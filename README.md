@@ -7,7 +7,7 @@ This project is a guided terminal app for people who want a custom image repo wi
 > [!NOTE]
 > This project was created with AI assistance and should be treated cautiously.
 >
-> This is a third-party tool. It is not an official Universal Blue utility, is not sanctioned by the Universal Blue project, and is not an official Fedora Project utility.
+> This is a third-party tool. It is not an official Universal Blue utility, is not sanctioned by the Universal Blue project, is not an official Fedora utility, and is not sanctioned by the Fedora Project.
 >
 > This project is provided as-is, without any promise that it will be safe for your repositories, data, systems, or build pipeline. Use it carefully, review its changes before applying them, and keep backups where appropriate. The maintainer is not responsible for repository damage, data loss, failed builds, system changes, or other consequences that may result from using this software.
 
