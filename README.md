@@ -28,7 +28,7 @@ It currently focuses on the beginner-friendly Containerfile path. Generated repo
 
 https://github.com/ublue-os/image-template
 
-That bundled snapshot may lag behind upstream, though the maintainer aims to keep this utility aligned with the latest version of that template.
+That upstream template works across this tool's supported Universal Blue and Fedora Atomic images. It does not change very often, but this utility still uses a bundled snapshot so repo generation stays predictable.
 
 ## What It Does
 
