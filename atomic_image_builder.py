@@ -2106,8 +2106,9 @@ class App:
                 [
                     "",
                     "This repo carries over package changes from your current system.",
-                    "Before switching, reset the current deployment with:",
+                    "Before rebooting, run this first in the same session:",
                     "sudo rpm-ostree reset",
+                    "Then run the bootc switch command above.",
                 ]
             )
         print(
@@ -2915,6 +2916,32 @@ class App:
         copr_repos = "\n".join(f"- `{repo}`" for repo in self.config.copr_repos) or "- None."
         services = "\n".join(f"- `{service}`" for service in self.config.services) or "- None."
         removed_packages = "\n".join(f"- `{pkg}`" for pkg in self.config.removed_packages) or "- None."
+        using_image_lines = [
+            "## Using The Image",
+            "",
+            "After the first successful GitHub Actions build finishes, switch to it with:",
+            "",
+            "```bash",
+            f"sudo bootc switch {image_ref}",
+            "systemctl reboot",
+            "```",
+        ]
+        if self.carried_scan_customizations():
+            using_image_lines = [
+                "## Using The Image",
+                "",
+                "This repo carries over package changes scanned from your current system.",
+                "Run these commands in the same session before rebooting:",
+                "",
+                "```bash",
+                "sudo rpm-ostree reset",
+                f"sudo bootc switch {image_ref}",
+                "systemctl reboot",
+                "```",
+                "",
+                "Do not reboot between `rpm-ostree reset` and `bootc switch`.",
+            ]
+
         sections = [
             f"# Custom {base_name} Image",
             "",
@@ -2957,14 +2984,7 @@ class App:
             "",
             removed_packages,
             "",
-            "## Using The Image",
-            "",
-            "After the first successful GitHub Actions build finishes, switch to it with:",
-            "",
-            "```bash",
-            f"sudo bootc switch {image_ref}",
-            "systemctl reboot",
-            "```",
+            *using_image_lines,
         ]
         return "\n".join(sections).rstrip() + "\n"
 
