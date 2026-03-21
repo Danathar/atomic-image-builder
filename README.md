@@ -2,7 +2,7 @@
 
 Beta terminal tool for creating and updating GitHub-backed bootc image repositories.
 
-This project is a guided terminal app for people who want a custom image repo without learning the full upstream template and workflow setup first. It currently supports curated Universal Blue desktop images and the official Fedora Atomic desktop images.
+This project is a guided terminal app for people who want a custom image repo without learning the full upstream template and workflow setup first. It supports both curated Universal Blue desktop images and the official Fedora Atomic desktop images.
 
 > [!NOTE]
 > This project was created with AI assistance and should be treated cautiously.
@@ -19,6 +19,11 @@ This project is currently **0.8 beta** and is **not fully tested yet**. Use it c
 
 This tool creates and maintains a GitHub repository that builds a custom bootc image from a curated supported base image.
 
+Supported base images currently include:
+
+- Universal Blue: Bazzite, Bazzite DX, Aurora, Aurora DX, Bluefin, and Bluefin DX
+- Fedora Atomic desktops: Silverblue, Kinoite, Sway Atomic, Budgie Atomic, and COSMIC Atomic
+
 It currently focuses on the beginner-friendly Containerfile path. Generated repos start from a bundled snapshot of the official `ublue-os/image-template` repository:
 
 https://github.com/ublue-os/image-template
@@ -29,7 +34,7 @@ That bundled snapshot may lag behind upstream, though the maintainer aims to kee
 
 - Creates a new public GitHub repo for a custom bootc image
 - Supports curated Universal Blue desktop images
-- Supports the official Fedora Atomic desktop images: Silverblue, Kinoite, Sway Atomic, Budgie Atomic, and COSMIC Atomic
+- Supports the official Fedora Atomic desktop images
 - Writes the repo files needed for a GitHub Actions build
 - Lets users add packages, COPR repos, services, and base-package removals
 - Updates repos that were previously created by this tool
@@ -54,7 +59,8 @@ This project exists to reduce that setup cost for newer users by turning the com
 
 This is for:
 
-- beginner and intermediate Universal Blue users
+- beginner and intermediate desktop-atomic users
+- Universal Blue users who want a custom repo on GitHub
 - Fedora Atomic desktop users who want a custom repo on GitHub
 - Bazzite, Aurora, Bluefin, Silverblue, Kinoite, Sway Atomic, Budgie Atomic, and COSMIC Atomic users who want a guided path
 - people who want GitHub Actions to build their image automatically
