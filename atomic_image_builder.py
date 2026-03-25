@@ -55,6 +55,7 @@ PACKAGE_TOKEN_RE = re.compile(r"^[A-Za-z0-9._+:-]+$")
 COPR_REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 SERVICE_TOKEN_RE = re.compile(r"^[A-Za-z0-9@._:+-]+$")
 FROM_LINE_RE = re.compile(r"^(\s*FROM(?:\s+--platform=\S+)?\s+)(\S+)(.*)$", flags=re.IGNORECASE)
+INSTALLER_SWITCH_RE = re.compile(r"^(\s*bootc switch --mutate-in-place --transport registry )(\S+)(.*)$")
 DNF5_MISSING_MARKERS = (
     "no matches found",
     "no package matched",
@@ -73,6 +74,16 @@ ACTION_PINS: dict[str, tuple[str, str]] = {
     "docker/login-action": ("c94ce9fb468520275223c153574b00df6fe4bcc9", "v3"),
     "redhat-actions/push-to-registry": ("5ed88d269cf581ea9ef6dd6806d01562096bee9c", "v2"),
     "sigstore/cosign-installer": ("faadad0cce49287aee09b3a48701e75088a2c6ad", "v4.0.0"),
+    "actions/upload-artifact": ("bbbca2ddaa5d8feaa63e36b76fdaad77386f024f", "v7.0.0"),
+}
+ACTION_REF_PINS: dict[str, tuple[str, str]] = {
+    "ublue-os/remove-unwanted-software@v8": ACTION_PINS["ublue-os/remove-unwanted-software"],
+    "ublue-os/remove-unwanted-software@695eb75bc387dbcd9685a8e72d23439d8686cba6": ACTION_PINS["ublue-os/remove-unwanted-software"],
+    "ublue-os/remove-unwanted-software@v9": ("cc0becac701cf642c8f0a6613bbdaf5dc36b259e", "v9"),
+    "ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e": ("cc0becac701cf642c8f0a6613bbdaf5dc36b259e", "v9"),
+    "osbuild/bootc-image-builder-action@main": ("5fc2ef0c4689b43ba959a10e3dfed3a889810ba1", "main"),
+    "osbuild/bootc-image-builder-action@5fc2ef0c4689b43ba959a10e3dfed3a889810ba1": ("5fc2ef0c4689b43ba959a10e3dfed3a889810ba1", "main"),
+    "actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f": ACTION_PINS["actions/upload-artifact"],
 }
 PRECHECK_REQUIRED_TOOLS: tuple[str, ...] = ("gum", "git", "gh", "cosign")
 BREW_INSTALLABLE_TOOLS: tuple[str, ...] = ("gum", "git", "gh", "cosign")
@@ -329,7 +340,7 @@ def pin_action_uses_line(line: str) -> str:
     if not match:
         return line
     prefix, action, _ref, suffix = match.groups()
-    pin = ACTION_PINS.get(action)
+    pin = ACTION_REF_PINS.get(f"{action}@{_ref}") or ACTION_PINS.get(action)
     if not pin:
         return line
     sha, label = pin
@@ -2491,7 +2502,21 @@ class App:
         return diff
 
     def repo_full_diff(self, repo_dir: Path) -> str:
-        return run(["git", "diff"], cwd=repo_dir, check=False).stdout
+        parts: list[str] = []
+        tracked_diff = run(["git", "diff"], cwd=repo_dir, check=False).stdout.strip()
+        if tracked_diff:
+            parts.append(tracked_diff)
+        status = run(["git", "status", "--porcelain"], cwd=repo_dir, check=False).stdout
+        for line in status.splitlines():
+            if not line.startswith("?? "):
+                continue
+            path = line[3:]
+            untracked_diff = run(["git", "diff", "--no-index", "--", "/dev/null", path], cwd=repo_dir, check=False).stdout.strip()
+            if untracked_diff:
+                parts.append(untracked_diff)
+        if not parts:
+            return ""
+        return "\n\n".join(parts).rstrip("\n") + "\n"
 
     def pager_text_with_hint(self, text: str) -> str:
         hint = "Press q to close this diff and return to the previous screen."
@@ -2651,6 +2676,10 @@ class App:
                 )
         return ensure_trailing_newline(text)
 
+    def patch_container_disk_workflow(self, existing_text: str, *, default_branch: str = "main") -> str:
+        lines = [pin_action_uses_line(line) for line in existing_text.splitlines()]
+        return self.patch_workflow_branch_filters("\n".join(lines), default_branch)
+
     def patch_workflow_branch_filters(self, workflow_text: str, default_branch: str) -> str:
         lines = workflow_text.splitlines()
         output: list[str] = []
@@ -2684,6 +2713,46 @@ class App:
             index += 1
         return ensure_trailing_newline("\n".join(output))
 
+    def installer_profile(self) -> str:
+        matched = self.match_base_image(self.config.base_image_uri)
+        if matched and matched.key in {"bazzite", "bazzite-dx", "aurora", "aurora-dx", "kinoite"}:
+            return "kde"
+        return "gnome"
+
+    def installer_config_name(self) -> str:
+        return f"iso-{self.installer_profile()}.toml"
+
+    def patch_installer_config(self, existing_text: str) -> str:
+        lines = existing_text.splitlines()
+        image_ref = self.published_image_ref()
+        for index, line in enumerate(lines):
+            match = INSTALLER_SWITCH_RE.match(line)
+            if not match:
+                continue
+            prefix, _current_ref, suffix = match.groups()
+            lines[index] = f"{prefix}{image_ref}{suffix}"
+            break
+        return ensure_trailing_newline("\n".join(lines))
+
+    def write_installer_configs(self, base_dir: Path) -> None:
+        disk_dir = base_dir / "disk_config"
+        if not disk_dir.exists():
+            return
+        for name in ("iso-gnome.toml", "iso-kde.toml"):
+            path = disk_dir / name
+            if path.exists():
+                path.write_text(self.patch_installer_config(path.read_text()))
+        selected_name = self.installer_config_name()
+        selected_path = disk_dir / selected_name
+        if selected_path.exists():
+            iso_text = selected_path.read_text()
+        else:
+            template_path = CONTAINERFILE_TEMPLATE_DIR / "disk_config" / selected_name
+            if not template_path.is_file():
+                raise CommandError(f"Bundled installer config not found: {selected_name}")
+            iso_text = template_path.read_text()
+        (disk_dir / "iso.toml").write_text(self.patch_installer_config(iso_text))
+
     def write_container_project_files(self, base_dir: Path, *, include_workflow: bool, default_branch: str = "main") -> None:
         # This is the "materialize the repo" step for Containerfile mode. It
         # patches template-owned files where possible and generates tool-owned
@@ -2716,12 +2785,17 @@ class App:
         else:
             justfile_path.write_text(self.generate_justfile())
 
+        self.write_installer_configs(base_dir)
+
         if include_workflow:
             workflow_path.parent.mkdir(parents=True, exist_ok=True)
             if workflow_path.exists():
                 workflow_path.write_text(self.patch_container_workflow(workflow_path.read_text(), default_branch=default_branch))
             else:
                 workflow_path.write_text(self.generate_container_workflow(default_branch=default_branch))
+            disk_workflow_path = base_dir / ".github/workflows/build-disk.yml"
+            if disk_workflow_path.exists():
+                disk_workflow_path.write_text(self.patch_container_disk_workflow(disk_workflow_path.read_text(), default_branch=default_branch))
 
     def write_project_files(self, base_dir: Path, *, include_workflow: bool, default_branch: str = "main") -> None:
         # Always write the canonical state file first. That way the repo can be
@@ -3011,6 +3085,9 @@ class App:
         )
 
     def run_main(self) -> None:
+        if not command_exists("gum"):
+            self.preflight()
+            return
         self.clear()
         self.banner()
         self.startup_requirements()

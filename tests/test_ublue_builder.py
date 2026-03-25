@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from atomic_image_builder import (
+    ACTION_REF_PINS,
     ACTION_PINS,
     App,
     BASE_IMAGES,
@@ -333,6 +334,27 @@ class BuilderTests(unittest.TestCase):
                     app.preflight()
         self.assertTrue(any("gh auth login" in message for level, message in app.gum.messages if level == "hint"))
         self.assertEqual(stub.prompts, ["Press Enter to exit to the terminal..."])
+
+    def test_run_main_checks_preflight_before_rendering_when_gum_is_missing(self) -> None:
+        app = self.make_app()
+
+        def fake_exists(name: str) -> bool:
+            return False if name == "gum" else True
+
+        with patch("atomic_image_builder.command_exists", side_effect=fake_exists):
+            with patch.object(app, "preflight", side_effect=SystemExit(1)) as preflight_mock:
+                with patch.object(app, "clear") as clear_mock:
+                    with patch.object(app, "banner") as banner_mock:
+                        with patch.object(app, "startup_requirements") as startup_mock:
+                            with patch.object(app, "main_menu") as menu_mock:
+                                with self.assertRaises(SystemExit):
+                                    app.run_main()
+
+        preflight_mock.assert_called_once_with()
+        clear_mock.assert_not_called()
+        banner_mock.assert_not_called()
+        startup_mock.assert_not_called()
+        menu_mock.assert_not_called()
 
     def test_add_packages_to_config_accepts_valid_tokens(self) -> None:
         app = self.make_app()
@@ -1024,6 +1046,28 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("  pull_request:\n    branches:\n      - master", workflow)
         self.assertIn("  push:\n    branches:\n      - master", workflow)
 
+    def test_write_project_files_repairs_disk_workflow_and_installer_configs(self) -> None:
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True, default_branch="master")
+            disk_workflow = (repo_dir / ".github/workflows/build-disk.yml").read_text()
+            iso_toml = (repo_dir / "disk_config/iso.toml").read_text()
+            iso_gnome = (repo_dir / "disk_config/iso-gnome.toml").read_text()
+            iso_kde = (repo_dir / "disk_config/iso-kde.toml").read_text()
+
+        self.assertIn("  pull_request:\n    branches:\n      - master", disk_workflow)
+        self.assertIn(ACTION_REF_PINS["osbuild/bootc-image-builder-action@main"][0], disk_workflow)
+        self.assertNotIn("osbuild/bootc-image-builder-action@main", disk_workflow)
+        self.assertEqual(iso_toml, iso_kde)
+        self.assertIn("ghcr.io/example/test-image:latest", iso_toml)
+        self.assertIn("ghcr.io/example/test-image:latest", iso_gnome)
+        self.assertIn("ghcr.io/example/test-image:latest", iso_kde)
+        self.assertNotIn("image-template", iso_toml)
+        self.assertNotIn("image-template", iso_gnome)
+        self.assertNotIn("image-template", iso_kde)
+
     def test_generate_container_workflow_uses_default_branch_and_pins_cosign_release(self) -> None:
         app = self.make_app()
         app.config.signing_enabled = True
@@ -1144,6 +1188,18 @@ class BuilderTests(unittest.TestCase):
         text = app.pager_text_with_hint("diff --git a/file b/file\n+new line\n")
         self.assertTrue(text.startswith("Press q to close this diff and return to the previous screen."))
         self.assertIn("diff --git a/file b/file", text)
+
+    def test_repo_full_diff_includes_untracked_files(self) -> None:
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=repo_dir, check=True)
+            (repo_dir / "new.txt").write_text("hello world\n")
+            diff = app.repo_full_diff(repo_dir)
+
+        self.assertIn("diff --git", diff)
+        self.assertIn("new.txt", diff)
+        self.assertIn("+hello world", diff)
 
     def test_show_summary_uses_pager_for_read_only_view(self) -> None:
         app = self.make_app()
