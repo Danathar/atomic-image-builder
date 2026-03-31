@@ -39,6 +39,7 @@ That upstream template works across this tool's supported Universal Blue and Fed
 - Supports the official Fedora Atomic desktop images
 - Writes the repo files needed for a GitHub Actions build
 - Lets users add packages, COPR repos, services, and base-package removals
+- Offers optional Homebrew integration for Fedora Atomic base images using the Universal Blue brew OCI layer
 - Updates repos that were previously created by this tool
 - Can scan a running rpm-ostree / bootc system and carry layered packages into a new image repo
 
@@ -141,6 +142,18 @@ systemctl reboot
 ```
 
 That clears the old layered package state from the current deployment before you switch to the image-based version of those changes. You do not need to reboot between `rpm-ostree reset` and `bootc switch`.
+
+## Homebrew on Fedora Atomic Images
+
+Universal Blue images ship with Homebrew (brew) already integrated. Fedora Atomic images do not.
+
+When you choose a Fedora Atomic base image (Silverblue, Kinoite, etc.), the tool offers to include Homebrew using the Universal Blue brew OCI layer (`ghcr.io/ublue-os/brew:latest`). This adds:
+
+- The Homebrew installation and shell integration files
+- `brew-setup.service` for first-boot initialization
+- `brew-update.timer` and `brew-upgrade.timer` for automatic maintenance
+
+This option is skipped automatically for Universal Blue base images since they already include Homebrew. You can also toggle it later through the update menu.
 
 ## Project Scope
 

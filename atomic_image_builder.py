@@ -37,6 +37,7 @@ STATE_FILE = ".ublue-builder.json"
 DEFAULT_REPO_NAME = "my-atomic-image"
 DEFAULT_GITHUB_BUILD_CRON = "05 10 * * *"
 FEDORA_ATOMIC_FALLBACK_TAG = "43"
+UBLUE_BREW_IMAGE = "ghcr.io/ublue-os/brew:latest"
 MAX_UI_WIDTH = 120
 ACCENT_COLOR = 117
 CONTROLS_COLOR = 10
@@ -195,6 +196,7 @@ class Config:
     copr_repos: list[str] = field(default_factory=list)
     services: list[str] = field(default_factory=list)
     removed_packages: list[str] = field(default_factory=list)
+    brew_enabled: bool = False
     signing_enabled: bool = False
     github_user: str = ""
     scanned_packages: list[str] = field(default_factory=list)
@@ -360,11 +362,12 @@ def config_from_state_payload(data: object) -> Config:
             if not isinstance(value, str):
                 raise ValueError(f"{name} must be a string")
             setattr(cfg, name, value)
-    if "signing_enabled" in data:
-        value = data["signing_enabled"]
-        if not isinstance(value, bool):
-            raise ValueError("signing_enabled must be a boolean")
-        cfg.signing_enabled = value
+    for bool_field in ("brew_enabled", "signing_enabled"):
+        if bool_field in data:
+            value = data[bool_field]
+            if not isinstance(value, bool):
+                raise ValueError(f"{bool_field} must be a boolean")
+            setattr(cfg, bool_field, value)
     if cfg.method and cfg.method not in ALLOWED_METHODS:
         raise ValueError(f"unsupported build method: {cfg.method}")
     cfg.normalize()
@@ -1023,6 +1026,8 @@ class App:
             parts.append(f"{len(self.config.services)} svc")
         if self.config.removed_packages:
             parts.append(f"{len(self.config.removed_packages)} removed")
+        if self.config.brew_enabled:
+            parts.append("brew")
         return ", ".join(parts) or "No software changes yet"
 
     def repository_status(self) -> str:
@@ -1132,7 +1137,7 @@ class App:
         self.menu_section("Next Step", next_step_hint)
 
     def update_task_choices(self) -> list[tuple[str, str]]:
-        return [
+        choices = [
             ("Packages", self.summarize_selection(self.config.packages, empty="No packages", verb="selected")),
             ("Base image", self.config.base_image_name or "(not set)"),
             ("Description", self.truncate_label(self.config.image_desc or "(empty)")),
@@ -1140,6 +1145,9 @@ class App:
             ("Services", self.summarize_selection(self.config.services, empty="No services", verb="enabled")),
             ("Removed base packages", self.summarize_selection(self.config.removed_packages, empty="None", verb="selected")),
         ]
+        if not self.is_ublue_base():
+            choices.append(("Homebrew", "Enabled" if self.config.brew_enabled else "Not included"))
+        return choices
 
     def show_managed_repo_warning(self) -> None:
         self.gum.warn(MANAGED_REPO_WARNING)
@@ -1387,6 +1395,7 @@ class App:
                 print(f"  Image: {self.gum.style(self.config.base_image_uri, foreground=117)}")
                 print()
                 if self.gum.confirm("Use this base image?", default=True):
+                    self.offer_brew_if_applicable()
                     return
             else:
                 self.gum.warn(f"This tool supports only the curated images listed below: {supported_base_image_names()}.")
@@ -1407,6 +1416,29 @@ class App:
                 self.config.base_image_name = image.name
                 break
         self.gum.success(f"Base image: {self.config.base_image_name} ({self.config.base_image_uri})")
+        self.offer_brew_if_applicable()
+
+    def is_ublue_base(self) -> bool:
+        matched = self.match_base_image(self.config.base_image_uri)
+        return matched is not None and matched.provider == "Universal Blue"
+
+    def offer_brew_if_applicable(self) -> None:
+        if self.is_ublue_base():
+            self.config.brew_enabled = False
+            return
+        print()
+        self.menu_section(
+            "Homebrew",
+            "Universal Blue images include Homebrew (brew) for installing extra command-line tools.",
+            "Since you chose a Fedora Atomic base image, Homebrew is not included by default.",
+            "You can add it now using the Universal Blue Homebrew OCI layer.",
+        )
+        print()
+        self.config.brew_enabled = self.gum.confirm("Include Homebrew (brew) in this image?", default=False)
+        if self.config.brew_enabled:
+            self.gum.success("Homebrew will be included in your image.")
+        else:
+            self.gum.hint("You can add Homebrew later from the update menu.")
 
     def configure_repo(self, *, step: int | None = None, total_steps: int | None = None) -> None:
         # We collect repo name and description together because those two values
@@ -1742,6 +1774,10 @@ class App:
                 lines.extend(f"- {value}" for value in values)
             else:
                 lines.append("- (none)")
+        if not self.is_ublue_base():
+            lines.append("")
+            lines.append("Homebrew")
+            lines.append(f"- {'Enabled' if self.config.brew_enabled else 'Not included'}")
         self.gum.pager(self.read_only_pager_text("Current Selections", lines))
 
     def show_summary(
@@ -1769,6 +1805,8 @@ class App:
             ("Services", self.summarize_selection(self.config.services, empty="None", verb="enabled", limit=3)),
             ("Removed Base Packages", self.summarize_selection(self.config.removed_packages, empty="None", verb="selected", limit=3)),
         ]
+        if not self.is_ublue_base():
+            rows.append(("Homebrew", "Enabled" if self.config.brew_enabled else "Not included"))
         body = self.format_key_value_rows(rows)
         lines = [*intro_lines, "", *body]
         self.gum.pager(self.read_only_pager_text("Review Build Configuration", lines))
@@ -2570,6 +2608,8 @@ class App:
                     self.manage_services()
                 elif task == "Removed base packages":
                     self.manage_removed_packages()
+                elif task == "Homebrew":
+                    self.offer_brew_if_applicable()
             except ScreenBack:
                 continue
 
@@ -2854,8 +2894,9 @@ class App:
         return payload
 
     def render_containerfile(self, existing_text: str | None = None) -> str:
-        # If the template already has a Containerfile, only replace the FROM line
-        # so we preserve upstream formatting and comments where possible.
+        # If the template already has a Containerfile, replace the FROM line and
+        # inject or remove the brew block so we preserve upstream formatting and
+        # comments where possible.
         if existing_text:
             lines = existing_text.splitlines()
             for index, line in enumerate(lines):
@@ -2866,9 +2907,60 @@ class App:
                 if image.lower() == "scratch":
                     continue
                 lines[index] = f"{prefix}{self.config.base_image_uri}{suffix}"
+                lines = self._patch_brew_block(lines, from_index=index)
                 return ensure_trailing_newline("\n".join(lines))
             return ensure_trailing_newline(existing_text)
         return self.generate_containerfile()
+
+    def _patch_brew_block(self, lines: list[str], *, from_index: int) -> list[str]:
+        # Find existing brew COPY line if present.
+        brew_start: int | None = None
+        brew_end: int | None = None
+        for i, line in enumerate(lines):
+            if line.strip().startswith("COPY --from=") and "brew" in line.lower() and "/system_files" in line:
+                brew_start = i
+                # The block includes a following RUN for systemctl preset.
+                brew_end = i + 1
+                for j in range(i + 1, len(lines)):
+                    stripped = lines[j].strip()
+                    if not stripped:
+                        brew_end = j + 1
+                        break
+                    if stripped.endswith("\\"):
+                        brew_end = j + 1
+                        continue
+                    brew_end = j + 1
+                    break
+                # Consume a trailing blank line so removal/replacement
+                # does not leave a double blank.
+                if brew_end < len(lines) and not lines[brew_end].strip():
+                    brew_end += 1
+                break
+
+        if not self.config.brew_enabled:
+            # Remove the brew block if it exists.
+            if brew_start is not None:
+                return lines[:brew_start] + lines[brew_end:]
+            return lines
+
+        # brew_enabled: inject or replace the block.
+        brew_lines = [
+            f"COPY --from={UBLUE_BREW_IMAGE} /system_files /",
+            "RUN --mount=type=cache,dst=/var/cache \\",
+            "    --mount=type=cache,dst=/var/log \\",
+            "    --mount=type=tmpfs,dst=/tmp \\",
+            "    /usr/bin/systemctl preset brew-setup.service && \\",
+            "    /usr/bin/systemctl preset brew-update.timer && \\",
+            "    /usr/bin/systemctl preset brew-upgrade.timer",
+            "",
+        ]
+        if brew_start is not None:
+            return lines[:brew_start] + brew_lines + lines[brew_end:]
+        # Insert after the FROM line (and any blank line following it).
+        insert_at = from_index + 1
+        if insert_at < len(lines) and not lines[insert_at].strip():
+            insert_at += 1
+        return lines[:insert_at] + brew_lines + lines[insert_at:]
 
     def patch_container_justfile(self, existing_text: str) -> str:
         # The template Justfile already has sensible defaults; we only patch the
@@ -3069,22 +3161,35 @@ class App:
     def generate_containerfile(self) -> str:
         # The Containerfile is intentionally small. Most customization lives in
         # build_files/build.sh so users can inspect a simpler mutation layer.
-        return textwrap.dedent(
-            f"""\
-            FROM scratch AS ctx
-            COPY build_files /
-
-            FROM {self.config.base_image_uri}
-
-            RUN --mount=type=bind,from=ctx,source=/,target=/ctx \\
-                --mount=type=cache,dst=/var/cache \\
-                --mount=type=cache,dst=/var/log \\
-                --mount=type=tmpfs,dst=/tmp \\
-                /ctx/build.sh
-
-            RUN bootc container lint
-            """
-        )
+        lines = [
+            "FROM scratch AS ctx",
+            "COPY build_files /",
+            "",
+            f"FROM {self.config.base_image_uri}",
+            "",
+        ]
+        if self.config.brew_enabled:
+            lines.extend([
+                f"COPY --from={UBLUE_BREW_IMAGE} /system_files /",
+                "RUN --mount=type=cache,dst=/var/cache \\",
+                "    --mount=type=cache,dst=/var/log \\",
+                "    --mount=type=tmpfs,dst=/tmp \\",
+                "    /usr/bin/systemctl preset brew-setup.service && \\",
+                "    /usr/bin/systemctl preset brew-update.timer && \\",
+                "    /usr/bin/systemctl preset brew-upgrade.timer",
+                "",
+            ])
+        lines.extend([
+            "RUN --mount=type=bind,from=ctx,source=/,target=/ctx \\",
+            "    --mount=type=cache,dst=/var/cache \\",
+            "    --mount=type=cache,dst=/var/log \\",
+            "    --mount=type=tmpfs,dst=/tmp \\",
+            "    /ctx/build.sh",
+            "",
+            "RUN bootc container lint",
+            "",
+        ])
+        return "\n".join(lines)
 
     def generate_build_sh(self) -> str:
         # build.sh is where user selections become actual package/service
