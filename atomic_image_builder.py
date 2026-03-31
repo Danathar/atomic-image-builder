@@ -69,22 +69,24 @@ DNF5_MISSING_MARKERS = (
 # upstream version the pin came from.
 ACTION_PINS: dict[str, tuple[str, str]] = {
     "actions/checkout": ("de0fac2e4500dabe0009e67214ff5f5447ce83dd", "v6"),
-    "ublue-os/remove-unwanted-software": ("695eb75bc387dbcd9685a8e72d23439d8686cba6", "v8"),
+    "ublue-os/remove-unwanted-software": ("cc0becac701cf642c8f0a6613bbdaf5dc36b259e", "v9"),
     "docker/metadata-action": ("030e881283bb7a6894de51c315a6bfe6a94e05cf", "v6.0.0"),
     "redhat-actions/buildah-build": ("7a95fa7ee0f02d552a32753e7414641a04307056", "v2"),
     "docker/login-action": ("b45d80f862d83dbcd57f89517bcf500b2ab88fb2", "v4.0.0"),
     "redhat-actions/push-to-registry": ("5ed88d269cf581ea9ef6dd6806d01562096bee9c", "v2"),
-    "sigstore/cosign-installer": ("faadad0cce49287aee09b3a48701e75088a2c6ad", "v4.0.0"),
+    "sigstore/cosign-installer": ("cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003", "v4.1.1"),
     "actions/upload-artifact": ("bbbca2ddaa5d8feaa63e36b76fdaad77386f024f", "v7.0.0"),
 }
 ACTION_REF_PINS: dict[str, tuple[str, str]] = {
-    "ublue-os/remove-unwanted-software@v8": ACTION_PINS["ublue-os/remove-unwanted-software"],
-    "ublue-os/remove-unwanted-software@695eb75bc387dbcd9685a8e72d23439d8686cba6": ACTION_PINS["ublue-os/remove-unwanted-software"],
-    "ublue-os/remove-unwanted-software@v9": ("cc0becac701cf642c8f0a6613bbdaf5dc36b259e", "v9"),
-    "ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e": ("cc0becac701cf642c8f0a6613bbdaf5dc36b259e", "v9"),
+    "ublue-os/remove-unwanted-software@v8": ("695eb75bc387dbcd9685a8e72d23439d8686cba6", "v8"),
+    "ublue-os/remove-unwanted-software@695eb75bc387dbcd9685a8e72d23439d8686cba6": ("695eb75bc387dbcd9685a8e72d23439d8686cba6", "v8"),
+    "ublue-os/remove-unwanted-software@v9": ACTION_PINS["ublue-os/remove-unwanted-software"],
+    "ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e": ACTION_PINS["ublue-os/remove-unwanted-software"],
     "osbuild/bootc-image-builder-action@main": ("5fc2ef0c4689b43ba959a10e3dfed3a889810ba1", "main"),
     "osbuild/bootc-image-builder-action@5fc2ef0c4689b43ba959a10e3dfed3a889810ba1": ("5fc2ef0c4689b43ba959a10e3dfed3a889810ba1", "main"),
     "actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f": ACTION_PINS["actions/upload-artifact"],
+    "sigstore/cosign-installer@v4.0.0": ("faadad0cce49287aee09b3a48701e75088a2c6ad", "v4.0.0"),
+    "sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad": ("faadad0cce49287aee09b3a48701e75088a2c6ad", "v4.0.0"),
 }
 PRECHECK_REQUIRED_TOOLS: tuple[str, ...] = ("gum", "git", "gh", "cosign")
 BREW_INSTALLABLE_TOOLS: tuple[str, ...] = ("gum", "git", "gh", "cosign")
@@ -1833,6 +1835,17 @@ class App:
         matched = self.match_base_image(base)
         if matched:
             self.config.base_image_name = matched.name
+            # Warn when the host is running a non-standard tag (e.g. :testing,
+            # :44) that differs from the curated image_uri.  Offer to use the
+            # curated tag so the generated repo tracks a known-good stream.
+            scanned_tag = base.rsplit(":", 1)[-1] if ":" in base else ""
+            curated_tag = matched.image_uri.rsplit(":", 1)[-1] if ":" in matched.image_uri else ""
+            if scanned_tag and curated_tag and scanned_tag != curated_tag:
+                self.gum.warn(
+                    f"Your system is running :{scanned_tag}, but this tool recommends :{curated_tag} for {matched.name}."
+                )
+                if self.gum.confirm(f"Use the recommended :{curated_tag} tag instead?", default=True):
+                    self.config.base_image_uri = matched.image_uri
 
         self.gum.header("Scan Results")
         rows = [
@@ -1919,6 +1932,46 @@ class App:
     def repo_has_state_file(self, owner: str, repo: str) -> bool:
         return self.repo_file_exists(owner, repo, STATE_FILE)
 
+    def batch_check_state_files(self, owner: str, repos: list[dict[str, str]]) -> set[str]:
+        """Check which repos contain STATE_FILE using a single GraphQL query.
+
+        Falls back to serial REST calls if GraphQL fails (e.g. token scopes).
+        Returns a set of repo names that have the state file.
+        """
+        if not repos:
+            return set()
+        # GraphQL aliases must start with a letter and contain only [A-Za-z0-9_]
+        alias_map: dict[str, str] = {}
+        for i, item in enumerate(repos):
+            alias_map[f"r{i}"] = item["name"]
+        fragments: list[str] = []
+        for alias, name in alias_map.items():
+            fragments.append(
+                f'{alias}: repository(owner: "{owner}", name: "{name}") '
+                f'{{ object(expression: "HEAD:{STATE_FILE}") {{ id }} }}'
+            )
+        query = "query { " + " ".join(fragments) + " }"
+        proc = run(["gh", "api", "graphql", "-f", f"query={query}"], check=False)
+        if proc.returncode != 0 or not proc.stdout.strip():
+            # Fall back to serial REST checks
+            return {
+                item["name"] for item in repos
+                if self.repo_has_state_file(owner, item["name"])
+            }
+        try:
+            data = json.loads(proc.stdout).get("data", {})
+        except (json.JSONDecodeError, AttributeError):
+            return {
+                item["name"] for item in repos
+                if self.repo_has_state_file(owner, item["name"])
+            }
+        found: set[str] = set()
+        for alias, name in alias_map.items():
+            repo_data = data.get(alias)
+            if repo_data and repo_data.get("object"):
+                found.add(name)
+        return found
+
     def ensure_signing_ready(self, owner: str, repo: str) -> bool:
         # Signed images are required for this tool, so "ready" means:
         # - the repo already has SIGNING_SECRET, or
@@ -1987,7 +2040,9 @@ class App:
                 raise CommandError(f"{target} already exists and is not empty.")
             target.rmdir()
         try:
-            shutil.copytree(source_dir, target, ignore=shutil.ignore_patterns(".template-source"))
+            shutil.copytree(source_dir, target, ignore=shutil.ignore_patterns(
+                ".template-source", "dependabot.yml", "renovate.json5",
+            ))
         except (OSError, shutil.Error) as exc:
             raise CommandError(f"Unable to copy bundled template snapshot for {repo}: {exc}") from exc
 
@@ -2351,7 +2406,8 @@ class App:
             visible_repos = repos
             if require_state_file:
                 self.gum.hint("Checking which repos were created by this tool...")
-                visible_repos = [item for item in repos if self.repo_has_state_file(self.github_user, item["name"])]
+                managed = self.batch_check_state_files(self.github_user, repos)
+                visible_repos = [item for item in repos if item["name"] in managed]
             if not visible_repos:
                 if require_state_file:
                     self.gum.warn("I couldn't find any GitHub repos on your account that were created by this tool yet.")
@@ -2666,6 +2722,14 @@ class App:
     def push_update(self, owner: str, repo: str, repo_dir: Path) -> None:
         # The update path rewrites files in a temporary clone, shows the diff,
         # and only then asks for confirmation before pushing.
+        #
+        # write_project_files is called twice intentionally:
+        #   1) First write: generates files WITHOUT signing so the user can
+        #      preview the diff before any secrets are created or rotated.
+        #   2) Second write: after ensure_signing_ready() uploads the cosign
+        #      keypair, regenerates files WITH signing enabled so the workflow
+        #      includes the cosign steps.  If the diff changes, the user is
+        #      asked to re-confirm before pushing.
         self.generated_cosign_pub = None
         self.config.signing_enabled = True
         default_branch = self.repo_default_branch(owner, repo)

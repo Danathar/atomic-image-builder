@@ -137,6 +137,44 @@ class BuilderTests(unittest.TestCase):
             "quay.io/fedora-ostree-desktops/kinoite:43",
         )
 
+    def test_normalize_container_image_reference_handles_image_signed_docker_prefix(self) -> None:
+        self.assertEqual(
+            normalize_container_image_reference("ostree-image-signed:docker://ghcr.io/ublue-os/bazzite:stable"),
+            "ghcr.io/ublue-os/bazzite:stable",
+        )
+
+    def test_normalize_container_image_reference_handles_unverified_registry_prefix(self) -> None:
+        self.assertEqual(
+            normalize_container_image_reference("ostree-unverified-registry:ghcr.io/ublue-os/bluefin:stable"),
+            "ghcr.io/ublue-os/bluefin:stable",
+        )
+
+    def test_normalize_container_image_reference_handles_docker_scheme(self) -> None:
+        self.assertEqual(
+            normalize_container_image_reference("docker://ghcr.io/ublue-os/aurora:stable"),
+            "ghcr.io/ublue-os/aurora:stable",
+        )
+
+    def test_normalize_container_image_reference_handles_remote_image_prefix(self) -> None:
+        # ostree-remote-image uses the same split logic as ostree-remote-registry;
+        # the inner docker:// prefix is then stripped by the docker:// handler.
+        self.assertEqual(
+            normalize_container_image_reference("ostree-remote-image:fedora:docker://quay.io/fedora-ostree-desktops/silverblue:43"),
+            "quay.io/fedora-ostree-desktops/silverblue:43",
+        )
+
+    def test_normalize_container_image_reference_returns_bare_ref_unchanged(self) -> None:
+        self.assertEqual(
+            normalize_container_image_reference("ghcr.io/ublue-os/bazzite:stable"),
+            "ghcr.io/ublue-os/bazzite:stable",
+        )
+
+    def test_normalize_container_image_reference_strips_whitespace(self) -> None:
+        self.assertEqual(
+            normalize_container_image_reference("  ghcr.io/ublue-os/bazzite:stable  "),
+            "ghcr.io/ublue-os/bazzite:stable",
+        )
+
     def test_load_repo_config_rejects_repo_without_state_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_dir = Path(tmp)
@@ -182,7 +220,8 @@ class BuilderTests(unittest.TestCase):
         patched = app.patch_container_workflow(workflow)
         self.assertIn(".ublue-builder.json", patched)
         self.assertIn(ACTION_PINS["actions/checkout"][0], patched)
-        self.assertIn(ACTION_PINS["ublue-os/remove-unwanted-software"][0], patched)
+        # The fixture uses @v8, which maps to the legacy v8 SHA via ACTION_REF_PINS
+        self.assertIn(ACTION_REF_PINS["ublue-os/remove-unwanted-software@v8"][0], patched)
         self.assertIn(ACTION_PINS["sigstore/cosign-installer"][0], patched)
 
     def test_patch_container_workflow_matches_signing_steps_by_behavior(self) -> None:
@@ -1009,7 +1048,11 @@ class BuilderTests(unittest.TestCase):
                 ]
             }
         )
-        app.gum = GumStub()
+        gum = GumStub()
+        # Decline only the tag-normalization prompt so the exact ref is kept,
+        # but accept other confirm prompts (like "Continue anyway?") by default.
+        gum.confirm = lambda prompt, default=False: False if "recommended" in prompt else default
+        app.gum = gum
         with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
             with patch(
                 "atomic_image_builder.run",
@@ -1020,6 +1063,8 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(app.config.base_image_uri, "ghcr.io/ublue-os/bazzite:testing")
         self.assertEqual(app.config.base_image_name, "Bazzite (KDE)")
+        # Verify the warning was shown
+        self.assertTrue(any("testing" in msg and "stable" in msg for _, msg in gum.messages))
 
     def test_scan_os_matches_fedora_atomic_remote_registry_origin(self) -> None:
         app = self.make_app()
@@ -1356,6 +1401,49 @@ class BuilderTests(unittest.TestCase):
         self.assertIn('echo "Skipping removal of $pkg because it is not installed in the base image."', build_sh)
         self.assertIn('dnf5 remove -y "${packages_to_remove[@]}"', build_sh)
 
+    def test_generate_build_sh_with_copr_repos(self) -> None:
+        app = self.make_app()
+        app.config.copr_repos = ["kylegospo/bazzite"]
+        app.config.packages = ["steam"]
+        build_sh = app.generate_build_sh()
+        self.assertIn("dnf5 -y copr enable kylegospo/bazzite", build_sh)
+        self.assertIn("dnf5 -y copr disable kylegospo/bazzite", build_sh)
+        # Enable should come before install, disable should come after
+        enable_pos = build_sh.index("copr enable")
+        install_pos = build_sh.index("dnf5 install")
+        disable_pos = build_sh.index("copr disable")
+        self.assertLess(enable_pos, install_pos)
+        self.assertLess(install_pos, disable_pos)
+        self.assertIn("dnf5 clean all", build_sh)
+
+    def test_generate_build_sh_with_services(self) -> None:
+        app = self.make_app()
+        app.config.services = ["tailscaled.service", "docker.socket"]
+        build_sh = app.generate_build_sh()
+        self.assertIn("systemctl enable tailscaled.service", build_sh)
+        self.assertIn("systemctl enable docker.socket", build_sh)
+
+    def test_generate_build_sh_empty_config(self) -> None:
+        app = self.make_app()
+        app.config.packages = []
+        app.config.removed_packages = []
+        app.config.copr_repos = []
+        app.config.services = []
+        build_sh = app.generate_build_sh()
+        self.assertIn("set -ouex pipefail", build_sh)
+        self.assertIn("# dnf5 install -y <your-packages-here>", build_sh)
+        self.assertNotIn("dnf5 clean all", build_sh)
+        self.assertNotIn("systemctl enable", build_sh)
+        self.assertNotIn("copr", build_sh)
+
+    def test_generate_build_sh_packages_only_cleans_dnf(self) -> None:
+        app = self.make_app()
+        app.config.packages = ["htop", "tmux"]
+        build_sh = app.generate_build_sh()
+        self.assertIn("dnf5 install -y", build_sh)
+        self.assertIn("dnf5 clean all", build_sh)
+        self.assertNotIn("copr", build_sh)
+
 
     def test_generate_container_workflow_includes_template_tag_variants(self) -> None:
         app = self.make_app()
@@ -1419,6 +1507,38 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("- `tmux`", first_readme)
         self.assertNotIn("- `tmux`", second_readme)
         self.assertIn("- `ripgrep`", second_readme)
+
+    def test_write_project_files_load_repo_config_roundtrip(self) -> None:
+        """State file written by write_project_files survives load_repo_config."""
+        app = self.make_app()
+        app.config.packages = ["htop", "tmux"]
+        app.config.removed_packages = ["firefox"]
+        app.config.copr_repos = ["kylegospo/bazzite"]
+        app.config.services = ["tailscaled.service"]
+        app.config.image_desc = "Test roundtrip image"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.write_project_files(repo_dir, include_workflow=False)
+            app2 = self.make_app()
+            app2.load_repo_config(repo_dir)
+        self.assertEqual(app2.config.packages, ["htop", "tmux"])
+        self.assertEqual(app2.config.removed_packages, ["firefox"])
+        self.assertEqual(app2.config.copr_repos, ["kylegospo/bazzite"])
+        self.assertEqual(app2.config.services, ["tailscaled.service"])
+        self.assertEqual(app2.config.image_desc, "Test roundtrip image")
+        self.assertEqual(app2.config.base_image_uri, app.config.base_image_uri)
+
+    def test_clone_container_template_excludes_renovate_and_dependabot(self) -> None:
+        """Template copy should not include renovate.json5 or dependabot.yml."""
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "repo"
+            app.clone_container_template(target)
+            github_dir = target / ".github"
+            self.assertFalse((github_dir / "renovate.json5").exists(),
+                             "renovate.json5 should be excluded from template copies")
+            self.assertFalse((github_dir / "dependabot.yml").exists(),
+                             "dependabot.yml should be excluded from template copies")
 
 
 if __name__ == "__main__":
