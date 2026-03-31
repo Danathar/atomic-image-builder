@@ -27,6 +27,7 @@ from atomic_image_builder import (
     STATE_FILE,
     TOOL_NAME,
     TOOL_SLUG,
+    UBLUE_BREW_IMAGE,
     VERSION,
     config_from_state_payload,
     determine_fedora_atomic_default_tag,
@@ -1584,6 +1585,179 @@ class BuilderTests(unittest.TestCase):
                              "renovate.json5 should be excluded from template copies")
             self.assertFalse((github_dir / "dependabot.yml").exists(),
                              "dependabot.yml should be excluded from template copies")
+
+    # ------------------------------------------------------------------
+    # Brew OCI integration
+    # ------------------------------------------------------------------
+
+    def test_generate_containerfile_includes_brew_block_when_enabled(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.brew_enabled = True
+        cf = app.generate_containerfile()
+        self.assertIn(f"COPY --from={UBLUE_BREW_IMAGE} /system_files /", cf)
+        self.assertIn("brew-setup.service", cf)
+        self.assertIn("brew-update.timer", cf)
+        self.assertIn("brew-upgrade.timer", cf)
+
+    def test_generate_containerfile_excludes_brew_block_when_disabled(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.brew_enabled = False
+        cf = app.generate_containerfile()
+        self.assertNotIn("brew", cf.lower())
+        self.assertNotIn("system_files", cf)
+
+    def test_render_containerfile_injects_brew_block_into_existing(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.brew_enabled = True
+        existing = textwrap.dedent("""\
+            FROM scratch AS ctx
+            COPY build_files /
+
+            FROM ghcr.io/ublue-os/bazzite:stable
+
+            RUN --mount=type=bind,from=ctx,source=/,target=/ctx \\
+                /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertIn(f"COPY --from={UBLUE_BREW_IMAGE} /system_files /", result)
+        self.assertIn("brew-setup.service", result)
+        # The original RUN line should still be present.
+        self.assertIn("/ctx/build.sh", result)
+        # Brew block must appear before the build.sh RUN.
+        brew_pos = result.index("brew-setup.service")
+        build_pos = result.index("/ctx/build.sh")
+        self.assertLess(brew_pos, build_pos)
+        # No triple-newline (double blank line).
+        self.assertNotIn("\n\n\n", result)
+
+    def test_render_containerfile_removes_brew_block_from_existing(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.brew_enabled = False
+        existing = textwrap.dedent("""\
+            FROM scratch AS ctx
+            COPY build_files /
+
+            FROM ghcr.io/ublue-os/bazzite:stable
+
+            COPY --from=ghcr.io/ublue-os/brew:latest /system_files /
+            RUN --mount=type=cache,dst=/var/cache \\
+                --mount=type=cache,dst=/var/log \\
+                --mount=type=tmpfs,dst=/tmp \\
+                /usr/bin/systemctl preset brew-setup.service && \\
+                /usr/bin/systemctl preset brew-update.timer && \\
+                /usr/bin/systemctl preset brew-upgrade.timer
+
+            RUN --mount=type=bind,from=ctx,source=/,target=/ctx \\
+                /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertNotIn("brew", result.lower())
+        self.assertNotIn("system_files", result)
+        self.assertIn("/ctx/build.sh", result)
+        # Should not leave a double blank line after removal.
+        self.assertNotIn("\n\n\n", result)
+
+    def test_render_containerfile_replaces_existing_brew_block(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.brew_enabled = True
+        existing = textwrap.dedent("""\
+            FROM scratch AS ctx
+            COPY build_files /
+
+            FROM ghcr.io/ublue-os/bazzite:stable
+
+            COPY --from=ghcr.io/ublue-os/brew:old-tag /system_files /
+            RUN /usr/bin/systemctl preset brew-setup.service
+
+            RUN --mount=type=bind,from=ctx,source=/,target=/ctx \\
+                /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        # Old brew reference should be replaced with the current image.
+        self.assertNotIn("brew:old-tag", result)
+        self.assertIn(f"COPY --from={UBLUE_BREW_IMAGE} /system_files /", result)
+        self.assertIn("brew-upgrade.timer", result)
+        self.assertIn("/ctx/build.sh", result)
+        # Should not leave double blank lines after replacement.
+        self.assertNotIn("\n\n\n", result)
+
+    def test_config_from_state_payload_roundtrips_brew_enabled(self) -> None:
+        cfg = config_from_state_payload({"brew_enabled": True})
+        self.assertTrue(cfg.brew_enabled)
+        cfg2 = config_from_state_payload({"brew_enabled": False})
+        self.assertFalse(cfg2.brew_enabled)
+
+    def test_config_from_state_payload_rejects_non_bool_brew_enabled(self) -> None:
+        with self.assertRaisesRegex(ValueError, "brew_enabled must be a boolean"):
+            config_from_state_payload({"brew_enabled": "yes"})
+
+    def test_is_ublue_base_true_for_ublue_image(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = "ghcr.io/ublue-os/bazzite:stable"
+        self.assertTrue(app.is_ublue_base())
+
+    def test_is_ublue_base_false_for_fedora_image(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        self.assertFalse(app.is_ublue_base())
+
+    def test_software_status_includes_brew_when_enabled(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        app.config.brew_enabled = True
+        status = app.software_status()
+        self.assertIn("brew", status)
+
+    def test_software_status_excludes_brew_when_disabled(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        app.config.brew_enabled = False
+        status = app.software_status()
+        self.assertNotIn("brew", status)
+
+    def test_update_task_choices_includes_homebrew_for_fedora_base(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.base_image_name = "Silverblue"
+        app.config.brew_enabled = True
+        choices = app.update_task_choices()
+        homebrew_choices = [(t, s) for t, s in choices if t == "Homebrew"]
+        self.assertEqual(len(homebrew_choices), 1)
+        self.assertEqual(homebrew_choices[0][1], "Enabled")
+
+    def test_update_task_choices_excludes_homebrew_for_ublue_base(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        # Default make_app uses a UBlue base
+        choices = app.update_task_choices()
+        homebrew_choices = [t for t, _s in choices if t == "Homebrew"]
+        self.assertFalse(homebrew_choices)
+
+    def test_state_payload_includes_brew_enabled(self) -> None:
+        app = self.make_app()
+        app.config.brew_enabled = True
+        payload = app.state_payload()
+        self.assertTrue(payload["brew_enabled"])
+
+    def test_write_project_files_roundtrips_brew_enabled(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.base_image_name = "Silverblue"
+        app.config.brew_enabled = True
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.write_project_files(repo_dir, include_workflow=False)
+            state = json.loads((repo_dir / STATE_FILE).read_text())
+            self.assertTrue(state["brew_enabled"])
+            cf = (repo_dir / "Containerfile").read_text()
+            self.assertIn(f"COPY --from={UBLUE_BREW_IMAGE} /system_files /", cf)
+            self.assertIn("brew-setup.service", cf)
 
 
 if __name__ == "__main__":
