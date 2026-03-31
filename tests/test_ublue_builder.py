@@ -2068,6 +2068,21 @@ class BuilderTests(unittest.TestCase):
             self.assertIn(method, METHOD_DISPLAY)
             self.assertTrue(METHOD_DISPLAY[method])
 
+    def test_write_bluebuild_project_files_restores_missing_workflow(self) -> None:
+        """If the workflow file is missing (e.g. manually deleted), it should be
+        restored from the template snapshot during an update."""
+        app = self.make_bluebuild_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            # Write project files WITHOUT seeding the template first so
+            # there is no pre-existing workflow file.
+            app.write_project_files(repo_dir, include_workflow=True)
+            workflow_path = repo_dir / ".github/workflows/build.yml"
+            self.assertTrue(workflow_path.exists(), "Workflow should be restored from template snapshot")
+            workflow = workflow_path.read_text()
+            self.assertIn(ACTION_PINS["blue-build/github-action"][0], workflow)
+            self.assertIn(DEFAULT_GITHUB_BUILD_CRON, workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

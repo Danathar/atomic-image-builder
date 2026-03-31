@@ -3277,6 +3277,12 @@ class App:
 
         if include_workflow:
             workflow_path.parent.mkdir(parents=True, exist_ok=True)
+            if not workflow_path.exists():
+                # Restore from the bundled template snapshot so updates can
+                # recreate a workflow that was manually deleted.
+                template_workflow = BLUEBUILD_TEMPLATE_DIR / ".github/workflows/build.yml"
+                if template_workflow.exists():
+                    shutil.copy2(template_workflow, workflow_path)
             if workflow_path.exists():
                 workflow_path.write_text(self.patch_bluebuild_workflow(workflow_path.read_text(), default_branch=default_branch))
 
