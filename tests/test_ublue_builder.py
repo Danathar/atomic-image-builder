@@ -245,6 +245,51 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(patched.count("env.COSIGN_PRIVATE_KEY != ''"), 2)
         self.assertIn(ACTION_PINS["sigstore/cosign-installer"][0], patched)
 
+    def test_patch_container_workflow_injects_job_env_even_when_step_env_matches(self) -> None:
+        """Step-level COSIGN_PRIVATE_KEY must not prevent job-level injection."""
+        app = self.make_app()
+        app.config.signing_enabled = True
+        # This mirrors the template workflow: COSIGN_PRIVATE_KEY exists at the
+        # step level but NOT at the job level.
+        workflow = textwrap.dedent(
+            """\
+            name: Build container image
+            on:
+              push:
+                paths-ignore:
+                  - '**/README.md'
+            jobs:
+              build_push:
+                env:
+                  COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v4
+                  - name: Install Cosign
+                    uses: sigstore/cosign-installer@v3
+                    if: github.event_name != 'pull_request' && env.COSIGN_PRIVATE_KEY != ''
+                  - name: Sign container image
+                    if: github.event_name != 'pull_request' && env.COSIGN_PRIVATE_KEY != ''
+                    run: cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/example/test:latest
+                    env:
+                      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        # The job-level env block must now contain COSIGN_PRIVATE_KEY
+        job_env_lines = []
+        in_job_env = False
+        for line in patched.splitlines():
+            if line == "    env:":
+                in_job_env = True
+                continue
+            if in_job_env and line.startswith("      ") and ":" in line:
+                job_env_lines.append(line.strip())
+            elif in_job_env:
+                break
+        self.assertIn("COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", job_env_lines)
+        self.assertIn("COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}", job_env_lines)
+
     def test_patch_container_workflow_handles_inline_paths_ignore(self) -> None:
         app = self.make_app()
         workflow = textwrap.dedent(

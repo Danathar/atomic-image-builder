@@ -469,10 +469,14 @@ def patch_workflow_signing_steps(workflow_text: str, *, branch_if: str, sign_if:
 def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[str, str]]) -> str:
     lines = workflow_text.splitlines()
     missing_lines: list[str] = []
+    # Job-level env is at 6 spaces (4 for job indent + 2 for key).  We must
+    # check at this exact indentation, otherwise a step-level env entry with
+    # the same key fools the check into thinking the job-level one exists.
+    job_env_prefix = "      "  # 6 spaces
     for name, value in entries:
         wanted = f"{name}: {value}"
-        if not any(line.strip() == wanted for line in lines):
-            missing_lines.append(f"      {wanted}")
+        if not any(line == f"{job_env_prefix}{wanted}" for line in lines):
+            missing_lines.append(f"{job_env_prefix}{wanted}")
     if not missing_lines:
         return workflow_text
 
