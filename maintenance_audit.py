@@ -14,8 +14,10 @@ from pathlib import Path
 
 from atomic_image_builder import ACTION_PINS, ACTION_REF_PINS
 
-TEMPLATE_SOURCE_REL = Path("template_snapshots/containerfile/.template-source")
-TEMPLATE_WORKFLOW_REL = Path("template_snapshots/containerfile/.github/workflows/build.yml")
+TEMPLATE_SOURCES: list[tuple[str, str]] = [
+    ("template_snapshots/containerfile/.template-source", "template_snapshots/containerfile/.github/workflows/build.yml"),
+    ("template_snapshots/bluebuild/.template-source", "template_snapshots/bluebuild/.github/workflows/build.yml"),
+]
 REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 USES_RE = re.compile(r"^\s*(?:-\s*)?uses:\s+([^@\s]+)@([^\s#]+)")
 VERSION_TAG_RE = re.compile(r"^v(\d+)(?:\.(\d+))?(?:\.(\d+))?$")
@@ -89,35 +91,36 @@ def iter_workflow_action_refs(text: str) -> list[tuple[str, str]]:
 
 def audit_local_snapshot(repo_root: Path) -> list[str]:
     findings: list[str] = []
-    source_path = repo_root / TEMPLATE_SOURCE_REL
-    workflow_path = repo_root / TEMPLATE_WORKFLOW_REL
-    if not source_path.is_file():
-        findings.append(f"Missing template metadata file: {source_path}")
-    else:
-        try:
-            load_template_source(source_path)
-        except (OSError, ValueError) as exc:
-            findings.append(str(exc))
-    if not workflow_path.is_file():
-        findings.append(f"Missing template workflow file: {workflow_path}")
-        return findings
-
-    try:
-        workflow_text = workflow_path.read_text()
-    except OSError as exc:
-        findings.append(f"Unable to read {workflow_path}: {exc}")
-        return findings
-
-    for action, ref in iter_workflow_action_refs(workflow_text):
-        pin = ACTION_REF_PINS.get(f"{action}@{ref}") or ACTION_PINS.get(action)
-        if pin is None:
-            findings.append(f"Template workflow action {action}@{ref} is not covered by ACTION_PINS or ACTION_REF_PINS.")
+    for source_rel, workflow_rel in TEMPLATE_SOURCES:
+        source_path = repo_root / source_rel
+        workflow_path = repo_root / workflow_rel
+        if not source_path.is_file():
+            findings.append(f"Missing template metadata file: {source_path}")
+        else:
+            try:
+                load_template_source(source_path)
+            except (OSError, ValueError) as exc:
+                findings.append(str(exc))
+        if not workflow_path.is_file():
+            findings.append(f"Missing template workflow file: {workflow_path}")
             continue
-        sha, _label = pin
-        if ref != sha:
-            findings.append(
-                f"Template workflow action {action}@{ref} does not match the pin table SHA {sha}."
-            )
+
+        try:
+            workflow_text = workflow_path.read_text()
+        except OSError as exc:
+            findings.append(f"Unable to read {workflow_path}: {exc}")
+            continue
+
+        for action, ref in iter_workflow_action_refs(workflow_text):
+            pin = ACTION_REF_PINS.get(f"{action}@{ref}") or ACTION_PINS.get(action)
+            if pin is None:
+                findings.append(f"Template workflow action {action}@{ref} is not covered by ACTION_PINS or ACTION_REF_PINS.")
+                continue
+            sha, _label = pin
+            if ref != sha:
+                findings.append(
+                    f"Template workflow action {action}@{ref} does not match the pin table SHA {sha}."
+                )
     return findings
 
 
@@ -213,13 +216,14 @@ def audit_action_update_availability(
 def run_audit(repo_root: Path, *, skip_upstream: bool, check_action_updates: bool = False) -> list[str]:
     findings = audit_local_snapshot(repo_root)
     if not skip_upstream:
-        source_path = repo_root / TEMPLATE_SOURCE_REL
-        try:
-            source = load_template_source(source_path)
-        except (OSError, ValueError):
-            source = None
-        if source is not None:
-            findings.extend(audit_upstream_drift(source))
+        for source_rel, _workflow_rel in TEMPLATE_SOURCES:
+            source_path = repo_root / source_rel
+            try:
+                source = load_template_source(source_path)
+            except (OSError, ValueError):
+                source = None
+            if source is not None:
+                findings.extend(audit_upstream_drift(source))
     if check_action_updates:
         findings.extend(audit_action_update_availability())
     return findings

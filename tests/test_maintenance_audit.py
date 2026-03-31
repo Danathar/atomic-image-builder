@@ -40,14 +40,23 @@ class MaintenanceAuditTests(unittest.TestCase):
     def test_audit_local_snapshot_reports_unknown_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
-            workflow_dir = repo_root / "template_snapshots/containerfile/.github/workflows"
-            workflow_dir.mkdir(parents=True)
+            # Set up containerfile template with an unknown action.
+            cf_workflow_dir = repo_root / "template_snapshots/containerfile/.github/workflows"
+            cf_workflow_dir.mkdir(parents=True)
             (repo_root / "template_snapshots/containerfile/.template-source").write_text(
                 "repo=https://github.com/example/repo.git\nrevision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
             )
-            (workflow_dir / "build.yml").write_text(
+            (cf_workflow_dir / "build.yml").write_text(
                 "jobs:\n  build:\n    steps:\n      - uses: example/custom-action@v1\n"
             )
+            # Set up bluebuild template with a valid (empty) workflow so it
+            # does not add extra findings.
+            bb_workflow_dir = repo_root / "template_snapshots/bluebuild/.github/workflows"
+            bb_workflow_dir.mkdir(parents=True)
+            (repo_root / "template_snapshots/bluebuild/.template-source").write_text(
+                "repo=https://github.com/example/bb.git\nrevision=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+            )
+            (bb_workflow_dir / "build.yml").write_text("jobs: {}\n")
 
             findings = audit_local_snapshot(repo_root)
 

@@ -43,13 +43,20 @@ ACCENT_COLOR = 117
 CONTROLS_COLOR = 10
 PACKAGE_SEARCH_LIMIT = 40
 MANAGED_REPO_WARNING = "If you hand-edit a repo after this tool creates or manages it, stop using this tool for that repo."
-MANAGED_REPO_HINT = (
+MANAGED_REPO_HINT_CONTAINERFILE = (
     f"Future updates use {STATE_FILE} as the source of truth and rewrite managed files such as README.md and build_files/build.sh."
 )
+MANAGED_REPO_HINT_BLUEBUILD = (
+    f"Future updates use {STATE_FILE} as the source of truth and rewrite managed files such as README.md and recipes/recipe.yml."
+)
 CONTAINERFILE_TEMPLATE_REPO = "ublue-os/image-template"
+BLUEBUILD_TEMPLATE_REPO = "blue-build/template"
 TEMPLATE_SNAPSHOT_DIR = Path(__file__).resolve().parent / "template_snapshots"
 CONTAINERFILE_TEMPLATE_DIR = TEMPLATE_SNAPSHOT_DIR / "containerfile"
-ALLOWED_METHODS = {"containerfile"}
+BLUEBUILD_TEMPLATE_DIR = TEMPLATE_SNAPSHOT_DIR / "bluebuild"
+ALLOWED_METHODS = {"containerfile", "bluebuild"}
+METHOD_DISPLAY = {"containerfile": "Containerfile", "bluebuild": "BlueBuild"}
+BLUEBUILD_RECIPE_SCHEMA = "https://schema.blue-build.org/recipe-v1.json"
 # These regexes are our low-cost safety rails. They do not prove a package or
 # service is real, but they do stop obviously unsafe values from becoming shell
 # script content later.
@@ -77,6 +84,7 @@ ACTION_PINS: dict[str, tuple[str, str]] = {
     "redhat-actions/push-to-registry": ("5ed88d269cf581ea9ef6dd6806d01562096bee9c", "v2"),
     "sigstore/cosign-installer": ("cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003", "v4.1.1"),
     "actions/upload-artifact": ("bbbca2ddaa5d8feaa63e36b76fdaad77386f024f", "v7.0.0"),
+    "blue-build/github-action": ("01902d3bbdcd2196dbd3830af6a5344884f0ef0a", "v1.11"),
 }
 ACTION_REF_PINS: dict[str, tuple[str, str]] = {
     "ublue-os/remove-unwanted-software@v8": ("695eb75bc387dbcd9685a8e72d23439d8686cba6", "v8"),
@@ -888,7 +896,7 @@ class App:
     def fresh_config(self) -> Config:
         # Starting a new create/scan flow should not inherit stale repo names or
         # package picks from the previous action the user ran in this session.
-        return Config(method="containerfile", github_user=self.github_user)
+        return Config(github_user=self.github_user)
 
     def landing_panel_width(self) -> int:
         return self.gum.content_width(max_width=92, reserve=10)
@@ -940,12 +948,13 @@ class App:
                 "GitHub account required",
                 "Log in first: gh auth login",
                 "",
-                "Official template repo",
-                "https://github.com/ublue-os/image-template",
-                "Generated repos start from a bundled snapshot",
-                "of that official template repository.",
-                "That template works across this tool's",
-                "supported images and changes infrequently.",
+                "Official template repos",
+                "Containerfile: ublue-os/image-template",
+                "BlueBuild: blue-build/template",
+                "Generated repos start from bundled snapshots",
+                "of these official template repositories.",
+                "Those templates work across this tool's",
+                "supported images and change infrequently.",
             ],
             width=info_width,
             border_foreground=117,
@@ -1151,7 +1160,10 @@ class App:
 
     def show_managed_repo_warning(self) -> None:
         self.gum.warn(MANAGED_REPO_WARNING)
-        self.gum.hint(MANAGED_REPO_HINT)
+        if self.config.method == "bluebuild":
+            self.gum.hint(MANAGED_REPO_HINT_BLUEBUILD)
+        else:
+            self.gum.hint(MANAGED_REPO_HINT_CONTAINERFILE)
 
     def preflight(self) -> None:
         # Preflight is intentionally blunt: it checks the tools this app depends
@@ -1335,25 +1347,28 @@ class App:
         # This is a simple step-by-step wizard. "step" is an integer instead of
         # a stack because the beginner flow is intentionally linear.
         if scanned:
-            self.config.method = "containerfile"
             self.config.github_user = self.github_user
         else:
             self.config = self.fresh_config()
-        total_steps = 4
+        total_steps = 5
         step = 1
         while True:
             try:
                 if step == 1:
-                    self.choose_base_image(step=step, total_steps=total_steps)
+                    self.choose_method(step=step, total_steps=total_steps)
                     step = 2
                     continue
                 if step == 2:
-                    self.configure_repo(step=step, total_steps=total_steps)
+                    self.choose_base_image(step=step, total_steps=total_steps)
                     step = 3
                     continue
                 if step == 3:
-                    self.select_packages(step=step, total_steps=total_steps)
+                    self.configure_repo(step=step, total_steps=total_steps)
                     step = 4
+                    continue
+                if step == 4:
+                    self.select_packages(step=step, total_steps=total_steps)
+                    step = 5
                     continue
                 action = self.review_new_image(step=step, total_steps=total_steps)
             except ScreenBack:
@@ -1365,14 +1380,40 @@ class App:
                 if self.do_build():
                     return
                 continue
-            if action == "base":
+            if action == "method":
                 step = 1
-            elif action == "repo":
+            elif action == "base":
                 step = 2
-            elif action == "software":
+            elif action == "repo":
                 step = 3
+            elif action == "software":
+                step = 4
             else:
                 return
+
+    def choose_method(self, *, step: int | None = None, total_steps: int | None = None) -> None:
+        if step is not None and total_steps is not None:
+            self.show_step_header("Build Method", step=step, total_steps=total_steps)
+        else:
+            self.gum.header("Build Method")
+        self.gum.controls("Up/Down move", "Enter choose", "Esc back", "Ctrl+C quit")
+        self.menu_section(
+            "Tip",
+            "Containerfile uses a standard Containerfile and shell script.",
+            "BlueBuild uses a YAML recipe and the BlueBuild GitHub Action.",
+        )
+        print()
+        options = [
+            "Containerfile    Standard Containerfile with build script (recommended for beginners)",
+            "BlueBuild        YAML recipe with the BlueBuild GitHub Action",
+        ]
+        choice = self.gum.choose(options, height=5)
+        selected = choice[0] if choice else options[0]
+        if selected.startswith("BlueBuild"):
+            self.config.method = "bluebuild"
+        else:
+            self.config.method = "containerfile"
+        self.gum.success(f"Build method: {METHOD_DISPLAY[self.config.method]}")
 
     def choose_base_image(self, *, step: int | None = None, total_steps: int | None = None) -> None:
         # Supported base images are intentionally limited. The point of this tool
@@ -1796,6 +1837,7 @@ class App:
             intro_lines.append(f"Step {step} of {total_steps}.")
         intro_lines.append("This is a read-only summary of the current settings.")
         rows = [
+            ("Build Method", METHOD_DISPLAY.get(self.config.method, "(not set)")),
             ("Repository", f"{self.github_user}/{self.config.repo_name}" if self.github_user else self.config.repo_name),
             ("Description", self.config.image_desc),
             ("Base Image", self.config.base_image_name or self.config.base_image_uri),
@@ -1816,17 +1858,20 @@ class App:
             self.show_step_header("Review and Create Image", step=step, total_steps=total_steps)
             self.gum.hint("Choose a section to review or change, or start the GitHub build.")
             print()
+            method_label = self.format_task_choice("Build method", METHOD_DISPLAY.get(self.config.method, "(not set)"))
             software_label = self.format_task_choice("Software", self.software_status())
             repo_label = self.format_task_choice("Repository settings", self.repository_status())
             base_label = self.format_task_choice("Base image", self.config.base_image_name or "(not set)")
             full_label = "View full configuration"
             build_label = "Start GitHub build"
             cancel_label = "Cancel and return to the main menu"
-            options = [software_label, repo_label, base_label, full_label, build_label, cancel_label]
-            choice = self.gum.choose(options, height=9)
+            options = [method_label, software_label, repo_label, base_label, full_label, build_label, cancel_label]
+            choice = self.gum.choose(options, height=10)
             selected = choice[0] if choice else cancel_label
             if selected == build_label:
                 return "build"
+            if selected == method_label:
+                return "method"
             if selected == software_label:
                 return "software"
             if selected == repo_label:
@@ -2091,6 +2136,9 @@ class App:
     def clone_container_template(self, target: Path) -> None:
         self.copy_template_snapshot(target, repo=CONTAINERFILE_TEMPLATE_REPO, source_dir=CONTAINERFILE_TEMPLATE_DIR)
 
+    def clone_bluebuild_template(self, target: Path) -> None:
+        self.copy_template_snapshot(target, repo=BLUEBUILD_TEMPLATE_REPO, source_dir=BLUEBUILD_TEMPLATE_DIR)
+
     def repo_default_branch(self, owner: str, repo: str) -> str:
         data = self.gh_json(["repo", "view", f"{owner}/{repo}", "--json", "defaultBranchRef"])
         branch = data.get("defaultBranchRef", {}).get("name")
@@ -2108,7 +2156,10 @@ class App:
         return "main"
 
     def seed_project_template(self, target: Path) -> None:
-        self.clone_container_template(target)
+        if self.config.method == "bluebuild":
+            self.clone_bluebuild_template(target)
+        else:
+            self.clone_container_template(target)
 
     def add_packages_to_config(
         self,
@@ -2224,7 +2275,7 @@ class App:
             joined = ", ".join(unchecked)
             self.gum.warn("Could not fully check some package removals on this system.")
             self.gum.hint(f"Keeping for now: {joined}")
-            self.gum.hint("The generated build script will skip removals that are not installed in the base image.")
+            self.gum.hint("The build will skip removals that are not installed in the base image.")
             self.removed_package_lookup_warning_shown = True
         return accepted
 
@@ -2536,8 +2587,6 @@ class App:
             data = json.loads(state_path.read_text())
             cfg = config_from_state_payload(data)
         except ValueError as exc:
-            if "unsupported build method" in str(exc):
-                raise CommandError("This repo uses BlueBuild, which is no longer supported by this tool.") from exc
             raise CommandError(
                 f"This repo's saved settings file `{STATE_FILE}` is missing or broken. "
                 "Restore it from Git, or stop using this tool for this repo."
@@ -3106,6 +3155,131 @@ class App:
             iso_text = template_path.read_text()
         (disk_dir / "iso.toml").write_text(self.patch_installer_config(iso_text))
 
+    def _split_image_ref(self, uri: str) -> tuple[str, str]:
+        # BlueBuild recipes separate "base-image" and "image-version" so we need
+        # to split a combined URI like "ghcr.io/ublue-os/bazzite:stable".
+        if ":" in uri:
+            base, tag = uri.rsplit(":", 1)
+            return base, tag
+        return uri, "latest"
+
+    def generate_recipe(self) -> str:
+        # Generate a BlueBuild recipe YAML from Config without needing pyyaml.
+        # Values that might need quoting use yaml_scalar(); plain tokens like
+        # package names are safe because validate_config() already checked them.
+        base_image, image_version = self._split_image_ref(self.config.base_image_uri)
+        lines = [
+            "---",
+            f"# yaml-language-server: $schema={BLUEBUILD_RECIPE_SCHEMA}",
+            f"name: {self.config.repo_name}",
+            f"description: {yaml_scalar(self.config.image_desc)}",
+            "",
+            f"base-image: {base_image}",
+            f"image-version: {yaml_scalar(image_version)}",
+            "",
+            "modules:",
+            "  - type: files",
+            "    files:",
+            "      - source: system",
+            "        destination: /",
+        ]
+
+        if self.config.brew_enabled:
+            lines.extend([
+                "",
+                "  - type: containerfile",
+                "    snippets:",
+                f"      - COPY --from={UBLUE_BREW_IMAGE} /system_files /",
+                "      - |",
+                "        RUN --mount=type=cache,dst=/var/cache \\",
+                "            --mount=type=cache,dst=/var/log \\",
+                "            --mount=type=tmpfs,dst=/tmp \\",
+                "            /usr/bin/systemctl preset brew-setup.service && \\",
+                "            /usr/bin/systemctl preset brew-update.timer && \\",
+                "            /usr/bin/systemctl preset brew-upgrade.timer",
+            ])
+
+        if self.config.copr_repos or self.config.packages or self.config.removed_packages:
+            lines.extend(["", "  - type: dnf"])
+            if self.config.copr_repos:
+                lines.extend(["    repos:", "      copr:"])
+                for repo in self.config.copr_repos:
+                    lines.append(f"        - {repo}")
+            if self.config.packages:
+                lines.extend(["    install:", "      packages:"])
+                for pkg in self.config.packages:
+                    lines.append(f"        - {pkg}")
+            if self.config.removed_packages:
+                lines.extend(["    remove:", "      packages:"])
+                for pkg in self.config.removed_packages:
+                    lines.append(f"        - {pkg}")
+
+        if self.config.services:
+            lines.extend(["", "  - type: systemd", "    system:", "      enabled:"])
+            for svc in self.config.services:
+                lines.append(f"        - {svc}")
+
+        lines.extend(["", "  - type: signing"])
+        return "\n".join(lines) + "\n"
+
+    def patch_bluebuild_workflow(self, existing_text: str, *, default_branch: str = "main") -> str:
+        # The BlueBuild workflow is simpler than the Containerfile one: a single
+        # monolithic action handles the build. We pin the action, update the
+        # schedule, add state-file ignore, and fix branch filters.
+        lines = existing_text.splitlines()
+        output: list[str] = []
+        state_ignore_present = any(STATE_FILE in line for line in lines)
+        paths_ignore_inserted = False
+        for line in lines:
+            line = pin_action_uses_line(line)
+            stripped = line.strip()
+            if stripped.startswith("- cron:"):
+                indent = line[: len(line) - len(line.lstrip())]
+                output.append(f"{indent}- cron: '{DEFAULT_GITHUB_BUILD_CRON}'")
+                continue
+            if stripped.startswith("paths-ignore:") and not state_ignore_present and not paths_ignore_inserted:
+                output.append(line)
+                paths_ignore_indent = line[: len(line) - len(line.lstrip())] + "  "
+                output.append(f"{paths_ignore_indent}- '{STATE_FILE}'")
+                paths_ignore_inserted = True
+                continue
+            if stripped in {'- "**.md"', "- '**.md'"} and not state_ignore_present and not paths_ignore_inserted:
+                output.append(line)
+                output.append(f"{line[: len(line) - len(line.lstrip())]}- '{STATE_FILE}'")
+                paths_ignore_inserted = True
+                continue
+            output.append(line)
+        text = "\n".join(output)
+        text = self.patch_workflow_branch_filters(text, default_branch)
+        return ensure_trailing_newline(text)
+
+    def write_bluebuild_project_files(self, base_dir: Path, *, include_workflow: bool, default_branch: str = "main") -> None:
+        # This is the "materialize the repo" step for BlueBuild mode. The recipe
+        # YAML replaces the Containerfile + build.sh used by Containerfile mode.
+        readme_path = base_dir / "README.md"
+        gitignore_path = base_dir / ".gitignore"
+        recipe_path = base_dir / "recipes" / "recipe.yml"
+        workflow_path = base_dir / ".github/workflows/build.yml"
+
+        readme_path.write_text(self.generate_readme())
+
+        existing_gitignore = gitignore_path.read_text().splitlines() if gitignore_path.exists() else []
+        for entry in ["cosign.key", "cosign.private"]:
+            if entry not in existing_gitignore:
+                existing_gitignore.append(entry)
+        gitignore_path.write_text(ensure_trailing_newline("\n".join(existing_gitignore)))
+
+        recipe_path.parent.mkdir(parents=True, exist_ok=True)
+        recipe_path.write_text(self.generate_recipe())
+
+        if self.generated_cosign_pub is not None:
+            (base_dir / "cosign.pub").write_text(ensure_trailing_newline(self.generated_cosign_pub))
+
+        if include_workflow:
+            workflow_path.parent.mkdir(parents=True, exist_ok=True)
+            if workflow_path.exists():
+                workflow_path.write_text(self.patch_bluebuild_workflow(workflow_path.read_text(), default_branch=default_branch))
+
     def write_container_project_files(self, base_dir: Path, *, include_workflow: bool, default_branch: str = "main") -> None:
         # This is the "materialize the repo" step for Containerfile mode. It
         # patches template-owned files where possible and generates tool-owned
@@ -3156,7 +3330,10 @@ class App:
         self.validate_config()
         base_dir.mkdir(parents=True, exist_ok=True)
         (base_dir / STATE_FILE).write_text(json.dumps(self.state_payload(), indent=2) + "\n")
-        self.write_container_project_files(base_dir, include_workflow=include_workflow, default_branch=default_branch)
+        if self.config.method == "bluebuild":
+            self.write_bluebuild_project_files(base_dir, include_workflow=include_workflow, default_branch=default_branch)
+        else:
+            self.write_container_project_files(base_dir, include_workflow=include_workflow, default_branch=default_branch)
 
     def generate_containerfile(self) -> str:
         # The Containerfile is intentionally small. Most customization lives in
@@ -3417,7 +3594,7 @@ class App:
             f"| Base Image | `{base_name}` |",
             f"| Base Image URI | `{self.config.base_image_uri}` |",
             f"| Published Image | `{image_ref}` |",
-            "| Build Method | `Containerfile` |",
+            f"| Build Method | `{METHOD_DISPLAY.get(self.config.method, self.config.method)}` |",
             "",
             f"## Managed By {TOOL_NAME}",
             "",
@@ -3425,11 +3602,11 @@ class App:
             "",
             f"If you hand-edit this repo after `{TOOL_SLUG}` creates or manages it, stop using `{TOOL_SLUG}` for this repo.",
             "",
-            "Later tool-driven updates rewrite managed files and can overwrite manual changes, especially `README.md` and `build_files/build.sh`.",
+            f"Later tool-driven updates rewrite managed files and can overwrite manual changes, especially `README.md` and `{'recipes/recipe.yml' if self.config.method == 'bluebuild' else 'build_files/build.sh'}`.",
             "",
             "## Requested Packages",
             "",
-            "These are the package names requested by this repo's generated build script.",
+            f"These are the package names requested by this repo's {'recipe' if self.config.method == 'bluebuild' else 'generated build script'}.",
             self.requested_packages_note(),
             "",
             packages,

@@ -14,14 +14,18 @@ from atomic_image_builder import (
     ACTION_PINS,
     App,
     BASE_IMAGES,
+    BLUEBUILD_RECIPE_SCHEMA,
+    BLUEBUILD_TEMPLATE_DIR,
     COMMON_SERVICES,
     CommandError,
     CONTAINERFILE_TEMPLATE_DIR,
     Config,
+    DEFAULT_GITHUB_BUILD_CRON,
     FEDORA_ATOMIC_FALLBACK_TAG,
     FEDORA_ATOMIC_DEFAULT_TAG,
     Gum,
     MANAGED_REPO_WARNING,
+    METHOD_DISPLAY,
     PACKAGE_SEARCH_LIMIT,
     ScreenBack,
     STATE_FILE,
@@ -1030,6 +1034,7 @@ class BuilderTests(unittest.TestCase):
         app.config.services = ["sshd.service"]
         app.config.repo_name = "old-repo"
         seen: dict[str, object] = {}
+        method_calls = {"count": 0}
 
         def fake_choose_base_image(**_kwargs):
             seen["packages"] = list(app.config.packages)
@@ -1038,8 +1043,15 @@ class BuilderTests(unittest.TestCase):
             seen["github_user"] = app.config.github_user
             raise ScreenBack()
 
-        with patch.object(app, "choose_base_image", side_effect=fake_choose_base_image):
-            app.create_new_image()
+        def fake_choose_method(**_kwargs):
+            method_calls["count"] += 1
+            if method_calls["count"] > 1:
+                raise ScreenBack()
+            app.config.method = "containerfile"
+
+        with patch.object(app, "choose_method", side_effect=fake_choose_method):
+            with patch.object(app, "choose_base_image", side_effect=fake_choose_base_image):
+                app.create_new_image()
 
         self.assertEqual(seen["packages"], [])
         self.assertEqual(seen["services"], [])
@@ -1758,6 +1770,303 @@ class BuilderTests(unittest.TestCase):
             cf = (repo_dir / "Containerfile").read_text()
             self.assertIn(f"COPY --from={UBLUE_BREW_IMAGE} /system_files /", cf)
             self.assertIn("brew-setup.service", cf)
+
+
+    # ------------------------------------------------------------------
+    # BlueBuild build method
+    # ------------------------------------------------------------------
+
+    def make_bluebuild_app(self) -> App:
+        app = App()
+        app.config = Config(
+            method="bluebuild",
+            base_image_uri="ghcr.io/ublue-os/bazzite:stable",
+            base_image_name="Bazzite (KDE)",
+            repo_name="test-bb-image",
+            image_desc="Test BlueBuild image",
+            github_user="example",
+        )
+        return app
+
+    def test_split_image_ref_separates_tag(self) -> None:
+        app = self.make_app()
+        self.assertEqual(
+            app._split_image_ref("ghcr.io/ublue-os/bazzite:stable"),
+            ("ghcr.io/ublue-os/bazzite", "stable"),
+        )
+
+    def test_split_image_ref_defaults_to_latest(self) -> None:
+        app = self.make_app()
+        self.assertEqual(
+            app._split_image_ref("ghcr.io/ublue-os/bazzite"),
+            ("ghcr.io/ublue-os/bazzite", "latest"),
+        )
+
+    def test_generate_recipe_basic(self) -> None:
+        app = self.make_bluebuild_app()
+        recipe = app.generate_recipe()
+        self.assertIn(f"$schema={BLUEBUILD_RECIPE_SCHEMA}", recipe)
+        self.assertIn("name: test-bb-image", recipe)
+        self.assertIn("base-image: ghcr.io/ublue-os/bazzite", recipe)
+        self.assertIn("image-version:", recipe)
+        self.assertIn("stable", recipe)
+        self.assertIn("- type: files", recipe)
+        self.assertIn("- type: signing", recipe)
+
+    def test_generate_recipe_includes_packages(self) -> None:
+        app = self.make_bluebuild_app()
+        app.config.packages = ["htop", "tmux"]
+        recipe = app.generate_recipe()
+        self.assertIn("- type: dnf", recipe)
+        self.assertIn("        - htop", recipe)
+        self.assertIn("        - tmux", recipe)
+
+    def test_generate_recipe_includes_copr_repos(self) -> None:
+        app = self.make_bluebuild_app()
+        app.config.copr_repos = ["kylegospo/bazzite"]
+        recipe = app.generate_recipe()
+        self.assertIn("copr:", recipe)
+        self.assertIn("        - kylegospo/bazzite", recipe)
+
+    def test_generate_recipe_includes_removed_packages(self) -> None:
+        app = self.make_bluebuild_app()
+        app.config.removed_packages = ["firefox"]
+        recipe = app.generate_recipe()
+        self.assertIn("remove:", recipe)
+        self.assertIn("        - firefox", recipe)
+
+    def test_generate_recipe_includes_services(self) -> None:
+        app = self.make_bluebuild_app()
+        app.config.services = ["tailscaled.service"]
+        recipe = app.generate_recipe()
+        self.assertIn("- type: systemd", recipe)
+        self.assertIn("        - tailscaled.service", recipe)
+
+    def test_generate_recipe_includes_brew_oci_layer(self) -> None:
+        app = self.make_bluebuild_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.brew_enabled = True
+        recipe = app.generate_recipe()
+        self.assertIn("- type: containerfile", recipe)
+        self.assertIn(f"COPY --from={UBLUE_BREW_IMAGE} /system_files /", recipe)
+        self.assertIn("brew-setup.service", recipe)
+        self.assertIn("brew-update.timer", recipe)
+        self.assertIn("brew-upgrade.timer", recipe)
+
+    def test_generate_recipe_excludes_brew_when_disabled(self) -> None:
+        app = self.make_bluebuild_app()
+        app.config.brew_enabled = False
+        recipe = app.generate_recipe()
+        self.assertNotIn("containerfile", recipe.split("type: signing")[0])
+        self.assertNotIn(UBLUE_BREW_IMAGE, recipe)
+
+    def test_generate_recipe_omits_dnf_module_when_no_packages(self) -> None:
+        app = self.make_bluebuild_app()
+        recipe = app.generate_recipe()
+        self.assertNotIn("- type: dnf", recipe)
+
+    def test_generate_recipe_omits_systemd_module_when_no_services(self) -> None:
+        app = self.make_bluebuild_app()
+        recipe = app.generate_recipe()
+        self.assertNotIn("- type: systemd", recipe)
+
+    def test_generate_recipe_full_config(self) -> None:
+        app = self.make_bluebuild_app()
+        app.config.packages = ["htop"]
+        app.config.copr_repos = ["kylegospo/bazzite"]
+        app.config.services = ["tailscaled.service"]
+        app.config.removed_packages = ["firefox"]
+        app.config.brew_enabled = True
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        recipe = app.generate_recipe()
+        self.assertIn("- type: files", recipe)
+        self.assertIn("- type: containerfile", recipe)
+        self.assertIn("- type: dnf", recipe)
+        self.assertIn("- type: systemd", recipe)
+        self.assertIn("- type: signing", recipe)
+
+    def test_patch_bluebuild_workflow_pins_action(self) -> None:
+        app = self.make_bluebuild_app()
+        template = "        uses: blue-build/github-action@v1.11\n"
+        patched = app.patch_bluebuild_workflow(template)
+        self.assertIn(ACTION_PINS["blue-build/github-action"][0], patched)
+        self.assertNotIn("@v1.11\n", patched)
+
+    def test_patch_bluebuild_workflow_updates_cron(self) -> None:
+        app = self.make_bluebuild_app()
+        template = '    - cron: "00 06 * * *"\n'
+        patched = app.patch_bluebuild_workflow(template)
+        self.assertIn(DEFAULT_GITHUB_BUILD_CRON, patched)
+        self.assertNotIn("00 06", patched)
+
+    def test_patch_bluebuild_workflow_adds_state_file_ignore(self) -> None:
+        app = self.make_bluebuild_app()
+        template = '    paths-ignore:\n      - "**.md"\n'
+        patched = app.patch_bluebuild_workflow(template)
+        self.assertIn(STATE_FILE, patched)
+
+    def test_clone_bluebuild_template_copies_snapshot(self) -> None:
+        app = self.make_bluebuild_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "repo"
+            app.clone_bluebuild_template(target)
+            self.assertTrue((target / ".github/workflows/build.yml").exists())
+            self.assertTrue((target / "recipes/recipe.yml").exists())
+            self.assertTrue((target / "files/system/etc/.gitkeep").exists())
+
+    def test_seed_project_template_uses_bluebuild_for_bluebuild_method(self) -> None:
+        app = self.make_bluebuild_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "repo"
+            app.seed_project_template(target)
+            self.assertTrue((target / "recipes/recipe.yml").exists())
+            # Should NOT have Containerfile-specific files
+            self.assertFalse((target / "Containerfile").exists())
+
+    def test_seed_project_template_uses_containerfile_for_containerfile_method(self) -> None:
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "repo"
+            app.seed_project_template(target)
+            self.assertTrue((target / "Containerfile").exists())
+
+    def test_write_bluebuild_project_files_creates_recipe(self) -> None:
+        app = self.make_bluebuild_app()
+        app.config.packages = ["htop"]
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.write_project_files(repo_dir, include_workflow=False)
+            recipe_path = repo_dir / "recipes/recipe.yml"
+            self.assertTrue(recipe_path.exists())
+            recipe = recipe_path.read_text()
+            self.assertIn("name: test-bb-image", recipe)
+            self.assertIn("- type: dnf", recipe)
+            self.assertIn("        - htop", recipe)
+
+    def test_write_bluebuild_project_files_writes_readme(self) -> None:
+        app = self.make_bluebuild_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.write_project_files(repo_dir, include_workflow=False)
+            readme = (repo_dir / "README.md").read_text()
+            self.assertIn("BlueBuild", readme)
+
+    def test_write_bluebuild_project_files_writes_state_file(self) -> None:
+        app = self.make_bluebuild_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.write_project_files(repo_dir, include_workflow=False)
+            state = json.loads((repo_dir / STATE_FILE).read_text())
+            self.assertEqual(state["method"], "bluebuild")
+
+    def test_write_bluebuild_project_files_does_not_create_containerfile(self) -> None:
+        app = self.make_bluebuild_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.write_project_files(repo_dir, include_workflow=False)
+            self.assertFalse((repo_dir / "Containerfile").exists())
+            self.assertFalse((repo_dir / "build_files/build.sh").exists())
+
+    def test_write_bluebuild_project_files_patches_workflow(self) -> None:
+        app = self.make_bluebuild_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            # Seed template first so workflow file exists
+            app.clone_bluebuild_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            workflow = (repo_dir / ".github/workflows/build.yml").read_text()
+            # Should be pinned
+            self.assertIn(ACTION_PINS["blue-build/github-action"][0], workflow)
+            self.assertIn(DEFAULT_GITHUB_BUILD_CRON, workflow)
+
+    def test_write_bluebuild_project_files_updates_gitignore(self) -> None:
+        app = self.make_bluebuild_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / ".gitignore").write_text("*.pyc\n")
+            app.write_project_files(repo_dir, include_workflow=False)
+            gitignore = (repo_dir / ".gitignore").read_text()
+            self.assertIn("cosign.key", gitignore)
+            self.assertIn("cosign.private", gitignore)
+
+    def test_write_bluebuild_project_files_roundtrips_config(self) -> None:
+        """State file written by BlueBuild write_project_files survives load_repo_config."""
+        app = self.make_bluebuild_app()
+        app.config.packages = ["htop", "tmux"]
+        app.config.removed_packages = ["firefox"]
+        app.config.copr_repos = ["kylegospo/bazzite"]
+        app.config.services = ["tailscaled.service"]
+        app.config.image_desc = "Test BB roundtrip"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.write_project_files(repo_dir, include_workflow=False)
+            app2 = self.make_bluebuild_app()
+            app2.load_repo_config(repo_dir)
+        self.assertEqual(app2.config.method, "bluebuild")
+        self.assertEqual(app2.config.packages, ["htop", "tmux"])
+        self.assertEqual(app2.config.removed_packages, ["firefox"])
+        self.assertEqual(app2.config.copr_repos, ["kylegospo/bazzite"])
+        self.assertEqual(app2.config.services, ["tailscaled.service"])
+        self.assertEqual(app2.config.image_desc, "Test BB roundtrip")
+
+    def test_write_bluebuild_project_files_roundtrips_brew_enabled(self) -> None:
+        app = self.make_bluebuild_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.base_image_name = "Silverblue"
+        app.config.brew_enabled = True
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.write_project_files(repo_dir, include_workflow=False)
+            state = json.loads((repo_dir / STATE_FILE).read_text())
+            self.assertTrue(state["brew_enabled"])
+            recipe = (repo_dir / "recipes/recipe.yml").read_text()
+            self.assertIn(f"COPY --from={UBLUE_BREW_IMAGE} /system_files /", recipe)
+            self.assertIn("brew-setup.service", recipe)
+
+    def test_validate_config_rejects_empty_method(self) -> None:
+        app = self.make_app()
+        app.config.method = ""
+        with self.assertRaisesRegex(CommandError, "supported build method"):
+            app.validate_config()
+
+    def test_validate_config_rejects_unknown_method(self) -> None:
+        app = self.make_app()
+        app.config.method = "buildah"
+        with self.assertRaisesRegex(CommandError, "supported build method"):
+            app.validate_config()
+
+    def test_validate_config_accepts_bluebuild_method(self) -> None:
+        app = self.make_bluebuild_app()
+        app.validate_config()
+
+    def test_config_from_state_payload_rejects_unsupported_method(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported build method"):
+            config_from_state_payload({"method": "buildah"})
+
+    def test_config_from_state_payload_loads_bluebuild_method(self) -> None:
+        cfg = config_from_state_payload({"method": "bluebuild"})
+        self.assertEqual(cfg.method, "bluebuild")
+
+    def test_show_summary_includes_build_method(self) -> None:
+        app = self.make_bluebuild_app()
+        app.gum = GumStub()
+        captured: list[str] = []
+        original_pager = app.gum.pager
+        app.gum.pager = lambda text: captured.append(text)
+        app.show_summary()
+        self.assertTrue(captured)
+        self.assertIn("BlueBuild", captured[0])
+
+    def test_generate_readme_uses_method_display(self) -> None:
+        app = self.make_bluebuild_app()
+        readme = app.generate_readme()
+        self.assertIn(METHOD_DISPLAY["bluebuild"], readme)
+
+    def test_method_display_covers_all_allowed_methods(self) -> None:
+        from atomic_image_builder import ALLOWED_METHODS
+        for method in ALLOWED_METHODS:
+            self.assertIn(method, METHOD_DISPLAY)
+            self.assertTrue(METHOD_DISPLAY[method])
 
 
 if __name__ == "__main__":

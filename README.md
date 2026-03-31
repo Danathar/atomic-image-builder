@@ -26,17 +26,19 @@ Supported base images currently include:
 - Universal Blue: Bazzite, Bazzite DX, Aurora, Aurora DX, Bluefin, and Bluefin DX
 - Fedora Atomic desktops: Silverblue, Kinoite, Sway Atomic, Budgie Atomic, and COSMIC Atomic
 
-It currently focuses on the beginner-friendly Containerfile path. Generated repos start from a bundled snapshot of the official `ublue-os/image-template` repository:
+It supports two build methods:
 
-https://github.com/ublue-os/image-template
+- **Containerfile** — Uses a standard Containerfile and shell build script. Generated repos start from a bundled snapshot of the official `ublue-os/image-template` repository: https://github.com/ublue-os/image-template
+- **BlueBuild** — Uses a YAML recipe and the BlueBuild GitHub Action. Generated repos start from a bundled snapshot of the official `blue-build/template` repository: https://github.com/blue-build/template
 
-That upstream template works across this tool's supported Universal Blue and Fedora Atomic images. It does not change very often, but this utility still uses a bundled snapshot so repo generation stays predictable.
+Both upstream templates work across this tool's supported Universal Blue and Fedora Atomic images. They do not change very often, but this utility still uses bundled snapshots so repo generation stays predictable.
 
 ## What It Does
 
 - Creates a new public GitHub repo for a custom bootc image
 - Supports curated Universal Blue desktop images
 - Supports the official Fedora Atomic desktop images
+- Lets users choose between Containerfile and BlueBuild build methods
 - Writes the repo files needed for a GitHub Actions build
 - Lets users add packages, COPR repos, services, and base-package removals
 - Offers optional Homebrew integration for Fedora Atomic base images using the Universal Blue brew OCI layer
@@ -70,7 +72,6 @@ This is for:
 
 This is not aimed at:
 
-- people who want full BlueBuild support in the same tool
 - people who want every advanced image workflow exposed in the beginner UI
 
 ## Requirements
@@ -159,10 +160,9 @@ This option is skipped automatically for Universal Blue base images since they a
 
 This repo intentionally keeps the beginner tool narrow:
 
-- Containerfile-based repo creation and updates are supported
+- Containerfile and BlueBuild repo creation and updates are supported
 - Existing repos that do not contain `.ublue-builder.json` are not supported for adoption or import
-- BlueBuild support was removed from the beginner app to keep the UX and code simpler
-- If a BlueBuild-focused workflow is needed later, it should live in a separate tool
+- Advanced BlueBuild modules and features beyond the guided wizard are out of scope
 
 ## Feedback
 
@@ -180,7 +180,7 @@ Run the local-only checks without touching the network:
 python3 maintenance_audit.py --skip-upstream
 ```
 
-Run the full audit, including an upstream HEAD drift check against the bundled `ublue-os/image-template` snapshot:
+Run the full audit, including upstream HEAD drift checks against both bundled template snapshots (`ublue-os/image-template` and `blue-build/template`):
 
 ```bash
 python3 maintenance_audit.py
