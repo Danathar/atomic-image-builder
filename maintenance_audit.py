@@ -31,7 +31,8 @@ def parse_version_tag(tag: str) -> tuple[int, int, int] | None:
     match = VERSION_TAG_RE.fullmatch(tag)
     if not match:
         return None
-    return tuple(int(part) if part is not None else 0 for part in match.groups())
+    major, minor, patch = (int(part) if part is not None else 0 for part in match.groups())
+    return (major, minor, patch)
 
 
 def version_tag_precision(tag: str) -> int | None:

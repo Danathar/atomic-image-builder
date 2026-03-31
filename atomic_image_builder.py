@@ -30,7 +30,7 @@ if sys.version_info < (3, 10):
 # A future refactor could split UI, GitHub operations, and rendering into
 # separate modules, but the comments below aim to make the current layout easier
 # to understand for anyone reading it now.
-VERSION = "0.8 beta"
+VERSION = "0.8-beta"
 TOOL_NAME = "Atomic Image Builder"
 TOOL_SLUG = "atomic-image-builder"
 STATE_FILE = ".ublue-builder.json"

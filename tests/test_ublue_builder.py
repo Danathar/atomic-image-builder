@@ -185,26 +185,26 @@ class BuilderTests(unittest.TestCase):
         self.assertIn(ACTION_PINS["ublue-os/remove-unwanted-software"][0], patched)
         self.assertIn(ACTION_PINS["sigstore/cosign-installer"][0], patched)
 
-        def test_patch_container_workflow_matches_signing_steps_by_behavior(self) -> None:
-                app = self.make_app()
-                workflow = textwrap.dedent(
-                        """\
-                        name: Build container image
-                        jobs:
-                            build_push:
-                                steps:
-                                    - name: Setup signer toolchain
-                                        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-                                        uses: sigstore/cosign-installer@v3
-                                    - name: Publish signature with custom label
-                                        run: cosign sign --yes ghcr.io/example/test-image:latest
-                        """
-                )
+    def test_patch_container_workflow_matches_signing_steps_by_behavior(self) -> None:
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Build container image
+            jobs:
+              build_push:
+                steps:
+                  - name: Setup signer toolchain
+                    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+                    uses: sigstore/cosign-installer@v3
+                  - name: Publish signature with custom label
+                    run: cosign sign --yes ghcr.io/example/test-image:latest
+            """
+        )
 
-                patched = app.patch_container_workflow(workflow)
+        patched = app.patch_container_workflow(workflow)
 
-                self.assertEqual(patched.count("env.COSIGN_PRIVATE_KEY != ''"), 2)
-                self.assertIn(ACTION_PINS["sigstore/cosign-installer"][0], patched)
+        self.assertEqual(patched.count("env.COSIGN_PRIVATE_KEY != ''"), 2)
+        self.assertIn(ACTION_PINS["sigstore/cosign-installer"][0], patched)
 
     def test_patch_container_workflow_handles_inline_paths_ignore(self) -> None:
         app = self.make_app()
@@ -1363,6 +1363,20 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("type=raw,value={{date 'YYYYMMDD'}}", workflow)
         self.assertIn("type=ref,event=pr", workflow)
         self.assertIn("COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}", workflow)
+
+    def test_installer_profile_maps_kde_and_gnome_base_images_correctly(self) -> None:
+        app = self.make_app()
+        kde_bases = {"bazzite", "bazzite-dx", "aurora", "aurora-dx", "kinoite"}
+        gnome_bases = {"bazzite-gnome", "bazzite-dx-gnome", "bluefin", "bluefin-dx", "silverblue", "sway-atomic", "budgie-atomic", "cosmic-atomic"}
+        for bi in BASE_IMAGES:
+            app.config.base_image_uri = bi.image_uri
+            profile = app.installer_profile()
+            if bi.key in kde_bases:
+                self.assertEqual(profile, "kde", f"{bi.key} should map to kde")
+            elif bi.key in gnome_bases:
+                self.assertEqual(profile, "gnome", f"{bi.key} should map to gnome")
+            else:
+                self.fail(f"Base image {bi.key} is not covered by this test")
 
     def test_generate_readme_uses_custom_base_title_and_lists_packages(self) -> None:
         app = self.make_app()
