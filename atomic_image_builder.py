@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -35,7 +36,7 @@ TOOL_SLUG = "atomic-image-builder"
 STATE_FILE = ".ublue-builder.json"
 DEFAULT_REPO_NAME = "my-atomic-image"
 DEFAULT_GITHUB_BUILD_CRON = "05 10 * * *"
-FEDORA_ATOMIC_DEFAULT_TAG = "43"
+FEDORA_ATOMIC_FALLBACK_TAG = "43"
 MAX_UI_WIDTH = 120
 ACCENT_COLOR = 117
 CONTROLS_COLOR = 10
@@ -69,9 +70,9 @@ DNF5_MISSING_MARKERS = (
 ACTION_PINS: dict[str, tuple[str, str]] = {
     "actions/checkout": ("de0fac2e4500dabe0009e67214ff5f5447ce83dd", "v6"),
     "ublue-os/remove-unwanted-software": ("695eb75bc387dbcd9685a8e72d23439d8686cba6", "v8"),
-    "docker/metadata-action": ("c299e40c65443455700f0fdfc63efafe5b349051", "v5"),
+    "docker/metadata-action": ("030e881283bb7a6894de51c315a6bfe6a94e05cf", "v6.0.0"),
     "redhat-actions/buildah-build": ("7a95fa7ee0f02d552a32753e7414641a04307056", "v2"),
-    "docker/login-action": ("c94ce9fb468520275223c153574b00df6fe4bcc9", "v3"),
+    "docker/login-action": ("b45d80f862d83dbcd57f89517bcf500b2ab88fb2", "v4.0.0"),
     "redhat-actions/push-to-registry": ("5ed88d269cf581ea9ef6dd6806d01562096bee9c", "v2"),
     "sigstore/cosign-installer": ("faadad0cce49287aee09b3a48701e75088a2c6ad", "v4.0.0"),
     "actions/upload-artifact": ("bbbca2ddaa5d8feaa63e36b76fdaad77386f024f", "v7.0.0"),
@@ -100,6 +101,41 @@ class BaseImage:
     name: str
     description: str
     image_uri: str
+
+
+def read_os_release_fields(path: Path = Path("/etc/os-release")) -> dict[str, str]:
+    try:
+        text = path.read_text()
+    except OSError:
+        return {}
+    fields: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        fields[key] = value
+    return fields
+
+
+def determine_fedora_atomic_default_tag(
+    *,
+    fallback: str = FEDORA_ATOMIC_FALLBACK_TAG,
+    os_release_path: Path = Path("/etc/os-release"),
+) -> str:
+    data = read_os_release_fields(os_release_path)
+    if data.get("ID") != "fedora":
+        return fallback
+    version_id = data.get("VERSION_ID", "")
+    if not version_id.isdigit():
+        return fallback
+    return str(max(int(fallback), int(version_id)))
+
+
+FEDORA_ATOMIC_DEFAULT_TAG = determine_fedora_atomic_default_tag()
 
 
 def ublue_image(key: str, name: str, description: str, image_uri: str) -> BaseImage:
@@ -354,6 +390,108 @@ def pinned_action(action: str) -> str:
     # of floating tags for the same reason as pin_action_uses_line().
     sha, label = ACTION_PINS[action]
     return f"{action}@{sha} # {label}"
+
+
+def patch_signing_step_block(step_lines: Sequence[str], *, branch_if: str, sign_if: str) -> list[str]:
+    # Signing-related steps are identified by behavior rather than display
+    # names so template renames do not silently bypass our signing guard.
+    is_cosign_install = any("uses:" in line and "sigstore/cosign-installer@" in line for line in step_lines)
+    is_cosign_sign = any(re.search(r"\bcosign\s+sign\b", line) for line in step_lines)
+    if not (is_cosign_install or is_cosign_sign):
+        return list(step_lines)
+
+    patched: list[str] = []
+    has_if = False
+    for line in step_lines:
+        stripped = line.lstrip()
+        if stripped.startswith("if: "):
+            has_if = True
+            if branch_if in stripped and sign_if not in stripped:
+                indent = line[: len(line) - len(stripped)]
+                condition = stripped.replace(branch_if, sign_if, 1)
+                patched.append(f"{indent}{condition}")
+                continue
+        patched.append(line)
+    if has_if or not patched:
+        return patched
+
+    first_line = patched[0]
+    indent = first_line[: len(first_line) - len(first_line.lstrip())] + "  "
+    return [patched[0], f"{indent}if: {sign_if}", *patched[1:]]
+
+
+def patch_workflow_signing_steps(workflow_text: str, *, branch_if: str, sign_if: str) -> str:
+    lines = workflow_text.splitlines()
+    output: list[str] = []
+    current_step: list[str] = []
+    in_steps = False
+    steps_indent: int | None = None
+
+    def flush_step() -> None:
+        nonlocal current_step
+        if not current_step:
+            return
+        output.extend(patch_signing_step_block(current_step, branch_if=branch_if, sign_if=sign_if))
+        current_step = []
+
+    for line in lines:
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+
+        if in_steps and steps_indent is not None and indent <= steps_indent and stripped and not stripped.startswith("#"):
+            flush_step()
+            in_steps = False
+            steps_indent = None
+
+        if stripped == "steps:":
+            flush_step()
+            in_steps = True
+            steps_indent = indent
+            output.append(line)
+            continue
+
+        if in_steps and steps_indent is not None and indent == steps_indent + 2 and stripped.startswith("- "):
+            flush_step()
+            current_step = [line]
+            continue
+
+        if current_step:
+            current_step.append(line)
+        else:
+            output.append(line)
+
+    flush_step()
+    return "\n".join(output)
+
+
+def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[str, str]]) -> str:
+    lines = workflow_text.splitlines()
+    missing_lines: list[str] = []
+    for name, value in entries:
+        wanted = f"{name}: {value}"
+        if not any(line.strip() == wanted for line in lines):
+            missing_lines.append(f"      {wanted}")
+    if not missing_lines:
+        return workflow_text
+
+    insertion = "".join(f"{line}\n" for line in missing_lines)
+    if re.search(r"^    env:\n", workflow_text, flags=re.MULTILINE):
+        return re.sub(
+            r"^    env:\n",
+            "    env:\n" + insertion,
+            workflow_text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+    if re.search(r"^    steps:\n", workflow_text, flags=re.MULTILINE):
+        return re.sub(
+            r"^    steps:\n",
+            "    env:\n" + insertion + "    steps:\n",
+            workflow_text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+    return workflow_text
 
 
 class CommandError(RuntimeError):
@@ -662,7 +800,7 @@ class Gum:
         try:
             shell_command = f"{shlex.join(command)} > {shlex.quote(output_path)}"
             run(
-                ["gum", "spin", "--spinner", "dot", "--title", title, "--", "bash", "-lc", shell_command],
+                ["gum", "spin", "--spinner", "dot", "--title", title, "--", "bash", "-c", shell_command],
                 cwd=cwd,
                 capture=False,
             )
@@ -686,7 +824,7 @@ class Gum:
                 f"printf '%s' $? > {shlex.quote(status_path)}"
             )
             run(
-                ["gum", "spin", "--spinner", "dot", "--title", title, "--", "bash", "-lc", shell_command],
+                ["gum", "spin", "--spinner", "dot", "--title", title, "--", "bash", "-c", shell_command],
                 cwd=cwd,
                 capture=False,
             )
@@ -735,6 +873,8 @@ class App:
         self.package_search_cache: dict[str, list[tuple[str, str]]] = {}
         self.package_lookup_warning_shown = False
         self.last_manual_package_check_had_missing = False
+        self.removed_package_lookup_warning_shown = False
+        self.last_manual_removed_package_check_had_missing = False
 
     def fresh_config(self) -> Config:
         # Starting a new create/scan flow should not inherit stale repo names or
@@ -1782,36 +1922,42 @@ class App:
     def ensure_signing_ready(self, owner: str, repo: str) -> bool:
         # Signed images are required for this tool, so "ready" means:
         # - the repo already has SIGNING_SECRET, or
-        # - we can create a cosign keypair and upload the private key now
+        # - we can create a cosign keypair and upload both required secrets now
         self.generated_cosign_pub = None
         if self.repo_secret_exists(owner, repo, "SIGNING_SECRET"):
             return True
         if not command_exists("cosign"):
             raise CommandError("cosign is required for signed images. Install it with: brew install cosign")
+        cosign_password = secrets.token_urlsafe(32)
         with tempfile.TemporaryDirectory(prefix="ublue-signing.") as tmp:
             tmpdir = Path(tmp)
             env = os.environ.copy()
-            env["COSIGN_PASSWORD"] = ""
+            env["COSIGN_PASSWORD"] = cosign_password
             proc = run(["cosign", "generate-key-pair"], cwd=tmpdir, env=env, check=False)
             key_path = tmpdir / "cosign.key"
             pub_path = tmpdir / "cosign.pub"
             if proc.returncode != 0 or not key_path.exists() or not pub_path.exists():
                 raise CommandError("Unable to generate a cosign keypair. Fix cosign first, then try again.")
-            with key_path.open("rb") as key_handle:
-                secret_proc = subprocess.run(
-                    ["gh", "secret", "set", "SIGNING_SECRET", "-R", f"{owner}/{repo}"],
-                    cwd=str(tmpdir),
-                    stdin=key_handle,
-                    text=False,
-                    capture_output=True,
-                    check=False,
-                )
+            password_proc = run(
+                ["gh", "secret", "set", "COSIGN_PASSWORD", "-R", f"{owner}/{repo}"],
+                cwd=tmpdir,
+                stdin=cosign_password,
+                check=False,
+            )
+            if password_proc.returncode != 0:
+                raise CommandError("Unable to upload COSIGN_PASSWORD to GitHub. Check your gh login and repo access, then try again.")
+            secret_proc = run(
+                ["gh", "secret", "set", "SIGNING_SECRET", "-R", f"{owner}/{repo}"],
+                cwd=tmpdir,
+                stdin=key_path.read_text(),
+                check=False,
+            )
             if secret_proc.returncode != 0:
                 raise CommandError("Unable to upload SIGNING_SECRET to GitHub. Check your gh login and repo access, then try again.")
             self.generated_cosign_pub = pub_path.read_text()
         # The public key is kept in memory for the current run so it can be
         # written into the repo files that we are about to generate.
-        self.gum.success("Configured SIGNING_SECRET for image signing.")
+        self.gum.success("Configured SIGNING_SECRET and COSIGN_PASSWORD for image signing.")
         return True
 
     def clone_repo(self, owner: str, repo: str, target: Path) -> None:
@@ -1890,6 +2036,29 @@ class App:
         self.gum.success(f"Added {len(packages)} package(s) from {source_label}")
         return True
 
+    def add_removed_packages_to_config(
+        self,
+        candidates: Iterable[str],
+        *,
+        source_label: str,
+    ) -> bool:
+        packages = unique(candidates)
+        if not packages:
+            return False
+        try:
+            self.validate_token_list(packages, PACKAGE_TOKEN_RE, "removed package")
+        except CommandError as exc:
+            self.gum.error(str(exc))
+            return False
+        if source_label == "manual entry":
+            packages = self.filter_available_manual_removed_packages(packages)
+            if not packages:
+                return False
+        self.config.removed_packages.extend(packages)
+        self.config.normalize()
+        self.gum.success(f"Added {len(packages)} package removal(s) from {source_label}")
+        return True
+
     def filter_available_manual_packages(self, packages: Sequence[str]) -> list[str]:
         # Manual package entry is intentionally forgiving:
         # - known good packages are accepted
@@ -1931,6 +2100,35 @@ class App:
             self.gum.hint(f"Keeping for now: {joined}")
             self.gum.hint("The GitHub build will do the final package check.")
             self.package_lookup_warning_shown = True
+        return accepted
+
+    def filter_available_manual_removed_packages(self, packages: Sequence[str]) -> list[str]:
+        # Removed packages are checked locally for obvious typos before we save
+        # them into the repo state file. The generated build script still skips
+        # removals that are not installed in the chosen base image.
+        self.last_manual_removed_package_check_had_missing = False
+        accepted: list[str] = []
+        missing: list[str] = []
+        unchecked: list[str] = []
+        for package in packages:
+            available = self.lookup_host_package(package)
+            if available is False:
+                missing.append(package)
+                continue
+            accepted.append(package)
+            if available is None:
+                unchecked.append(package)
+        if missing:
+            self.last_manual_removed_package_check_had_missing = True
+            joined = ", ".join(missing)
+            self.gum.error(f"These package names were not found: {joined}")
+            self.gum.hint("They were skipped because no RPM package with that name was found in your current host repos.")
+        if unchecked and not self.removed_package_lookup_warning_shown:
+            joined = ", ".join(unchecked)
+            self.gum.warn("Could not fully check some package removals on this system.")
+            self.gum.hint(f"Keeping for now: {joined}")
+            self.gum.hint("The generated build script will skip removals that are not installed in the base image.")
+            self.removed_package_lookup_warning_shown = True
         return accepted
 
     def lookup_host_package(self, package: str) -> bool | None:
@@ -2441,15 +2639,27 @@ class App:
         if selected == "Add package names to remove":
             self.menu_section(
                 "What To Enter",
-                "Enter one package name per line. Leave this empty if you want to go back.",
+                "Enter exact RPM package names separated by spaces or newlines.",
+                "Leave this empty if you want to go back.",
             )
             raw = self.gum.write(
                 placeholder="Enter package names, one per line...",
                 height=6,
                 width=self.gum.form_width(max_width=90),
             )
-            self.config.removed_packages.extend(line.strip() for line in raw.splitlines())
-            self.config.normalize()
+            packages = [token.strip(",") for token in raw.split() if token.strip(",")]
+            if not packages:
+                return
+            before_count = len(self.config.removed_packages)
+            added = self.add_removed_packages_to_config(packages, source_label="manual entry")
+            added_count = len(self.config.removed_packages) - before_count
+            if added and not self.last_manual_removed_package_check_had_missing:
+                self.gum.enter_to_continue(f"Added {added_count} package removal(s). Press Enter to return to the update menu...")
+                return
+            if added and self.last_manual_removed_package_check_had_missing:
+                self.gum.enter_to_continue("Finished checking package removals. Press Enter to return to the update menu...")
+                return
+            self.gum.enter_to_continue("No package removals were added. Press Enter to return to the update menu...")
         elif selected == "Stop removing listed packages":
             self.config.removed_packages = self.choose_to_remove(self.config.removed_packages, "Remove Base Package Removals")
 
@@ -2614,8 +2824,6 @@ class App:
         sign_if = f"{branch_if} && env.COSIGN_PRIVATE_KEY != ''"
         lines = existing_text.splitlines()
         output: list[str] = []
-        current_step = ""
-        has_job_cosign = any(re.fullmatch(r" {6}COSIGN_PRIVATE_KEY: \$\{\{ secrets\.SIGNING_SECRET \}\}", line) for line in lines)
         state_ignore_present = any(STATE_FILE in line for line in lines)
         paths_ignore_inserted = False
         for line in lines:
@@ -2649,31 +2857,16 @@ class App:
             if stripped.startswith("IMAGE_DESC:"):
                 output.append(f"  IMAGE_DESC: {yaml_scalar(self.config.image_desc)}")
                 continue
-            if stripped.startswith("- name: "):
-                current_step = stripped[len("- name: ") :]
-            if current_step in {"Install Cosign", "Sign container image"} and stripped.startswith("if: ") and branch_if in stripped:
-                indent = line[: len(line) - len(line.lstrip())]
-                output.append(f"{indent}if: {sign_if}")
-                continue
             output.append(line)
-        text = self.patch_workflow_branch_filters("\n".join(output), default_branch)
-        if not has_job_cosign:
-            if re.search(r"^    env:\n", text, flags=re.MULTILINE):
-                text = re.sub(
-                    r"^    env:\n",
-                    "    env:\n      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}\n",
-                    text,
-                    count=1,
-                    flags=re.MULTILINE,
-                )
-            elif re.search(r"^    steps:\n", text, flags=re.MULTILINE):
-                text = re.sub(
-                    r"^    steps:\n",
-                    "    env:\n      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}\n    steps:\n",
-                    text,
-                    count=1,
-                    flags=re.MULTILINE,
-                )
+        text = patch_workflow_signing_steps("\n".join(output), branch_if=branch_if, sign_if=sign_if)
+        text = self.patch_workflow_branch_filters(text, default_branch)
+        text = ensure_workflow_job_env_entries(
+            text,
+            [
+                ("COSIGN_PRIVATE_KEY", "${{ secrets.SIGNING_SECRET }}"),
+                ("COSIGN_PASSWORD", "${{ secrets.COSIGN_PASSWORD }}"),
+            ],
+        )
         return ensure_trailing_newline(text)
 
     def patch_container_disk_workflow(self, existing_text: str, *, default_branch: str = "main") -> str:
@@ -2835,12 +3028,27 @@ class App:
                 lines.append(f"dnf5 -y copr enable {shell_quote(repo)}")
             lines.append("")
         if self.config.removed_packages:
-            lines.append("# Remove packages from the base image")
-            lines.append("dnf5 remove -y \\")
-            for index, pkg in enumerate(self.config.removed_packages):
-                suffix = " \\" if index < len(self.config.removed_packages) - 1 else ""
-                lines.append(f"    {shell_quote(pkg)}{suffix}")
-            lines.append("")
+            lines.append("# Remove packages from the base image when they are installed")
+            lines.append("packages_to_remove=()")
+            lines.append("for pkg in \\")
+            for pkg in self.config.removed_packages:
+                lines.append(f"    {shell_quote(pkg)} \\")
+            lines[-1] = lines[-1].removesuffix(" \\")
+            lines.extend(
+                [
+                    "do",
+                    '    if rpm -q --quiet "$pkg"; then',
+                    '        packages_to_remove+=("$pkg")',
+                    "    else",
+                    '        echo "Skipping removal of $pkg because it is not installed in the base image."',
+                    "    fi",
+                    "done",
+                    'if ((${#packages_to_remove[@]})); then',
+                    '    dnf5 remove -y "${packages_to_remove[@]}"',
+                    "fi",
+                    "",
+                ]
+            )
         if self.config.packages:
             lines.append("# Install packages")
             lines.append("dnf5 install -y \\")
@@ -2854,6 +3062,10 @@ class App:
             lines.append("# Disable COPRs so they do not persist in the final image")
             for repo in self.config.copr_repos:
                 lines.append(f"dnf5 -y copr disable {shell_quote(repo)}")
+            lines.append("")
+        if self.config.copr_repos or self.config.removed_packages or self.config.packages:
+            lines.append("# Clean dnf metadata before the final image is committed")
+            lines.append("dnf5 clean all")
             lines.append("")
         if self.config.services:
             lines.append("# Enable systemd services")
@@ -2900,6 +3112,7 @@ class App:
             "      id-token: write",
             "    env:",
             "      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}",
+            "      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}",
             "    steps:",
             "      - name: Prepare environment",
             "        run: |",
@@ -2923,7 +3136,9 @@ class App:
             "          tags: |",
             "            type=raw,value=${{ env.DEFAULT_TAG }}",
             "            type=raw,value=${{ env.DEFAULT_TAG }}.{{date 'YYYYMMDD'}}",
+            "            type=raw,value={{date 'YYYYMMDD'}}",
             "            type=sha,enable=${{ github.event_name == 'pull_request' }}",
+            "            type=ref,event=pr",
             "          labels: |",
             "            org.opencontainers.image.created=${{ steps.date.outputs.date }}",
             "            org.opencontainers.image.description=${{ env.IMAGE_DESC }}",

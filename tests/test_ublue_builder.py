@@ -18,6 +18,7 @@ from atomic_image_builder import (
     CommandError,
     CONTAINERFILE_TEMPLATE_DIR,
     Config,
+    FEDORA_ATOMIC_FALLBACK_TAG,
     FEDORA_ATOMIC_DEFAULT_TAG,
     Gum,
     MANAGED_REPO_WARNING,
@@ -28,6 +29,7 @@ from atomic_image_builder import (
     TOOL_SLUG,
     VERSION,
     config_from_state_payload,
+    determine_fedora_atomic_default_tag,
     format_daily_rebuild_note,
     normalize_container_image_reference,
 )
@@ -182,7 +184,27 @@ class BuilderTests(unittest.TestCase):
         self.assertIn(ACTION_PINS["actions/checkout"][0], patched)
         self.assertIn(ACTION_PINS["ublue-os/remove-unwanted-software"][0], patched)
         self.assertIn(ACTION_PINS["sigstore/cosign-installer"][0], patched)
-        self.assertIn("env.COSIGN_PRIVATE_KEY != ''", patched)
+
+        def test_patch_container_workflow_matches_signing_steps_by_behavior(self) -> None:
+                app = self.make_app()
+                workflow = textwrap.dedent(
+                        """\
+                        name: Build container image
+                        jobs:
+                            build_push:
+                                steps:
+                                    - name: Setup signer toolchain
+                                        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+                                        uses: sigstore/cosign-installer@v3
+                                    - name: Publish signature with custom label
+                                        run: cosign sign --yes ghcr.io/example/test-image:latest
+                        """
+                )
+
+                patched = app.patch_container_workflow(workflow)
+
+                self.assertEqual(patched.count("env.COSIGN_PRIVATE_KEY != ''"), 2)
+                self.assertIn(ACTION_PINS["sigstore/cosign-installer"][0], patched)
 
     def test_patch_container_workflow_handles_inline_paths_ignore(self) -> None:
         app = self.make_app()
@@ -256,6 +278,18 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(image_map["silverblue"], f"quay.io/fedora-ostree-desktops/silverblue:{FEDORA_ATOMIC_DEFAULT_TAG}")
         self.assertEqual(image_map["kinoite"], f"quay.io/fedora-ostree-desktops/kinoite:{FEDORA_ATOMIC_DEFAULT_TAG}")
 
+    def test_determine_fedora_atomic_default_tag_prefers_newer_fedora_host_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            os_release = Path(tmp) / "os-release"
+            os_release.write_text('ID="fedora"\nVERSION_ID="44"\n')
+            self.assertEqual(determine_fedora_atomic_default_tag(os_release_path=os_release), "44")
+
+    def test_determine_fedora_atomic_default_tag_keeps_fallback_for_non_fedora_hosts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            os_release = Path(tmp) / "os-release"
+            os_release.write_text('ID="ubuntu"\nVERSION_ID="24.04"\n')
+            self.assertEqual(determine_fedora_atomic_default_tag(os_release_path=os_release), FEDORA_ATOMIC_FALLBACK_TAG)
+
     def test_validate_config_rejects_unsupported_base_image(self) -> None:
         app = self.make_app()
         app.config.base_image_uri = "ghcr.io/ublue-os/bazzite-deck:stable"
@@ -281,6 +315,33 @@ class BuilderTests(unittest.TestCase):
             with patch("atomic_image_builder.command_exists", side_effect=lambda name: False if name == "cosign" else True):
                 with self.assertRaisesRegex(CommandError, "brew install cosign"):
                     app.ensure_signing_ready("example", "test-image")
+
+    def test_ensure_signing_ready_uploads_password_and_private_key_secrets(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        seen_calls: list[tuple[list[str], Path | None, str | None, dict[str, str] | None]] = []
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            seen_calls.append((list(args), cwd, stdin, env))
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                assert cwd is not None
+                (cwd / "cosign.key").write_text("PRIVATE KEY")
+                (cwd / "cosign.pub").write_text("PUBLIC KEY")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with patch.object(app, "repo_secret_exists", return_value=False):
+            with patch("atomic_image_builder.command_exists", side_effect=lambda name: True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    self.assertTrue(app.ensure_signing_ready("example", "test-image"))
+
+        self.assertEqual(app.generated_cosign_pub, "PUBLIC KEY")
+        self.assertTrue(any(level == "success" and "COSIGN_PASSWORD" in message for level, message in app.gum.messages))
+        cosign_call = next(call for call in seen_calls if call[0][:2] == ["cosign", "generate-key-pair"])
+        self.assertTrue(cosign_call[3] is not None and cosign_call[3].get("COSIGN_PASSWORD"))
+        password_call = next(call for call in seen_calls if call[0][:4] == ["gh", "secret", "set", "COSIGN_PASSWORD"])
+        self.assertTrue(password_call[2])
+        key_call = next(call for call in seen_calls if call[0][:4] == ["gh", "secret", "set", "SIGNING_SECRET"])
+        self.assertEqual(key_call[2], "PRIVATE KEY")
 
     def test_preflight_requires_cosign(self) -> None:
         app = self.make_app()
@@ -409,6 +470,32 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(added)
         self.assertEqual(app.config.packages, ["nethock"])
         self.assertTrue(any(level == "warn" and "host repos" in message for level, message in app.gum.messages))
+
+    def test_add_removed_packages_to_config_accepts_valid_tokens(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        with patch.object(app, "lookup_host_package", side_effect=[True, True]):
+            added = app.add_removed_packages_to_config(["vim-enhanced", "nano"], source_label="manual entry")
+        self.assertTrue(added)
+        self.assertEqual(app.config.removed_packages, ["vim-enhanced", "nano"])
+        self.assertTrue(any(level == "success" for level, _message in app.gum.messages))
+
+    def test_add_removed_packages_to_config_rejects_unsafe_tokens(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        added = app.add_removed_packages_to_config(["vim-enhanced", "bad;rm"], source_label="manual entry")
+        self.assertFalse(added)
+        self.assertEqual(app.config.removed_packages, [])
+        self.assertTrue(any(level == "error" and "Invalid removed package value" in message for level, message in app.gum.messages))
+
+    def test_add_removed_packages_to_config_rejects_missing_manual_packages(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        with patch.object(app, "lookup_host_package", return_value=False):
+            added = app.add_removed_packages_to_config(["nethock"], source_label="manual entry")
+        self.assertFalse(added)
+        self.assertEqual(app.config.removed_packages, [])
+        self.assertTrue(any(level == "error" and "not found" in message for level, message in app.gum.messages))
 
     def test_search_host_packages_parses_results_and_limits_output(self) -> None:
         app = self.make_app()
@@ -1249,7 +1336,33 @@ class BuilderTests(unittest.TestCase):
         )
         patched = app.patch_container_workflow(workflow)
         self.assertIn("      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", patched)
+        self.assertIn("      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}", patched)
         self.assertIn("      FOO: bar", patched)
+
+    def test_generate_build_sh_cleans_dnf_metadata_after_package_changes(self) -> None:
+        app = self.make_app()
+        app.config.packages = ["tmux"]
+        build_sh = app.generate_build_sh()
+        self.assertIn("dnf5 clean all", build_sh)
+
+    def test_generate_build_sh_skips_missing_removed_packages_at_build_time(self) -> None:
+        app = self.make_app()
+        app.config.removed_packages = ["vim-enhanced", "nano"]
+        build_sh = app.generate_build_sh()
+        self.assertIn("packages_to_remove=()", build_sh)
+        self.assertIn("vim-enhanced \\", build_sh)
+        self.assertIn("nano", build_sh)
+        self.assertIn('if rpm -q --quiet "$pkg"; then', build_sh)
+        self.assertIn('echo "Skipping removal of $pkg because it is not installed in the base image."', build_sh)
+        self.assertIn('dnf5 remove -y "${packages_to_remove[@]}"', build_sh)
+
+
+    def test_generate_container_workflow_includes_template_tag_variants(self) -> None:
+        app = self.make_app()
+        workflow = app.generate_container_workflow()
+        self.assertIn("type=raw,value={{date 'YYYYMMDD'}}", workflow)
+        self.assertIn("type=ref,event=pr", workflow)
+        self.assertIn("COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}", workflow)
 
     def test_generate_readme_uses_custom_base_title_and_lists_packages(self) -> None:
         app = self.make_app()

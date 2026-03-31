@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import urllib.error
+import urllib.request
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+from atomic_image_builder import ACTION_PINS, ACTION_REF_PINS
+
+TEMPLATE_SOURCE_REL = Path("template_snapshots/containerfile/.template-source")
+TEMPLATE_WORKFLOW_REL = Path("template_snapshots/containerfile/.github/workflows/build.yml")
+REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+USES_RE = re.compile(r"^\s*(?:-\s*)?uses:\s+([^@\s]+)@([^\s#]+)")
+VERSION_TAG_RE = re.compile(r"^v(\d+)(?:\.(\d+))?(?:\.(\d+))?$")
+
+
+@dataclass(frozen=True)
+class TemplateSource:
+    repo: str
+    revision: str
+
+
+def parse_version_tag(tag: str) -> tuple[int, int, int] | None:
+    match = VERSION_TAG_RE.fullmatch(tag)
+    if not match:
+        return None
+    return tuple(int(part) if part is not None else 0 for part in match.groups())
+
+
+def version_tag_precision(tag: str) -> int | None:
+    match = VERSION_TAG_RE.fullmatch(tag)
+    if not match:
+        return None
+    groups = match.groups()
+    if groups[2] is not None:
+        return 3
+    if groups[1] is not None:
+        return 2
+    return 1
+
+
+def is_newer_version_available(current_tag: str, latest_tag: str) -> bool:
+    current_version = parse_version_tag(current_tag)
+    latest_version = parse_version_tag(latest_tag)
+    precision = version_tag_precision(current_tag)
+    if current_version is None or latest_version is None or precision is None:
+        return False
+    if precision == 1:
+        return latest_version[0] > current_version[0]
+    if precision == 2:
+        return latest_version[:2] > current_version[:2]
+    return latest_version > current_version
+
+
+def load_template_source(path: Path) -> TemplateSource:
+    data: dict[str, str] = {}
+    text = path.read_text()
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        data[key.strip()] = value.strip()
+    repo = data.get("repo", "")
+    revision = data.get("revision", "")
+    if not repo:
+        raise ValueError(f"{path} is missing repo=")
+    if not REVISION_RE.fullmatch(revision):
+        raise ValueError(f"{path} has an invalid revision=")
+    return TemplateSource(repo=repo, revision=revision)
+
+
+def iter_workflow_action_refs(text: str) -> list[tuple[str, str]]:
+    refs: list[tuple[str, str]] = []
+    for raw_line in text.splitlines():
+        match = USES_RE.match(raw_line)
+        if match:
+            refs.append(match.groups())
+    return refs
+
+
+def audit_local_snapshot(repo_root: Path) -> list[str]:
+    findings: list[str] = []
+    source_path = repo_root / TEMPLATE_SOURCE_REL
+    workflow_path = repo_root / TEMPLATE_WORKFLOW_REL
+    if not source_path.is_file():
+        findings.append(f"Missing template metadata file: {source_path}")
+    else:
+        try:
+            load_template_source(source_path)
+        except (OSError, ValueError) as exc:
+            findings.append(str(exc))
+    if not workflow_path.is_file():
+        findings.append(f"Missing template workflow file: {workflow_path}")
+        return findings
+
+    try:
+        workflow_text = workflow_path.read_text()
+    except OSError as exc:
+        findings.append(f"Unable to read {workflow_path}: {exc}")
+        return findings
+
+    for action, ref in iter_workflow_action_refs(workflow_text):
+        pin = ACTION_REF_PINS.get(f"{action}@{ref}") or ACTION_PINS.get(action)
+        if pin is None:
+            findings.append(f"Template workflow action {action}@{ref} is not covered by ACTION_PINS or ACTION_REF_PINS.")
+            continue
+        sha, _label = pin
+        if ref != sha:
+            findings.append(
+                f"Template workflow action {action}@{ref} does not match the pin table SHA {sha}."
+            )
+    return findings
+
+
+def query_remote_head(repo: str) -> str:
+    proc = subprocess.run(["git", "ls-remote", repo, "HEAD"], capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        detail = "\n".join(part for part in [proc.stdout, proc.stderr] if part).strip()
+        raise RuntimeError(detail or "git ls-remote failed")
+    line = next((raw.strip() for raw in proc.stdout.splitlines() if raw.strip()), "")
+    sha = line.split()[0] if line else ""
+    if not REVISION_RE.fullmatch(sha):
+        raise RuntimeError(f"Unexpected ls-remote output: {line or 'empty output'}")
+    return sha
+
+
+def audit_upstream_drift(source: TemplateSource) -> list[str]:
+    try:
+        head = query_remote_head(source.repo)
+    except RuntimeError as exc:
+        return [f"Unable to query upstream template HEAD for {source.repo}: {exc}"]
+    if head == source.revision:
+        return []
+    return [
+        (
+            "Bundled template snapshot differs from upstream HEAD: "
+            f"pinned {source.revision}, upstream {head}. Refresh the snapshot and review pin updates."
+        )
+    ]
+
+
+def github_api_json(url: str) -> object:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "atomic-image-builder-maintenance-audit",
+    }
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace").strip()
+        raise RuntimeError(detail or f"HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(str(exc.reason)) from exc
+
+
+def query_latest_github_semver_tag(action: str) -> str | None:
+    payload = github_api_json(f"https://api.github.com/repos/{action}/tags?per_page=100")
+    if not isinstance(payload, list):
+        raise RuntimeError(f"Unexpected tag payload for {action}")
+    latest_tag: str | None = None
+    latest_version: tuple[int, int, int] | None = None
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not isinstance(name, str):
+            continue
+        version = parse_version_tag(name)
+        if version is None:
+            continue
+        if latest_version is None or version > latest_version:
+            latest_tag = name
+            latest_version = version
+    return latest_tag
+
+
+def audit_action_update_availability(
+    actions: Mapping[str, tuple[str, str]] = ACTION_PINS,
+) -> list[str]:
+    findings: list[str] = []
+    for action, (_sha, label) in actions.items():
+        if parse_version_tag(label) is None:
+            continue
+        try:
+            latest_tag = query_latest_github_semver_tag(action)
+        except RuntimeError as exc:
+            findings.append(f"Unable to query upstream tags for {action}: {exc}")
+            continue
+        if latest_tag is None:
+            continue
+        if not is_newer_version_available(label, latest_tag):
+            continue
+        findings.append(
+            f"Action pin {action} is behind the latest upstream tag: current {label}, latest {latest_tag}. Review and refresh ACTION_PINS if appropriate."
+        )
+    return findings
+
+
+def run_audit(repo_root: Path, *, skip_upstream: bool, check_action_updates: bool = False) -> list[str]:
+    findings = audit_local_snapshot(repo_root)
+    if not skip_upstream:
+        source_path = repo_root / TEMPLATE_SOURCE_REL
+        try:
+            source = load_template_source(source_path)
+        except (OSError, ValueError):
+            source = None
+        if source is not None:
+            findings.extend(audit_upstream_drift(source))
+    if check_action_updates:
+        findings.extend(audit_action_update_availability())
+    return findings
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Audit bundled template snapshot drift and workflow action pin coverage.")
+    parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=Path(__file__).resolve().parent,
+        help="Path to the repository root.",
+    )
+    parser.add_argument(
+        "--skip-upstream",
+        action="store_true",
+        help="Run only local consistency checks without querying the upstream template HEAD.",
+    )
+    parser.add_argument(
+        "--check-action-updates",
+        action="store_true",
+        help="Also query upstream action tags and report when ACTION_PINS trail newer semver tags.",
+    )
+    args = parser.parse_args(argv)
+
+    findings = run_audit(
+        args.repo_root.resolve(),
+        skip_upstream=args.skip_upstream,
+        check_action_updates=args.check_action_updates,
+    )
+    if not findings:
+        print("Maintenance audit passed.")
+        return 0
+
+    print("Maintenance audit failed:")
+    for finding in findings:
+        print(f"- {finding}")
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
