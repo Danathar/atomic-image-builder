@@ -432,6 +432,33 @@ class BuilderTests(unittest.TestCase):
         key_call = next(call for call in seen_calls if call[0][:4] == ["gh", "secret", "set", "SIGNING_SECRET"])
         self.assertEqual(key_call[2], "PRIVATE KEY")
 
+    def test_ensure_signing_ready_bluebuild_uses_empty_password_and_skips_cosign_password_secret(self) -> None:
+        app = self.make_bluebuild_app()
+        app.gum = GumStub()
+        seen_calls: list[tuple[list[str], Path | None, str | None, dict[str, str] | None]] = []
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            seen_calls.append((list(args), cwd, stdin, env))
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                assert cwd is not None
+                (cwd / "cosign.key").write_text("PRIVATE KEY")
+                (cwd / "cosign.pub").write_text("PUBLIC KEY")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with patch.object(app, "repo_secret_exists", return_value=False):
+            with patch("atomic_image_builder.command_exists", side_effect=lambda name: True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    self.assertTrue(app.ensure_signing_ready("example", "test-image"))
+
+        self.assertEqual(app.generated_cosign_pub, "PUBLIC KEY")
+        self.assertTrue(any(level == "success" and "BlueBuild" in message for level, message in app.gum.messages))
+        cosign_call = next(call for call in seen_calls if call[0][:2] == ["cosign", "generate-key-pair"])
+        self.assertTrue(cosign_call[3] is not None)
+        self.assertEqual(cosign_call[3].get("COSIGN_PASSWORD"), "")
+        self.assertFalse(any(call[0][:4] == ["gh", "secret", "set", "COSIGN_PASSWORD"] for call in seen_calls))
+        key_call = next(call for call in seen_calls if call[0][:4] == ["gh", "secret", "set", "SIGNING_SECRET"])
+        self.assertEqual(key_call[2], "PRIVATE KEY")
+
     def test_preflight_requires_cosign(self) -> None:
         app = self.make_app()
         stub = GumStub()

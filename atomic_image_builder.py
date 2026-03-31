@@ -2061,14 +2061,15 @@ class App:
 
     def ensure_signing_ready(self, owner: str, repo: str) -> bool:
         # Signed images are required for this tool, so "ready" means:
-        # - the repo already has SIGNING_SECRET, or
-        # - we can create a cosign keypair and upload both required secrets now
+        # - the repo already has a compatible SIGNING_SECRET, or
+        # - we can create a cosign keypair and upload the needed secrets now
         self.generated_cosign_pub = None
+        bluebuild_signing = self.config.method == "bluebuild"
         if self.repo_secret_exists(owner, repo, "SIGNING_SECRET"):
             return True
         if not command_exists("cosign"):
             raise CommandError("cosign is required for signed images. Install it with: brew install cosign")
-        cosign_password = secrets.token_urlsafe(32)
+        cosign_password = "" if bluebuild_signing else secrets.token_urlsafe(32)
         with tempfile.TemporaryDirectory(prefix="ublue-signing.") as tmp:
             tmpdir = Path(tmp)
             env = os.environ.copy()
@@ -2078,14 +2079,15 @@ class App:
             pub_path = tmpdir / "cosign.pub"
             if proc.returncode != 0 or not key_path.exists() or not pub_path.exists():
                 raise CommandError("Unable to generate a cosign keypair. Fix cosign first, then try again.")
-            password_proc = run(
-                ["gh", "secret", "set", "COSIGN_PASSWORD", "-R", f"{owner}/{repo}"],
-                cwd=tmpdir,
-                stdin=cosign_password,
-                check=False,
-            )
-            if password_proc.returncode != 0:
-                raise CommandError("Unable to upload COSIGN_PASSWORD to GitHub. Check your gh login and repo access, then try again.")
+            if not bluebuild_signing:
+                password_proc = run(
+                    ["gh", "secret", "set", "COSIGN_PASSWORD", "-R", f"{owner}/{repo}"],
+                    cwd=tmpdir,
+                    stdin=cosign_password,
+                    check=False,
+                )
+                if password_proc.returncode != 0:
+                    raise CommandError("Unable to upload COSIGN_PASSWORD to GitHub. Check your gh login and repo access, then try again.")
             secret_proc = run(
                 ["gh", "secret", "set", "SIGNING_SECRET", "-R", f"{owner}/{repo}"],
                 cwd=tmpdir,
@@ -2097,7 +2099,10 @@ class App:
             self.generated_cosign_pub = pub_path.read_text()
         # The public key is kept in memory for the current run so it can be
         # written into the repo files that we are about to generate.
-        self.gum.success("Configured SIGNING_SECRET and COSIGN_PASSWORD for image signing.")
+        if bluebuild_signing:
+            self.gum.success("Configured SIGNING_SECRET for BlueBuild image signing.")
+        else:
+            self.gum.success("Configured SIGNING_SECRET and COSIGN_PASSWORD for image signing.")
         return True
 
     def clone_repo(self, owner: str, repo: str, target: Path) -> None:
