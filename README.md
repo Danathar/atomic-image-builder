@@ -132,8 +132,6 @@ What to expect:
 - Scheduled rebuilds also run daily on GitHub
 - The scan option reads your current rpm-ostree / bootc state and can carry layered packages into the new repo
 
-The legacy `./ublue_builder.py` entrypoint still exists as a compatibility shim, but `./atomic_image_builder.py` is now the primary command.
-
 If you use the scan flow to carry layered packages from your current system into the new image, run these in the same session before rebooting:
 
 ```bash
