@@ -336,6 +336,27 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("  pull_request:\n    branches:\n      - master", patched)
         self.assertIn("  push:\n    branches:\n      - master", patched)
 
+    def test_patch_workflow_branch_filters_adds_missing_branches_blocks(self) -> None:
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Workflow
+            on:
+              push:
+                paths-ignore:
+                  - '**.md'
+              pull_request:
+              workflow_dispatch:
+            jobs:
+              build:
+                steps:
+                  - run: true
+            """
+        )
+        patched = app.patch_workflow_branch_filters(workflow, "master")
+        self.assertIn("  push:\n    branches:\n      - master\n    paths-ignore:", patched)
+        self.assertIn("  pull_request:\n    branches:\n      - master\n  workflow_dispatch:", patched)
+
     def test_validate_config_rejects_unsafe_package_token(self) -> None:
         app = self.make_app()
         app.config.packages = ["tmux", "bad;rm"]
@@ -1932,6 +1953,38 @@ class BuilderTests(unittest.TestCase):
         patched = app.patch_bluebuild_workflow(template)
         self.assertIn(STATE_FILE, patched)
 
+    def test_patch_bluebuild_workflow_adds_branch_filters_and_validation_only_inputs(self) -> None:
+        app = self.make_bluebuild_app()
+        template = textwrap.dedent(
+            """\
+            name: bluebuild
+            on:
+              push:
+                paths-ignore:
+                  - "**.md"
+              pull_request:
+              workflow_dispatch:
+            jobs:
+              bluebuild:
+                steps:
+                  - name: Build Custom Image
+                    uses: blue-build/github-action@v1.11
+                    with:
+                      recipe: ${{ matrix.recipe }}
+                      cosign_private_key: ${{ secrets.SIGNING_SECRET }}
+                      registry_token: ${{ github.token }}
+                      pr_event_number: ${{ github.event.number }}
+            """
+        )
+        patched = app.patch_bluebuild_workflow(template, default_branch="master")
+        self.assertIn("  push:\n    branches:\n      - master\n    paths-ignore:", patched)
+        self.assertIn("  pull_request:\n    branches:\n      - master\n  workflow_dispatch:", patched)
+        self.assertIn(
+            "          push: ${{ github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && 'true' || 'false' }}",
+            patched,
+        )
+        self.assertIn("          build_opts: ${{ github.event_name == 'pull_request' && '--no-sign' || '' }}", patched)
+
     def test_clone_bluebuild_template_copies_snapshot(self) -> None:
         app = self.make_bluebuild_app()
         with tempfile.TemporaryDirectory() as tmp:
@@ -2001,11 +2054,14 @@ class BuilderTests(unittest.TestCase):
             repo_dir = Path(tmp)
             # Seed template first so workflow file exists
             app.clone_bluebuild_template(repo_dir)
-            app.write_project_files(repo_dir, include_workflow=True)
+            app.write_project_files(repo_dir, include_workflow=True, default_branch="master")
             workflow = (repo_dir / ".github/workflows/build.yml").read_text()
             # Should be pinned
             self.assertIn(ACTION_PINS["blue-build/github-action"][0], workflow)
             self.assertIn(DEFAULT_GITHUB_BUILD_CRON, workflow)
+            self.assertIn("  push:\n    branches:\n      - master", workflow)
+            self.assertIn("  pull_request:\n    branches:\n      - master", workflow)
+            self.assertIn("          build_opts: ${{ github.event_name == 'pull_request' && '--no-sign' || '' }}", workflow)
 
     def test_write_bluebuild_project_files_updates_gitignore(self) -> None:
         app = self.make_bluebuild_app()

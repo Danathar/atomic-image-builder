@@ -3090,35 +3090,154 @@ class App:
     def patch_workflow_branch_filters(self, workflow_text: str, default_branch: str) -> str:
         lines = workflow_text.splitlines()
         output: list[str] = []
-        current_event: str | None = None
         index = 0
         while index < len(lines):
             line = lines[index]
             stripped = line.strip()
             indent = len(line) - len(line.lstrip())
             if indent == 2 and stripped in {"pull_request:", "push:"}:
-                current_event = stripped[:-1]
                 output.append(line)
                 index += 1
-                continue
-            if current_event in {"pull_request", "push"} and indent == 4 and stripped == "branches:":
-                output.append(line)
-                output.append(f"{line[: len(line) - len(line.lstrip())]}  - {default_branch}")
-                index += 1
+                block_start = index
                 while index < len(lines):
-                    branch_line = lines[index]
-                    branch_stripped = branch_line.strip()
-                    branch_indent = len(branch_line) - len(branch_line.lstrip())
-                    if branch_indent == 6 and branch_stripped.startswith("- "):
-                        index += 1
+                    block_line = lines[index]
+                    block_stripped = block_line.strip()
+                    block_indent = len(block_line) - len(block_line.lstrip())
+                    if block_indent <= 2 and block_stripped.endswith(":"):
+                        break
+                    index += 1
+                block = lines[block_start:index]
+                branch_block = [f"    branches:", f"      - {default_branch}"]
+                patched_block: list[str] = []
+                branches_found = False
+                block_index = 0
+                while block_index < len(block):
+                    block_line = block[block_index]
+                    block_stripped = block_line.strip()
+                    block_indent = len(block_line) - len(block_line.lstrip())
+                    if block_indent == 4 and block_stripped == "branches:":
+                        prefix = block_line[: len(block_line) - len(block_line.lstrip())]
+                        patched_block.append(block_line)
+                        patched_block.append(f"{prefix}  - {default_branch}")
+                        branches_found = True
+                        block_index += 1
+                        while block_index < len(block):
+                            branch_line = block[block_index]
+                            branch_stripped = branch_line.strip()
+                            branch_indent = len(branch_line) - len(branch_line.lstrip())
+                            if branch_indent == 6 and branch_stripped.startswith("- "):
+                                block_index += 1
+                                continue
+                            break
                         continue
-                    break
+                    patched_block.append(block_line)
+                    block_index += 1
+                if branches_found:
+                    output.extend(patched_block)
+                else:
+                    output.extend(branch_block + block)
                 continue
-            if indent <= 2 and stripped.endswith(":"):
-                current_event = None
             output.append(line)
             index += 1
         return ensure_trailing_newline("\n".join(output))
+
+    def patch_bluebuild_action_inputs(self, workflow_text: str) -> str:
+        lines = workflow_text.splitlines()
+        output: list[str] = []
+        current_step: list[str] = []
+        in_steps = False
+        steps_indent: int | None = None
+
+        def patch_step(step_lines: list[str]) -> list[str]:
+            if not step_lines:
+                return []
+            if not any(re.search(r"uses:\s+blue-build/github-action@", line) for line in step_lines):
+                return step_lines
+            with_index: int | None = None
+            entry_prefix = ""
+            for idx, step_line in enumerate(step_lines):
+                if step_line.strip() == "with:":
+                    with_index = idx
+                    entry_prefix = step_line[: len(step_line) - len(step_line.lstrip())] + "  "
+                    break
+            if with_index is None:
+                return step_lines
+            wanted_lines = [
+                f"{entry_prefix}push: ${{{{ github.event_name != 'pull_request' && github.ref == format('refs/heads/{{0}}', github.event.repository.default_branch) && 'true' || 'false' }}}}",
+                f"{entry_prefix}build_opts: ${{{{ github.event_name == 'pull_request' && '--no-sign' || '' }}}}",
+            ]
+            missing = [line for line in wanted_lines if line not in step_lines]
+            if not missing:
+                return step_lines
+            return step_lines[: with_index + 1] + missing + step_lines[with_index + 1 :]
+
+        def flush_step() -> None:
+            nonlocal current_step
+            if not current_step:
+                return
+            output.extend(patch_step(current_step))
+            current_step = []
+
+        for line in lines:
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+
+            if in_steps and steps_indent is not None and indent <= steps_indent and stripped and not stripped.startswith("#"):
+                flush_step()
+                in_steps = False
+                steps_indent = None
+
+            if stripped == "steps:":
+                flush_step()
+                in_steps = True
+                steps_indent = indent
+                output.append(line)
+                continue
+
+            if in_steps and steps_indent is not None and indent == steps_indent + 2 and stripped.startswith("- "):
+                flush_step()
+                current_step = [line]
+                continue
+
+            if current_step:
+                current_step.append(line)
+            else:
+                output.append(line)
+
+        flush_step()
+        return ensure_trailing_newline("\n".join(output))
+
+    def patch_bluebuild_workflow(self, existing_text: str, *, default_branch: str = "main") -> str:
+        # The BlueBuild workflow is simpler than the Containerfile one: a single
+        # monolithic action handles the build. We pin the action, update the
+        # schedule, add state-file ignore, and fix branch filters.
+        lines = existing_text.splitlines()
+        output: list[str] = []
+        state_ignore_present = any(STATE_FILE in line for line in lines)
+        paths_ignore_inserted = False
+        for line in lines:
+            line = pin_action_uses_line(line)
+            stripped = line.strip()
+            if stripped.startswith("- cron:"):
+                indent = line[: len(line) - len(line.lstrip())]
+                output.append(f"{indent}- cron: '{DEFAULT_GITHUB_BUILD_CRON}'")
+                continue
+            if stripped.startswith("paths-ignore:") and not state_ignore_present and not paths_ignore_inserted:
+                output.append(line)
+                paths_ignore_indent = line[: len(line) - len(line.lstrip())] + "  "
+                output.append(f"{paths_ignore_indent}- '{STATE_FILE}'")
+                paths_ignore_inserted = True
+                continue
+            if stripped in {'- "**.md"', "- '**.md'"} and not state_ignore_present and not paths_ignore_inserted:
+                output.append(line)
+                output.append(f"{line[: len(line) - len(line.lstrip())]}- '{STATE_FILE}'")
+                paths_ignore_inserted = True
+                continue
+            output.append(line)
+        text = "\n".join(output)
+        text = self.patch_workflow_branch_filters(text, default_branch)
+        text = self.patch_bluebuild_action_inputs(text)
+        return ensure_trailing_newline(text)
 
     def installer_profile(self) -> str:
         matched = self.match_base_image(self.config.base_image_uri)
@@ -3226,37 +3345,6 @@ class App:
 
         lines.extend(["", "  - type: signing"])
         return "\n".join(lines) + "\n"
-
-    def patch_bluebuild_workflow(self, existing_text: str, *, default_branch: str = "main") -> str:
-        # The BlueBuild workflow is simpler than the Containerfile one: a single
-        # monolithic action handles the build. We pin the action, update the
-        # schedule, add state-file ignore, and fix branch filters.
-        lines = existing_text.splitlines()
-        output: list[str] = []
-        state_ignore_present = any(STATE_FILE in line for line in lines)
-        paths_ignore_inserted = False
-        for line in lines:
-            line = pin_action_uses_line(line)
-            stripped = line.strip()
-            if stripped.startswith("- cron:"):
-                indent = line[: len(line) - len(line.lstrip())]
-                output.append(f"{indent}- cron: '{DEFAULT_GITHUB_BUILD_CRON}'")
-                continue
-            if stripped.startswith("paths-ignore:") and not state_ignore_present and not paths_ignore_inserted:
-                output.append(line)
-                paths_ignore_indent = line[: len(line) - len(line.lstrip())] + "  "
-                output.append(f"{paths_ignore_indent}- '{STATE_FILE}'")
-                paths_ignore_inserted = True
-                continue
-            if stripped in {'- "**.md"', "- '**.md'"} and not state_ignore_present and not paths_ignore_inserted:
-                output.append(line)
-                output.append(f"{line[: len(line) - len(line.lstrip())]}- '{STATE_FILE}'")
-                paths_ignore_inserted = True
-                continue
-            output.append(line)
-        text = "\n".join(output)
-        text = self.patch_workflow_branch_filters(text, default_branch)
-        return ensure_trailing_newline(text)
 
     def write_bluebuild_project_files(self, base_dir: Path, *, include_workflow: bool, default_branch: str = "main") -> None:
         # This is the "materialize the repo" step for BlueBuild mode. The recipe
