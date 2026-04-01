@@ -1613,8 +1613,8 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app2.config.image_desc, "Test roundtrip image")
         self.assertEqual(app2.config.base_image_uri, app.config.base_image_uri)
 
-    def test_clone_container_template_excludes_renovate_and_dependabot(self) -> None:
-        """Template copy should not include renovate.json5 or dependabot.yml."""
+    def test_clone_container_template_excludes_renovate_but_keeps_dependabot(self) -> None:
+        """Template copy should exclude renovate.json5 but keep upstream dependabot.yml."""
         app = self.make_app()
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "repo"
@@ -1622,8 +1622,8 @@ class BuilderTests(unittest.TestCase):
             github_dir = target / ".github"
             self.assertFalse((github_dir / "renovate.json5").exists(),
                              "renovate.json5 should be excluded from template copies")
-            self.assertFalse((github_dir / "dependabot.yml").exists(),
-                             "dependabot.yml should be excluded from template copies")
+            self.assertTrue((github_dir / "dependabot.yml").exists(),
+                            "dependabot.yml should be preserved from the upstream template snapshot")
 
     # ------------------------------------------------------------------
     # Brew OCI integration
@@ -1938,6 +1938,7 @@ class BuilderTests(unittest.TestCase):
             target = Path(tmp) / "repo"
             app.clone_bluebuild_template(target)
             self.assertTrue((target / ".github/workflows/build.yml").exists())
+            self.assertTrue((target / ".github/dependabot.yml").exists())
             self.assertTrue((target / "recipes/recipe.yml").exists())
             self.assertTrue((target / "files/system/etc/.gitkeep").exists())
 

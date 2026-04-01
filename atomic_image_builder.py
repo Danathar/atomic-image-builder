@@ -2133,7 +2133,7 @@ class App:
             target.rmdir()
         try:
             shutil.copytree(source_dir, target, ignore=shutil.ignore_patterns(
-                ".template-source", "dependabot.yml", "renovate.json5",
+                ".template-source", "renovate.json5",
             ))
         except (OSError, shutil.Error) as exc:
             raise CommandError(f"Unable to copy bundled template snapshot for {repo}: {exc}") from exc
