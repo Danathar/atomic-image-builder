@@ -23,7 +23,7 @@ This tool creates and maintains a GitHub repository that builds a custom bootc i
 
 Supported base images currently include:
 
-- Universal Blue: Bazzite, Bazzite DX, Aurora, Aurora DX, Bluefin, and Bluefin DX
+- Universal Blue: Bazzite, Bazzite GNOME, Bazzite DX, Bazzite DX GNOME, Aurora, Aurora DX, Bluefin, and Bluefin DX
 - Fedora Atomic desktops: Silverblue, Kinoite, Sway Atomic, Budgie Atomic, and COSMIC Atomic
 
 It supports two build methods:
@@ -83,12 +83,12 @@ You need:
 - `git`
 - `gh`
 - `cosign`
-- `dnf5` for manual package-name checks
-- `rpm-ostree`
+- `dnf5` (used for package-name validation)
+- `rpm-ostree` (used for system scanning)
 
-The app checks the required helper CLI tools at startup and exits if they are missing.
+The app checks all required tools at startup and exits if any are missing.
 
-On supported Universal Blue and Fedora Atomic desktop images, core host tools like `dnf5` and `rpm-ostree` are expected to already be present. If helper CLI tools such as `gum`, `git`, `gh`, or `cosign` are missing, install them with Homebrew.
+On supported Universal Blue and Fedora Atomic desktop images, `dnf5` and `rpm-ostree` are expected to already be present. If helper CLI tools such as `gum`, `git`, `gh`, or `cosign` are missing, install them with Homebrew.
 
 You also need a GitHub account and should log in first:
 

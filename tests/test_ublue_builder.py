@@ -16,6 +16,7 @@ from atomic_image_builder import (
     BASE_IMAGES,
     BLUEBUILD_RECIPE_SCHEMA,
     BLUEBUILD_TEMPLATE_DIR,
+    COPR_REPO_RE,
     COMMON_SERVICES,
     CommandError,
     CONTAINERFILE_TEMPLATE_DIR,
@@ -27,6 +28,7 @@ from atomic_image_builder import (
     MANAGED_REPO_WARNING,
     METHOD_DISPLAY,
     PACKAGE_SEARCH_LIMIT,
+    SERVICE_TOKEN_RE,
     ScreenBack,
     STATE_FILE,
     TOOL_NAME,
@@ -37,6 +39,7 @@ from atomic_image_builder import (
     determine_fedora_atomic_default_tag,
     format_daily_rebuild_note,
     normalize_container_image_reference,
+    pin_action_uses_line,
 )
 
 
@@ -2166,6 +2169,536 @@ class BuilderTests(unittest.TestCase):
             workflow = workflow_path.read_text()
             self.assertIn(ACTION_PINS["blue-build/github-action"][0], workflow)
             self.assertIn(DEFAULT_GITHUB_BUILD_CRON, workflow)
+
+
+    # ── manage_removed_packages update flow ──────────────────────────────
+
+    def test_manage_removed_packages_add_flow(self) -> None:
+        """Adding packages through manage_removed_packages reaches
+        add_removed_packages_to_config and updates the config."""
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Add package names to remove"]
+        stub.write = lambda **_kwargs: "vim-enhanced"
+        app.gum = stub
+        with patch.object(app, "lookup_host_package", return_value=True):
+            app.manage_removed_packages()
+        self.assertIn("vim-enhanced", app.config.removed_packages)
+
+    def test_manage_removed_packages_remove_flow(self) -> None:
+        """Choosing 'Stop removing listed packages' lets the user deselect
+        previously listed removals."""
+        app = self.make_app()
+        app.config.removed_packages = ["vim-enhanced", "nano"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Stop removing listed packages"]
+        app.gum = stub
+        # choose_to_remove will be called; stub it to remove "nano"
+        with patch.object(app, "choose_to_remove", return_value=["vim-enhanced"]) as mock:
+            app.manage_removed_packages()
+        mock.assert_called_once_with(["vim-enhanced", "nano"], "Remove Base Package Removals")
+        self.assertEqual(app.config.removed_packages, ["vim-enhanced"])
+
+    def test_manage_removed_packages_back_is_noop(self) -> None:
+        """Choosing Back or pressing Esc returns without changes."""
+        app = self.make_app()
+        app.config.removed_packages = ["vim-enhanced"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: (_ for _ in ()).throw(ScreenBack())
+        app.gum = stub
+        app.manage_removed_packages()
+        self.assertEqual(app.config.removed_packages, ["vim-enhanced"])
+
+    # ── manage_services update flow ────────────────────────────────────
+
+    def test_manage_services_add_delegates_to_add_services(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Add services"]
+        app.gum = stub
+        with patch.object(app, "add_services") as mock:
+            app.manage_services()
+        mock.assert_called_once()
+
+    def test_manage_services_remove_calls_choose_to_remove(self) -> None:
+        app = self.make_app()
+        app.config.services = ["sshd.service", "tailscaled.service"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Remove services"]
+        app.gum = stub
+        with patch.object(app, "choose_to_remove", return_value=["sshd.service"]) as mock:
+            app.manage_services()
+        mock.assert_called_once_with(["sshd.service", "tailscaled.service"], "Remove Services")
+        self.assertEqual(app.config.services, ["sshd.service"])
+
+    def test_manage_services_back_is_noop(self) -> None:
+        app = self.make_app()
+        app.config.services = ["sshd.service"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: (_ for _ in ()).throw(ScreenBack())
+        app.gum = stub
+        app.manage_services()
+        self.assertEqual(app.config.services, ["sshd.service"])
+
+    # ── manage_copr_repos update flow ──────────────────────────────────
+
+    def test_manage_copr_repos_add_delegates_to_add_copr(self) -> None:
+        app = self.make_app()
+        call_count = [0]
+        def fake_choose(_options, **_kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return ["Add a COPR repository"]
+            return ["Back"]
+        stub = GumStub()
+        stub.choose = fake_choose
+        app.gum = stub
+        with patch.object(app, "add_copr") as mock:
+            app.manage_copr_repos()
+        mock.assert_called_once()
+
+    def test_manage_copr_repos_remove_calls_choose_to_remove(self) -> None:
+        app = self.make_app()
+        app.config.copr_repos = ["foo/bar"]
+        call_count = [0]
+        def fake_choose(_options, **_kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return ["Remove a COPR repository"]
+            return ["Back"]
+        stub = GumStub()
+        stub.choose = fake_choose
+        app.gum = stub
+        with patch.object(app, "choose_to_remove", return_value=[]) as mock:
+            app.manage_copr_repos()
+        mock.assert_called_once_with(["foo/bar"], "Remove COPR Repos")
+
+    def test_manage_copr_repos_back_exits_loop(self) -> None:
+        app = self.make_app()
+        app.config.copr_repos = ["foo/bar"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Back"]
+        app.gum = stub
+        app.manage_copr_repos()
+        self.assertEqual(app.config.copr_repos, ["foo/bar"])
+
+    # ── edit_description update flow ───────────────────────────────────
+
+    def test_edit_description_updates_config(self) -> None:
+        app = self.make_app()
+        app.config.image_desc = "Old description"
+        stub = GumStub()
+        stub.input = lambda **_kwargs: "New description"
+        app.gum = stub
+        app.edit_description()
+        self.assertEqual(app.config.image_desc, "New description")
+
+    def test_edit_description_empty_keeps_current(self) -> None:
+        app = self.make_app()
+        app.config.image_desc = "Keep this"
+        stub = GumStub()
+        stub.input = lambda **_kwargs: ""
+        app.gum = stub
+        app.edit_description()
+        self.assertEqual(app.config.image_desc, "Keep this")
+
+    # ── update_menu full flow ──────────────────────────────────────────
+
+    def test_update_menu_save_returns_true(self) -> None:
+        """Choosing 'Save and push changes' returns True."""
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Save and push changes"]
+        app.gum = stub
+        self.assertTrue(app.update_menu())
+
+    def test_update_menu_cancel_returns_false(self) -> None:
+        """Choosing 'Cancel and go back' returns False."""
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Cancel and go back"]
+        app.gum = stub
+        self.assertFalse(app.update_menu())
+
+    def test_update_menu_dispatches_to_edit_description(self) -> None:
+        """Selecting 'Description' from the menu dispatches to edit_description."""
+        app = self.make_app()
+        call_count = [0]
+        def fake_choose(options, **_kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # Find the option containing "Description"
+                for opt in options:
+                    if "Description" in opt:
+                        return [opt]
+            return ["Cancel and go back"]
+        stub = GumStub()
+        stub.choose = fake_choose
+        app.gum = stub
+        with patch.object(app, "edit_description") as mock:
+            app.update_menu()
+        mock.assert_called_once()
+
+    def test_update_menu_dispatches_to_manage_services(self) -> None:
+        """Selecting 'Services' from the menu dispatches to manage_services."""
+        app = self.make_app()
+        call_count = [0]
+        def fake_choose(options, **_kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                for opt in options:
+                    if "Services" in opt:
+                        return [opt]
+            return ["Cancel and go back"]
+        stub = GumStub()
+        stub.choose = fake_choose
+        app.gum = stub
+        with patch.object(app, "manage_services") as mock:
+            app.update_menu()
+        mock.assert_called_once()
+
+    def test_update_menu_dispatches_to_manage_removed_packages(self) -> None:
+        """Selecting 'Removed base packages' dispatches to manage_removed_packages."""
+        app = self.make_app()
+        call_count = [0]
+        def fake_choose(options, **_kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                for opt in options:
+                    if "Removed base packages" in opt:
+                        return [opt]
+            return ["Cancel and go back"]
+        stub = GumStub()
+        stub.choose = fake_choose
+        app.gum = stub
+        with patch.object(app, "manage_removed_packages") as mock:
+            app.update_menu()
+        mock.assert_called_once()
+
+    def test_update_menu_dispatches_to_manage_copr_repos(self) -> None:
+        """Selecting 'COPR repositories' dispatches to manage_copr_repos."""
+        app = self.make_app()
+        call_count = [0]
+        def fake_choose(options, **_kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                for opt in options:
+                    if "COPR repositories" in opt:
+                        return [opt]
+            return ["Cancel and go back"]
+        stub = GumStub()
+        stub.choose = fake_choose
+        app.gum = stub
+        with patch.object(app, "manage_copr_repos") as mock:
+            app.update_menu()
+        mock.assert_called_once()
+
+    def test_update_menu_esc_returns_false(self) -> None:
+        """ScreenBack from choose returns False (cancel)."""
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: (_ for _ in ()).throw(ScreenBack())
+        app.gum = stub
+        self.assertFalse(app.update_menu())
+
+    # ── github_setup_guide interactive login flow ──────────────────────
+
+    def test_github_setup_guide_quit_option_exits(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Quit"]
+        app.gum = stub
+        with self.assertRaises(SystemExit):
+            app.github_setup_guide()
+
+    def test_github_setup_guide_login_success(self) -> None:
+        """Choosing 'I already have a GitHub account' proceeds to gh auth login."""
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["I already have a GitHub account - log me in"]
+        stub.confirm = lambda _prompt, **_kwargs: True
+        app.gum = stub
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gh", "auth", "login"], 0, "", "")):
+            app.github_setup_guide()
+
+    def test_github_setup_guide_login_failure_exits(self) -> None:
+        """A failed gh auth login raises SystemExit."""
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["I already have a GitHub account - log me in"]
+        stub.confirm = lambda _prompt, **_kwargs: True
+        app.gum = stub
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gh", "auth", "login"], 1, "", "")):
+            with self.assertRaises(SystemExit):
+                app.github_setup_guide()
+
+    def test_github_setup_guide_create_account_then_login(self) -> None:
+        """Choosing 'I need to create a GitHub account first' shows signup info,
+        then proceeds to login."""
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["I need to create a GitHub account first"]
+        stub.confirm = lambda _prompt, **_kwargs: False  # Don't open browser, don't log in
+        app.gum = stub
+        with self.assertRaises(SystemExit):
+            # confirm("Ready to log in?") returns False → SystemExit(0)
+            app.github_setup_guide()
+
+    # ── batch_check_state_files GraphQL path ───────────────────────────
+
+    def test_batch_check_state_files_graphql_success(self) -> None:
+        """When the GraphQL query succeeds, repos with state files are identified."""
+        app = self.make_app()
+        repos = [{"name": "repo-a"}, {"name": "repo-b"}, {"name": "repo-c"}]
+        graphql_response = json.dumps({
+            "data": {
+                "r0": {"object": {"id": "abc123"}},
+                "r1": None,
+                "r2": {"object": {"id": "def456"}},
+            }
+        })
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(
+            ["gh"], 0, graphql_response, ""
+        )):
+            found = app.batch_check_state_files("testuser", repos)
+        self.assertEqual(found, {"repo-a", "repo-c"})
+
+    def test_batch_check_state_files_graphql_empty_object(self) -> None:
+        """A repo where 'object' is null is not included in results."""
+        app = self.make_app()
+        repos = [{"name": "repo-a"}]
+        graphql_response = json.dumps({
+            "data": {
+                "r0": {"object": None},
+            }
+        })
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(
+            ["gh"], 0, graphql_response, ""
+        )):
+            found = app.batch_check_state_files("testuser", repos)
+        self.assertEqual(found, set())
+
+    def test_batch_check_state_files_empty_repos(self) -> None:
+        """An empty repo list returns an empty set without making any calls."""
+        app = self.make_app()
+        with patch("atomic_image_builder.run") as run_mock:
+            found = app.batch_check_state_files("testuser", [])
+        run_mock.assert_not_called()
+        self.assertEqual(found, set())
+
+    def test_batch_check_state_files_graphql_failure_falls_back_to_rest(self) -> None:
+        """When GraphQL fails, the method falls back to serial REST calls."""
+        app = self.make_app()
+        repos = [{"name": "repo-a"}, {"name": "repo-b"}]
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(
+            ["gh"], 1, "", "GraphQL error"
+        )):
+            with patch.object(app, "repo_has_state_file", side_effect=[True, False]) as rest_mock:
+                found = app.batch_check_state_files("testuser", repos)
+        self.assertEqual(found, {"repo-a"})
+        self.assertEqual(rest_mock.call_count, 2)
+
+    def test_batch_check_state_files_graphql_bad_json_falls_back(self) -> None:
+        """When GraphQL returns non-JSON, the method falls back to REST."""
+        app = self.make_app()
+        repos = [{"name": "repo-a"}]
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(
+            ["gh"], 0, "not json", ""
+        )):
+            with patch.object(app, "repo_has_state_file", return_value=True) as rest_mock:
+                found = app.batch_check_state_files("testuser", repos)
+        self.assertEqual(found, {"repo-a"})
+        rest_mock.assert_called_once()
+
+    # ── generate_justfile output validation ────────────────────────────
+
+    def test_generate_justfile_contains_repo_name(self) -> None:
+        app = self.make_app()
+        justfile = app.generate_justfile()
+        self.assertIn('image_name := env("IMAGE_NAME", "test-image")', justfile)
+
+    def test_generate_justfile_contains_build_target(self) -> None:
+        app = self.make_app()
+        justfile = app.generate_justfile()
+        self.assertIn("build $target_image=image_name $tag=default_tag:", justfile)
+        self.assertIn("podman build", justfile)
+
+    def test_generate_justfile_contains_default_recipe(self) -> None:
+        app = self.make_app()
+        justfile = app.generate_justfile()
+        self.assertIn("[private]", justfile)
+        self.assertIn("default:", justfile)
+        self.assertIn("@just --list", justfile)
+
+    def test_generate_justfile_has_trailing_newline(self) -> None:
+        app = self.make_app()
+        justfile = app.generate_justfile()
+        self.assertTrue(justfile.endswith("\n"))
+
+    def test_generate_justfile_has_default_tag(self) -> None:
+        app = self.make_app()
+        justfile = app.generate_justfile()
+        self.assertIn('default_tag := env("DEFAULT_TAG", "latest")', justfile)
+
+    # ── patch_container_justfile unit test ──────────────────────────────
+
+    def test_patch_container_justfile_updates_image_name(self) -> None:
+        app = self.make_app()
+        app.config.repo_name = "my-custom-image"
+        existing = textwrap.dedent("""\
+            export image_name := env("IMAGE_NAME", "image-template")
+            export default_tag := env("DEFAULT_TAG", "latest")
+
+            build:
+                podman build .
+        """)
+        result = app.patch_container_justfile(existing)
+        self.assertIn('image_name := env("IMAGE_NAME", "my-custom-image")', result)
+        self.assertNotIn("image-template", result)
+
+    def test_patch_container_justfile_preserves_other_content(self) -> None:
+        app = self.make_app()
+        existing = textwrap.dedent("""\
+            export image_name := env("IMAGE_NAME", "old-name")
+            export default_tag := env("DEFAULT_TAG", "latest")
+
+            build:
+                podman build .
+
+            custom-target:
+                echo "custom"
+        """)
+        result = app.patch_container_justfile(existing)
+        self.assertIn("custom-target:", result)
+        self.assertIn('echo "custom"', result)
+
+    def test_patch_container_justfile_ensures_trailing_newline(self) -> None:
+        app = self.make_app()
+        existing = 'export image_name := env("IMAGE_NAME", "old")'
+        result = app.patch_container_justfile(existing)
+        self.assertTrue(result.endswith("\n"))
+
+    # ── write_installer_configs missing template error path ────────────
+
+    def test_write_installer_configs_raises_on_missing_template(self) -> None:
+        """When the selected installer config doesn't exist in the repo or the
+        template snapshot, CommandError is raised."""
+        app = self.make_app()
+        # Use a base image that maps to KDE profile
+        app.config.base_image_uri = "ghcr.io/ublue-os/bazzite:stable"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            disk_dir = repo_dir / "disk_config"
+            disk_dir.mkdir()
+            # Don't create iso-kde.toml or iso-gnome.toml — simulating missing files
+            # The method needs the selected config to exist somewhere
+            with patch.object(app, "installer_config_name", return_value="nonexistent.toml"):
+                with patch.object(type(CONTAINERFILE_TEMPLATE_DIR / "disk_config" / "nonexistent.toml"), "is_file", return_value=False):
+                    with self.assertRaisesRegex(CommandError, "Bundled installer config not found"):
+                        app.write_installer_configs(repo_dir)
+
+    def test_write_installer_configs_skips_when_no_disk_dir(self) -> None:
+        """When disk_config/ doesn't exist, write_installer_configs is a no-op."""
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            # No disk_config/ directory
+            app.write_installer_configs(repo_dir)  # Should not raise
+
+    # ── patch_container_disk_workflow unit test ─────────────────────────
+
+    def test_patch_container_disk_workflow_pins_actions(self) -> None:
+        """Actions in build-disk.yml are pinned by patch_container_disk_workflow."""
+        app = self.make_app()
+        # Use realistic step format: name on one line, uses on the next (indented)
+        workflow_text = (
+            "name: Build disk images\n"
+            "on:\n"
+            "  pull_request:\n"
+            "    branches:\n"
+            "      - main\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - name: Checkout\n"
+            "        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6\n"
+            "      - name: Build disk images\n"
+            "        uses: osbuild/bootc-image-builder-action@main\n"
+            "        with:\n"
+            "          image: ghcr.io/example/test:latest\n"
+        )
+        result = app.patch_container_disk_workflow(workflow_text)
+        # osbuild action should be pinned (the main test target)
+        self.assertIn(ACTION_REF_PINS["osbuild/bootc-image-builder-action@main"][0], result)
+        self.assertNotIn("osbuild/bootc-image-builder-action@main", result)
+        # actions/checkout was already pinned, should stay pinned
+        self.assertIn(ACTION_PINS["actions/checkout"][0], result)
+
+    def test_patch_container_disk_workflow_patches_branch_filters(self) -> None:
+        """Branch filters are updated to the specified default branch."""
+        app = self.make_app()
+        workflow_text = (
+            "name: Build Disk\n"
+            "on:\n"
+            "  push:\n"
+            "    branches:\n"
+            "      - main\n"
+            "  pull_request:\n"
+            "    branches:\n"
+            "      - main\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - name: Checkout\n"
+            "        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6\n"
+        )
+        result = app.patch_container_disk_workflow(workflow_text, default_branch="develop")
+        self.assertIn("- develop", result)
+
+    # ── search_packages deselection-only path ──────────────────────────
+
+    def test_search_packages_deselection_only_when_all_already_selected(self) -> None:
+        """When all search results are already in config.packages and the user
+        deselects some, only removals happen (no add_packages_to_config call)."""
+        app = self.make_app()
+        app.config.packages = ["fish", "tmux"]
+        stub = GumStub()
+        stub.input = lambda **_kwargs: "fish"
+        # User deselects "fish" but keeps "tmux" (tmux wasn't in results though)
+        stub.choose = lambda _options, **_kwargs: []
+        app.gum = stub
+        with patch.object(
+            app, "search_host_packages",
+            return_value=([("fish", "Friendly shell")], False, None)
+        ):
+            with patch.object(app, "add_packages_to_config") as add_mock:
+                app.search_packages()
+        # fish was deselected
+        self.assertNotIn("fish", app.config.packages)
+        # tmux was not in search results so it's untouched
+        self.assertIn("tmux", app.config.packages)
+        # add_packages_to_config should not have been called (no new packages)
+        add_mock.assert_not_called()
+        self.assertEqual(stub.prompts, ["Removed 1 package(s). Press Enter to return to the package menu..."])
+
+    def test_search_packages_no_changes_message(self) -> None:
+        """When no packages are added or removed, the 'no changes' message shows."""
+        app = self.make_app()
+        app.config.packages = ["fish"]
+        stub = GumStub()
+        stub.input = lambda **_kwargs: "fish"
+        # User picks the same packages already selected
+        stub.choose = lambda _options, **_kwargs: ["fish"]
+        app.gum = stub
+        with patch.object(
+            app, "search_host_packages",
+            return_value=([("fish", "Friendly shell")], False, None)
+        ):
+            with patch.object(app, "add_packages_to_config", return_value=False):
+                app.search_packages()
+        self.assertEqual(stub.prompts, ["No package changes were made. Press Enter to return to the package menu..."])
 
 
 if __name__ == "__main__":
