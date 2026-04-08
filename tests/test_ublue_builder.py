@@ -677,6 +677,15 @@ class BuilderTests(unittest.TestCase):
         self.assertFalse(truncated)
         self.assertIn("dnf5 makecache", message or "")
 
+    def test_gum_spinner_result_treats_missing_status_file_contents_as_failure(self) -> None:
+        gum = Gum()
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gum", "spin"], 0, "", "")):
+            proc = gum.spinner_result("Checking package name", ["true"])
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stdout, "")
+        self.assertEqual(proc.stderr, "")
+
     def test_search_packages_can_remove_previously_selected_match(self) -> None:
         app = self.make_app()
         app.config.packages = ["fish"]
@@ -952,6 +961,31 @@ class BuilderTests(unittest.TestCase):
                     app.do_build()
 
         self.assertTrue(any("delete_repo scope" in message for level, message in app.gum.messages if level == "hint"))
+
+    def test_do_build_deletes_new_repo_when_interrupted_before_first_push(self) -> None:
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        app.config.github_user = "example"
+        app.gum = GumStub()
+
+        run_calls: list[list[str]] = []
+
+        def fake_run(args, **_kwargs):
+            run_calls.append(list(args))
+            if args[:3] == ["gh", "repo", "view"]:
+                return subprocess.CompletedProcess(list(args), 1, "", "")
+            if args[:3] == ["gh", "repo", "delete"]:
+                return subprocess.CompletedProcess(list(args), 0, "", "")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with patch("atomic_image_builder.run", side_effect=fake_run):
+            with patch.object(app, "ensure_signing_ready", side_effect=KeyboardInterrupt()):
+                with self.assertRaises(KeyboardInterrupt):
+                    app.do_build()
+
+        self.assertIn(["gh", "repo", "delete", "example/test-image", "--yes"], run_calls)
+        self.assertTrue(any("Removing the empty repo" in message for level, message in app.gum.messages if level == "warn"))
 
     def test_push_update_sets_local_git_identity_before_commit(self) -> None:
         app = self.make_app()
@@ -1356,6 +1390,128 @@ class BuilderTests(unittest.TestCase):
                     owner, repo = app.select_repo(require_state_file=True)
 
         self.assertEqual((owner, repo), ("example", "managed-repo"))
+
+    def test_select_repo_allows_manual_entry_when_repo_list_payload_is_null(self) -> None:
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        manual_label = "Type a repository name manually"
+        stub = GumStub()
+        stub.filter = lambda _options, **_kwargs: manual_label
+        stub.input = lambda **_kwargs: "managed-repo"
+        app.gum = stub
+        with patch.object(app, "gh_json_with_spinner", return_value=None):
+            with patch.object(app, "gh_json", return_value={"name": "managed-repo"}):
+                owner, repo = app.select_repo()
+
+        self.assertEqual((owner, repo), ("example", "managed-repo"))
+
+    def test_select_repo_allows_manual_entry_when_repo_list_fetch_fails(self) -> None:
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        manual_label = "Type a repository name manually"
+        stub = GumStub()
+        stub.filter = lambda _options, **_kwargs: manual_label
+        stub.input = lambda **_kwargs: "managed-repo"
+        app.gum = stub
+        with patch.object(app, "gh_json_with_spinner", side_effect=CommandError("gh failed")):
+            with patch.object(app, "gh_json", return_value={"name": "managed-repo"}):
+                owner, repo = app.select_repo()
+
+        self.assertEqual((owner, repo), ("example", "managed-repo"))
+        self.assertTrue(any("couldn't load your repository list" in message.lower() for level, message in app.gum.messages if level == "warn"))
+
+    def test_select_repo_manual_entry_reprompts_when_repo_view_payload_is_null(self) -> None:
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        manual_label = "Type a repository name manually"
+        existing_label = f"{'existing-repo':<30} (no description)"
+        filters = [manual_label, existing_label]
+        stub = GumStub()
+        stub.filter = lambda _options, **_kwargs: filters.pop(0)
+        stub.input = lambda **_kwargs: "broken-repo"
+        app.gum = stub
+        with patch.object(
+            app,
+            "gh_json_with_spinner",
+            return_value=[{"name": "existing-repo", "description": None}],
+        ):
+            with patch.object(app, "gh_json", side_effect=[None]):
+                owner, repo = app.select_repo()
+
+        self.assertEqual((owner, repo), ("example", "existing-repo"))
+        self.assertTrue(any("Unable to confirm example/broken-repo" in message for level, message in app.gum.messages if level == "error"))
+        self.assertEqual(app.gum.prompts, ["Press Enter to choose a different repository..."])
+
+    def test_select_repo_manual_entry_reprompts_when_repo_view_json_is_invalid(self) -> None:
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        manual_label = "Type a repository name manually"
+        existing_label = f"{'existing-repo':<30} (no description)"
+        filters = [manual_label, existing_label]
+        stub = GumStub()
+        stub.filter = lambda _options, **_kwargs: filters.pop(0)
+        stub.input = lambda **_kwargs: "broken-repo"
+        app.gum = stub
+        with patch.object(
+            app,
+            "gh_json_with_spinner",
+            return_value=[{"name": "existing-repo", "description": None}],
+        ):
+            with patch.object(app, "gh_json", side_effect=[json.JSONDecodeError("bad json", "x", 0)]):
+                owner, repo = app.select_repo()
+
+        self.assertEqual((owner, repo), ("example", "existing-repo"))
+        self.assertTrue(any("Unable to confirm example/broken-repo" in message for level, message in app.gum.messages if level == "error"))
+        self.assertEqual(app.gum.prompts, ["Press Enter to choose a different repository..."])
+
+    def test_repo_default_branch_falls_back_to_rest_api_when_graphql_payload_is_null(self) -> None:
+        app = self.make_app()
+
+        def fake_run(args, **_kwargs):
+            self.assertEqual(args[:2], ["gh", "api"])
+            return subprocess.CompletedProcess(list(args), 0, '{"default_branch":"stable"}', "")
+
+        with patch.object(app, "gh_json", return_value=None):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                branch = app.repo_default_branch("example", "test-image")
+
+        self.assertEqual(branch, "stable")
+
+    def test_repo_default_branch_falls_back_to_rest_api_when_graphql_query_fails(self) -> None:
+        app = self.make_app()
+
+        def fake_run(args, **_kwargs):
+            self.assertEqual(args[:2], ["gh", "api"])
+            return subprocess.CompletedProcess(list(args), 0, '{"default_branch":"stable"}', "")
+
+        with patch.object(app, "gh_json", side_effect=CommandError("gh failed")):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                branch = app.repo_default_branch("example", "test-image")
+
+        self.assertEqual(branch, "stable")
+
+    def test_repo_default_branch_falls_back_to_rest_api_when_graphql_json_is_invalid(self) -> None:
+        app = self.make_app()
+
+        def fake_run(args, **_kwargs):
+            self.assertEqual(args[:2], ["gh", "api"])
+            return subprocess.CompletedProcess(list(args), 0, '{"default_branch":"stable"}', "")
+
+        with patch.object(app, "gh_json", side_effect=json.JSONDecodeError("bad json", "x", 0)):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                branch = app.repo_default_branch("example", "test-image")
+
+        self.assertEqual(branch, "stable")
+
+    def test_github_login_name_rejects_null_payload(self) -> None:
+        app = self.make_app()
+        with patch.object(app, "gh_json", return_value=None):
+            with self.assertRaisesRegex(CommandError, "Unable to determine GitHub username"):
+                app.github_login_name()
 
     def test_update_menu_restores_base_image_when_cancelled(self) -> None:
         app = self.make_app()

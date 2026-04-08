@@ -848,7 +848,11 @@ class Gum:
             stdout = Path(stdout_path).read_text()
             stderr = Path(stderr_path).read_text()
             status_text = Path(status_path).read_text().strip()
-            return subprocess.CompletedProcess(list(command), int(status_text or "0"), stdout, stderr)
+            try:
+                returncode = int(status_text)
+            except ValueError:
+                returncode = 1
+            return subprocess.CompletedProcess(list(command), returncode, stdout, stderr)
         finally:
             Path(stdout_path).unlink(missing_ok=True)
             Path(stderr_path).unlink(missing_ok=True)
@@ -991,6 +995,18 @@ class App:
         # Networked GitHub queries can feel frozen without a spinner.
         output = self.gum.spinner_capture(title, ["gh", *args])
         return json.loads(output or "null")
+
+    def github_login_name(self) -> str:
+        try:
+            data = self.gh_json(["api", "user"])
+        except (CommandError, json.JSONDecodeError) as exc:
+            raise CommandError("Unable to determine GitHub username.") from exc
+        if not isinstance(data, dict):
+            raise CommandError("Unable to determine GitHub username.")
+        login = data.get("login")
+        if not isinstance(login, str) or not login.strip():
+            raise CommandError("Unable to determine GitHub username.")
+        return login.strip()
 
     def show_step_header(self, title: str, *, step: int, total_steps: int, next_hint: str | None = None) -> None:
         self.gum.header(title)
@@ -1178,10 +1194,10 @@ class App:
                 github_login_missing = True
             else:
                 try:
-                    self.github_user = str(self.gh_json(["api", "user"])["login"])
+                    self.github_user = self.github_login_name()
                     self.github_available = True
                     self.config.github_user = self.github_user
-                except Exception:
+                except CommandError:
                     self.github_available = False
                     github_account_error = True
         else:
@@ -1227,8 +1243,8 @@ class App:
         if run(["gh", "auth", "status"], check=False).returncode != 0:
             self.github_setup_guide()
         try:
-            self.github_user = str(self.gh_json(["api", "user"])["login"])
-        except Exception:
+            self.github_user = self.github_login_name()
+        except CommandError:
             self.gum.error("Unable to determine GitHub username after login.")
             return False
         self.config.github_user = self.github_user
@@ -2145,8 +2161,11 @@ class App:
         self.copy_template_snapshot(target, repo=BLUEBUILD_TEMPLATE_REPO, source_dir=BLUEBUILD_TEMPLATE_DIR)
 
     def repo_default_branch(self, owner: str, repo: str) -> str:
-        data = self.gh_json(["repo", "view", f"{owner}/{repo}", "--json", "defaultBranchRef"])
-        branch = data.get("defaultBranchRef", {}).get("name")
+        try:
+            data = self.gh_json(["repo", "view", f"{owner}/{repo}", "--json", "defaultBranchRef"])
+        except (CommandError, json.JSONDecodeError):
+            data = None
+        branch = data.get("defaultBranchRef", {}).get("name") if isinstance(data, dict) else None
         if branch:
             return branch
         proc = run(["gh", "api", f"/repos/{owner}/{repo}"], check=False)
@@ -2433,7 +2452,7 @@ class App:
                 run(["git", "commit", "-m", f"Initial image configuration via {TOOL_SLUG}"], cwd=tmpdir)
                 run(["git", "push", "origin", "HEAD"], cwd=tmpdir, capture=False)
                 pushed = True
-        except Exception:
+        except BaseException:
             if not pushed:
                 # Repo creation is the only irreversible network step before the
                 # first push. If anything later fails, we delete that empty repo
@@ -2497,10 +2516,20 @@ class App:
         if not self.require_github():
             raise ScreenBack()
         while True:
-            repos = self.gh_json_with_spinner(
-                "Fetching repositories from GitHub...",
-                ["repo", "list", self.github_user, "--json", "name,description", "--limit", "100"],
-            )
+            try:
+                repo_data = self.gh_json_with_spinner(
+                    "Fetching repositories from GitHub...",
+                    ["repo", "list", self.github_user, "--json", "name,description", "--limit", "100"],
+                )
+            except (CommandError, json.JSONDecodeError):
+                self.gum.warn("I couldn't load your repository list from GitHub right now.")
+                self.gum.hint("Type a repository name manually if you know one, or press Esc to go back.")
+                repo_data = []
+            repos = [
+                item
+                for item in (repo_data if isinstance(repo_data, list) else [])
+                if isinstance(item, dict) and isinstance(item.get("name"), str)
+            ]
             visible_repos = repos
             if require_state_file:
                 self.gum.hint("Checking which repos were created by this tool...")
@@ -2541,9 +2570,17 @@ class App:
                     continue
                 repo = sanitize_slug(repo_input)
                 try:
-                    self.gh_json(["repo", "view", f"{self.github_user}/{repo}", "--json", "name"])
+                    repo_data = self.gh_json(["repo", "view", f"{self.github_user}/{repo}", "--json", "name"])
                 except CommandError:
                     self.gum.error(f"{self.github_user}/{repo} was not found on GitHub.")
+                    self.gum.enter_to_continue("Press Enter to choose a different repository...")
+                    continue
+                except json.JSONDecodeError:
+                    self.gum.error(f"Unable to confirm {self.github_user}/{repo} on GitHub right now.")
+                    self.gum.enter_to_continue("Press Enter to choose a different repository...")
+                    continue
+                if not isinstance(repo_data, dict) or not isinstance(repo_data.get("name"), str):
+                    self.gum.error(f"Unable to confirm {self.github_user}/{repo} on GitHub right now.")
                     self.gum.enter_to_continue("Press Enter to choose a different repository...")
                     continue
                 if require_state_file and not self.repo_has_state_file(self.github_user, repo):
