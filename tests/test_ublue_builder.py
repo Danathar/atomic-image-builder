@@ -10,36 +10,32 @@ from pathlib import Path
 from unittest.mock import patch
 
 from atomic_image_builder import (
-    ACTION_REF_PINS,
     ACTION_PINS,
-    App,
+    ACTION_REF_PINS,
     BASE_IMAGES,
     BLUEBUILD_RECIPE_SCHEMA,
-    BLUEBUILD_TEMPLATE_DIR,
-    COPR_REPO_RE,
     COMMON_SERVICES,
-    CommandError,
     CONTAINERFILE_TEMPLATE_DIR,
-    Config,
     DEFAULT_GITHUB_BUILD_CRON,
-    FEDORA_ATOMIC_FALLBACK_TAG,
     FEDORA_ATOMIC_DEFAULT_TAG,
-    Gum,
+    FEDORA_ATOMIC_FALLBACK_TAG,
     MANAGED_REPO_WARNING,
     METHOD_DISPLAY,
     PACKAGE_SEARCH_LIMIT,
-    SERVICE_TOKEN_RE,
-    ScreenBack,
     STATE_FILE,
     TOOL_NAME,
     TOOL_SLUG,
     UBLUE_BREW_IMAGE,
     VERSION,
+    App,
+    CommandError,
+    Config,
+    Gum,
+    ScreenBack,
     config_from_state_payload,
     determine_fedora_atomic_default_tag,
     format_daily_rebuild_note,
     normalize_container_image_reference,
-    pin_action_uses_line,
 )
 
 
@@ -2294,7 +2290,6 @@ class BuilderTests(unittest.TestCase):
         app = self.make_bluebuild_app()
         app.gum = GumStub()
         captured: list[str] = []
-        original_pager = app.gum.pager
         app.gum.pager = lambda text: captured.append(text)
         app.show_summary()
         self.assertTrue(captured)

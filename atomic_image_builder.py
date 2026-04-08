@@ -11,12 +11,12 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-from datetime import datetime, timezone, tzinfo
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone, tzinfo
 from pathlib import Path
-from typing import Iterable, Sequence
 
-if sys.version_info < (3, 10):
+if sys.version_info < (3, 10):  # noqa: UP036
     raise SystemExit("Python 3.10 or newer is required.")
 
 # This file intentionally keeps the whole beginner-focused tool in one module.
@@ -1000,12 +1000,12 @@ class App:
         try:
             data = self.gh_json(["api", "user"])
         except (CommandError, json.JSONDecodeError) as exc:
-            raise CommandError("Unable to determine GitHub username.") from exc
+            raise CommandError(f"Unable to determine GitHub username: {exc}") from exc
         if not isinstance(data, dict):
-            raise CommandError("Unable to determine GitHub username.")
+            raise CommandError("Unable to determine GitHub username: unexpected API response.")
         login = data.get("login")
         if not isinstance(login, str) or not login.strip():
-            raise CommandError("Unable to determine GitHub username.")
+            raise CommandError("Unable to determine GitHub username: login field missing from API response.")
         return login.strip()
 
     def show_step_header(self, title: str, *, step: int, total_steps: int, next_hint: str | None = None) -> None:
@@ -2048,9 +2048,11 @@ class App:
         for i, item in enumerate(repos):
             alias_map[f"r{i}"] = item["name"]
         fragments: list[str] = []
+        safe_owner = json.dumps(owner)
         for alias, name in alias_map.items():
+            safe_name = json.dumps(name)
             fragments.append(
-                f'{alias}: repository(owner: "{owner}", name: "{name}") '
+                f'{alias}: repository(owner: {safe_owner}, name: {safe_name}) '
                 f'{{ object(expression: "HEAD:{STATE_FILE}") {{ id }} }}'
             )
         query = "query { " + " ".join(fragments) + " }"
@@ -3144,7 +3146,7 @@ class App:
                         break
                     index += 1
                 block = lines[block_start:index]
-                branch_block = [f"    branches:", f"      - {default_branch}"]
+                branch_block = ["    branches:", f"      - {default_branch}"]
                 patched_block: list[str] = []
                 branches_found = False
                 block_index = 0

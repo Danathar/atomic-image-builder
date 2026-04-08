@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "atomic-image-builder"
+version = "0.8b1"
+description = "Guided CLI for creating GitHub-backed bootc image repositories"
+license = "GPL-3.0-only"
+requires-python = ">=3.10"
+readme = "README.md"
+
+[project.scripts]
+atomic-image-builder = "atomic_image_builder:main"
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]
