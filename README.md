@@ -168,29 +168,9 @@ If you test this and hit bugs, confusing behavior, or rough edges, please open a
 
 https://github.com/Danathar/atomic-image-builder/issues
 
-## Maintainer Audit
+## Contributing
 
-This repo includes a small maintenance audit for the bundled template snapshot and workflow action pins.
-
-Run the local-only checks without touching the network:
-
-```bash
-python3 maintenance_audit.py --skip-upstream
-```
-
-Run the full audit, including upstream HEAD drift checks against both bundled template snapshots (`ublue-os/image-template` and `blue-build/template`):
-
-```bash
-python3 maintenance_audit.py
-```
-
-Run the optional action-update audit when you want proactive pin-refresh signals for GitHub Actions used by generated repos:
-
-```bash
-python3 maintenance_audit.py --check-action-updates
-```
-
-The full audit also runs weekly and on demand through the repository workflow at `.github/workflows/maintenance-audit.yml`.
+Development workflows (tests, linting, maintainer audit) are documented in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
