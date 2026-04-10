@@ -1811,7 +1811,15 @@ class App:
             height=5,
             width=self.gum.form_width(max_width=80),
         )
-        self.config.services.extend(line.strip() for line in raw.splitlines())
+        services = unique(line.strip() for line in raw.splitlines())
+        if not services:
+            return
+        try:
+            self.validate_token_list(services, SERVICE_TOKEN_RE, "systemd service")
+        except CommandError as exc:
+            self.gum.error(str(exc))
+            return
+        self.config.services.extend(services)
         self.config.normalize()
         self.gum.success(f"Total services configured: {len(self.config.services)}")
 
@@ -1916,7 +1924,11 @@ class App:
             self.gum.error("Failed to read rpm-ostree status.")
             return False
 
-        status = json.loads(proc.stdout)
+        try:
+            status = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            self.gum.error("Failed to read rpm-ostree status.")
+            return False
         deployments = status.get("deployments", [])
         booted = next((item for item in deployments if item.get("booted")), deployments[0] if deployments else {})
         if not booted:
@@ -2173,12 +2185,20 @@ class App:
         proc = run(["gh", "api", f"/repos/{owner}/{repo}"], check=False)
         if proc.returncode == 0 and proc.stdout.strip():
             try:
-                data = json.loads(proc.stdout)
+                rest_data = json.loads(proc.stdout)
             except json.JSONDecodeError:
-                return "main"
-            branch = data.get("default_branch")
-            if isinstance(branch, str) and branch:
-                return branch
+                rest_data = None
+            if isinstance(rest_data, dict):
+                rest_branch = rest_data.get("default_branch")
+                if isinstance(rest_branch, str) and rest_branch:
+                    return rest_branch
+        # Both detection paths failed. Warn the user instead of silently picking
+        # "main", because a non-main default would otherwise leave the workflow's
+        # branch filter pointing at a branch that does not exist on the repo.
+        self.gum.warn("Could not detect the GitHub default branch; using 'main'.")
+        self.gum.hint(
+            "If your repo's default branch is not 'main', edit .github/workflows/build.yml after the first push."
+        )
         return "main"
 
     def seed_project_template(self, target: Path) -> None:

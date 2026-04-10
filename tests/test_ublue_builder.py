@@ -633,6 +633,38 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.config.removed_packages, [])
         self.assertTrue(any(level == "error" and "not found" in message for level, message in app.gum.messages))
 
+    def test_add_services_manually_accepts_valid_tokens(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.write = lambda **_kwargs: "sshd.service\ntailscaled.service\n"
+        app.gum = stub
+        app.add_services_manually()
+        self.assertEqual(app.config.services, ["sshd.service", "tailscaled.service"])
+        self.assertTrue(any(level == "success" for level, _message in stub.messages))
+
+    def test_add_services_manually_rejects_unsafe_tokens_immediately(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.write = lambda **_kwargs: "sshd.service\nfoo bar.service\n"
+        app.gum = stub
+        app.add_services_manually()
+        self.assertEqual(app.config.services, [])
+        self.assertTrue(
+            any(
+                level == "error" and "Invalid systemd service" in message
+                for level, message in stub.messages
+            )
+        )
+
+    def test_add_services_manually_returns_quietly_on_empty_input(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.write = lambda **_kwargs: "\n  \n"
+        app.gum = stub
+        app.add_services_manually()
+        self.assertEqual(app.config.services, [])
+        self.assertFalse(any(level == "success" for level, _message in stub.messages))
+
     def test_search_host_packages_parses_results_and_limits_output(self) -> None:
         app = self.make_app()
         seen_commands: list[list[str]] = []
@@ -1205,6 +1237,34 @@ class BuilderTests(unittest.TestCase):
         # Verify the warning was shown
         self.assertTrue(any("testing" in msg and "stable" in msg for _, msg in gum.messages))
 
+    def test_scan_os_returns_false_on_malformed_rpm_ostree_json(self) -> None:
+        app = self.make_app()
+        app.github_user = "example"
+        stub = GumStub()
+        app.gum = stub
+        # rpm-ostree exited 0 with non-empty stdout that is not valid JSON.
+        # The original code raised an unhandled JSONDecodeError here; the fix
+        # surfaces a friendly error and returns False instead.
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(
+                    ["rpm-ostree", "status", "--json", "--booted"],
+                    0,
+                    "warning: cache busy\nnot json at all",
+                    "",
+                ),
+            ):
+                result = app.scan_os()
+
+        self.assertFalse(result)
+        self.assertTrue(
+            any(
+                level == "error" and "rpm-ostree" in message
+                for level, message in stub.messages
+            )
+        )
+
     def test_scan_os_matches_fedora_atomic_remote_registry_origin(self) -> None:
         app = self.make_app()
         app.github_user = "example"
@@ -1502,6 +1562,27 @@ class BuilderTests(unittest.TestCase):
                 branch = app.repo_default_branch("example", "test-image")
 
         self.assertEqual(branch, "stable")
+
+    def test_repo_default_branch_warns_when_both_detection_paths_fail(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+
+        def fake_run(args, **_kwargs):
+            self.assertEqual(args[:2], ["gh", "api"])
+            return subprocess.CompletedProcess(list(args), 1, "", "API rate limit exceeded")
+
+        with patch.object(app, "gh_json", side_effect=CommandError("gh failed")):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                branch = app.repo_default_branch("example", "test-image")
+
+        self.assertEqual(branch, "main")
+        self.assertTrue(
+            any(
+                level == "warn" and "default branch" in message
+                for level, message in stub.messages
+            )
+        )
 
     def test_github_login_name_rejects_null_payload(self) -> None:
         app = self.make_app()
