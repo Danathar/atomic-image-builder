@@ -43,6 +43,9 @@ Both upstream templates work across this tool's supported Universal Blue and Fed
 - Lets users add packages, COPR repos, services, and base-package removals
 - Offers optional Homebrew integration for Fedora Atomic base images using the Universal Blue brew OCI layer
 - Updates repos that were previously created by this tool
+- Shows recent GitHub Actions build status for a configured image repo
+- Can run a local Podman test build for Containerfile-based images before pushing
+- Can rotate the cosign signing key for repos created by this tool
 - Can scan a running rpm-ostree / bootc system and carry layered packages into a new image repo
 
 ## What It Does Not Do
@@ -90,6 +93,10 @@ The app checks all required tools at startup and exits if any are missing.
 
 On supported Universal Blue and Fedora Atomic desktop images, `dnf5` and `rpm-ostree` are expected to already be present. If helper CLI tools such as `gum`, `git`, `gh`, or `cosign` are missing, install them with Homebrew.
 
+Optional:
+
+- `podman` for local Containerfile test builds
+
 You also need a GitHub account and should log in first:
 
 ```bash
@@ -130,6 +137,9 @@ What to expect:
 - The tool creates a public GitHub repo under your account
 - GitHub Actions builds the image for you after repo creation
 - Scheduled rebuilds also run daily on GitHub
+- The main menu can show recent GitHub Actions build status for a configured repo
+- Containerfile repos can be test-built locally with Podman before you push changes
+- The update menu can rotate the repo's cosign signing key and update `cosign.pub`
 - The scan option reads your current rpm-ostree / bootc state and can carry layered packages into the new repo
 
 If you use the scan flow to carry layered packages from your current system into the new image, run these in the same session before rebooting:
@@ -159,6 +169,7 @@ This option is skipped automatically for Universal Blue base images since they a
 This repo intentionally keeps the beginner tool narrow:
 
 - Containerfile and BlueBuild repo creation and updates are supported
+- Local test builds are currently Containerfile-only
 - Existing repos that do not contain `.ublue-builder.json` are not supported for adoption or import
 - Advanced BlueBuild modules and features beyond the guided wizard are out of scope
 
