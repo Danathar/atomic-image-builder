@@ -336,6 +336,13 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("  pull_request:\n    branches:\n      - master", patched)
         self.assertIn("  push:\n    branches:\n      - master", patched)
 
+    def test_patch_container_workflow_golden(self) -> None:
+        expected_path = Path(__file__).parent / "fixtures/workflows/container_expected.yml"
+        input_path = Path(__file__).parent / "fixtures/workflows/container_input.yml"
+        app = self.make_app()
+        result = app.patch_container_workflow(input_path.read_text(), default_branch="main")
+        self.assertEqual(result, expected_path.read_text())
+
     def test_patch_workflow_branch_filters_adds_missing_branches_blocks(self) -> None:
         app = self.make_app()
         workflow = textwrap.dedent(

@@ -1,0 +1,28 @@
+name: Build container image
+on:
+  schedule:
+    - cron: '05 10 * * *'
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '.ublue-builder.json'
+      - '**/README.md'
+  pull_request:
+    branches:
+      - main
+jobs:
+  build_push:
+    env:
+      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+      REGISTRY: ghcr.io
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Install Cosign
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.COSIGN_PRIVATE_KEY != ''
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+      - name: Sign container image
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.COSIGN_PRIVATE_KEY != ''
+        run: cosign sign --yes ghcr.io/example/test-image:latest

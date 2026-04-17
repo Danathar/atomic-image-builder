@@ -1,0 +1,25 @@
+name: Build container image
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  push:
+    branches:
+      - trunk
+    paths-ignore:
+      - '**/README.md'
+  pull_request:
+    branches:
+      - trunk
+jobs:
+  build_push:
+    env:
+      REGISTRY: ghcr.io
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Install Cosign
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: sigstore/cosign-installer@v4.1.1
+      - name: Sign container image
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        run: cosign sign --yes ghcr.io/example/test-image:latest
