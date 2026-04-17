@@ -12,6 +12,7 @@ import sys
 import tempfile
 import textwrap
 from collections.abc import Iterable, Sequence
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, tzinfo
 from pathlib import Path
@@ -830,13 +831,16 @@ class Gum:
         # Same idea as spinner_capture(), but this version keeps stdout, stderr,
         # and exit status so callers can inspect a command result after the
         # spinner closes.
-        with tempfile.NamedTemporaryFile(delete=False) as stdout_tmp:
-            stdout_path = stdout_tmp.name
-        with tempfile.NamedTemporaryFile(delete=False) as stderr_tmp:
-            stderr_path = stderr_tmp.name
-        with tempfile.NamedTemporaryFile(delete=False) as status_tmp:
-            status_path = status_tmp.name
-        try:
+        with ExitStack() as stack:
+            with tempfile.NamedTemporaryFile(delete=False) as stdout_tmp:
+                stdout_path = stdout_tmp.name
+            stack.callback(Path(stdout_path).unlink, missing_ok=True)
+            with tempfile.NamedTemporaryFile(delete=False) as stderr_tmp:
+                stderr_path = stderr_tmp.name
+            stack.callback(Path(stderr_path).unlink, missing_ok=True)
+            with tempfile.NamedTemporaryFile(delete=False) as status_tmp:
+                status_path = status_tmp.name
+            stack.callback(Path(status_path).unlink, missing_ok=True)
             shell_command = (
                 f"{shlex.join(command)} > {shlex.quote(stdout_path)} 2> {shlex.quote(stderr_path)}; "
                 f"printf '%s' $? > {shlex.quote(status_path)}"
@@ -854,10 +858,6 @@ class Gum:
             except ValueError:
                 returncode = 1
             return subprocess.CompletedProcess(list(command), returncode, stdout, stderr)
-        finally:
-            Path(stdout_path).unlink(missing_ok=True)
-            Path(stderr_path).unlink(missing_ok=True)
-            Path(status_path).unlink(missing_ok=True)
 
     def enter_to_continue(self, placeholder: str = "Press Enter to continue...") -> None:
         self.instruction(placeholder)

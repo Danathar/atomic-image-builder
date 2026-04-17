@@ -730,6 +730,29 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(proc.stdout, "")
         self.assertEqual(proc.stderr, "")
 
+    def test_gum_spinner_result_cleans_tempfile_when_setup_fails(self) -> None:
+        gum = Gum()
+        original_named_temporary_file = tempfile.NamedTemporaryFile
+        created_paths: list[str] = []
+
+        def fake_named_temporary_file(*args, **kwargs):
+            if not created_paths:
+                tmp = original_named_temporary_file(*args, **kwargs)
+                created_paths.append(tmp.name)
+                return tmp
+            raise OSError("tempfile setup failed")
+
+        with patch("atomic_image_builder.tempfile.NamedTemporaryFile", side_effect=fake_named_temporary_file):
+            with self.assertRaisesRegex(OSError, "tempfile setup failed"):
+                gum.spinner_result("Checking package name", ["true"])
+
+        self.assertEqual(len(created_paths), 1)
+        try:
+            self.assertFalse(Path(created_paths[0]).exists())
+        finally:
+            for path in created_paths:
+                Path(path).unlink(missing_ok=True)
+
     def test_search_packages_can_remove_previously_selected_match(self) -> None:
         app = self.make_app()
         app.config.packages = ["fish"]
