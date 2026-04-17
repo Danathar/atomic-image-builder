@@ -1367,6 +1367,68 @@ class BuilderTests(unittest.TestCase):
             app.load_repo_config(repo_dir)
         self.assertEqual(app.github_user, "current-user")
 
+    def test_view_build_status_renders_recent_runs(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        runs = [
+            {
+                "databaseId": 1,
+                "displayTitle": "Build succeeded",
+                "status": "completed",
+                "conclusion": "success",
+                "createdAt": "2026-04-17T10:00:00Z",
+                "updatedAt": "2026-04-17T10:05:00Z",
+                "url": "https://github.com/example/test-image/actions/runs/1",
+                "workflowName": "Build",
+            },
+            {
+                "databaseId": 2,
+                "displayTitle": "Build failed",
+                "status": "completed",
+                "conclusion": "failure",
+                "createdAt": "2026-04-17T09:00:00Z",
+                "updatedAt": "2026-04-17T09:03:00Z",
+                "url": "https://github.com/example/test-image/actions/runs/2",
+                "workflowName": "Build",
+            },
+            {
+                "databaseId": 3,
+                "displayTitle": "Build running",
+                "status": "in_progress",
+                "conclusion": None,
+                "createdAt": "2026-04-17T08:00:00Z",
+                "updatedAt": "2026-04-17T08:01:00Z",
+                "url": "https://github.com/example/test-image/actions/runs/3",
+                "workflowName": "Build",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / STATE_FILE).write_text(json.dumps(app.state_payload()) + "\n")
+            with patch("atomic_image_builder.Path.cwd", return_value=repo_dir):
+                with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gh", "run"], 0, json.dumps(runs), "")):
+                    app.view_build_status()
+
+        rendered = "\n".join(message for level, message in stub.messages if level == "hint")
+        self.assertEqual(rendered.count("https://github.com/example/test-image/actions/runs/"), 3)
+        self.assertIn("✓", rendered)
+        self.assertIn("✗", rendered)
+        self.assertIn("●", rendered)
+
+    def test_view_build_status_warns_when_not_in_repo(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("atomic_image_builder.Path.cwd", return_value=Path(tmp)):
+                with patch("atomic_image_builder.run") as run_mock:
+                    app.view_build_status()
+
+        self.assertTrue(any(level == "warn" and "configured repo" in message for level, message in stub.messages))
+        run_mock.assert_not_called()
+
     def test_search_packages_uses_value_delimiter_for_selected_results(self) -> None:
         app = self.make_app()
         app.config.packages = ["fish"]

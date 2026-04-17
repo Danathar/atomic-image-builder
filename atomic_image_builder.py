@@ -1340,6 +1340,7 @@ class App:
                         "Create New Image",
                         "Scan OS & Migrate Layered Packages",
                         "Update Existing Image",
+                        "View Build Status",
                         "Quit",
                     ],
                     height=8,
@@ -1358,6 +1359,9 @@ class App:
                 continue
             if selected == "Update Existing Image":
                 self.update_existing_image()
+                continue
+            if selected == "View Build Status":
+                self.view_build_status()
                 continue
 
     def create_new_image(self, *, scanned: bool = False) -> None:
@@ -2631,6 +2635,57 @@ class App:
                 self.show_summary()
                 print()
                 self.push_update(owner, repo, tmpdir)
+
+    def view_build_status(self) -> None:
+        repo_dir = Path.cwd()
+        try:
+            self.load_repo_config(repo_dir)
+        except CommandError:
+            self.gum.warn(f"Run this from a configured repo that contains `{STATE_FILE}`.")
+            return
+        owner = self.config.github_user or self.github_user
+        repo = self.config.repo_name
+        if not owner or not repo:
+            self.gum.warn(f"Run this from a configured repo that contains `{STATE_FILE}`.")
+            return
+        fields = "databaseId,displayTitle,status,conclusion,createdAt,updatedAt,url,workflowName"
+        proc = run(["gh", "run", "list", "-R", f"{owner}/{repo}", "--limit", "5", "--json", fields])
+        try:
+            runs = json.loads(proc.stdout or "[]")
+        except json.JSONDecodeError:
+            self.gum.error("Unable to read GitHub Actions run data.")
+            return
+        if not isinstance(runs, list) or not runs:
+            self.gum.warn(f"No recent GitHub Actions runs found for {owner}/{repo}.")
+            self.gum.enter_to_continue("Press Enter to return to the main menu...")
+            return
+        self.gum.header("Build Status")
+        self.gum.hint(f"Recent GitHub Actions runs for {owner}/{repo}:")
+        self.gum.hint("Status  Workflow                Title                                   When         URL")
+        now = datetime.now(timezone.utc)
+        for item in runs:
+            if not isinstance(item, dict):
+                continue
+            conclusion = item.get("conclusion")
+            icon = "✓" if conclusion == "success" else "✗" if conclusion else "●"
+            workflow = self.truncate_label(str(item.get("workflowName") or "(workflow)"), limit=22)
+            title = self.truncate_label(str(item.get("displayTitle") or f"Run {item.get('databaseId') or ''}").strip(), limit=38)
+            created_at = item.get("createdAt")
+            when = "unknown"
+            if isinstance(created_at, str):
+                try:
+                    created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    delta = now - created
+                    if delta.days:
+                        when = f"{delta.days}d ago"
+                    else:
+                        hours = delta.seconds // 3600
+                        minutes = (delta.seconds % 3600) // 60
+                        when = f"{hours}h ago" if hours else f"{minutes}m ago"
+                except ValueError:
+                    when = "unknown"
+            self.gum.hint(f"{icon:<7} {workflow:<22} {title:<38} {when:<12} {item.get('url') or ''}")
+        self.gum.enter_to_continue("Press Enter to return to the main menu...")
 
     def load_repo_config(self, repo_dir: Path) -> None:
         # Prefer the canonical JSON state file whenever possible. That is what
