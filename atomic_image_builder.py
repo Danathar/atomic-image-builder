@@ -2254,14 +2254,21 @@ class App:
         self.gum.success(f"Added {len(packages)} package removal(s) from {source_label}")
         return True
 
-    def filter_available_manual_packages(self, packages: Sequence[str]) -> list[str]:
-        # Manual package entry is intentionally forgiving:
-        # - known good packages are accepted
-        # - clearly missing packages are skipped
-        # - packages that might come from configured COPRs are kept
-        # - unknown/uncheckable cases are kept, but the user is warned that the
-        #   GitHub build is the final authority
-        self.last_manual_package_check_had_missing = False
+    def _filter_manual_packages(self, packages: Sequence[str], *, mode: str) -> list[str]:
+        if mode == "available":
+            missing_attr = "last_manual_package_check_had_missing"
+            warning_attr = "package_lookup_warning_shown"
+            missing_hint = "They were skipped because no RPM package with that name was found."
+            unchecked_warn = "Could not fully check some package names on this system."
+            unchecked_hint = "The GitHub build will do the final package check."
+        else:
+            missing_attr = "last_manual_removed_package_check_had_missing"
+            warning_attr = "removed_package_lookup_warning_shown"
+            missing_hint = "They were skipped because no RPM package with that name was found in your current host repos."
+            unchecked_warn = "Could not fully check some package removals on this system."
+            unchecked_hint = "The build will skip removals that are not installed in the base image."
+
+        setattr(self, missing_attr, False)
         accepted: list[str] = []
         missing: list[str] = []
         missing_but_copr_may_provide: list[str] = []
@@ -2271,7 +2278,7 @@ class App:
             if available is True:
                 accepted.append(package)
             elif available is False:
-                if self.config.copr_repos:
+                if mode == "available" and self.config.copr_repos:
                     accepted.append(package)
                     missing_but_copr_may_provide.append(package)
                 else:
@@ -2280,51 +2287,37 @@ class App:
                 accepted.append(package)
                 unchecked.append(package)
         if missing:
-            self.last_manual_package_check_had_missing = True
+            setattr(self, missing_attr, True)
             joined = ", ".join(missing)
             self.gum.error(f"These package names were not found: {joined}")
-            self.gum.hint("They were skipped because no RPM package with that name was found.")
+            self.gum.hint(missing_hint)
         if missing_but_copr_may_provide:
             joined = ", ".join(missing_but_copr_may_provide)
             self.gum.warn("Some package names were not found in your current host repos.")
             self.gum.hint(f"Keeping for now because configured COPRs may provide them: {joined}")
             self.gum.hint("The GitHub build will do the final package check.")
-        if unchecked and not self.package_lookup_warning_shown:
+        if unchecked and not getattr(self, warning_attr):
             joined = ", ".join(unchecked)
-            self.gum.warn("Could not fully check some package names on this system.")
+            self.gum.warn(unchecked_warn)
             self.gum.hint(f"Keeping for now: {joined}")
-            self.gum.hint("The GitHub build will do the final package check.")
-            self.package_lookup_warning_shown = True
+            self.gum.hint(unchecked_hint)
+            setattr(self, warning_attr, True)
         return accepted
+
+    def filter_available_manual_packages(self, packages: Sequence[str]) -> list[str]:
+        # Manual package entry is intentionally forgiving:
+        # - known good packages are accepted
+        # - clearly missing packages are skipped
+        # - packages that might come from configured COPRs are kept
+        # - unknown/uncheckable cases are kept, but the user is warned that the
+        #   GitHub build is the final authority
+        return self._filter_manual_packages(packages, mode="available")
 
     def filter_available_manual_removed_packages(self, packages: Sequence[str]) -> list[str]:
         # Removed packages are checked locally for obvious typos before we save
         # them into the repo state file. The generated build script still skips
         # removals that are not installed in the chosen base image.
-        self.last_manual_removed_package_check_had_missing = False
-        accepted: list[str] = []
-        missing: list[str] = []
-        unchecked: list[str] = []
-        for package in packages:
-            available = self.lookup_host_package(package)
-            if available is False:
-                missing.append(package)
-                continue
-            accepted.append(package)
-            if available is None:
-                unchecked.append(package)
-        if missing:
-            self.last_manual_removed_package_check_had_missing = True
-            joined = ", ".join(missing)
-            self.gum.error(f"These package names were not found: {joined}")
-            self.gum.hint("They were skipped because no RPM package with that name was found in your current host repos.")
-        if unchecked and not self.removed_package_lookup_warning_shown:
-            joined = ", ".join(unchecked)
-            self.gum.warn("Could not fully check some package removals on this system.")
-            self.gum.hint(f"Keeping for now: {joined}")
-            self.gum.hint("The build will skip removals that are not installed in the base image.")
-            self.removed_package_lookup_warning_shown = True
-        return accepted
+        return self._filter_manual_packages(packages, mode="removed")
 
     def lookup_host_package(self, package: str) -> bool | None:
         # Host-side dnf5 checks are a lightweight "spellcheck" for manual RPM
