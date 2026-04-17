@@ -2186,15 +2186,27 @@ class App:
             if password_proc.returncode != 0:
                 self.gum.error("Unable to upload COSIGN_PASSWORD to GitHub. Check your gh login and repo access, then try again.")
                 return
-            secret_proc = run(
-                ["gh", "secret", "set", "SIGNING_SECRET", "-R", f"{owner}/{repo}"],
-                cwd=tmpdir,
-                stdin=key_path.read_text(),
-                check=False,
-            )
-            if secret_proc.returncode != 0:
-                self.gum.error("Unable to upload SIGNING_SECRET to GitHub. Check your gh login and repo access, then try again.")
-                return
+            while True:
+                secret_proc = run(
+                    ["gh", "secret", "set", "SIGNING_SECRET", "-R", f"{owner}/{repo}"],
+                    cwd=tmpdir,
+                    stdin=key_path.read_text(),
+                    check=False,
+                )
+                if secret_proc.returncode == 0:
+                    break
+                # COSIGN_PASSWORD already uploaded — GitHub is now half-rotated.
+                # Pressing on without the new key would leave signing broken.
+                self.gum.error(
+                    "Could not upload SIGNING_SECRET to GitHub. Rotation is half-complete — "
+                    "your next image build will fail signing until this finishes."
+                )
+                if not self.gum.confirm("Retry uploading SIGNING_SECRET now?", default=True):
+                    self.gum.warn(
+                        "Aborting with rotation half-complete. Re-run 'Rotate signing key (cosign)' "
+                        "before pushing new commits, or your GitHub Actions signing step will fail."
+                    )
+                    return
             shutil.copy2(pub_path, repo_dir / "cosign.pub")
 
         self.configure_temp_repo_git_identity(repo_dir)
