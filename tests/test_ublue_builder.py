@@ -1429,6 +1429,42 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(any(level == "warn" and "configured repo" in message for level, message in stub.messages))
         run_mock.assert_not_called()
 
+    def test_test_build_locally_warns_when_podman_missing(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name != "podman"):
+            with patch("atomic_image_builder.run") as run_mock:
+                app.test_build_locally()
+
+        self.assertTrue(any(level == "warn" and "podman" in message.lower() for level, message in stub.messages))
+        run_mock.assert_not_called()
+
+    def test_test_build_locally_runs_podman_on_rendered_tree(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        commands: list[list[str]] = []
+        context_exists: list[bool] = []
+        containerfile_exists: list[bool] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            command = list(command)
+            commands.append(command)
+            context = Path(command[-1])
+            context_exists.append(context.exists())
+            containerfile_exists.append((context / "Containerfile").exists())
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            app.test_build_locally()
+
+        self.assertEqual(commands[0][0], "podman")
+        self.assertTrue(context_exists[0])
+        self.assertTrue(containerfile_exists[0])
+        self.assertTrue(any(level == "success" and "ublue-builder-local-test:dryrun" in message for level, message in stub.messages))
+
     def test_search_packages_uses_value_delimiter_for_selected_results(self) -> None:
         app = self.make_app()
         app.config.packages = ["fish"]

@@ -1892,13 +1892,20 @@ class App:
             repo_label = self.format_task_choice("Repository settings", self.repository_status())
             base_label = self.format_task_choice("Base image", self.config.base_image_name or "(not set)")
             full_label = "View full configuration"
+            local_build_label = "Test build locally (podman)"
             build_label = "Start GitHub build"
             cancel_label = "Cancel and return to the main menu"
-            options = [method_label, software_label, repo_label, base_label, full_label, build_label, cancel_label]
+            options = [method_label, software_label, repo_label, base_label, full_label]
+            if self.config.method == "containerfile":
+                options.append(local_build_label)
+            options.extend([build_label, cancel_label])
             choice = self.gum.choose(options, height=10)
             selected = choice[0] if choice else cancel_label
             if selected == build_label:
                 return "build"
+            if selected == local_build_label:
+                self.test_build_locally()
+                continue
             if selected == method_label:
                 return "method"
             if selected == software_label:
@@ -2529,6 +2536,35 @@ class App:
         self.gum.enter_to_continue("Press Enter to return to the main menu...")
         return True
 
+    def test_build_locally(self) -> None:
+        if self.config.method != "containerfile":
+            self.gum.hint("Local test build is Containerfile-only for now.")
+            return
+        if not command_exists("podman"):
+            self.gum.warn("podman is required to run a local test build.")
+            self.gum.hint("Install podman, then try this again.")
+            return
+
+        tag = "ublue-builder-local-test:dryrun"
+        with tempfile.TemporaryDirectory(prefix=f"{TOOL_SLUG}-local-build.") as tmp:
+            tmpdir = Path(tmp)
+            self.seed_project_template(tmpdir)
+            self.write_project_files(tmpdir, include_workflow=False)
+            proc = self.gum.spinner_result(
+                "Testing local podman build...",
+                ["podman", "build", "-t", tag, str(tmpdir)],
+            )
+            if proc.returncode == 0:
+                self.gum.success(f"Local test build succeeded: {tag}")
+                self.gum.hint(f"Try inspecting it with: podman image inspect {tag}")
+            else:
+                self.gum.error(f"Local podman build failed with exit status {proc.returncode}.")
+                stderr = (proc.stderr or "").strip()
+                if stderr:
+                    tail = "\n".join(stderr.splitlines()[-8:])
+                    self.gum.hint(tail)
+        self.gum.enter_to_continue("Press Enter to return to the menu...")
+
     def select_repo(self, *, require_state_file: bool = False) -> tuple[str, str]:
         # This helper centralizes repo picking for update flows. The
         # require_state_file flag is what prevents the normal update path from
@@ -2731,9 +2767,13 @@ class App:
                 mapping[label] = title
                 options.append(label)
             review_label = "Review current configuration"
+            local_build_label = "Test build locally (podman)"
             save_label = "Save and push changes"
             cancel_label = "Cancel and go back"
-            options.extend([review_label, save_label, cancel_label])
+            options.append(review_label)
+            if self.config.method == "containerfile":
+                options.append(local_build_label)
+            options.extend([save_label, cancel_label])
             try:
                 choice = self.gum.choose(options, height=14)
             except ScreenBack:
@@ -2746,6 +2786,9 @@ class App:
                 return False
             if selected == review_label:
                 self.show_summary(next_hint="This is the full configuration summary.")
+                continue
+            if selected == local_build_label:
+                self.test_build_locally()
                 continue
             task = mapping[selected]
             try:
