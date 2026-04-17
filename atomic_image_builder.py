@@ -2147,6 +2147,65 @@ class App:
             self.gum.success("Configured SIGNING_SECRET and COSIGN_PASSWORD for image signing.")
         return True
 
+    def rotate_signing_key(self, repo_dir: Path | None = None) -> None:
+        repo_dir = Path.cwd() if repo_dir is None else repo_dir
+        owner = self.config.github_user or self.github_user
+        repo = self.config.repo_name
+        if not owner or not repo:
+            self.gum.warn("Run this from a configured image repo so the GitHub repository can be identified.")
+            return
+        if not self.gum.confirm(
+            "Rotate the cosign signing key? Old signatures remain valid in the registry; re-pull or re-verify after rotation.",
+            default=False,
+        ):
+            return
+        missing = [name for name in ("cosign", "gh") if not command_exists(name)]
+        if missing:
+            verb = "is" if len(missing) == 1 else "are"
+            self.gum.warn(f"{', '.join(missing)} {verb} required to rotate the signing key.")
+            self.gum.hint("Install the missing tool, then try this again.")
+            return
+
+        cosign_password = secrets.token_urlsafe(32)
+        with tempfile.TemporaryDirectory(prefix="ublue-signing.") as tmp:
+            tmpdir = Path(tmp)
+            env = os.environ.copy()
+            env["COSIGN_PASSWORD"] = cosign_password
+            proc = run(["cosign", "generate-key-pair"], cwd=tmpdir, env=env, check=False)
+            key_path = tmpdir / "cosign.key"
+            pub_path = tmpdir / "cosign.pub"
+            if proc.returncode != 0 or not key_path.exists() or not pub_path.exists():
+                self.gum.error("Unable to generate a cosign keypair. Fix cosign first, then try again.")
+                return
+            password_proc = run(
+                ["gh", "secret", "set", "COSIGN_PASSWORD", "-R", f"{owner}/{repo}"],
+                cwd=tmpdir,
+                stdin=cosign_password,
+                check=False,
+            )
+            if password_proc.returncode != 0:
+                self.gum.error("Unable to upload COSIGN_PASSWORD to GitHub. Check your gh login and repo access, then try again.")
+                return
+            secret_proc = run(
+                ["gh", "secret", "set", "SIGNING_SECRET", "-R", f"{owner}/{repo}"],
+                cwd=tmpdir,
+                stdin=key_path.read_text(),
+                check=False,
+            )
+            if secret_proc.returncode != 0:
+                self.gum.error("Unable to upload SIGNING_SECRET to GitHub. Check your gh login and repo access, then try again.")
+                return
+            shutil.copy2(pub_path, repo_dir / "cosign.pub")
+
+        self.configure_temp_repo_git_identity(repo_dir)
+        run(["git", "add", "cosign.pub"], cwd=repo_dir)
+        run(["git", "commit", "-m", "Rotate cosign signing key"], cwd=repo_dir)
+        commit_sha = run(["git", "rev-parse", "--short", "HEAD"], cwd=repo_dir).stdout.strip()
+        run(["git", "push", "origin", "HEAD"], cwd=repo_dir, capture=False)
+        self.gum.success(f"Rotated cosign signing key in commit {commit_sha}. GitHub secrets were updated.")
+        self.gum.warn("Pre-rotation signatures remain valid in the registry; re-pull or re-verify after rotation.")
+        self.gum.enter_to_continue("Press Enter to return to the update menu...")
+
     def clone_repo(self, owner: str, repo: str, target: Path) -> None:
         self.gum.spinner(f"Cloning {owner}/{repo}...", ["gh", "repo", "clone", f"{owner}/{repo}", str(target)])
 
@@ -2667,7 +2726,7 @@ class App:
             self.load_repo_config(tmpdir)
             self.config.repo_name = repo
             self.config.github_user = owner
-            if self.update_menu():
+            if self.update_menu(repo_dir=tmpdir):
                 self.show_summary()
                 print()
                 self.push_update(owner, repo, tmpdir)
@@ -2749,7 +2808,7 @@ class App:
         if not self.github_user:
             self.github_user = cfg.github_user
 
-    def update_menu(self) -> bool:
+    def update_menu(self, repo_dir: Path | None = None) -> bool:
         # Update uses a task-list style menu instead of the linear create wizard,
         # because returning users usually want to jump straight to one section.
         while True:
@@ -2768,11 +2827,13 @@ class App:
                 options.append(label)
             review_label = "Review current configuration"
             local_build_label = "Test build locally (podman)"
+            rotate_label = "Rotate signing key (cosign)"
             save_label = "Save and push changes"
             cancel_label = "Cancel and go back"
             options.append(review_label)
             if self.config.method == "containerfile":
                 options.append(local_build_label)
+            options.append(rotate_label)
             options.extend([save_label, cancel_label])
             try:
                 choice = self.gum.choose(options, height=14)
@@ -2789,6 +2850,9 @@ class App:
                 continue
             if selected == local_build_label:
                 self.test_build_locally()
+                continue
+            if selected == rotate_label:
+                self.rotate_signing_key(repo_dir)
                 continue
             task = mapping[selected]
             try:

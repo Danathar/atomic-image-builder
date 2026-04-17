@@ -109,6 +109,14 @@ class BuilderTests(unittest.TestCase):
         )
         return app
 
+    def init_signing_repo(self, repo_dir: Path) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=repo_dir, check=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+        (repo_dir / "cosign.pub").write_text("OLD PUBLIC KEY\n")
+        subprocess.run(["git", "add", "cosign.pub"], cwd=repo_dir, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "Initial key"], cwd=repo_dir, check=True)
+
     def test_config_from_state_payload_rejects_string_list_mismatch(self) -> None:
         with self.assertRaisesRegex(ValueError, "packages must be a list of strings"):
             config_from_state_payload({"packages": "tmux"})
@@ -486,6 +494,112 @@ class BuilderTests(unittest.TestCase):
         self.assertFalse(any(call[0][:4] == ["gh", "secret", "set", "COSIGN_PASSWORD"] for call in seen_calls))
         key_call = next(call for call in seen_calls if call[0][:4] == ["gh", "secret", "set", "SIGNING_SECRET"])
         self.assertEqual(key_call[2], "PRIVATE KEY")
+
+    def test_rotate_signing_key_aborts_if_secret_upload_fails(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        app.gum.confirm = lambda _prompt, default=False: True
+        calls: list[list[str]] = []
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            calls.append(list(args))
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                assert cwd is not None
+                (cwd / "cosign.key").write_text("PRIVATE KEY")
+                (cwd / "cosign.pub").write_text("NEW PUBLIC KEY\n")
+                return subprocess.CompletedProcess(list(args), 0, "", "")
+            if args[:4] == ["gh", "secret", "set", "COSIGN_PASSWORD"]:
+                return subprocess.CompletedProcess(list(args), 1, "", "nope")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            self.init_signing_repo(repo_dir)
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    with patch("atomic_image_builder.secrets.token_urlsafe", return_value="ROTATE_PASSWORD"):
+                        app.rotate_signing_key(repo_dir)
+
+            subject = subprocess.run(["git", "log", "-1", "--pretty=%s"], cwd=repo_dir, check=True, text=True, capture_output=True)
+            self.assertEqual(subject.stdout.strip(), "Initial key")
+            self.assertEqual((repo_dir / "cosign.pub").read_text(), "OLD PUBLIC KEY\n")
+
+        self.assertTrue(any(level == "error" and "COSIGN_PASSWORD" in message for level, message in app.gum.messages))
+        self.assertFalse(any(call[:2] == ["git", "commit"] for call in calls))
+
+    def test_rotate_signing_key_happy_path(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        app.gum.confirm = lambda _prompt, default=False: True
+        calls: list[tuple[list[str], str | None]] = []
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            args = list(args)
+            calls.append((args, stdin))
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                assert cwd is not None
+                (cwd / "cosign.key").write_text("PRIVATE KEY")
+                (cwd / "cosign.pub").write_text("NEW PUBLIC KEY\n")
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if args[:3] == ["gh", "secret", "set"]:
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if args[:2] == ["git", "push"]:
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if args[0] == "git":
+                proc = subprocess.run(args, cwd=cwd, input=stdin, text=True, capture_output=True, check=False)
+                return subprocess.CompletedProcess(args, proc.returncode, proc.stdout, proc.stderr)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            self.init_signing_repo(repo_dir)
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    with patch("atomic_image_builder.secrets.token_urlsafe", return_value="ROTATE_PASSWORD"):
+                        app.rotate_signing_key(repo_dir)
+
+            subject = subprocess.run(["git", "log", "-1", "--pretty=%s"], cwd=repo_dir, check=True, text=True, capture_output=True)
+            self.assertEqual(subject.stdout.strip(), "Rotate cosign signing key")
+            self.assertEqual((repo_dir / "cosign.pub").read_text(), "NEW PUBLIC KEY\n")
+
+        self.assertTrue(any(call[0] == ["git", "add", "cosign.pub"] for call in calls))
+        secret_names = [call[0][3] for call in calls if call[0][:3] == ["gh", "secret", "set"]]
+        self.assertIn("SIGNING_SECRET", secret_names)
+        self.assertIn("COSIGN_PASSWORD", secret_names)
+        self.assertTrue(any(level == "success" and "Rotated" in message for level, message in app.gum.messages))
+
+    def test_rotate_signing_key_never_puts_password_in_argv(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        app.gum.confirm = lambda _prompt, default=False: True
+        calls: list[list[str]] = []
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            args = list(args)
+            calls.append(args)
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                assert cwd is not None
+                (cwd / "cosign.key").write_text("PRIVATE KEY")
+                (cwd / "cosign.pub").write_text("NEW PUBLIC KEY\n")
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if args[:3] == ["gh", "secret", "set"]:
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if args[:2] == ["git", "push"]:
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if args[0] == "git":
+                proc = subprocess.run(args, cwd=cwd, input=stdin, text=True, capture_output=True, check=False)
+                return subprocess.CompletedProcess(args, proc.returncode, proc.stdout, proc.stderr)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            self.init_signing_repo(repo_dir)
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    with patch("atomic_image_builder.secrets.token_urlsafe", return_value="ROTATE_PASSWORD"):
+                        app.rotate_signing_key(repo_dir)
+
+        self.assertFalse(any("ROTATE_PASSWORD" in arg for call in calls for arg in call))
 
     def test_preflight_requires_cosign(self) -> None:
         app = self.make_app()
