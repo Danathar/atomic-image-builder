@@ -543,7 +543,8 @@ def run(
     if check and proc.returncode != 0:
         stderr = proc.stderr.strip() if proc.stderr else ""
         stdout = proc.stdout.strip() if proc.stdout else ""
-        detail = stderr or stdout or f"command failed: {' '.join(args)}"
+        body = stderr or stdout
+        detail = f"{body} (command: {' '.join(args)})" if body else f"command failed: {' '.join(args)}"
         raise CommandError(detail)
     return proc
 

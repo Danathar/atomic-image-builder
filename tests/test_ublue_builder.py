@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import atomic_image_builder
 from atomic_image_builder import (
     ACTION_PINS,
     ACTION_REF_PINS,
@@ -531,6 +532,14 @@ class BuilderTests(unittest.TestCase):
                     app.preflight()
         self.assertTrue(any("gh auth login" in message for level, message in app.gum.messages if level == "hint"))
         self.assertEqual(stub.prompts, ["Press Enter to exit to the terminal..."])
+
+    def test_run_includes_args_on_error(self) -> None:
+        proc = subprocess.CompletedProcess(["git", "fake-verb"], returncode=1, stdout="", stderr="fatal: boom")
+        with patch("atomic_image_builder.subprocess.run", return_value=proc):
+            with self.assertRaises(CommandError) as raised:
+                atomic_image_builder.run(["git", "fake-verb"])
+        self.assertIn("fatal: boom", str(raised.exception))
+        self.assertIn("git fake-verb", str(raised.exception))
 
     def test_run_main_checks_preflight_before_rendering_when_gum_is_missing(self) -> None:
         app = self.make_app()
