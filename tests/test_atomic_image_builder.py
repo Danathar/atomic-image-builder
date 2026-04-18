@@ -602,6 +602,44 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("COSIGN_PASSWORD", secret_names)
         self.assertTrue(any(level == "success" and "Rotated" in message for level, message in app.gum.messages))
 
+    def test_rotate_signing_key_bluebuild_uses_empty_password_and_skips_cosign_password_secret(self) -> None:
+        app = self.make_bluebuild_app()
+        app.gum = GumStub()
+        app.gum.confirm = lambda _prompt, default=False: True
+        calls: list[tuple[list[str], str | None, dict[str, str] | None]] = []
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            args = list(args)
+            calls.append((args, stdin, env))
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                assert cwd is not None
+                (cwd / "cosign.key").write_text("PRIVATE KEY")
+                (cwd / "cosign.pub").write_text("NEW PUBLIC KEY\n")
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if args[:3] == ["gh", "secret", "set"]:
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if args[:2] == ["git", "push"]:
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if args[0] == "git":
+                proc = subprocess.run(args, cwd=cwd, input=stdin, text=True, capture_output=True, check=False)
+                return subprocess.CompletedProcess(args, proc.returncode, proc.stdout, proc.stderr)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            self.init_signing_repo(repo_dir)
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    with patch("atomic_image_builder.secrets.token_urlsafe", return_value="ROTATE_PASSWORD"):
+                        app.rotate_signing_key(repo_dir)
+
+        cosign_call = next(call for call in calls if call[0][:2] == ["cosign", "generate-key-pair"])
+        self.assertTrue(cosign_call[2] is not None)
+        self.assertEqual(cosign_call[2].get("COSIGN_PASSWORD"), "")
+        secret_names = [call[0][3] for call in calls if call[0][:3] == ["gh", "secret", "set"]]
+        self.assertIn("SIGNING_SECRET", secret_names)
+        self.assertNotIn("COSIGN_PASSWORD", secret_names)
+
     def test_rotate_signing_key_never_puts_password_in_argv(self) -> None:
         app = self.make_app()
         app.gum = GumStub()

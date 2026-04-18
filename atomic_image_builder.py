@@ -2166,7 +2166,8 @@ class App:
             self.gum.hint("Install the missing tool, then try this again.")
             return
 
-        cosign_password = secrets.token_urlsafe(32)
+        bluebuild_signing = self.config.method == "bluebuild"
+        cosign_password = "" if bluebuild_signing else secrets.token_urlsafe(32)
         with tempfile.TemporaryDirectory(prefix=f"{TOOL_SLUG}-signing.") as tmp:
             tmpdir = Path(tmp)
             env = os.environ.copy()
@@ -2177,15 +2178,16 @@ class App:
             if proc.returncode != 0 or not key_path.exists() or not pub_path.exists():
                 self.gum.error("Unable to generate a cosign keypair. Fix cosign first, then try again.")
                 return
-            password_proc = run(
-                ["gh", "secret", "set", "COSIGN_PASSWORD", "-R", f"{owner}/{repo}"],
-                cwd=tmpdir,
-                stdin=cosign_password,
-                check=False,
-            )
-            if password_proc.returncode != 0:
-                self.gum.error("Unable to upload COSIGN_PASSWORD to GitHub. Check your gh login and repo access, then try again.")
-                return
+            if not bluebuild_signing:
+                password_proc = run(
+                    ["gh", "secret", "set", "COSIGN_PASSWORD", "-R", f"{owner}/{repo}"],
+                    cwd=tmpdir,
+                    stdin=cosign_password,
+                    check=False,
+                )
+                if password_proc.returncode != 0:
+                    self.gum.error("Unable to upload COSIGN_PASSWORD to GitHub. Check your gh login and repo access, then try again.")
+                    return
             while True:
                 secret_proc = run(
                     ["gh", "secret", "set", "SIGNING_SECRET", "-R", f"{owner}/{repo}"],
@@ -2195,6 +2197,11 @@ class App:
                 )
                 if secret_proc.returncode == 0:
                     break
+                if bluebuild_signing:
+                    self.gum.error("Could not upload SIGNING_SECRET to GitHub. Rotation was not applied.")
+                    if not self.gum.confirm("Retry uploading SIGNING_SECRET now?", default=True):
+                        return
+                    continue
                 # COSIGN_PASSWORD already uploaded — GitHub is now half-rotated.
                 # Pressing on without the new key would leave signing broken.
                 self.gum.error(
