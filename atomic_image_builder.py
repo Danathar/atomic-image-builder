@@ -34,11 +34,11 @@ if sys.version_info < (3, 10):  # noqa: UP036
 VERSION = "0.8-beta"
 TOOL_NAME = "Atomic Image Builder"
 TOOL_SLUG = "atomic-image-builder"
-STATE_FILE = ".ublue-builder.json"
+STATE_FILE = f".{TOOL_SLUG}.json"
 DEFAULT_REPO_NAME = "my-atomic-image"
 DEFAULT_GITHUB_BUILD_CRON = "05 10 * * *"
 FEDORA_ATOMIC_FALLBACK_TAG = "43"
-UBLUE_BREW_IMAGE = "ghcr.io/ublue-os/brew:latest"
+UNIVERSAL_BLUE_BREW_IMAGE = "ghcr.io/ublue-os/brew:latest"
 MAX_UI_WIDTH = 120
 ACCENT_COLOR = 117
 CONTROLS_COLOR = 10
@@ -150,7 +150,7 @@ def determine_fedora_atomic_default_tag(
 FEDORA_ATOMIC_DEFAULT_TAG = determine_fedora_atomic_default_tag()
 
 
-def ublue_image(key: str, name: str, description: str, image_uri: str) -> BaseImage:
+def universal_blue_image(key: str, name: str, description: str, image_uri: str) -> BaseImage:
     return BaseImage(key=key, provider="Universal Blue", name=name, description=description, image_uri=image_uri)
 
 
@@ -165,14 +165,14 @@ def fedora_atomic_image(key: str, name: str, description: str, variant: str) -> 
 
 
 BASE_IMAGES: tuple[BaseImage, ...] = (
-    ublue_image("bazzite", "Bazzite (KDE)", "KDE desktop for gaming systems and handheld-style setups", "ghcr.io/ublue-os/bazzite:stable"),
-    ublue_image("bazzite-gnome", "Bazzite (GNOME)", "GNOME desktop for gaming systems and handheld-style setups", "ghcr.io/ublue-os/bazzite-gnome:stable"),
-    ublue_image("bazzite-dx", "Bazzite DX (KDE)", "Bazzite plus extra developer tools on KDE", "ghcr.io/ublue-os/bazzite-dx:stable"),
-    ublue_image("bazzite-dx-gnome", "Bazzite DX (GNOME)", "Bazzite plus extra developer tools on GNOME", "ghcr.io/ublue-os/bazzite-dx-gnome:stable"),
-    ublue_image("aurora", "Aurora (KDE)", "KDE desktop for everyday use", "ghcr.io/ublue-os/aurora:stable"),
-    ublue_image("aurora-dx", "Aurora DX", "Aurora plus extra developer tools", "ghcr.io/ublue-os/aurora-dx:stable"),
-    ublue_image("bluefin", "Bluefin (GNOME)", "GNOME desktop for everyday use", "ghcr.io/ublue-os/bluefin:stable"),
-    ublue_image("bluefin-dx", "Bluefin DX", "Bluefin plus extra developer tools", "ghcr.io/ublue-os/bluefin-dx:stable"),
+    universal_blue_image("bazzite", "Bazzite (KDE)", "KDE desktop for gaming systems and handheld-style setups", "ghcr.io/ublue-os/bazzite:stable"),
+    universal_blue_image("bazzite-gnome", "Bazzite (GNOME)", "GNOME desktop for gaming systems and handheld-style setups", "ghcr.io/ublue-os/bazzite-gnome:stable"),
+    universal_blue_image("bazzite-dx", "Bazzite DX (KDE)", "Bazzite plus extra developer tools on KDE", "ghcr.io/ublue-os/bazzite-dx:stable"),
+    universal_blue_image("bazzite-dx-gnome", "Bazzite DX (GNOME)", "Bazzite plus extra developer tools on GNOME", "ghcr.io/ublue-os/bazzite-dx-gnome:stable"),
+    universal_blue_image("aurora", "Aurora (KDE)", "KDE desktop for everyday use", "ghcr.io/ublue-os/aurora:stable"),
+    universal_blue_image("aurora-dx", "Aurora DX", "Aurora plus extra developer tools", "ghcr.io/ublue-os/aurora-dx:stable"),
+    universal_blue_image("bluefin", "Bluefin (GNOME)", "GNOME desktop for everyday use", "ghcr.io/ublue-os/bluefin:stable"),
+    universal_blue_image("bluefin-dx", "Bluefin DX", "Bluefin plus extra developer tools", "ghcr.io/ublue-os/bluefin-dx:stable"),
     fedora_atomic_image("silverblue", "Fedora Silverblue", "GNOME desktop built from the official Fedora Atomic desktop image", "silverblue"),
     fedora_atomic_image("kinoite", "Fedora Kinoite", "KDE Plasma desktop built from the official Fedora Atomic desktop image", "kinoite"),
     fedora_atomic_image("sway-atomic", "Fedora Sway Atomic", "Sway desktop built from the official Fedora Atomic desktop image", "sway-atomic"),
@@ -195,7 +195,7 @@ COMMON_SERVICES: tuple[tuple[str, str], ...] = (
 class Config:
     # Config is the single source of truth for what the user wants to build.
     # Most of the app mutates this object in memory, then state_payload()
-    # serializes it to .ublue-builder.json before repo files are written.
+    # serializes it to STATE_FILE before repo files are written.
     method: str = ""
     base_image_uri: str = ""
     base_image_name: str = ""
@@ -1171,7 +1171,7 @@ class App:
             ("Services", self.summarize_selection(self.config.services, empty="No services", verb="enabled")),
             ("Removed base packages", self.summarize_selection(self.config.removed_packages, empty="None", verb="selected")),
         ]
-        if not self.is_ublue_base():
+        if not self.is_universal_blue_base():
             choices.append(("Homebrew", "Enabled" if self.config.brew_enabled else "Not included"))
         return choices
 
@@ -1480,12 +1480,12 @@ class App:
         self.gum.success(f"Base image: {self.config.base_image_name} ({self.config.base_image_uri})")
         self.offer_brew_if_applicable()
 
-    def is_ublue_base(self) -> bool:
+    def is_universal_blue_base(self) -> bool:
         matched = self.match_base_image(self.config.base_image_uri)
         return matched is not None and matched.provider == "Universal Blue"
 
     def offer_brew_if_applicable(self) -> None:
-        if self.is_ublue_base():
+        if self.is_universal_blue_base():
             self.config.brew_enabled = False
             return
         print()
@@ -1844,7 +1844,7 @@ class App:
                 lines.extend(f"- {value}" for value in values)
             else:
                 lines.append("- (none)")
-        if not self.is_ublue_base():
+        if not self.is_universal_blue_base():
             lines.append("")
             lines.append("Homebrew")
             lines.append(f"- {'Enabled' if self.config.brew_enabled else 'Not included'}")
@@ -1876,7 +1876,7 @@ class App:
             ("Services", self.summarize_selection(self.config.services, empty="None", verb="enabled", limit=3)),
             ("Removed Base Packages", self.summarize_selection(self.config.removed_packages, empty="None", verb="selected", limit=3)),
         ]
-        if not self.is_ublue_base():
+        if not self.is_universal_blue_base():
             rows.append(("Homebrew", "Enabled" if self.config.brew_enabled else "Not included"))
         body = self.format_key_value_rows(rows)
         lines = [*intro_lines, "", *body]
@@ -2112,7 +2112,7 @@ class App:
         if not command_exists("cosign"):
             raise CommandError("cosign is required for signed images. Install it with: brew install cosign")
         cosign_password = "" if bluebuild_signing else secrets.token_urlsafe(32)
-        with tempfile.TemporaryDirectory(prefix="ublue-signing.") as tmp:
+        with tempfile.TemporaryDirectory(prefix=f"{TOOL_SLUG}-signing.") as tmp:
             tmpdir = Path(tmp)
             env = os.environ.copy()
             env["COSIGN_PASSWORD"] = cosign_password
@@ -2167,7 +2167,7 @@ class App:
             return
 
         cosign_password = secrets.token_urlsafe(32)
-        with tempfile.TemporaryDirectory(prefix="ublue-signing.") as tmp:
+        with tempfile.TemporaryDirectory(prefix=f"{TOOL_SLUG}-signing.") as tmp:
             tmpdir = Path(tmp)
             env = os.environ.copy()
             env["COSIGN_PASSWORD"] = cosign_password
@@ -2616,7 +2616,7 @@ class App:
             self.gum.hint("Install podman, then try this again.")
             return
 
-        tag = "ublue-builder-local-test:dryrun"
+        tag = f"{TOOL_SLUG}-local-test:dryrun"
         with tempfile.TemporaryDirectory(prefix=f"{TOOL_SLUG}-local-build.") as tmp:
             tmpdir = Path(tmp)
             self.seed_project_template(tmpdir)
@@ -2732,7 +2732,7 @@ class App:
             return
         self.config.repo_name = repo
         self.config.github_user = owner
-        with tempfile.TemporaryDirectory(prefix="ublue-update.") as tmp:
+        with tempfile.TemporaryDirectory(prefix=f"{TOOL_SLUG}-update.") as tmp:
             tmpdir = Path(tmp)
             self.clone_repo(owner, repo, tmpdir)
             self.load_repo_config(tmpdir)
@@ -3226,7 +3226,7 @@ class App:
 
         # brew_enabled: inject or replace the block.
         brew_lines = [
-            f"COPY --from={UBLUE_BREW_IMAGE} /system_files /",
+            f"COPY --from={UNIVERSAL_BLUE_BREW_IMAGE} /system_files /",
             "RUN --mount=type=cache,dst=/var/cache \\",
             "    --mount=type=cache,dst=/var/log \\",
             "    --mount=type=tmpfs,dst=/tmp \\",
@@ -3540,7 +3540,7 @@ class App:
                 "",
                 "  - type: containerfile",
                 "    snippets:",
-                f"      - COPY --from={UBLUE_BREW_IMAGE} /system_files /",
+                f"      - COPY --from={UNIVERSAL_BLUE_BREW_IMAGE} /system_files /",
                 "      - |",
                 "        RUN --mount=type=cache,dst=/var/cache \\",
                 "            --mount=type=cache,dst=/var/log \\",
@@ -3673,7 +3673,7 @@ class App:
         ]
         if self.config.brew_enabled:
             lines.extend([
-                f"COPY --from={UBLUE_BREW_IMAGE} /system_files /",
+                f"COPY --from={UNIVERSAL_BLUE_BREW_IMAGE} /system_files /",
                 "RUN --mount=type=cache,dst=/var/cache \\",
                 "    --mount=type=cache,dst=/var/log \\",
                 "    --mount=type=tmpfs,dst=/tmp \\",

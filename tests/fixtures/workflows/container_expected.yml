@@ -6,7 +6,7 @@ on:
     branches:
       - main
     paths-ignore:
-      - '.ublue-builder.json'
+      - '.atomic-image-builder.json'
       - '**/README.md'
   pull_request:
     branches:

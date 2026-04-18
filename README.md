@@ -170,7 +170,7 @@ This repo intentionally keeps the beginner tool narrow:
 
 - Containerfile and BlueBuild repo creation and updates are supported
 - Local test builds are currently Containerfile-only
-- Existing repos that do not contain `.ublue-builder.json` are not supported for adoption or import
+- Existing repos that do not contain `.atomic-image-builder.json` are not supported for adoption or import
 - Advanced BlueBuild modules and features beyond the guided wizard are out of scope
 
 ## Feedback

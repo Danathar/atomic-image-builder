@@ -26,7 +26,7 @@ from atomic_image_builder import (
     STATE_FILE,
     TOOL_NAME,
     TOOL_SLUG,
-    UBLUE_BREW_IMAGE,
+    UNIVERSAL_BLUE_BREW_IMAGE,
     VERSION,
     App,
     CommandError,
@@ -108,6 +108,9 @@ class BuilderTests(unittest.TestCase):
             github_user="example",
         )
         return app
+
+    def test_state_file_uses_current_tool_slug(self) -> None:
+        self.assertEqual(STATE_FILE, f".{TOOL_SLUG}.json")
 
     def init_signing_repo(self, repo_dir: Path) -> None:
         subprocess.run(["git", "init", "-q"], cwd=repo_dir, check=True)
@@ -231,7 +234,7 @@ class BuilderTests(unittest.TestCase):
             """
         )
         patched = app.patch_container_workflow(workflow)
-        self.assertIn(".ublue-builder.json", patched)
+        self.assertIn(".atomic-image-builder.json", patched)
         self.assertIn(ACTION_PINS["actions/checkout"][0], patched)
         # The fixture uses @v8, which maps to the legacy v8 SHA via ACTION_REF_PINS
         self.assertIn(ACTION_REF_PINS["ublue-os/remove-unwanted-software@v8"][0], patched)
@@ -319,7 +322,7 @@ class BuilderTests(unittest.TestCase):
             """
         )
         patched = app.patch_container_workflow(workflow)
-        self.assertIn("paths-ignore: ['**/README.md', '.ublue-builder.json']", patched)
+        self.assertIn("paths-ignore: ['**/README.md', '.atomic-image-builder.json']", patched)
 
     def test_patch_container_workflow_updates_branch_filters_for_default_branch(self) -> None:
         app = self.make_app()
@@ -1608,7 +1611,7 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(commands[0][0], "podman")
         self.assertTrue(context_exists[0])
         self.assertTrue(containerfile_exists[0])
-        self.assertTrue(any(level == "success" and "ublue-builder-local-test:dryrun" in message for level, message in stub.messages))
+        self.assertTrue(any(level == "success" and "atomic-image-builder-local-test:dryrun" in message for level, message in stub.messages))
 
     def test_search_packages_uses_value_delimiter_for_selected_results(self) -> None:
         app = self.make_app()
@@ -2173,7 +2176,7 @@ class BuilderTests(unittest.TestCase):
         app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
         app.config.brew_enabled = True
         cf = app.generate_containerfile()
-        self.assertIn(f"COPY --from={UBLUE_BREW_IMAGE} /system_files /", cf)
+        self.assertIn(f"COPY --from={UNIVERSAL_BLUE_BREW_IMAGE} /system_files /", cf)
         self.assertIn("brew-setup.service", cf)
         self.assertIn("brew-update.timer", cf)
         self.assertIn("brew-upgrade.timer", cf)
@@ -2200,7 +2203,7 @@ class BuilderTests(unittest.TestCase):
                 /ctx/build.sh
         """)
         result = app.render_containerfile(existing)
-        self.assertIn(f"COPY --from={UBLUE_BREW_IMAGE} /system_files /", result)
+        self.assertIn(f"COPY --from={UNIVERSAL_BLUE_BREW_IMAGE} /system_files /", result)
         self.assertIn("brew-setup.service", result)
         # The original RUN line should still be present.
         self.assertIn("/ctx/build.sh", result)
@@ -2258,7 +2261,7 @@ class BuilderTests(unittest.TestCase):
         result = app.render_containerfile(existing)
         # Old brew reference should be replaced with the current image.
         self.assertNotIn("brew:old-tag", result)
-        self.assertIn(f"COPY --from={UBLUE_BREW_IMAGE} /system_files /", result)
+        self.assertIn(f"COPY --from={UNIVERSAL_BLUE_BREW_IMAGE} /system_files /", result)
         self.assertIn("brew-upgrade.timer", result)
         self.assertIn("/ctx/build.sh", result)
         # Should not leave double blank lines after replacement.
@@ -2274,15 +2277,15 @@ class BuilderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "brew_enabled must be a boolean"):
             config_from_state_payload({"brew_enabled": "yes"})
 
-    def test_is_ublue_base_true_for_ublue_image(self) -> None:
+    def test_is_universal_blue_base_true_for_universal_blue_image(self) -> None:
         app = self.make_app()
         app.config.base_image_uri = "ghcr.io/ublue-os/bazzite:stable"
-        self.assertTrue(app.is_ublue_base())
+        self.assertTrue(app.is_universal_blue_base())
 
-    def test_is_ublue_base_false_for_fedora_image(self) -> None:
+    def test_is_universal_blue_base_false_for_fedora_image(self) -> None:
         app = self.make_app()
         app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
-        self.assertFalse(app.is_ublue_base())
+        self.assertFalse(app.is_universal_blue_base())
 
     def test_software_status_includes_brew_when_enabled(self) -> None:
         app = self.make_app()
@@ -2309,7 +2312,7 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(len(homebrew_choices), 1)
         self.assertEqual(homebrew_choices[0][1], "Enabled")
 
-    def test_update_task_choices_excludes_homebrew_for_ublue_base(self) -> None:
+    def test_update_task_choices_excludes_homebrew_for_universal_blue_base(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
         # Default make_app uses a UBlue base
@@ -2334,7 +2337,7 @@ class BuilderTests(unittest.TestCase):
             state = json.loads((repo_dir / STATE_FILE).read_text())
             self.assertTrue(state["brew_enabled"])
             cf = (repo_dir / "Containerfile").read_text()
-            self.assertIn(f"COPY --from={UBLUE_BREW_IMAGE} /system_files /", cf)
+            self.assertIn(f"COPY --from={UNIVERSAL_BLUE_BREW_IMAGE} /system_files /", cf)
             self.assertIn("brew-setup.service", cf)
 
 
@@ -2414,7 +2417,7 @@ class BuilderTests(unittest.TestCase):
         app.config.brew_enabled = True
         recipe = app.generate_recipe()
         self.assertIn("- type: containerfile", recipe)
-        self.assertIn(f"COPY --from={UBLUE_BREW_IMAGE} /system_files /", recipe)
+        self.assertIn(f"COPY --from={UNIVERSAL_BLUE_BREW_IMAGE} /system_files /", recipe)
         self.assertIn("brew-setup.service", recipe)
         self.assertIn("brew-update.timer", recipe)
         self.assertIn("brew-upgrade.timer", recipe)
@@ -2424,7 +2427,7 @@ class BuilderTests(unittest.TestCase):
         app.config.brew_enabled = False
         recipe = app.generate_recipe()
         self.assertNotIn("containerfile", recipe.split("type: signing")[0])
-        self.assertNotIn(UBLUE_BREW_IMAGE, recipe)
+        self.assertNotIn(UNIVERSAL_BLUE_BREW_IMAGE, recipe)
 
     def test_generate_recipe_omits_dnf_module_when_no_packages(self) -> None:
         app = self.make_bluebuild_app()
@@ -2622,7 +2625,7 @@ class BuilderTests(unittest.TestCase):
             state = json.loads((repo_dir / STATE_FILE).read_text())
             self.assertTrue(state["brew_enabled"])
             recipe = (repo_dir / "recipes/recipe.yml").read_text()
-            self.assertIn(f"COPY --from={UBLUE_BREW_IMAGE} /system_files /", recipe)
+            self.assertIn(f"COPY --from={UNIVERSAL_BLUE_BREW_IMAGE} /system_files /", recipe)
             self.assertIn("brew-setup.service", recipe)
 
     def test_validate_config_rejects_empty_method(self) -> None:
