@@ -2130,14 +2130,30 @@ class App:
                 )
                 if password_proc.returncode != 0:
                     raise CommandError("Unable to upload COSIGN_PASSWORD to GitHub. Check your gh login and repo access, then try again.")
-            secret_proc = run(
-                ["gh", "secret", "set", "SIGNING_SECRET", "-R", f"{owner}/{repo}"],
-                cwd=tmpdir,
-                stdin=key_path.read_text(),
-                check=False,
-            )
-            if secret_proc.returncode != 0:
-                raise CommandError("Unable to upload SIGNING_SECRET to GitHub. Check your gh login and repo access, then try again.")
+            while True:
+                secret_proc = run(
+                    ["gh", "secret", "set", "SIGNING_SECRET", "-R", f"{owner}/{repo}"],
+                    cwd=tmpdir,
+                    stdin=key_path.read_text(),
+                    check=False,
+                )
+                if secret_proc.returncode == 0:
+                    break
+                if bluebuild_signing:
+                    self.gum.error("Could not upload SIGNING_SECRET to GitHub. Check your gh login and repo access, then try again.")
+                    if not self.gum.confirm("Retry uploading SIGNING_SECRET now?", default=True):
+                        raise CommandError("SIGNING_SECRET upload was not completed.")
+                    continue
+                # COSIGN_PASSWORD already uploaded — GitHub is now half-configured.
+                self.gum.error(
+                    "Could not upload SIGNING_SECRET to GitHub. Signing setup is half-complete — "
+                    "COSIGN_PASSWORD is set but SIGNING_SECRET is not, and image builds will fail signing until this finishes."
+                )
+                if not self.gum.confirm("Retry uploading SIGNING_SECRET now?", default=True):
+                    raise CommandError(
+                        "Aborting with signing setup half-complete. Re-run this tool to finish "
+                        "uploading SIGNING_SECRET before pushing new commits."
+                    )
             self.generated_cosign_pub = pub_path.read_text()
         # The public key is kept in memory for the current run so it can be
         # written into the repo files that we are about to generate.
