@@ -498,6 +498,30 @@ class BuilderTests(unittest.TestCase):
         key_call = next(call for call in seen_calls if call[0][:4] == ["gh", "secret", "set", "SIGNING_SECRET"])
         self.assertEqual(key_call[2], "PRIVATE KEY")
 
+    def test_ensure_signing_ready_aborts_if_cosign_password_upload_fails(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            calls.append(list(args))
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                assert cwd is not None
+                (cwd / "cosign.key").write_text("PRIVATE KEY")
+                (cwd / "cosign.pub").write_text("PUBLIC KEY")
+                return subprocess.CompletedProcess(list(args), 0, "", "")
+            if args[:4] == ["gh", "secret", "set", "COSIGN_PASSWORD"]:
+                return subprocess.CompletedProcess(list(args), 1, "", "nope")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with patch.object(app, "repo_secret_exists", return_value=False):
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    with self.assertRaisesRegex(CommandError, "COSIGN_PASSWORD"):
+                        app.ensure_signing_ready("example", "test-image")
+
+        self.assertFalse(any(call[:4] == ["gh", "secret", "set", "SIGNING_SECRET"] for call in calls))
+
     def test_ensure_signing_ready_warns_when_signing_secret_retry_declined(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
