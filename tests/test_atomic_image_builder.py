@@ -593,6 +593,37 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(any(level == "warn" and "half-complete" in message for level, message in app.gum.messages))
         self.assertFalse(any(call[:2] == ["git", "commit"] for call in calls))
 
+    def test_rotate_signing_key_warns_when_post_upload_commit_fails(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        app.gum.confirm = lambda _prompt, default=False: True
+        calls: list[list[str]] = []
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            calls.append(list(args))
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                assert cwd is not None
+                (cwd / "cosign.key").write_text("PRIVATE KEY")
+                (cwd / "cosign.pub").write_text("NEW PUBLIC KEY\n")
+                return subprocess.CompletedProcess(list(args), 0, "", "")
+            if args[:3] == ["gh", "secret", "set"]:
+                return subprocess.CompletedProcess(list(args), 0, "", "")
+            if args[:2] == ["git", "commit"]:
+                # Simulate a pre-commit hook failure after secrets were uploaded.
+                raise CommandError("pre-commit hook failed")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            self.init_signing_repo(repo_dir)
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    with patch("atomic_image_builder.secrets.token_urlsafe", return_value="ROTATE_PASSWORD"):
+                        app.rotate_signing_key(repo_dir)
+
+        self.assertTrue(any(level == "warn" and "half-complete" in message for level, message in app.gum.messages))
+        self.assertFalse(any(call[:2] == ["git", "push"] for call in calls))
+
     def test_rotate_signing_key_happy_path(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
