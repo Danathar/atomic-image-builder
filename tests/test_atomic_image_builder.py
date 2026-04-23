@@ -1522,6 +1522,45 @@ class BuilderTests(unittest.TestCase):
             )
         )
 
+    def test_scan_os_returns_false_when_deployment_has_no_container_reference(self) -> None:
+        app = self.make_app()
+        app.github_user = "example"
+        stub = GumStub()
+        app.gum = stub
+        # A booted deployment with neither container-image-reference nor origin
+        # (e.g. a legacy ostree-commit deployment) cannot be carried into an
+        # image repo. Bail early instead of silently producing an empty URI.
+        status_payload = json.dumps(
+            {
+                "deployments": [
+                    {
+                        "booted": True,
+                        "requested-packages": ["tmux"],
+                        "requested-base-removals": [],
+                    }
+                ]
+            }
+        )
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(
+                    ["rpm-ostree", "status", "--json", "--booted"],
+                    0,
+                    status_payload,
+                    "",
+                ),
+            ):
+                result = app.scan_os()
+
+        self.assertFalse(result)
+        self.assertTrue(
+            any(
+                level == "error" and "container image" in message
+                for level, message in stub.messages
+            )
+        )
+
     def test_scan_os_matches_fedora_atomic_remote_registry_origin(self) -> None:
         app = self.make_app()
         app.github_user = "example"

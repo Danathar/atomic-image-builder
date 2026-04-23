@@ -1952,6 +1952,14 @@ class App:
             or booted.get("origin")
             or ""
         )
+        if not container_ref.strip():
+            # A booted deployment without a container-image-reference or origin
+            # (e.g. a legacy ostree-commit deployment) cannot be carried into an
+            # image repo. Bail instead of proceeding with an empty base image.
+            self.gum.error(
+                "This deployment has no container image reference; scanning only supports bootc / image-based deployments."
+            )
+            return False
         base = normalize_container_image_reference(container_ref)
         self.config.scanned_packages = unique(booted.get("requested-packages", []))
         self.config.scanned_removed = unique(booted.get("requested-base-removals", []))
