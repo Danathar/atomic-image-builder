@@ -2101,13 +2101,21 @@ class App:
                 found.add(name)
         return found
 
-    def ensure_signing_ready(self, owner: str, repo: str) -> bool:
+    def ensure_signing_ready(self, owner: str, repo: str, *, repo_dir: Path | None = None) -> bool:
         # Signed images are required for this tool, so "ready" means:
         # - the repo already has a compatible SIGNING_SECRET, or
         # - we can create a cosign keypair and upload the needed secrets now
         self.generated_cosign_pub = None
         bluebuild_signing = self.config.method == "bluebuild"
         if self.repo_secret_exists(owner, repo, "SIGNING_SECRET"):
+            if repo_dir is not None and not (repo_dir / "cosign.pub").exists():
+                # GitHub secrets are write-only, so the public half of the key
+                # cannot be recovered from SIGNING_SECRET. Rotation is the only
+                # way to restore signing when cosign.pub has gone missing.
+                raise CommandError(
+                    "SIGNING_SECRET is configured on GitHub but cosign.pub is missing from this repo. "
+                    "The public key cannot be recovered; use 'Rotate signing key (cosign)' from the update menu to restore signing."
+                )
             return True
         if not command_exists("cosign"):
             raise CommandError("cosign is required for signed images. Install it with: brew install cosign")
@@ -3095,7 +3103,7 @@ class App:
             self.gum.pager(self.pager_text_with_hint(full_diff))
         if not self.gum.confirm(f"Push changes to {owner}/{repo}?", default=True):
             return
-        self.config.signing_enabled = self.ensure_signing_ready(owner, repo)
+        self.config.signing_enabled = self.ensure_signing_ready(owner, repo, repo_dir=repo_dir)
         self.write_project_files(repo_dir, include_workflow=True, default_branch=default_branch)
         final_diff = self.repo_diff_summary(repo_dir)
         if not final_diff:

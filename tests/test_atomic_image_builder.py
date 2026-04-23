@@ -521,6 +521,15 @@ class BuilderTests(unittest.TestCase):
 
         self.assertTrue(any(level == "error" and "half-" in message for level, message in app.gum.messages))
 
+    def test_ensure_signing_ready_raises_when_cosign_pub_missing_locally(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            with patch.object(app, "repo_secret_exists", return_value=True):
+                with self.assertRaisesRegex(CommandError, "cosign.pub is missing"):
+                    app.ensure_signing_ready("example", "test-image", repo_dir=repo_dir)
+
     def test_rotate_signing_key_aborts_if_secret_upload_fails(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
