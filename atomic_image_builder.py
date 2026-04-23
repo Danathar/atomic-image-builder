@@ -2246,25 +2246,24 @@ class App:
                         "before pushing new commits, or your GitHub Actions signing step will fail."
                     )
                     return
-            shutil.copy2(pub_path, repo_dir / "cosign.pub")
-
-        try:
-            self.configure_temp_repo_git_identity(repo_dir)
-            run(["git", "add", "cosign.pub"], cwd=repo_dir)
-            run(["git", "commit", "-m", "Rotate cosign signing key"], cwd=repo_dir)
-            commit_sha = run(["git", "rev-parse", "--short", "HEAD"], cwd=repo_dir).stdout.strip()
-            run(["git", "push", "origin", "HEAD"], cwd=repo_dir, capture=False)
-        except CommandError as exc:
-            # GitHub already has the new secrets. Surface the split state so the
-            # user knows to re-run rotation instead of trusting a silent failure.
-            self.gum.error(
-                f"Uploaded new signing secrets to GitHub but could not commit or push cosign.pub: {exc}"
-            )
-            self.gum.warn(
-                "Rotation is half-complete — GitHub secrets and the repo's cosign.pub are out of sync. "
-                "Re-run 'Rotate signing key (cosign)' before pushing new commits."
-            )
-            return
+            try:
+                shutil.copy2(pub_path, repo_dir / "cosign.pub")
+                self.configure_temp_repo_git_identity(repo_dir)
+                run(["git", "add", "cosign.pub"], cwd=repo_dir)
+                run(["git", "commit", "-m", "Rotate cosign signing key"], cwd=repo_dir)
+                commit_sha = run(["git", "rev-parse", "--short", "HEAD"], cwd=repo_dir).stdout.strip()
+                run(["git", "push", "origin", "HEAD"], cwd=repo_dir, capture=False)
+            except (CommandError, OSError) as exc:
+                # GitHub already has the new secrets. Surface the split state so the
+                # user knows to re-run rotation instead of trusting a silent failure.
+                self.gum.error(
+                    f"Uploaded new signing secrets to GitHub but could not write, commit, or push cosign.pub: {exc}"
+                )
+                self.gum.warn(
+                    "Rotation is half-complete — GitHub secrets and the repo's cosign.pub are out of sync. "
+                    "Re-run 'Rotate signing key (cosign)' before pushing new commits."
+                )
+                return
         self.gum.success(f"Rotated cosign signing key in commit {commit_sha}. GitHub secrets were updated.")
         self.gum.warn("Pre-rotation signatures remain valid in the registry; re-pull or re-verify after rotation.")
         self.gum.enter_to_continue("Press Enter to return to the update menu...")
