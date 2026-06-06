@@ -1603,6 +1603,24 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("✗", rendered)
         self.assertIn("●", rendered)
 
+    def test_view_build_status_returns_to_menu_when_gh_run_list_fails(self) -> None:
+        # A transient gh/network failure should report and return to the menu,
+        # not raise CommandError out of the whole app.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / STATE_FILE).write_text(json.dumps(app.state_payload()) + "\n")
+            failure = subprocess.CompletedProcess(["gh", "run"], 1, "", "network error")
+            with patch("atomic_image_builder.Path.cwd", return_value=repo_dir):
+                with patch("atomic_image_builder.run", return_value=failure):
+                    app.view_build_status()
+
+        self.assertTrue(any(level == "error" for level, _message in stub.messages))
+        self.assertTrue(app.gum.prompts)
+
     def test_view_build_status_warns_when_not_in_repo(self) -> None:
         app = self.make_app()
         stub = GumStub()
@@ -1859,6 +1877,22 @@ class BuilderTests(unittest.TestCase):
                 branch = app.repo_default_branch("example", "test-image")
 
         self.assertEqual(branch, "stable")
+
+    def test_repo_default_branch_falls_back_to_rest_api_for_empty_repo_null_ref(self) -> None:
+        # A freshly created repo with no commits reports defaultBranchRef as
+        # null. The key is present with a None value, so this must not crash and
+        # should fall through to the REST default_branch lookup.
+        app = self.make_app()
+
+        def fake_run(args, **_kwargs):
+            self.assertEqual(args[:2], ["gh", "api"])
+            return subprocess.CompletedProcess(list(args), 0, '{"default_branch":"main"}', "")
+
+        with patch.object(app, "gh_json", return_value={"defaultBranchRef": None}):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                branch = app.repo_default_branch("example", "test-image")
+
+        self.assertEqual(branch, "main")
 
     def test_repo_default_branch_falls_back_to_rest_api_when_graphql_query_fails(self) -> None:
         app = self.make_app()
@@ -2408,6 +2442,21 @@ class BuilderTests(unittest.TestCase):
             app._split_image_ref("ghcr.io/ublue-os/bazzite"),
             ("ghcr.io/ublue-os/bazzite", "latest"),
         )
+
+    def test_split_image_ref_does_not_split_digest_pinned_ref(self) -> None:
+        # A digest ref has no tag; its colon belongs to the digest and must not
+        # be treated as the image-version separator.
+        app = self.make_app()
+        digest = "ghcr.io/ublue-os/bazzite@sha256:" + "a" * 64
+        self.assertEqual(app._split_image_ref(digest), (digest, "latest"))
+
+    def test_generate_recipe_keeps_digest_pinned_base_image_whole(self) -> None:
+        app = self.make_bluebuild_app()
+        digest = "ghcr.io/ublue-os/bazzite@sha256:" + "a" * 64
+        app.config.base_image_uri = digest
+        recipe = app.generate_recipe()
+        self.assertIn(f"base-image: {digest}", recipe)
+        self.assertIn('image-version: "latest"', recipe)
 
     def test_generate_recipe_basic(self) -> None:
         app = self.make_bluebuild_app()
