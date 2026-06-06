@@ -1746,7 +1746,7 @@ class BuilderTests(unittest.TestCase):
         workflow = app.generate_container_workflow(default_branch="master")
         self.assertIn("  pull_request:\n    branches:\n      - master", workflow)
         self.assertIn("  push:\n    branches:\n      - master", workflow)
-        self.assertIn("          cosign-release: 'v2.6.1'", workflow)
+        self.assertIn("          cosign-release: 'v2.6.3'", workflow)
 
     def test_select_repo_manual_entry_recovers_after_missing_repo(self) -> None:
         app = self.make_app()
