@@ -77,14 +77,14 @@ DNF5_MISSING_MARKERS = (
 # The human-readable tag is kept as a comment so maintainers can still tell what
 # upstream version the pin came from.
 ACTION_PINS: dict[str, tuple[str, str]] = {
-    "actions/checkout": ("de0fac2e4500dabe0009e67214ff5f5447ce83dd", "v6"),
+    "actions/checkout": ("df4cb1c069e1874edd31b4311f1884172cec0e10", "v6"),
     "ublue-os/remove-unwanted-software": ("cc0becac701cf642c8f0a6613bbdaf5dc36b259e", "v9"),
-    "docker/metadata-action": ("030e881283bb7a6894de51c315a6bfe6a94e05cf", "v6.0.0"),
+    "docker/metadata-action": ("80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9", "v6.1.0"),
     "redhat-actions/buildah-build": ("7a95fa7ee0f02d552a32753e7414641a04307056", "v2"),
-    "docker/login-action": ("b45d80f862d83dbcd57f89517bcf500b2ab88fb2", "v4.0.0"),
+    "docker/login-action": ("650006c6eb7dba73a995cc03b0b2d7f5ca915bee", "v4.2.0"),
     "redhat-actions/push-to-registry": ("5ed88d269cf581ea9ef6dd6806d01562096bee9c", "v2"),
     "sigstore/cosign-installer": ("cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003", "v4.1.1"),
-    "actions/upload-artifact": ("bbbca2ddaa5d8feaa63e36b76fdaad77386f024f", "v7.0.0"),
+    "actions/upload-artifact": ("043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "v7.0.1"),
     "blue-build/github-action": ("01902d3bbdcd2196dbd3830af6a5344884f0ef0a", "v1.11"),
 }
 ACTION_REF_PINS: dict[str, tuple[str, str]] = {
@@ -2312,7 +2312,11 @@ class App:
             data = self.gh_json(["repo", "view", f"{owner}/{repo}", "--json", "defaultBranchRef"])
         except (CommandError, json.JSONDecodeError):
             data = None
-        branch = data.get("defaultBranchRef", {}).get("name") if isinstance(data, dict) else None
+        # A brand-new empty repo (no commits yet) reports defaultBranchRef as
+        # null, so the key is present but the value is None. Coerce that to {}
+        # before .get() or this crashes instead of falling through to the REST
+        # default_branch lookup below.
+        branch = (data.get("defaultBranchRef") or {}).get("name") if isinstance(data, dict) else None
         if branch:
             return branch
         proc = run(["gh", "api", f"/repos/{owner}/{repo}"], check=False)
@@ -2806,7 +2810,14 @@ class App:
             self.gum.warn(f"Run this from a configured repo that contains `{STATE_FILE}`.")
             return
         fields = "databaseId,displayTitle,status,conclusion,createdAt,updatedAt,url,workflowName"
-        proc = run(["gh", "run", "list", "-R", f"{owner}/{repo}", "--limit", "5", "--json", fields])
+        # Use check=False so a transient gh/network failure returns the user to
+        # the main menu instead of raising CommandError out of the whole app.
+        proc = run(["gh", "run", "list", "-R", f"{owner}/{repo}", "--limit", "5", "--json", fields], check=False)
+        if proc.returncode != 0:
+            self.gum.error("Unable to load GitHub Actions run data right now.")
+            self.gum.hint("Check your network and gh login, then try again.")
+            self.gum.enter_to_continue("Press Enter to return to the main menu...")
+            return
         try:
             runs = json.loads(proc.stdout or "[]")
         except json.JSONDecodeError:
@@ -3559,6 +3570,11 @@ class App:
     def _split_image_ref(self, uri: str) -> tuple[str, str]:
         # BlueBuild recipes separate "base-image" and "image-version" so we need
         # to split a combined URI like "ghcr.io/ublue-os/bazzite:stable".
+        # A digest-pinned ref ("...@sha256:...") has no tag and its colon belongs
+        # to the digest, so never split on it or the recipe gets a bogus
+        # image-version.
+        if "@" in uri:
+            return uri, "latest"
         if ":" in uri:
             base, tag = uri.rsplit(":", 1)
             return base, tag
@@ -3907,7 +3923,7 @@ class App:
                     f"        uses: {pinned_action('sigstore/cosign-installer')}",
                     f"        if: {sign_if}",
                     "        with:",
-                    "          cosign-release: 'v2.6.1'",
+                    "          cosign-release: 'v2.6.3'",
                     "",
                     "      - name: Sign container image",
                     f"        if: {sign_if}",
