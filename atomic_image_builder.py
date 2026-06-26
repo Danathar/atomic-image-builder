@@ -77,7 +77,7 @@ DNF5_MISSING_MARKERS = (
 # The human-readable tag is kept as a comment so maintainers can still tell what
 # upstream version the pin came from.
 ACTION_PINS: dict[str, tuple[str, str]] = {
-    "actions/checkout": ("df4cb1c069e1874edd31b4311f1884172cec0e10", "v6"),
+    "actions/checkout": ("9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0", "v7"),
     "ublue-os/remove-unwanted-software": ("cc0becac701cf642c8f0a6613bbdaf5dc36b259e", "v9"),
     "docker/metadata-action": ("80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9", "v6.1.0"),
     "redhat-actions/buildah-build": ("7a95fa7ee0f02d552a32753e7414641a04307056", "v2"),
