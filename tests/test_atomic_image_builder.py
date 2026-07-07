@@ -1286,10 +1286,11 @@ class BuilderTests(unittest.TestCase):
                 return subprocess.CompletedProcess(list(args), 0, "", "")
             return subprocess.CompletedProcess(list(args), 0, "", "")
 
-        with patch("atomic_image_builder.run", side_effect=fake_run):
-            with patch.object(app, "ensure_signing_ready", side_effect=CommandError("signing failed")):
-                with self.assertRaisesRegex(CommandError, "signing failed"):
-                    app.do_build()
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with patch.object(app, "ensure_signing_ready", side_effect=CommandError("signing failed")):
+                    with self.assertRaisesRegex(CommandError, "signing failed"):
+                        app.do_build()
         self.assertIn(["gh", "repo", "delete", "example/test-image", "--yes"], run_calls)
 
     def test_do_build_sets_local_git_identity_before_initial_commit(self) -> None:
@@ -1307,12 +1308,13 @@ class BuilderTests(unittest.TestCase):
                 return subprocess.CompletedProcess(list(args), 1, "", "")
             return subprocess.CompletedProcess(list(args), 0, "", "")
 
-        with patch("atomic_image_builder.run", side_effect=fake_run):
-            with patch.object(app, "ensure_signing_ready", return_value=True):
-                with patch.object(app, "repo_default_branch", return_value="main"):
-                    with patch.object(app, "seed_project_template", return_value=None):
-                        with patch.object(app, "write_project_files", return_value=None):
-                            self.assertTrue(app.do_build())
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with patch.object(app, "ensure_signing_ready", return_value=True):
+                    with patch.object(app, "repo_default_branch", return_value="main"):
+                        with patch.object(app, "seed_project_template", return_value=None):
+                            with patch.object(app, "write_project_files", return_value=None):
+                                self.assertTrue(app.do_build())
 
         self.assertIn(["git", "config", "user.name", "example"], run_calls)
         self.assertIn(["git", "config", "user.email", "example@users.noreply.github.com"], run_calls)
@@ -1330,12 +1332,13 @@ class BuilderTests(unittest.TestCase):
                 return subprocess.CompletedProcess(list(args), 1, "", "")
             return subprocess.CompletedProcess(list(args), 0, "", "")
 
-        with patch("atomic_image_builder.run", side_effect=fake_run):
-            with patch.object(app, "ensure_signing_ready", return_value=True):
-                with patch.object(app, "repo_default_branch", return_value="main"):
-                    with patch.object(app, "seed_project_template", return_value=None):
-                        with patch.object(app, "write_project_files", return_value=None):
-                            self.assertTrue(app.do_build())
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with patch.object(app, "ensure_signing_ready", return_value=True):
+                    with patch.object(app, "repo_default_branch", return_value="main"):
+                        with patch.object(app, "seed_project_template", return_value=None):
+                            with patch.object(app, "write_project_files", return_value=None):
+                                self.assertTrue(app.do_build())
 
         self.assertIn(("warn", MANAGED_REPO_WARNING), app.gum.messages)
 
@@ -1355,12 +1358,13 @@ class BuilderTests(unittest.TestCase):
 
         output = io.StringIO()
         with redirect_stdout(output):
-            with patch("atomic_image_builder.run", side_effect=fake_run):
-                with patch.object(app, "ensure_signing_ready", return_value=True):
-                    with patch.object(app, "repo_default_branch", return_value="main"):
-                        with patch.object(app, "seed_project_template", return_value=None):
-                            with patch.object(app, "write_project_files", return_value=None):
-                                self.assertTrue(app.do_build())
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    with patch.object(app, "ensure_signing_ready", return_value=True):
+                        with patch.object(app, "repo_default_branch", return_value="main"):
+                            with patch.object(app, "seed_project_template", return_value=None):
+                                with patch.object(app, "write_project_files", return_value=None):
+                                    self.assertTrue(app.do_build())
 
         self.assertIn("Scheduled rebuilds also run daily at about", output.getvalue())
         self.assertIn("sudo rpm-ostree reset", output.getvalue())
@@ -1379,12 +1383,13 @@ class BuilderTests(unittest.TestCase):
 
         output = io.StringIO()
         with redirect_stdout(output):
-            with patch("atomic_image_builder.run", side_effect=fake_run):
-                with patch.object(app, "ensure_signing_ready", return_value=True):
-                    with patch.object(app, "repo_default_branch", return_value="main"):
-                        with patch.object(app, "seed_project_template", return_value=None):
-                            with patch.object(app, "write_project_files", return_value=None):
-                                self.assertTrue(app.do_build())
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    with patch.object(app, "ensure_signing_ready", return_value=True):
+                        with patch.object(app, "repo_default_branch", return_value="main"):
+                            with patch.object(app, "seed_project_template", return_value=None):
+                                with patch.object(app, "write_project_files", return_value=None):
+                                    self.assertTrue(app.do_build())
 
         self.assertIn("Scheduled rebuilds also run daily at about", output.getvalue())
         self.assertNotIn("sudo rpm-ostree reset", output.getvalue())
@@ -1403,12 +1408,13 @@ class BuilderTests(unittest.TestCase):
 
         output = io.StringIO()
         with redirect_stdout(output):
-            with patch("atomic_image_builder.run", side_effect=fake_run):
-                with patch.object(app, "ensure_signing_ready", return_value=True):
-                    with patch.object(app, "repo_default_branch", return_value="main"):
-                        with patch.object(app, "seed_project_template", return_value=None):
-                            with patch.object(app, "write_project_files", return_value=None):
-                                self.assertTrue(app.do_build())
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    with patch.object(app, "ensure_signing_ready", return_value=True):
+                        with patch.object(app, "repo_default_branch", return_value="main"):
+                            with patch.object(app, "seed_project_template", return_value=None):
+                                with patch.object(app, "write_project_files", return_value=None):
+                                    self.assertTrue(app.do_build())
 
         rendered = output.getvalue()
         self.assertIn("ghcr.io/exampleuser/test-image:latest", rendered)
@@ -1433,10 +1439,11 @@ class BuilderTests(unittest.TestCase):
                 )
             return subprocess.CompletedProcess(list(args), 0, "", "")
 
-        with patch("atomic_image_builder.run", side_effect=fake_run):
-            with patch.object(app, "ensure_signing_ready", side_effect=CommandError("signing failed")):
-                with self.assertRaisesRegex(CommandError, "signing failed"):
-                    app.do_build()
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with patch.object(app, "ensure_signing_ready", side_effect=CommandError("signing failed")):
+                    with self.assertRaisesRegex(CommandError, "signing failed"):
+                        app.do_build()
 
         self.assertTrue(any("delete_repo scope" in message for level, message in app.gum.messages if level == "hint"))
 
@@ -1457,10 +1464,11 @@ class BuilderTests(unittest.TestCase):
                 return subprocess.CompletedProcess(list(args), 0, "", "")
             return subprocess.CompletedProcess(list(args), 0, "", "")
 
-        with patch("atomic_image_builder.run", side_effect=fake_run):
-            with patch.object(app, "ensure_signing_ready", side_effect=KeyboardInterrupt()):
-                with self.assertRaises(KeyboardInterrupt):
-                    app.do_build()
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with patch.object(app, "ensure_signing_ready", side_effect=KeyboardInterrupt()):
+                    with self.assertRaises(KeyboardInterrupt):
+                        app.do_build()
 
         self.assertIn(["gh", "repo", "delete", "example/test-image", "--yes"], run_calls)
         self.assertTrue(any("Removing the empty repo" in message for level, message in app.gum.messages if level == "warn"))
