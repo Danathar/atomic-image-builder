@@ -2705,6 +2705,17 @@ class App:
         return True
 
     def test_build_locally(self) -> None:
+        if os.environ.get("AIB_DISABLE_LOCAL_BUILD"):
+            # Set by the container image: podman is present there only as a
+            # transitive dependency of rpm-ostree, so an in-container build
+            # would be a nested build that is not supported and fails. Degrade
+            # cleanly here instead. See maintenance_notes.txt.
+            self.gum.warn("Local test builds are not available in this environment.")
+            self.gum.hint("Run the tool from a local clone to test-build images with Podman.")
+            # Pause so the message is read before the caller's menu redraws
+            # over it (the caller clears the screen on its next iteration).
+            self.gum.enter_to_continue("Press Enter to return to the menu...")
+            return
         if self.config.method != "containerfile":
             self.gum.hint("Local test build is Containerfile-only for now.")
             return

@@ -18,11 +18,11 @@ LABEL org.opencontainers.image.source="https://github.com/Danathar/atomic-image-
 #
 # Note: rpm-ostree is a hard startup requirement of the tool, and it pulls in
 # bootc, which hard-requires podman. So podman ends up in this image even
-# though we do not install it directly. A consequence is that the tool's
-# "Test build locally (podman)" option sees podman present and *attempts* a
-# nested build instead of degrading with its "podman is required" message;
-# that nested build is not supported here and fails. Local test builds are a
-# clone-and-run / distrobox feature — see the limitations table in README.md.
+# though we do not install it directly. Because podman is present, the tool
+# would otherwise *attempt* a nested "Test build locally" build (unsupported
+# here, and it fails) instead of degrading. We set AIB_DISABLE_LOCAL_BUILD
+# below so that option shows a clean "not available" message instead. Local
+# test builds remain a clone-and-run feature — see the README limitations.
 RUN dnf5 -y install dnf5-plugins curl && \
     dnf5 config-manager addrepo --from-repofile=https://cli.github.com/packages/rpm/gh-cli.repo && \
     printf '[charm]\nname=Charm\nbaseurl=https://repo.charm.sh/yum/\nenabled=1\ngpgcheck=1\ngpgkey=https://repo.charm.sh/yum/gpg.key\n' > /etc/yum.repos.d/charm.repo && \
@@ -55,9 +55,14 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 # This image runs as root (the base image default; no USER switch here).
 # Under rootless podman — the intended way to run this image — the
 # container's root maps to the invoking host user via user namespaces, so
-# files the tool creates (git clones, local test build output, etc.) end up
-# owned by the host user rather than a privileged root outside the
-# container. Do not add a non-root USER here without re-verifying that
-# rootless-podman UID mapping still holds end-to-end.
+# files the tool creates (e.g. git clones) end up owned by the host user
+# rather than a privileged root outside the container. Do not add a non-root
+# USER here without re-verifying that rootless-podman UID mapping still holds
+# end-to-end.
+
+# Make the tool's "Test build locally (podman)" option degrade with a clean
+# message instead of attempting an unsupported nested build (see the note by
+# the package install above, and maintenance_notes.txt).
+ENV AIB_DISABLE_LOCAL_BUILD=1
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

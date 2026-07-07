@@ -100,13 +100,15 @@ class GumStub:
 
 class BuilderTests(unittest.TestCase):
     def setUp(self) -> None:
-        # scan_os() consults AIB_RPM_OSTREE_STATUS_FILE. Keep the live-path
-        # scan tests hermetic by ensuring an ambient value from the runner
-        # environment (e.g. running the suite inside the container wrapper)
-        # cannot silently divert them onto the override path.
+        # The tool consults a couple of env vars the container distribution
+        # sets (AIB_RPM_OSTREE_STATUS_FILE, AIB_DISABLE_LOCAL_BUILD). Keep the
+        # tests that exercise the normal paths hermetic by ensuring ambient
+        # values from the runner environment (e.g. running the suite inside
+        # the container) cannot silently divert them.
         patcher = patch.dict("os.environ", {}, clear=False)
         patcher.start()
         os.environ.pop("AIB_RPM_OSTREE_STATUS_FILE", None)
+        os.environ.pop("AIB_DISABLE_LOCAL_BUILD", None)
         self.addCleanup(patcher.stop)
 
     def make_app(self) -> App:
@@ -2071,6 +2073,21 @@ class BuilderTests(unittest.TestCase):
 
         self.assertTrue(any(level == "warn" and "podman" in message.lower() for level, message in stub.messages))
         run_mock.assert_not_called()
+
+    def test_test_build_locally_degrades_cleanly_when_disabled_by_env(self) -> None:
+        app = self.make_app()
+        app.config.method = "containerfile"
+        stub = GumStub()
+        app.gum = stub
+        # AIB_DISABLE_LOCAL_BUILD short-circuits before anything is rendered or
+        # built, even with podman present (as it is in the container image).
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch.object(app, "seed_project_template") as seed_mock:
+                with patch.dict("os.environ", {"AIB_DISABLE_LOCAL_BUILD": "1"}):
+                    app.test_build_locally()
+
+        seed_mock.assert_not_called()
+        self.assertTrue(any(level == "warn" and "not available" in message for level, message in stub.messages))
 
     def test_test_build_locally_runs_podman_on_rendered_tree(self) -> None:
         app = self.make_app()

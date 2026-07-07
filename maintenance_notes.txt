@@ -88,6 +88,23 @@ container, and points this variable at the in-container path. This variable is
 not documented in the beginner-facing README; it is an integration detail of the
 container distribution, not a user-facing setting.
 
+Local Build Disable: AIB_DISABLE_LOCAL_BUILD
+--------------------------------------------
+When AIB_DISABLE_LOCAL_BUILD is set (to any non-empty value), the "Test build
+locally (podman)" option in test_build_locally() short-circuits with a clean
+"not available in this environment" message instead of rendering the project
+and invoking podman.
+
+The container image (Containerfile) sets this. Inside the image, podman is
+present only as a transitive dependency of rpm-ostree (rpm-ostree -> bootc ->
+podman), so command_exists("podman") is true and the tool would otherwise
+attempt a nested build, which is not supported in the container and fails.
+The env var makes it degrade cleanly instead. Like AIB_RPM_OSTREE_STATUS_FILE,
+this is an integration detail of the container distribution, not a
+user-facing setting, and is deliberately not documented in the README as a
+knob (its effect is described there as a limitation of running in a
+container).
+
 Rechunk Step Naming (Chunkah)
 -----------------------------
 patch_container_rechunk_step() swaps the bundled workflow's rpm-ostree rechunk
