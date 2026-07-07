@@ -35,6 +35,7 @@ from atomic_image_builder import (
     ScreenBack,
     config_from_state_payload,
     determine_fedora_atomic_default_tag,
+    ensure_trailing_newline,
     format_daily_rebuild_note,
     normalize_container_image_reference,
 )
@@ -353,6 +354,75 @@ class BuilderTests(unittest.TestCase):
         app = self.make_app()
         result = app.patch_container_workflow(input_path.read_text(), default_branch="main")
         self.assertEqual(result, expected_path.read_text())
+
+    def test_patch_container_workflow_matches_current_upstream_snapshot_shape(self) -> None:
+        # Coverage for the "rewrite in just" upstream refresh (image-template @
+        # f9a9e4f8): the current build.yml has no job-level env: block and no
+        # IMAGE_DESC: line (description now flows through
+        # patch_image_template_env instead), so this exercises the from-scratch
+        # env-block insertion and behavior-based signing-step detection against
+        # the real, current bundled snapshot rather than a synthetic fixture.
+        app = self.make_app()
+        snapshot_path = CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml"
+        result = app.patch_container_workflow(snapshot_path.read_text(), default_branch="master")
+
+        self.assertIn(f"- cron: '{DEFAULT_GITHUB_BUILD_CRON}'", result)
+        self.assertIn(
+            "    paths-ignore:\n      - '.atomic-image-builder.json'\n      - '**/README.md'\n",
+            result,
+        )
+        self.assertIn("  pull_request:\n    branches:\n      - master", result)
+        self.assertIn("  push:\n    branches:\n      - master", result)
+
+        self.assertEqual(
+            result.count("&& env.COSIGN_PRIVATE_KEY != ''"),
+            2,
+            "expected both the cosign-installer and cosign-sign steps to gain the guard",
+        )
+        self.assertIn(
+            "    env:\n      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}\n"
+            "      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}\n    steps:\n",
+            result,
+        )
+
+        self.assertIn(f"actions/checkout@{ACTION_PINS['actions/checkout'][0]}", result)
+        self.assertIn(f"docker/login-action@{ACTION_PINS['docker/login-action'][0]}", result)
+        self.assertIn(f"sigstore/cosign-installer@{ACTION_PINS['sigstore/cosign-installer'][0]}", result)
+        self.assertIn(f"extractions/setup-just@{ACTION_PINS['extractions/setup-just'][0]}", result)
+
+        # No IMAGE_DESC: env line exists in this shape; the legacy line-rewrite
+        # correctly finds nothing to match, since the description is instead
+        # wired in via patch_image_template_env.
+        self.assertNotIn("IMAGE_DESC:", result)
+
+        # Chunkah is enabled by default over the rpm-ostree rechunker, and the
+        # commented-out Chunkah alternative block in the snapshot is untouched.
+        self.assertIn("- name: Rechunk with Chunkah", result)
+        self.assertIn("command -v just) rechunk", result)
+        self.assertNotIn("- name: Rechunk with rpm-ostree", result)
+        self.assertNotIn("command -v just) ostree-rechunk", result)
+        self.assertIn("#- name: Rechunk with Chunkah", result)
+
+    def test_patch_container_rechunk_step_is_idempotent(self) -> None:
+        app = self.make_app()
+        snapshot_text = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        once = app.patch_container_rechunk_step(snapshot_text)
+        twice = app.patch_container_rechunk_step(once)
+        self.assertEqual(once, twice)
+
+    def test_patch_container_rechunk_step_no_ops_without_rechunk_step(self) -> None:
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build_push:
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v7
+            """
+        )
+        result = app.patch_container_rechunk_step(workflow)
+        self.assertEqual(result, ensure_trailing_newline(workflow))
 
     def test_patch_workflow_branch_filters_adds_missing_branches_blocks(self) -> None:
         app = self.make_app()
@@ -1055,6 +1125,36 @@ class BuilderTests(unittest.TestCase):
             for path in created_paths:
                 Path(path).unlink(missing_ok=True)
 
+    def test_gum_require_spinner_success_raises_keyboard_interrupt_on_ctrl_c(self) -> None:
+        gum = Gum()
+        proc = subprocess.CompletedProcess(["gum", "spin"], 130, "", "")
+        with self.assertRaises(KeyboardInterrupt):
+            gum.require_spinner_success(proc, ["gum", "spin"])
+
+    def test_gum_require_spinner_success_raises_command_error_on_other_failure(self) -> None:
+        gum = Gum()
+        proc = subprocess.CompletedProcess(["gum", "spin"], 1, "", "")
+        with self.assertRaisesRegex(CommandError, "gum spin"):
+            gum.require_spinner_success(proc, ["gum", "spin", "--title", "x"])
+
+    def test_gum_spinner_raises_keyboard_interrupt_on_ctrl_c(self) -> None:
+        gum = Gum()
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gum", "spin"], 130, "", "")):
+            with self.assertRaises(KeyboardInterrupt):
+                gum.spinner("Working...", ["true"])
+
+    def test_gum_spinner_capture_raises_command_error_when_gum_fails(self) -> None:
+        gum = Gum()
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gum", "spin"], 1, "", "")):
+            with self.assertRaises(CommandError):
+                gum.spinner_capture("Working...", ["true"])
+
+    def test_gum_spinner_result_raises_keyboard_interrupt_when_gum_itself_is_interrupted(self) -> None:
+        gum = Gum()
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gum", "spin"], 130, "", "")):
+            with self.assertRaises(KeyboardInterrupt):
+                gum.spinner_result("Working...", ["true"])
+
     def test_search_packages_can_remove_previously_selected_match(self) -> None:
         app = self.make_app()
         app.config.packages = ["fish"]
@@ -1126,6 +1226,15 @@ class BuilderTests(unittest.TestCase):
             app.manual_packages()
         self.assertEqual(app.config.packages, [])
         self.assertEqual(app.gum.prompts, ["No packages were added. Press Enter to return to the package menu..."])
+
+    def test_manual_packages_accepts_comma_separated_entry(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.write = lambda **_kwargs: "tmux,htop, vim"
+        app.gum = stub
+        with patch.object(app, "lookup_host_package", return_value=True):
+            app.manual_packages()
+        self.assertEqual(app.config.packages, ["tmux", "htop", "vim"])
 
     def test_select_common_services_replaces_curated_selection_only(self) -> None:
         app = self.make_app()
@@ -1512,6 +1621,45 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(seen["repo_name"], "")
         self.assertEqual(seen["github_user"], "example")
 
+    def test_create_new_image_recovers_from_do_build_command_error(self) -> None:
+        # A CommandError from do_build() (e.g. a failed signing-secret upload)
+        # must return to the review screen with wizard state intact, not take
+        # the whole app down.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        review_actions = iter(["build", "cancel"])
+
+        def fake_configure_repo(**_kwargs):
+            app.config.repo_name = "sentinel-repo"
+
+        with patch.object(app, "choose_method", return_value=None):
+            with patch.object(app, "choose_base_image", return_value=None):
+                with patch.object(app, "configure_repo", side_effect=fake_configure_repo):
+                    with patch.object(app, "select_packages", return_value=None):
+                        with patch.object(app, "review_new_image", side_effect=lambda **_kwargs: next(review_actions)):
+                            with patch.object(app, "do_build", side_effect=CommandError("build boom")):
+                                app.create_new_image()
+
+        self.assertIn(("error", "build boom"), stub.messages)
+        self.assertTrue(stub.prompts)
+        self.assertEqual(app.config.repo_name, "sentinel-repo")
+
+    def test_main_menu_recovers_from_command_error(self) -> None:
+        # A CommandError raised by any dispatched action must be reported and
+        # return to the main menu instead of propagating out of the app.
+        app = self.make_app()
+        stub = GumStub()
+        choices = ["Create New Image", "Quit"]
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "create_new_image", side_effect=CommandError("menu boom")):
+            with self.assertRaises(SystemExit):
+                app.main_menu()
+
+        self.assertIn(("error", "menu boom"), stub.messages)
+        self.assertTrue(stub.prompts)
+
     def test_scan_os_resets_stale_config_before_loading_host_state(self) -> None:
         app = self.make_app()
         app.github_user = "example"
@@ -1776,17 +1924,35 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(any(level == "error" for level, _message in stub.messages))
         self.assertTrue(app.gum.prompts)
 
-    def test_view_build_status_warns_when_not_in_repo(self) -> None:
+    def test_view_build_status_falls_back_to_repo_picker_when_not_in_repo(self) -> None:
+        # Most sessions never have a local clone of a managed repo, so this
+        # falls back to the same picker "Update Existing Image" uses instead
+        # of only working when run from inside a clone.
         app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
         stub = GumStub()
         app.gum = stub
         with tempfile.TemporaryDirectory() as tmp:
             with patch("atomic_image_builder.Path.cwd", return_value=Path(tmp)):
-                with patch("atomic_image_builder.run") as run_mock:
-                    app.view_build_status()
+                with patch.object(app, "select_repo", return_value=("example", "test-image")) as select_mock:
+                    with patch.object(app, "render_build_status") as render_mock:
+                        app.view_build_status()
+        select_mock.assert_called_once_with(require_state_file=True)
+        render_mock.assert_called_once_with("example", "test-image")
 
-        self.assertTrue(any(level == "warn" and "configured repo" in message for level, message in stub.messages))
-        run_mock.assert_not_called()
+    def test_view_build_status_returns_when_repo_picker_is_cancelled(self) -> None:
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        stub = GumStub()
+        app.gum = stub
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("atomic_image_builder.Path.cwd", return_value=Path(tmp)):
+                with patch.object(app, "select_repo", side_effect=ScreenBack):
+                    with patch.object(app, "render_build_status") as render_mock:
+                        app.view_build_status()
+        render_mock.assert_not_called()
 
     def test_test_build_locally_warns_when_podman_missing(self) -> None:
         app = self.make_app()
@@ -2298,6 +2464,16 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("dnf5 clean all", build_sh)
         self.assertNotIn("copr", build_sh)
 
+    def test_generate_build_sh_guards_system_files_copy(self) -> None:
+        # Newer upstream Containerfile snapshots stage a system_files/ overlay
+        # into the ctx build stage; older snapshots and from-scratch
+        # Containerfiles never COPY it there, so the copy must stay guarded.
+        app = self.make_app()
+        build_sh = app.generate_build_sh()
+        self.assertIn("if [ -d /ctx/system_files ]; then", build_sh)
+        self.assertIn("cp -avf /ctx/system_files/. /", build_sh)
+        self.assertIn("fi", build_sh)
+
 
     def test_generate_container_workflow_includes_template_tag_variants(self) -> None:
         app = self.make_app()
@@ -2513,6 +2689,23 @@ class BuilderTests(unittest.TestCase):
         app = self.make_app()
         app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
         self.assertFalse(app.is_universal_blue_base())
+
+    def test_offer_brew_if_applicable_confirm_defaults_to_current_brew_state(self) -> None:
+        # GumStub.confirm() returns whatever default it is passed, so this
+        # simulates a user pressing Enter to accept the default. Before the
+        # fix, the default was hardcoded to False, so accepting it on a repo
+        # that already had brew enabled would silently disable it.
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.gum = GumStub()
+
+        app.config.brew_enabled = True
+        app.offer_brew_if_applicable()
+        self.assertTrue(app.config.brew_enabled)
+
+        app.config.brew_enabled = False
+        app.offer_brew_if_applicable()
+        self.assertFalse(app.config.brew_enabled)
 
     def test_software_status_includes_brew_when_enabled(self) -> None:
         app = self.make_app()
@@ -2747,6 +2940,49 @@ class BuilderTests(unittest.TestCase):
             patched,
         )
         self.assertIn("          build_opts: ${{ github.event_name == 'pull_request' && '--no-sign' || '' }}", patched)
+        self.assertIn("          chunkah: 'true'", patched)
+
+    def test_patch_bluebuild_action_inputs_is_idempotent_for_chunkah(self) -> None:
+        app = self.make_bluebuild_app()
+        template = textwrap.dedent(
+            """\
+            jobs:
+              bluebuild:
+                steps:
+                  - name: Build Custom Image
+                    uses: blue-build/github-action@v1.12
+                    with:
+                      recipe: ${{ matrix.recipe }}
+            """
+        )
+        once = app.patch_bluebuild_action_inputs(template)
+        twice = app.patch_bluebuild_action_inputs(once)
+        self.assertEqual(once, twice)
+        self.assertEqual(once.count("chunkah:"), 1)
+
+    def test_patch_bluebuild_action_inputs_removes_conflicting_rechunk_inputs(self) -> None:
+        # rechunk/build_chunked_oci conflict with chunkah in the action's own
+        # input validation, so a hand-edited or previously-generated workflow
+        # that already sets one must have it removed when chunkah is added.
+        app = self.make_bluebuild_app()
+        template = textwrap.dedent(
+            """\
+            jobs:
+              bluebuild:
+                steps:
+                  - name: Build Custom Image
+                    uses: blue-build/github-action@v1.12
+                    with:
+                      recipe: ${{ matrix.recipe }}
+                      rechunk: true
+                      build_chunked_oci: true
+            """
+        )
+        result = app.patch_bluebuild_action_inputs(template)
+        self.assertNotIn("rechunk: true", result)
+        self.assertNotIn("build_chunked_oci: true", result)
+        self.assertIn("chunkah: 'true'", result)
+        self.assertEqual(result.count("chunkah:"), 1)
 
     def test_clone_bluebuild_template_copies_snapshot(self) -> None:
         app = self.make_bluebuild_app()
@@ -2944,6 +3180,16 @@ class BuilderTests(unittest.TestCase):
             app.manage_removed_packages()
         self.assertIn("vim-enhanced", app.config.removed_packages)
 
+    def test_manage_removed_packages_add_flow_accepts_comma_separated_entry(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Add package names to remove"]
+        stub.write = lambda **_kwargs: "vim-enhanced,nano"
+        app.gum = stub
+        with patch.object(app, "lookup_host_package", return_value=True):
+            app.manage_removed_packages()
+        self.assertEqual(app.config.removed_packages, ["vim-enhanced", "nano"])
+
     def test_manage_removed_packages_remove_flow(self) -> None:
         """Choosing 'Stop removing listed packages' lets the user deselect
         previously listed removals."""
@@ -3000,6 +3246,22 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.config.services, ["sshd.service"])
 
     # ── manage_copr_repos update flow ──────────────────────────────────
+
+    def test_add_copr_accepts_comma_separated_packages(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+
+        def fake_input(*, prompt, **_kwargs):
+            if prompt == "COPR repo: ":
+                return "kwizart/fedy"
+            return "tmux,htop"
+
+        stub.input = fake_input
+        app.gum = stub
+        with patch.object(app, "lookup_host_package", return_value=True):
+            app.add_copr()
+        self.assertEqual(app.config.copr_repos, ["kwizart/fedy"])
+        self.assertEqual(app.config.packages, ["tmux", "htop"])
 
     def test_manage_copr_repos_add_delegates_to_add_copr(self) -> None:
         app = self.make_app()
@@ -3269,35 +3531,144 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(found, {"repo-a"})
         rest_mock.assert_called_once()
 
-    # ── generate_justfile output validation ────────────────────────────
+    # ── Justfile / image-template.env restore-from-snapshot ─────────────
 
-    def test_generate_justfile_contains_repo_name(self) -> None:
+    def test_patch_container_justfile_no_ops_on_new_upstream_justfile_syntax(self) -> None:
+        # The current bundled Justfile sources image name via image-template.env
+        # (env_var(...), no inline default) rather than the older env("IMAGE_NAME",
+        # "default") form patch_container_justfile targets. It must silently
+        # leave this shape untouched; patch_image_template_env is what wires the
+        # repo name into the newer template instead.
         app = self.make_app()
-        justfile = app.generate_justfile()
+        existing = (CONTAINERFILE_TEMPLATE_DIR / "Justfile").read_text()
+        result = app.patch_container_justfile(existing)
+        self.assertEqual(result, ensure_trailing_newline(existing))
+        self.assertIn('export image_name := env_var("IMAGE_NAME")', result)
+
+    def test_write_project_files_restores_missing_justfile_and_env_from_snapshot(self) -> None:
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            (repo_dir / "Justfile").unlink()
+            (repo_dir / "image-template.env").unlink()
+            app.write_project_files(repo_dir, include_workflow=True)
+            justfile = (repo_dir / "Justfile").read_text()
+            env_text = (repo_dir / "image-template.env").read_text()
+        template_justfile = ensure_trailing_newline((CONTAINERFILE_TEMPLATE_DIR / "Justfile").read_text())
+        self.assertEqual(justfile, template_justfile)
+        self.assertIn("IMAGE_NAME=test-image", env_text)
+        self.assertIn('REPO_ORGANIZATION="example"', env_text)
+        self.assertIn('IMAGE_DESC="Test image"', env_text)
+
+    def test_write_project_files_patches_env_without_restoring_existing_justfile(self) -> None:
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            justfile_before = (repo_dir / "Justfile").read_text()
+            app.write_project_files(repo_dir, include_workflow=True)
+            justfile_after = (repo_dir / "Justfile").read_text()
+            env_text = (repo_dir / "image-template.env").read_text()
+        self.assertEqual(justfile_after, ensure_trailing_newline(justfile_before))
+        self.assertIn("IMAGE_NAME=test-image", env_text)
+
+    def test_write_project_files_does_not_add_env_file_to_old_shape_repos(self) -> None:
+        # Repos generated from the older template have a Justfile that never
+        # dotenv-loads image-template.env; updating them must not introduce an
+        # inert copy of that file.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            (repo_dir / "image-template.env").unlink()
+            (repo_dir / "Justfile").write_text(
+                'export image_name := env("IMAGE_NAME", "old-name")\n'
+                'export default_tag := env("DEFAULT_TAG", "latest")\n'
+                "\n"
+                "build:\n"
+                "    podman build .\n"
+            )
+            app.write_project_files(repo_dir, include_workflow=True)
+            env_exists = (repo_dir / "image-template.env").exists()
+            justfile = (repo_dir / "Justfile").read_text()
+        self.assertFalse(env_exists)
         self.assertIn('image_name := env("IMAGE_NAME", "test-image")', justfile)
 
-    def test_generate_justfile_contains_build_target(self) -> None:
+    def test_write_project_files_restores_missing_env_file_when_justfile_is_present(self) -> None:
+        # image-template.env can go missing on its own (e.g. a partial manual
+        # edit) while the Justfile stays intact; it must be restored
+        # independently of whether the Justfile itself needed restoring.
         app = self.make_app()
-        justfile = app.generate_justfile()
-        self.assertIn("build $target_image=image_name $tag=default_tag:", justfile)
-        self.assertIn("podman build", justfile)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            justfile_before = (repo_dir / "Justfile").read_text()
+            (repo_dir / "image-template.env").unlink()
+            app.write_project_files(repo_dir, include_workflow=True)
+            justfile_after = (repo_dir / "Justfile").read_text()
+            env_text = (repo_dir / "image-template.env").read_text()
+        self.assertEqual(justfile_after, ensure_trailing_newline(justfile_before))
+        self.assertIn("IMAGE_NAME=test-image", env_text)
+        self.assertIn('REPO_ORGANIZATION="example"', env_text)
+        self.assertIn('IMAGE_DESC="Test image"', env_text)
 
-    def test_generate_justfile_contains_default_recipe(self) -> None:
-        app = self.make_app()
-        justfile = app.generate_justfile()
-        self.assertIn("[private]", justfile)
-        self.assertIn("default:", justfile)
-        self.assertIn("@just --list", justfile)
+    # ── patch_image_template_env unit tests ──────────────────────────────
 
-    def test_generate_justfile_has_trailing_newline(self) -> None:
+    def test_patch_image_template_env_updates_owned_fields(self) -> None:
         app = self.make_app()
-        justfile = app.generate_justfile()
-        self.assertTrue(justfile.endswith("\n"))
+        app.config.repo_name = "my-custom-image"
+        app.config.github_user = "octocat"
+        app.config.image_desc = "My totally custom image"
+        existing = textwrap.dedent("""\
+            IMAGE_NAME=image-template
+            REPO_ORGANIZATION="alice-and-bob"
+            IMAGE_DESC="My Customized Bootc Image"
+            IMAGE_KEYWORDS="bootc,oci,linux"
+        """)
+        result = app.patch_image_template_env(existing)
+        self.assertIn("IMAGE_NAME=my-custom-image", result)
+        self.assertIn('REPO_ORGANIZATION="octocat"', result)
+        self.assertIn('IMAGE_DESC="My totally custom image"', result)
+        self.assertIn('IMAGE_KEYWORDS="bootc,oci,linux"', result)
 
-    def test_generate_justfile_has_default_tag(self) -> None:
+    def test_patch_image_template_env_preserves_other_lines(self) -> None:
         app = self.make_app()
-        justfile = app.generate_justfile()
-        self.assertIn('default_tag := env("DEFAULT_TAG", "latest")', justfile)
+        existing = (CONTAINERFILE_TEMPLATE_DIR / "image-template.env").read_text()
+        result = app.patch_image_template_env(existing)
+        self.assertIn("BIB_IMAGE=", result)
+        self.assertIn("# Put your own image here", result)
+
+    def test_patch_image_template_env_sanitizes_dangerous_characters(self) -> None:
+        app = self.make_app()
+        app.config.image_desc = 'Says "hi" `whoami` $(rm -rf /) \\'
+        existing = 'IMAGE_NAME=x\nREPO_ORGANIZATION="x"\nIMAGE_DESC="old"\n'
+        result = app.patch_image_template_env(existing)
+        self.assertIn('IMAGE_DESC="Says hi whoami (rm -rf /) "', result)
+        desc_value = result.splitlines()[2].removeprefix('IMAGE_DESC="').removesuffix('"')
+        for char in ('"', "\\", "$", "`"):
+            self.assertNotIn(char, desc_value)
+
+    def test_patch_image_template_env_strips_embedded_newlines(self) -> None:
+        # A newline embedded in image_desc (reachable via a hand-edited or
+        # migrated state file) would otherwise split IMAGE_DESC across two
+        # physical lines, and the per-line ^IMAGE_DESC="...$" regex would then
+        # silently stop matching on every subsequent patch attempt.
+        app = self.make_app()
+        app.config.image_desc = "Line one\nLine two\r\nLine three"
+        existing = 'IMAGE_NAME=x\nREPO_ORGANIZATION="x"\nIMAGE_DESC="old"\n'
+        once = app.patch_image_template_env(existing)
+        self.assertEqual(len(once.splitlines()), 3)
+        self.assertIn('IMAGE_DESC="Line oneLine twoLine three"', once)
+        twice = app.patch_image_template_env(once)
+        self.assertEqual(twice, once)
+
+    def test_patch_image_template_env_ensures_trailing_newline(self) -> None:
+        app = self.make_app()
+        existing = 'IMAGE_NAME=x\nREPO_ORGANIZATION="x"\nIMAGE_DESC="x"'
+        result = app.patch_image_template_env(existing)
+        self.assertTrue(result.endswith("\n"))
+        self.assertFalse(result.endswith("\n\n"))
 
     # ── patch_container_justfile unit test ──────────────────────────────
 

@@ -37,3 +37,49 @@ the test suite — the golden-file patcher tests in
 tests/test_atomic_image_builder.py cover the current shape.  Add a round-trip
 audit here if upstream ever changes the indentation style; the silent no-op
 failure mode is hard to notice otherwise.
+
+Containerfile-Method Image Identity: image-template.env
+--------------------------------------------------------
+Since the ublue-os/image-template "rewrite in just" refresh (revision
+f9a9e4f8), the bundled Containerfile-method Justfile no longer takes an inline
+IMAGE_NAME default (env("IMAGE_NAME", "...")). It instead dotenv-loads
+image-template.env and reads IMAGE_NAME, REPO_ORGANIZATION, and IMAGE_DESC from
+there via env_var(...), which has no fallback if the key is missing.
+
+patch_container_justfile() silently no-ops on this newer Justfile shape by
+design (see the section above). The repo name, GitHub owner, and description
+are instead wired in by patch_image_template_env(), which rewrites only those
+three lines in image-template.env and leaves everything else untouched.
+
+A missing image-template.env is restored from the bundled snapshot only when
+the repo's Justfile actually references it (the restore is keyed on the
+literal string "image-template.env" appearing in the Justfile text). This is
+what keeps older-shape repos — whose Justfile never dotenv-loads the file —
+from gaining an inert copy of it on update, while still repairing newer-shape
+repos that lost only the env file.
+
+If a future upstream refresh renames these fields, reformats the file (e.g.
+switching quoting style), or moves description/org into some other file
+again, patch_image_template_env()'s regexes will silently stop matching and
+every newly generated repo will publish under the upstream placeholder name
+("image-template") instead of the user's chosen repo name. There is currently
+no automated check for this beyond the test suite's golden-style coverage
+(test_write_project_files_restores_missing_justfile_and_env_from_snapshot and
+the patch_image_template_env unit tests) — treat a template refresh that
+touches image-template.env or the Justfile's dotenv lines as a signal to
+manually verify a generated repo's image-template.env has the right values.
+
+Rechunk Step Naming (Chunkah)
+-----------------------------
+patch_container_rechunk_step() swaps the bundled workflow's rpm-ostree rechunk
+step for Chunkah by matching the exact step name "Rechunk with rpm-ostree" and
+the exact substring "command -v just) ostree-rechunk". Both are upstream's
+current literal text, not a stable API. If a future template refresh renames
+this step or changes how it invokes the Justfile's rechunk recipes, this
+patcher will silently no-op (by design, matching every other patcher in this
+file) and generated workflows will keep rechunking with rpm-ostree instead of
+Chunkah. test_patch_container_rechunk_step_is_idempotent and the assertions in
+test_patch_container_workflow_matches_current_upstream_snapshot_shape catch
+this today only because they run against the real bundled snapshot — if that
+snapshot's step text ever drifts, re-check those tests still assert something
+meaningful rather than trivially passing on a no-op.

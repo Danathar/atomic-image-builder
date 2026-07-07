@@ -15,7 +15,7 @@ This project is a guided terminal app for people who want a custom image repo wi
 
 ## Status
 
-This project is currently **0.8 beta** and is **not fully tested yet**. Use it carefully, review the changes it makes, and do not assume every workflow or edge case has already been exercised.
+This project is currently **0.9 beta** and is **not fully tested yet**. Use it carefully, review the changes it makes, and do not assume every workflow or edge case has already been exercised.
 
 ## What This Is
 
@@ -40,6 +40,7 @@ Both upstream templates work across this tool's supported Universal Blue and Fed
 - Supports the official Fedora Atomic desktop images
 - Lets users choose between Containerfile and BlueBuild build methods
 - Writes the repo files needed for a GitHub Actions build
+- Rechunks generated images with Chunkah by default for smaller, more resumable updates
 - Lets users add packages, COPR repos, services, and base-package removals
 - Offers optional Homebrew integration for Fedora Atomic base images using the Universal Blue brew OCI layer
 - Updates repos that were previously created by this tool
