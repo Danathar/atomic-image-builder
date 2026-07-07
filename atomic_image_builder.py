@@ -1216,6 +1216,32 @@ class App:
         else:
             self.github_available = False
 
+        # If a GitHub login is the *only* thing missing (every required tool is
+        # present, including gum for the guided prompts), walk the user through
+        # `gh auth login` here instead of exiting. The container distribution
+        # runs the app as the container's entrypoint, so bailing out would leave
+        # a Podman-only user with no shell in which to log in. github_setup_guide()
+        # runs `gh auth login` (device-code flow when headless) and raises
+        # SystemExit itself if the user declines or the login fails.
+        only_login_missing = (
+            github_login_missing
+            and not github_account_error
+            and not missing_tools
+            and not missing_host_tools
+        )
+        if only_login_missing:
+            self.gum.ensure_available()
+            self.github_setup_guide()
+            try:
+                self.github_user = self.github_login_name()
+                self.config.github_user = self.github_user
+                self.github_available = True
+                github_login_missing = False
+            except CommandError:
+                # The login flow returned but the account still can't be read.
+                self.github_available = False
+                github_account_error = True
+
         if missing_tools or missing_host_tools or github_login_missing or github_account_error:
             self.render_preflight_failure(
                 missing_tools=missing_tools,

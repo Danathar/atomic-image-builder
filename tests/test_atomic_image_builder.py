@@ -909,7 +909,10 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(any("brew install gh" in message for level, message in app.gum.messages if level == "hint"))
         self.assertEqual(stub.prompts, ["Press Enter to exit to the terminal..."])
 
-    def test_preflight_requires_github_login(self) -> None:
+    def test_preflight_runs_github_setup_guide_when_login_missing(self) -> None:
+        # When a GitHub login is the only thing missing, preflight walks the
+        # user through it (via github_setup_guide) and continues instead of
+        # exiting — this is what makes the container's first run work.
         app = self.make_app()
         stub = GumStub()
         stub.ensure_available = lambda: None
@@ -920,8 +923,36 @@ class BuilderTests(unittest.TestCase):
 
         with patch("atomic_image_builder.command_exists", side_effect=fake_exists):
             with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gh", "auth", "status"], 1, "", "")):
-                with self.assertRaises(SystemExit):
-                    app.preflight()
+                with patch.object(app, "github_setup_guide") as guide:
+                    with patch.object(app, "github_login_name", return_value="example"):
+                        app.preflight()
+
+        guide.assert_called_once()
+        self.assertEqual(app.github_user, "example")
+        self.assertTrue(app.github_available)
+        self.assertTrue(
+            any(level == "success" and "example" in message for level, message in stub.messages)
+        )
+
+    def test_preflight_skips_setup_guide_when_other_prerequisites_are_missing(self) -> None:
+        # If anything besides the login is missing, preflight must not launch
+        # the login guide — it hard-fails so the user fixes the tools first.
+        app = self.make_app()
+        stub = GumStub()
+        stub.ensure_available = lambda: None
+        app.gum = stub
+
+        def fake_exists(name: str) -> bool:
+            # cosign missing, and (below) not logged in either
+            return name in {"gum", "git", "gh", "dnf5", "rpm-ostree"}
+
+        with patch("atomic_image_builder.command_exists", side_effect=fake_exists):
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gh", "auth", "status"], 1, "", "")):
+                with patch.object(app, "github_setup_guide") as guide:
+                    with self.assertRaises(SystemExit):
+                        app.preflight()
+
+        guide.assert_not_called()
         self.assertTrue(any("gh auth login" in message for level, message in app.gum.messages if level == "hint"))
         self.assertEqual(stub.prompts, ["Press Enter to exit to the terminal..."])
 
