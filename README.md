@@ -16,6 +16,9 @@ This project is a guided terminal app for people who want a custom image repo wi
 > [!WARNING]
 > **This is 0.9 beta and not fully tested.** Review the changes it makes before applying them, and do not assume every workflow or edge case has already been exercised.
 
+> [!TIP]
+> **Safe to explore — it won't touch the system you're running on.** Everything Atomic Image Builder does happens on GitHub: it creates a new repo and lets GitHub Actions build your image. It never modifies, rebases, or removes packages from your current install, so trying it out can't break the machine you run it on. Switching your machine over to the built image is a separate, deliberate step you take later — only if and when you want to.
+
 ## Quick start
 
 The fastest way to try it is as a container — [Podman](https://podman.io/) is the only thing you need installed:
@@ -53,9 +56,10 @@ Supported base images:
 
 ### What it does not do
 
-- Does not modify your currently running system in place, or rebase your machine automatically.
-- Does not remove layered packages from your current install.
-- Does not adopt existing repos that were not created by this tool — a repo without `.atomic-image-builder.json` is not treated as managed.
+- **It leaves the system you run it on alone** — no in-place changes, no automatic rebase, and it never removes layered packages from your current install.
+- Does not adopt existing repos it did not create — a repo without `.atomic-image-builder.json` is not treated as managed.
+- Local test builds are Containerfile-only.
+- Advanced BlueBuild modules and features beyond the guided wizard are out of scope.
 
 ## Who it's for
 
@@ -165,15 +169,6 @@ When you choose a Fedora Atomic base image (Silverblue, Kinoite, etc.), the tool
 - `brew-update.timer` and `brew-upgrade.timer` for automatic maintenance
 
 This option is skipped automatically for Universal Blue base images since they already include Homebrew. You can also toggle it later through the update menu.
-
-## Project scope
-
-This repo intentionally keeps the beginner tool narrow:
-
-- Containerfile and BlueBuild repo creation and updates are supported
-- Local test builds are currently Containerfile-only
-- Existing repos that do not contain `.atomic-image-builder.json` are not supported for adoption or import
-- Advanced BlueBuild modules and features beyond the guided wizard are out of scope
 
 ## Feedback
 
