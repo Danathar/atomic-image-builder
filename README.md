@@ -13,124 +13,63 @@ This project is a guided terminal app for people who want a custom image repo wi
 >
 > This project is provided as-is, without any promise that it will be safe for your repositories, data, systems, or build pipeline. Use it carefully, review its changes before applying them, and keep backups where appropriate. The maintainer is not responsible for repository damage, data loss, failed builds, system changes, or other consequences that may result from using this software.
 
-## Status
+> [!WARNING]
+> **This is 0.9 beta and not fully tested.** Review the changes it makes before applying them, and do not assume every workflow or edge case has already been exercised.
 
-This project is currently **0.9 beta** and is **not fully tested yet**. Use it carefully, review the changes it makes, and do not assume every workflow or edge case has already been exercised.
+> [!TIP]
+> **Safe to explore — it won't touch the system you're running on.** Everything Atomic Image Builder does happens on GitHub: it creates a new repo and lets GitHub Actions build your image. It never modifies, rebases, or removes packages from your current install, so trying it out can't break the machine you run it on. Switching your machine over to the built image is a separate, deliberate step you take later — only if and when you want to.
 
-## What This Is
+## Quick start
 
-This tool creates and maintains a GitHub repository that builds a custom bootc image from a curated supported base image.
-
-Supported base images currently include:
-
-- Universal Blue: Bazzite, Bazzite GNOME, Bazzite DX, Bazzite DX GNOME, Aurora, Aurora DX, Bluefin, and Bluefin DX
-- Fedora Atomic desktops: Silverblue, Kinoite, Sway Atomic, Budgie Atomic, and COSMIC Atomic
-
-It supports two build methods:
-
-- **Containerfile** — Uses a standard Containerfile and shell build script. Generated repos start from a bundled snapshot of the official `ublue-os/image-template` repository: https://github.com/ublue-os/image-template
-- **BlueBuild** — Uses a YAML recipe and the BlueBuild GitHub Action. Generated repos start from a bundled snapshot of the official `blue-build/template` repository: https://github.com/blue-build/template
-
-Both upstream templates work across this tool's supported Universal Blue and Fedora Atomic images. They do not change very often, but this utility still uses bundled snapshots so repo generation stays predictable.
-
-## What It Does
-
-- Creates a new public GitHub repo for a custom bootc image
-- Supports curated Universal Blue desktop images
-- Supports the official Fedora Atomic desktop images
-- Lets users choose between Containerfile and BlueBuild build methods
-- Writes the repo files needed for a GitHub Actions build
-- Rechunks generated images with Chunkah by default for smaller, more resumable updates
-- Lets users add packages, COPR repos, services, and base-package removals
-- Offers optional Homebrew integration for Fedora Atomic base images using the Universal Blue brew OCI layer
-- Updates repos that were previously created by this tool
-- Shows recent GitHub Actions build status for a configured image repo
-- Can run a local Podman test build for Containerfile-based images before pushing
-- Can rotate the cosign signing key for repos created by this tool
-- Can scan a running rpm-ostree / bootc system and carry layered packages into a new image repo
-
-## What It Does Not Do
-
-- Does not modify your currently running system in place
-- Does not rebase your machine automatically
-- Does not remove layered packages from your current install
-- Does not adopt arbitrary existing repos that were not created by this tool
-
-It creates and manages a separate GitHub repository that builds your custom image through GitHub Actions.
-
-## Why It Exists
-
-Bootc-based desktop images are powerful, but the normal setup path assumes users are comfortable with image templates, GitHub Actions, signing, and image maintenance.
-
-This project exists to reduce that setup cost for newer users by turning the common path into a guided terminal workflow with stricter defaults and guardrails.
-
-## Who It Is For
-
-This is for:
-
-- beginner and intermediate desktop-atomic users
-- Universal Blue users who want a custom repo on GitHub
-- Fedora Atomic desktop users who want a custom repo on GitHub
-- Bazzite, Aurora, Bluefin, Silverblue, Kinoite, Sway Atomic, Budgie Atomic, and COSMIC Atomic users who want a guided path
-- people who want GitHub Actions to build their image automatically
-
-This is not aimed at:
-
-- people who want every advanced image workflow exposed in the beginner UI
-
-## Requirements
-
-You need:
-
-- Python 3.10 or newer
-- `gum`
-- `git`
-- `gh`
-- `cosign`
-- `dnf5` (used for package-name validation)
-- `rpm-ostree` (used for system scanning)
-
-The app checks all required tools at startup and exits if any are missing.
-
-On supported Universal Blue and Fedora Atomic desktop images, `dnf5` and `rpm-ostree` are expected to already be present. If helper CLI tools such as `gum`, `git`, `gh`, or `cosign` are missing, install them with Homebrew.
-
-Optional:
-
-- `podman` for local Containerfile test builds
-
-You also need a GitHub account and should log in first:
+The fastest way to try it is as a container — [Podman](https://podman.io/) is the only thing you need installed:
 
 ```bash
-gh auth login
+curl -fsSL https://raw.githubusercontent.com/Danathar/atomic-image-builder/main/contrib/aib -o ~/.local/bin/aib
+chmod +x ~/.local/bin/aib
+aib
 ```
 
-On Universal Blue and Fedora Atomic desktop systems, missing CLI tools are typically installed with Homebrew:
+This launches the guided menu, where you create a GitHub repo that builds your custom image. You will need a GitHub account; if you are not already logged in on the host, the tool walks you through `gh auth login` on first run.
 
-```bash
-brew install gum git gh cosign
-```
+Prefer to run from a source checkout instead? See [Run from source](#run-from-source). For the full set of container options (plain `podman run`, distrobox, and their limitations), see [Run with Podman](#run-with-podman-containerized).
 
-## Installation
+## What it does
 
-Clone this repo locally and enter the project directory:
+Atomic Image Builder creates and maintains a **separate GitHub repository** that builds a custom bootc image for you through GitHub Actions. It does not change your running system. From the guided menu you can:
 
-```bash
-git clone https://github.com/Danathar/atomic-image-builder.git
-cd atomic-image-builder
-```
+- Create a new public GitHub repo for a custom image, using either build method:
+  - **Containerfile** — a standard Containerfile and shell build script, generated from a bundled snapshot of [`ublue-os/image-template`](https://github.com/ublue-os/image-template).
+  - **BlueBuild** — a YAML recipe and the BlueBuild GitHub Action, generated from a bundled snapshot of [`blue-build/template`](https://github.com/blue-build/template).
+- Add packages, COPR repos, systemd services, and base-package removals.
+- Include optional Homebrew integration on Fedora Atomic images (see [Homebrew on Fedora Atomic Images](#homebrew-on-fedora-atomic-images)).
+- Update repos it previously created, and view their recent GitHub Actions build status.
+- Rotate the cosign signing key for repos it created.
+- Test-build a Containerfile image locally with Podman before pushing.
+- Scan your running rpm-ostree / bootc system and carry layered packages into a new repo.
 
-If the script is not already executable on your system, make it executable once:
+Generated images are rechunked with Chunkah by default for smaller, more resumable updates. The bundled template snapshots keep repo generation predictable — the upstream templates change rarely, but this tool pins its own copies rather than fetching them live.
 
-```bash
-chmod +x atomic_image_builder.py
-```
+Supported base images:
+
+- **Universal Blue:** Bazzite, Bazzite GNOME, Bazzite DX, Bazzite DX GNOME, Aurora, Aurora DX, Bluefin, Bluefin DX
+- **Fedora Atomic:** Silverblue, Kinoite, Sway Atomic, Budgie Atomic, COSMIC Atomic
+
+### What it does not do
+
+- **It leaves the system you run it on alone** — no in-place changes, no automatic rebase, and it never removes layered packages from your current install.
+- Does not adopt existing repos it did not create — a repo without `.atomic-image-builder.json` is not treated as managed.
+- Local test builds are Containerfile-only.
+- Advanced BlueBuild modules and features beyond the guided wizard are out of scope.
+
+## Who it's for
+
+Beginner and intermediate atomic-desktop users — on Universal Blue (Bazzite, Aurora, Bluefin) or Fedora Atomic (Silverblue, Kinoite, Sway, Budgie, COSMIC) — who want a guided path to a custom image repo that GitHub Actions builds automatically.
+
+Bootc-based desktop images are powerful, but the normal setup path assumes you are comfortable with image templates, GitHub Actions, signing, and image maintenance. This tool trades that setup cost for a guided workflow with stricter defaults and guardrails. It is intentionally **not** aimed at exposing every advanced image workflow in the beginner UI.
 
 ## Run with Podman (containerized)
 
-An alternative to the clone-and-run install above — the clone-and-run method
-stays the primary, recommended way to use this tool. This runs it as a
-container instead, with every dependency (`gum`, `git`, `gh`, `cosign`,
-`rpm-ostree` client) bundled in. Podman is the only prerequisite.
+You can run the tool as a container — no local clone or dependency install needed, with `gum`, `git`, `gh`, `cosign`, and the `rpm-ostree` client all bundled in. Podman is the only prerequisite. To run from a source checkout instead, see [Run from source](#run-from-source).
 
 ### Using the wrapper script
 
@@ -140,11 +79,7 @@ chmod +x ~/.local/bin/aib
 aib
 ```
 
-The wrapper forwards your host's `gh` login when there is one (otherwise it
-persists an in-container login across runs in a podman-managed volume),
-makes your host's `rpm-ostree` state available to the Scan OS menu, and
-mounts your local timezone. See the comments at the top of
-[`contrib/aib`](contrib/aib) for exactly what it mounts and why.
+The wrapper forwards your host's `gh` login when there is one (otherwise it persists an in-container login across runs in a podman-managed volume), makes your host's `rpm-ostree` state available to the Scan OS menu, and mounts your local timezone. See the comments at the top of [`contrib/aib`](contrib/aib) for exactly what it mounts and why.
 
 ### Plain `podman run`
 
@@ -158,10 +93,7 @@ podman run --rm -it \
 
 ### Distrobox
 
-[Distrobox](https://distrobox.it/) integrates the container with your host:
-it shares your home directory, so your host `gh` login is reused directly,
-and host system access, so the Scan OS menu can read the host's `rpm-ostree`
-state — no wrapper or manual mounts needed:
+[Distrobox](https://distrobox.it/) integrates the container with your host: it shares your home directory, so your host `gh` login is reused directly, and host system access, so the Scan OS menu can read the host's `rpm-ostree` state — no wrapper or manual mounts needed:
 
 ```bash
 distrobox create --name aib --image ghcr.io/danathar/atomic-image-builder:latest
@@ -176,31 +108,45 @@ distrobox enter aib -- atomic-image-builder
 | Scan OS & Migrate Layered Packages | Works via the `aib` wrapper or distrobox; unavailable with a bare `podman run` (no host state) |
 | Local Podman test build | Not available — the option reports this and does nothing; see below |
 
-The image includes `podman` only because `rpm-ostree` (a required dependency
-the tool checks for at startup) pulls it in transitively. A nested build
-inside the container is not supported, so the image tells the tool to make
-its "Test build locally (podman)" option show a clean "not available in this
-environment" message rather than attempt a build that would fail. Run the
-tool from a local clone (the primary install method) if you need local test
-builds.
+The image includes `podman` only because `rpm-ostree` (a required dependency the tool checks for at startup) pulls it in transitively. A nested build inside the container is not supported, so the image tells the tool to make its "Test build locally (podman)" option show a clean "not available in this environment" message rather than attempt a build that would fail. Run the tool [from source](#run-from-source) if you need local test builds.
 
-## Usage
+## Run from source
 
-Run the beginner app:
+If you would rather run the script directly, you will need these on your host:
+
+- Python 3.10 or newer
+- `gum`, `git`, `gh`, and `cosign`
+- `dnf5` (used for package-name validation) and `rpm-ostree` (used for system scanning)
+- Optional: `podman`, for local Containerfile test builds
+
+The app checks for the required tools at startup and exits if any are missing. On Universal Blue and Fedora Atomic desktop images, `dnf5` and `rpm-ostree` are already present; install the rest with Homebrew:
 
 ```bash
+brew install gum git gh cosign
+```
+
+Then log in to GitHub, clone the repo, and run the tool:
+
+```bash
+gh auth login
+git clone https://github.com/Danathar/atomic-image-builder.git
+cd atomic-image-builder
 ./atomic_image_builder.py
 ```
 
-What to expect:
+If the script is not already executable on your system, make it executable once with `chmod +x atomic_image_builder.py`.
 
-- The tool creates a public GitHub repo under your account
-- GitHub Actions builds the image for you after repo creation
-- Scheduled rebuilds also run daily on GitHub
-- The main menu can show recent GitHub Actions build status for a configured repo
-- Containerfile repos can be test-built locally with Podman before you push changes
-- The update menu can rotate the repo's cosign signing key and update `cosign.pub`
-- The scan option reads your current rpm-ostree / bootc state and can carry layered packages into the new repo
+## Using the tool
+
+However you launch it, the guided menu is the same. What to expect:
+
+- The tool creates a public GitHub repo under your account, and GitHub Actions builds the image after creation. Scheduled rebuilds also run daily on GitHub.
+- The main menu can show recent GitHub Actions build status for a configured repo.
+- Containerfile repos can be test-built locally with Podman before you push — from a source checkout (see the [container limitations](#limitations-of-running-in-a-container) above).
+- The update menu can rotate the repo's cosign signing key and update `cosign.pub`.
+- The scan option reads your current rpm-ostree / bootc state and can carry layered packages into the new repo.
+
+### Migrating layered packages from your current system
 
 If you use the scan flow to carry layered packages from your current system into the new image, run these in the same session before rebooting:
 
@@ -223,15 +169,6 @@ When you choose a Fedora Atomic base image (Silverblue, Kinoite, etc.), the tool
 - `brew-update.timer` and `brew-upgrade.timer` for automatic maintenance
 
 This option is skipped automatically for Universal Blue base images since they already include Homebrew. You can also toggle it later through the update menu.
-
-## Project Scope
-
-This repo intentionally keeps the beginner tool narrow:
-
-- Containerfile and BlueBuild repo creation and updates are supported
-- Local test builds are currently Containerfile-only
-- Existing repos that do not contain `.atomic-image-builder.json` are not supported for adoption or import
-- Advanced BlueBuild modules and features beyond the guided wizard are out of scope
 
 ## Feedback
 
