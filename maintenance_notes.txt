@@ -69,6 +69,25 @@ the patch_image_template_env unit tests) — treat a template refresh that
 touches image-template.env or the Justfile's dotenv lines as a signal to
 manually verify a generated repo's image-template.env has the right values.
 
+Scan Override: AIB_RPM_OSTREE_STATUS_FILE
+------------------------------------------
+scan_os() normally invokes `rpm-ostree status --json` directly on the host. That
+does not work from inside a container, since the client talks to the host's
+rpm-ostreed over the system D-Bus, which the container does not have access to.
+
+When AIB_RPM_OSTREE_STATUS_FILE is set, scan_os() reads that path's contents as
+the `rpm-ostree status --json` output instead of invoking rpm-ostree at all (the
+command_exists("rpm-ostree") check is skipped too, since nothing is invoked). A
+missing or unreadable file, or a file whose contents are not valid JSON, produces
+the same "Failed to read rpm-ostree status." error path as a real invocation
+failure would.
+
+The container wrapper (contrib/aib) is the only intended consumer: it captures
+`rpm-ostree status --json` on the host, mounts the result read-only into the
+container, and points this variable at the in-container path. This variable is
+not documented in the beginner-facing README; it is an integration detail of the
+container distribution, not a user-facing setting.
+
 Rechunk Step Naming (Chunkah)
 -----------------------------
 patch_container_rechunk_step() swaps the bundled workflow's rpm-ostree rechunk

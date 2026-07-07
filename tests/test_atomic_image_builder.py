@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import subprocess
 import tempfile
 import textwrap
@@ -98,6 +99,16 @@ class GumStub:
 
 
 class BuilderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # scan_os() consults AIB_RPM_OSTREE_STATUS_FILE. Keep the live-path
+        # scan tests hermetic by ensuring an ambient value from the runner
+        # environment (e.g. running the suite inside the container wrapper)
+        # cannot silently divert them onto the override path.
+        patcher = patch.dict("os.environ", {}, clear=False)
+        patcher.start()
+        os.environ.pop("AIB_RPM_OSTREE_STATUS_FILE", None)
+        self.addCleanup(patcher.stop)
+
     def make_app(self) -> App:
         app = App()
         app.config = Config(
@@ -1828,6 +1839,94 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(app.config.base_image_uri, "quay.io/fedora-ostree-desktops/kinoite:43")
         self.assertEqual(app.config.base_image_name, "Fedora Kinoite")
+
+    def test_scan_os_honors_status_file_override(self) -> None:
+        app = self.make_app()
+        app.github_user = "example"
+        app.config.packages = ["old-package"]
+        app.config.removed_packages = ["old-removal"]
+
+        status_payload = json.dumps(
+            {
+                "deployments": [
+                    {
+                        "booted": True,
+                        "container-image-reference": "docker://ghcr.io/ublue-os/bazzite:stable",
+                        "requested-packages": [],
+                        "requested-base-removals": [],
+                    }
+                ]
+            }
+        )
+        app.gum = GumStub()
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = Path(tmp) / "rpm-ostree-status.json"
+            status_path.write_text(status_payload)
+            # command_exists always False and run() unpatched (would raise if
+            # actually invoked): the override path must never touch either.
+            with patch("atomic_image_builder.command_exists", return_value=False):
+                with patch("atomic_image_builder.run", side_effect=AssertionError("rpm-ostree must not be invoked")):
+                    with patch.dict("os.environ", {"AIB_RPM_OSTREE_STATUS_FILE": str(status_path)}):
+                        result = app.scan_os()
+
+        self.assertTrue(result)
+        self.assertEqual(app.config.packages, [])
+        self.assertEqual(app.config.removed_packages, [])
+        self.assertEqual(app.config.base_image_name, "Bazzite (KDE)")
+        self.assertEqual(app.config.github_user, "example")
+
+    def test_scan_os_status_file_override_missing_file_returns_false(self) -> None:
+        app = self.make_app()
+        app.github_user = "example"
+        stub = GumStub()
+        app.gum = stub
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_path = Path(tmp) / "does-not-exist.json"
+            with patch("atomic_image_builder.command_exists", return_value=False):
+                with patch.dict("os.environ", {"AIB_RPM_OSTREE_STATUS_FILE": str(missing_path)}):
+                    result = app.scan_os()
+
+        self.assertFalse(result)
+        self.assertTrue(
+            any(level == "error" and "rpm-ostree" in message for level, message in stub.messages)
+        )
+
+    def test_scan_os_status_file_override_invalid_json_returns_false(self) -> None:
+        app = self.make_app()
+        app.github_user = "example"
+        stub = GumStub()
+        app.gum = stub
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = Path(tmp) / "rpm-ostree-status.json"
+            status_path.write_text("not json at all")
+            with patch("atomic_image_builder.command_exists", return_value=False):
+                with patch.dict("os.environ", {"AIB_RPM_OSTREE_STATUS_FILE": str(status_path)}):
+                    result = app.scan_os()
+
+        self.assertFalse(result)
+        self.assertTrue(
+            any(level == "error" and "rpm-ostree" in message for level, message in stub.messages)
+        )
+
+    def test_scan_os_status_file_override_non_utf8_returns_false(self) -> None:
+        app = self.make_app()
+        app.github_user = "example"
+        stub = GumStub()
+        app.gum = stub
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = Path(tmp) / "rpm-ostree-status.json"
+            # A non-UTF-8 (e.g. binary) file: read_text() raises
+            # UnicodeDecodeError, which is not an OSError. Must still land on
+            # the friendly error path rather than propagating a traceback.
+            status_path.write_bytes(b"\xff\xfe\x00\x01 not valid utf-8")
+            with patch("atomic_image_builder.command_exists", return_value=False):
+                with patch.dict("os.environ", {"AIB_RPM_OSTREE_STATUS_FILE": str(status_path)}):
+                    result = app.scan_os()
+
+        self.assertFalse(result)
+        self.assertTrue(
+            any(level == "error" and "rpm-ostree" in message for level, message in stub.messages)
+        )
 
     def test_update_existing_image_defers_signing_setup_until_push(self) -> None:
         app = self.make_app()

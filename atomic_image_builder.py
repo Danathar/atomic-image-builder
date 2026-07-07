@@ -1953,19 +1953,34 @@ class App:
         # and base-package removals into a new GitHub-backed image repo.
         self.config = self.fresh_config()
         self.gum.header("Scanning Running OS")
-        if not command_exists("rpm-ostree"):
-            self.gum.error("rpm-ostree not found. OS scanning is unavailable.")
-            return False
+        status_override_path = os.environ.get("AIB_RPM_OSTREE_STATUS_FILE")
+        if status_override_path:
+            # Lets a container wrapper capture `rpm-ostree status --json` on the
+            # host (where rpm-ostreed's D-Bus socket actually is) and hand it to
+            # the tool running inside the container. See maintenance_notes.txt.
+            try:
+                status_text = Path(status_override_path).read_text()
+            except (OSError, UnicodeDecodeError):
+                # OSError: missing/unreadable/permission/is-a-directory.
+                # UnicodeDecodeError: a non-text (e.g. binary) file. Both are
+                # "unreadable" and must hit the friendly error, not a traceback.
+                self.gum.error("Failed to read rpm-ostree status.")
+                return False
+        else:
+            if not command_exists("rpm-ostree"):
+                self.gum.error("rpm-ostree not found. OS scanning is unavailable.")
+                return False
 
-        proc = run(["rpm-ostree", "status", "--json", "--booted"], check=False)
-        if proc.returncode != 0 or not proc.stdout.strip():
-            proc = run(["rpm-ostree", "status", "--json"], check=False)
-        if proc.returncode != 0 or not proc.stdout.strip():
-            self.gum.error("Failed to read rpm-ostree status.")
-            return False
+            proc = run(["rpm-ostree", "status", "--json", "--booted"], check=False)
+            if proc.returncode != 0 or not proc.stdout.strip():
+                proc = run(["rpm-ostree", "status", "--json"], check=False)
+            if proc.returncode != 0 or not proc.stdout.strip():
+                self.gum.error("Failed to read rpm-ostree status.")
+                return False
+            status_text = proc.stdout
 
         try:
-            status = json.loads(proc.stdout)
+            status = json.loads(status_text)
         except json.JSONDecodeError:
             self.gum.error("Failed to read rpm-ostree status.")
             return False
