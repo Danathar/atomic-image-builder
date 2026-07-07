@@ -1,0 +1,21 @@
+---
+name: Maintenance Audit
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # weekly, Monday 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Run maintenance audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 maintenance_audit.py

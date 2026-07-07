@@ -10,7 +10,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import textwrap
 from collections.abc import Iterable, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
@@ -31,7 +30,7 @@ if sys.version_info < (3, 10):  # noqa: UP036
 # A future refactor could split UI, GitHub operations, and rendering into
 # separate modules, but the comments below aim to make the current layout easier
 # to understand for anyone reading it now.
-VERSION = "0.8-beta"
+VERSION = "0.9-beta"
 TOOL_NAME = "Atomic Image Builder"
 TOOL_SLUG = "atomic-image-builder"
 STATE_FILE = f".{TOOL_SLUG}.json"
@@ -77,23 +76,25 @@ DNF5_MISSING_MARKERS = (
 # The human-readable tag is kept as a comment so maintainers can still tell what
 # upstream version the pin came from.
 ACTION_PINS: dict[str, tuple[str, str]] = {
-    "actions/checkout": ("df4cb1c069e1874edd31b4311f1884172cec0e10", "v6"),
+    "actions/checkout": ("9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0", "v7"),
     "ublue-os/remove-unwanted-software": ("cc0becac701cf642c8f0a6613bbdaf5dc36b259e", "v9"),
-    "docker/metadata-action": ("80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9", "v6.1.0"),
+    "docker/metadata-action": ("dc802804100637a589fabce1cb79ff13a1411302", "v6.2.0"),
     "redhat-actions/buildah-build": ("7a95fa7ee0f02d552a32753e7414641a04307056", "v2"),
-    "docker/login-action": ("650006c6eb7dba73a995cc03b0b2d7f5ca915bee", "v4.2.0"),
+    "docker/login-action": ("af1e73f918a031802d376d3c8bbc3fe56130a9b0", "v4.4.0"),
     "redhat-actions/push-to-registry": ("5ed88d269cf581ea9ef6dd6806d01562096bee9c", "v2"),
-    "sigstore/cosign-installer": ("cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003", "v4.1.1"),
+    "sigstore/cosign-installer": ("6f9f17788090df1f26f669e9d70d6ae9567deba6", "v4.1.2"),
     "actions/upload-artifact": ("043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "v7.0.1"),
-    "blue-build/github-action": ("01902d3bbdcd2196dbd3830af6a5344884f0ef0a", "v1.11"),
+    "blue-build/github-action": ("836161eb076426a451e6a0054f722b1153b8b3ad", "v1.12"),
+    "extractions/setup-just": ("53165ef7e734c5c07cb06b3c8e7b647c5aa16db3", "v4.0.0"),
 }
 ACTION_REF_PINS: dict[str, tuple[str, str]] = {
     "ublue-os/remove-unwanted-software@v8": ("695eb75bc387dbcd9685a8e72d23439d8686cba6", "v8"),
     "ublue-os/remove-unwanted-software@695eb75bc387dbcd9685a8e72d23439d8686cba6": ("695eb75bc387dbcd9685a8e72d23439d8686cba6", "v8"),
     "ublue-os/remove-unwanted-software@v9": ACTION_PINS["ublue-os/remove-unwanted-software"],
     "ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e": ACTION_PINS["ublue-os/remove-unwanted-software"],
-    "osbuild/bootc-image-builder-action@main": ("5fc2ef0c4689b43ba959a10e3dfed3a889810ba1", "main"),
-    "osbuild/bootc-image-builder-action@5fc2ef0c4689b43ba959a10e3dfed3a889810ba1": ("5fc2ef0c4689b43ba959a10e3dfed3a889810ba1", "main"),
+    "osbuild/bootc-image-builder-action@main": ("8661cd3832544ad68c12dcde8681b13ab0f56a8d", "main"),
+    "osbuild/bootc-image-builder-action@5fc2ef0c4689b43ba959a10e3dfed3a889810ba1": ("8661cd3832544ad68c12dcde8681b13ab0f56a8d", "main"),
+    "osbuild/bootc-image-builder-action@8661cd3832544ad68c12dcde8681b13ab0f56a8d": ("8661cd3832544ad68c12dcde8681b13ab0f56a8d", "main"),
     "actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f": ACTION_PINS["actions/upload-artifact"],
     "sigstore/cosign-installer@v4.0.0": ("faadad0cce49287aee09b3a48701e75088a2c6ad", "v4.0.0"),
     "sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad": ("faadad0cce49287aee09b3a48701e75088a2c6ad", "v4.0.0"),
@@ -808,8 +809,22 @@ class Gum:
         text = "\n".join("\t".join(row) for row in rows) + "\n"
         run(["gum", "table", "--separator", "\t", "--columns", columns, "--widths", widths], capture=False, stdin=text)
 
+    def require_spinner_success(
+        self, proc: subprocess.CompletedProcess[str], args: Sequence[str]
+    ) -> subprocess.CompletedProcess[str]:
+        # gum spin uses exit code 130 for Ctrl+C, same convention as the other
+        # interactive widgets. Any other nonzero exit means the spinner itself
+        # failed to run (the wrapped command's own exit status, when captured,
+        # is reported separately and is not subject to this check).
+        if proc.returncode == 130:
+            raise KeyboardInterrupt()
+        if proc.returncode != 0:
+            raise CommandError(f"command failed: {' '.join(args)}")
+        return proc
+
     def spinner(self, title: str, command: Sequence[str], *, cwd: Path | None = None) -> None:
-        run(["gum", "spin", "--spinner", "dot", "--title", title, "--", *command], cwd=cwd, capture=False)
+        args = ["gum", "spin", "--spinner", "dot", "--title", title, "--", *command]
+        self.require_spinner_success(run(args, cwd=cwd, capture=False, check=False), args)
 
     def spinner_capture(self, title: str, command: Sequence[str], *, cwd: Path | None = None) -> str:
         # gum spin does not give us structured output directly, so we capture the
@@ -818,11 +833,8 @@ class Gum:
             output_path = tmp.name
         try:
             shell_command = f"{shlex.join(command)} > {shlex.quote(output_path)}"
-            run(
-                ["gum", "spin", "--spinner", "dot", "--title", title, "--", "bash", "-c", shell_command],
-                cwd=cwd,
-                capture=False,
-            )
+            args = ["gum", "spin", "--spinner", "dot", "--title", title, "--", "bash", "-c", shell_command]
+            self.require_spinner_success(run(args, cwd=cwd, capture=False, check=False), args)
             return Path(output_path).read_text()
         finally:
             Path(output_path).unlink(missing_ok=True)
@@ -845,11 +857,8 @@ class Gum:
                 f"{shlex.join(command)} > {shlex.quote(stdout_path)} 2> {shlex.quote(stderr_path)}; "
                 f"printf '%s' $? > {shlex.quote(status_path)}"
             )
-            run(
-                ["gum", "spin", "--spinner", "dot", "--title", title, "--", "bash", "-c", shell_command],
-                cwd=cwd,
-                capture=False,
-            )
+            args = ["gum", "spin", "--spinner", "dot", "--title", title, "--", "bash", "-c", shell_command]
+            self.require_spinner_success(run(args, cwd=cwd, capture=False, check=False), args)
             stdout = Path(stdout_path).read_text()
             stderr = Path(stderr_path).read_text()
             status_text = Path(status_path).read_text().strip()
@@ -1143,6 +1152,7 @@ class App:
         packages_label: str = "Packages",
         include_copr: bool = False,
         include_services: bool = False,
+        include_removed: bool = False,
         next_step_hint: str,
     ) -> None:
         self.menu_section(
@@ -1158,6 +1168,8 @@ class App:
             current_lines.append(f"COPR repositories: {self.summarize_selection(self.config.copr_repos, empty='None', verb='added')}")
         if include_services:
             current_lines.append(f"Services: {self.summarize_selection(self.config.services, empty='None', verb='enabled')}")
+        if include_removed:
+            current_lines.append(f"Removed base packages: {self.summarize_selection(self.config.removed_packages, empty='None', verb='selected')}")
         self.menu_section("Current Selections", *current_lines)
         print()
         self.menu_section("Next Step", next_step_hint)
@@ -1350,19 +1362,23 @@ class App:
             selected = action[0] if action else "Quit"
             if selected == "Quit":
                 raise SystemExit(0)
-            if selected == "Create New Image":
-                self.create_new_image()
-                continue
-            if selected == "Scan OS & Migrate Layered Packages":
-                if self.scan_os():
-                    self.create_new_image(scanned=True)
-                continue
-            if selected == "Update Existing Image":
-                self.update_existing_image()
-                continue
-            if selected == "View Build Status":
-                self.view_build_status()
-                continue
+            try:
+                if selected == "Create New Image":
+                    self.create_new_image()
+                elif selected == "Scan OS & Migrate Layered Packages":
+                    if self.scan_os():
+                        self.create_new_image(scanned=True)
+                elif selected == "Update Existing Image":
+                    self.update_existing_image()
+                elif selected == "View Build Status":
+                    self.view_build_status()
+            except CommandError as exc:
+                # A failure here means something in the flow broke, not that
+                # the user chose to leave (that is ScreenBack/SystemExit).
+                # Report it and return to the main menu instead of taking the
+                # whole app down.
+                self.gum.error(str(exc))
+                self.gum.enter_to_continue("Press Enter to return to the main menu...")
 
     def create_new_image(self, *, scanned: bool = False) -> None:
         # This is a simple step-by-step wizard. "step" is an integer instead of
@@ -1398,8 +1414,14 @@ class App:
                 step -= 1
                 continue
             if action == "build":
-                if self.do_build():
-                    return
+                try:
+                    if self.do_build():
+                        return
+                except CommandError as exc:
+                    # Keep the wizard's in-memory state intact and return to
+                    # the review screen instead of taking the whole app down.
+                    self.gum.error(str(exc))
+                    self.gum.enter_to_continue("Press Enter to return to the review screen...")
                 continue
             if action == "method":
                 step = 1
@@ -1496,7 +1518,9 @@ class App:
             "You can add it now using the Universal Blue Homebrew OCI layer.",
         )
         print()
-        self.config.brew_enabled = self.gum.confirm("Include Homebrew (brew) in this image?", default=False)
+        self.config.brew_enabled = self.gum.confirm(
+            "Include Homebrew (brew) in this image?", default=self.config.brew_enabled
+        )
         if self.config.brew_enabled:
             self.gum.success("Homebrew will be included in your image.")
         else:
@@ -1554,6 +1578,7 @@ class App:
                 packages_empty="No packages yet",
                 include_copr=True,
                 include_services=True,
+                include_removed=True,
                 next_step_hint="Choose Continue to review when you are finished, or use the remove options to undo package, COPR, or service choices.",
             )
             print()
@@ -1566,10 +1591,11 @@ class App:
                     "Remove COPR repositories",
                     "Add systemd services to enable",
                     "Remove enabled services",
+                    "Removed base packages",
                     "Review current selections",
                     "Continue to review",
                 ],
-                height=12,
+                height=13,
             )
             selected = selection[0] if selection else "Continue to review"
             if selected == "Continue to review":
@@ -1590,6 +1616,8 @@ class App:
                     self.add_services()
                 elif selected == "Remove enabled services":
                     self.config.services = self.choose_to_remove(self.config.services, "Remove Services")
+                elif selected == "Removed base packages":
+                    self.manage_removed_packages(return_to="package menu")
                 elif selected == "Review current selections":
                     self.view_selections()
             except ScreenBack:
@@ -1615,7 +1643,7 @@ class App:
         )
         print()
         raw = self.gum.write(placeholder="Enter package names...", height=6, width=self.gum.form_width(max_width=110))
-        packages = [token.strip(",") for token in raw.split() if token.strip(",")]
+        packages = raw.replace(",", " ").split()
         if not packages:
             return
         before_count = len(self.config.packages)
@@ -1742,7 +1770,7 @@ class App:
             placeholder="package1 package2",
             width=self.gum.form_width(max_width=80),
         )
-        packages = [pkg.strip(",") for pkg in pkgs.split()]
+        packages = pkgs.replace(",", " ").split()
         if packages and not self.add_packages_to_config(packages, source_label=f"COPR {repo}"):
             return
         self.config.copr_repos = proposed_copr_repos
@@ -2798,17 +2826,30 @@ class App:
                 self.push_update(owner, repo, tmpdir)
 
     def view_build_status(self) -> None:
+        # Most sessions never have a local clone of a managed repo (the app
+        # works from temp clones), so falling back to the same managed-repo
+        # picker used by "Update Existing Image" is what makes this reachable
+        # in practice, instead of only working when run from inside a clone.
         repo_dir = Path.cwd()
+        owner: str | None = None
+        repo: str | None = None
         try:
             self.load_repo_config(repo_dir)
+            owner = self.config.github_user or self.github_user
+            repo = self.config.repo_name
         except CommandError:
-            self.gum.warn(f"Run this from a configured repo that contains `{STATE_FILE}`.")
-            return
-        owner = self.config.github_user or self.github_user
-        repo = self.config.repo_name
+            owner = None
+            repo = None
         if not owner or not repo:
-            self.gum.warn(f"Run this from a configured repo that contains `{STATE_FILE}`.")
-            return
+            # select_repo() already calls require_github() internally and
+            # raises ScreenBack if the user backs out of GitHub login.
+            try:
+                owner, repo = self.select_repo(require_state_file=True)
+            except ScreenBack:
+                return
+        self.render_build_status(owner, repo)
+
+    def render_build_status(self, owner: str, repo: str) -> None:
         fields = "databaseId,displayTitle,status,conclusion,createdAt,updatedAt,url,workflowName"
         # Use check=False so a transient gh/network failure returns the user to
         # the main menu instead of raising CommandError out of the whole app.
@@ -3064,13 +3105,13 @@ class App:
         elif selected == "Remove services":
             self.config.services = self.choose_to_remove(self.config.services, "Remove Services")
 
-    def manage_removed_packages(self) -> None:
+    def manage_removed_packages(self, *, return_to: str = "update menu") -> None:
         self.gum.header("Edit Removed Base Packages")
         self.menu_section(
             "What This Does",
             "These are packages you want removed from the base image.",
             "Choose Add to type package names to remove, or Remove to stop removing packages you already listed.",
-            "Choose Back to return to the update menu. Changes are kept automatically.",
+            f"Choose Back to return to the {return_to}. Changes are kept automatically.",
         )
         print()
         try:
@@ -3089,19 +3130,19 @@ class App:
                 height=6,
                 width=self.gum.form_width(max_width=90),
             )
-            packages = [token.strip(",") for token in raw.split() if token.strip(",")]
+            packages = raw.replace(",", " ").split()
             if not packages:
                 return
             before_count = len(self.config.removed_packages)
             added = self.add_removed_packages_to_config(packages, source_label="manual entry")
             added_count = len(self.config.removed_packages) - before_count
             if added and not self.last_manual_removed_package_check_had_missing:
-                self.gum.enter_to_continue(f"Added {added_count} package removal(s). Press Enter to return to the update menu...")
+                self.gum.enter_to_continue(f"Added {added_count} package removal(s). Press Enter to return to the {return_to}...")
                 return
             if added and self.last_manual_removed_package_check_had_missing:
-                self.gum.enter_to_continue("Finished checking package removals. Press Enter to return to the update menu...")
+                self.gum.enter_to_continue(f"Finished checking package removals. Press Enter to return to the {return_to}...")
                 return
-            self.gum.enter_to_continue("No package removals were added. Press Enter to return to the update menu...")
+            self.gum.enter_to_continue(f"No package removals were added. Press Enter to return to the {return_to}...")
         elif selected == "Stop removing listed packages":
             self.config.removed_packages = self.choose_to_remove(self.config.removed_packages, "Remove Base Package Removals")
 
@@ -3307,6 +3348,10 @@ class App:
     def patch_container_justfile(self, existing_text: str) -> str:
         # The template Justfile already has sensible defaults; we only patch the
         # image name so the local build target matches the chosen repo name.
+        # This regex targets the older upstream Justfile shape (image name
+        # sourced via env() with an inline default). Newer snapshots source
+        # image name from image-template.env instead (see
+        # patch_image_template_env), so this silently no-ops there by design.
         updated = re.sub(
             r'^export image_name := env\("IMAGE_NAME",\s*"[^"]*"\)(.*)$',
             f'export image_name := env("IMAGE_NAME", "{self.config.repo_name}")\\1',
@@ -3315,6 +3360,50 @@ class App:
             flags=re.MULTILINE,
         )
         return ensure_trailing_newline(updated)
+
+    def patch_image_template_env(self, existing_text: str) -> str:
+        # image-template.env is dotenv-loaded by the Justfile, and its values are
+        # interpolated directly into shell commands and label strings. Only the
+        # three fields we own are rewritten; every other line (including
+        # comments) passes through untouched so future upstream additions to
+        # this file are preserved across updates.
+        def sanitize_env_value(value: str) -> str:
+            # These characters would either break the double-quoted shell value,
+            # let it escape into command substitution (e.g. via $(...)), or (for
+            # newlines) split the value across multiple physical lines. The
+            # rewrite regexes below are per-line, so an embedded newline would
+            # otherwise make this patcher silently stop matching that field on
+            # every subsequent update.
+            for char in ('"', "\\", "$", "`", "\n", "\r"):
+                value = value.replace(char, "")
+            return value
+
+        repo_name = self.config.repo_name
+        github_user = sanitize_env_value(self.config.github_user)
+        image_desc = sanitize_env_value(self.config.image_desc)
+
+        text = re.sub(
+            r"^IMAGE_NAME=.*$",
+            lambda _match: f"IMAGE_NAME={repo_name}",
+            existing_text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        text = re.sub(
+            r'^REPO_ORGANIZATION=".*"$',
+            lambda _match: f'REPO_ORGANIZATION="{github_user}"',
+            text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        text = re.sub(
+            r'^IMAGE_DESC=".*"$',
+            lambda _match: f'IMAGE_DESC="{image_desc}"',
+            text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        return ensure_trailing_newline(text)
 
     def patch_container_workflow(self, existing_text: str, *, default_branch: str = "main") -> str:
         # This patcher updates the bundled template workflow in place. The main
@@ -3369,7 +3458,32 @@ class App:
                 ("COSIGN_PASSWORD", "${{ secrets.COSIGN_PASSWORD }}"),
             ],
         )
+        text = self.patch_container_rechunk_step(text)
         return ensure_trailing_newline(text)
+
+    def patch_container_rechunk_step(self, workflow_text: str) -> str:
+        # The bundled workflow rechunks with rpm-ostree by default and ships a
+        # commented-out Chunkah alternative (https://github.com/coreos/chunkah).
+        # Chunkah is the newer, distro-agnostic rechunker, so we enable it by
+        # default instead. Matching is scoped to non-comment lines so the
+        # commented alternative block, and workflows where this step was
+        # removed or never existed, are left untouched.
+        lines = workflow_text.splitlines()
+        output: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                output.append(line)
+                continue
+            if stripped == "- name: Rechunk with rpm-ostree":
+                indent = line[: len(line) - len(line.lstrip())]
+                output.append(f"{indent}- name: Rechunk with Chunkah")
+                continue
+            if "command -v just) ostree-rechunk" in line:
+                output.append(line.replace("command -v just) ostree-rechunk", "command -v just) rechunk"))
+                continue
+            output.append(line)
+        return ensure_trailing_newline("\n".join(output))
 
     def patch_container_disk_workflow(self, existing_text: str, *, default_branch: str = "main") -> str:
         lines = [pin_action_uses_line(line) for line in existing_text.splitlines()]
@@ -3450,9 +3564,16 @@ class App:
                     break
             if with_index is None:
                 return step_lines
+            # rechunk/build_chunked_oci conflict with chunkah in the action's
+            # input validation, so drop them before adding chunkah below (a
+            # hand-edited or previously-generated workflow may already set one).
+            conflicting_prefixes = (f"{entry_prefix}rechunk:", f"{entry_prefix}build_chunked_oci:")
+            step_lines = [line for line in step_lines if not line.startswith(conflicting_prefixes)]
             wanted_lines = [
                 f"{entry_prefix}push: ${{{{ github.event_name != 'pull_request' && github.ref == format('refs/heads/{{0}}', github.event.repository.default_branch) && 'true' || 'false' }}}}",
                 f"{entry_prefix}build_opts: ${{{{ github.event_name == 'pull_request' && '--no-sign' || '' }}}}",
+                # Chunkah is the newer, distro-agnostic rechunker (blue-build/github-action v1.12+).
+                f"{entry_prefix}chunkah: 'true'",
             ]
             missing = [line for line in wanted_lines if line not in step_lines]
             if not missing:
@@ -3679,6 +3800,7 @@ class App:
         readme_path = base_dir / "README.md"
         gitignore_path = base_dir / ".gitignore"
         justfile_path = base_dir / "Justfile"
+        env_path = base_dir / "image-template.env"
         containerfile_path = base_dir / "Containerfile"
         workflow_path = base_dir / ".github/workflows/build.yml"
 
@@ -3699,10 +3821,29 @@ class App:
         if self.generated_cosign_pub is not None:
             (base_dir / "cosign.pub").write_text(ensure_trailing_newline(self.generated_cosign_pub))
 
+        if not justfile_path.exists():
+            # Restore from the bundled template snapshot so updates can recreate
+            # a Justfile that was manually deleted, matching the pattern used
+            # for the BlueBuild and Containerfile-method workflow files.
+            template_justfile = CONTAINERFILE_TEMPLATE_DIR / "Justfile"
+            if template_justfile.exists():
+                shutil.copy2(template_justfile, justfile_path)
+        justfile_text = ""
         if justfile_path.exists():
-            justfile_path.write_text(self.patch_container_justfile(justfile_path.read_text()))
-        else:
-            justfile_path.write_text(self.generate_justfile())
+            justfile_text = justfile_path.read_text()
+            justfile_path.write_text(self.patch_container_justfile(justfile_text))
+        if not env_path.exists() and "image-template.env" in justfile_text:
+            # Restored independently of the Justfile above: a repo can lose
+            # just this file (e.g. a partial manual edit) while keeping an
+            # otherwise-intact Justfile that still depends on it. Keyed on the
+            # Justfile actually referencing image-template.env so older-shape
+            # repos (whose Justfile never dotenv-loads it) do not gain an
+            # inert copy of the file on update.
+            template_env = CONTAINERFILE_TEMPLATE_DIR / "image-template.env"
+            if template_env.exists():
+                shutil.copy2(template_env, env_path)
+        if env_path.exists():
+            env_path.write_text(self.patch_image_template_env(env_path.read_text()))
 
         self.write_installer_configs(base_dir)
 
@@ -3764,6 +3905,17 @@ class App:
         # build.sh is where user selections become actual package/service
         # changes inside the image. Values are shell-quoted before this point.
         lines = ["#!/bin/bash", "", "set -ouex pipefail", ""]
+        # Newer upstream Containerfile snapshots stage a system_files/ overlay
+        # into the ctx build stage. Guarded so old-shape repos and from-scratch
+        # Containerfiles (which never COPY system_files into ctx) stay safe.
+        lines.extend(
+            [
+                "if [ -d /ctx/system_files ]; then",
+                "    cp -avf /ctx/system_files/. /",
+                "fi",
+                "",
+            ]
+        )
         if self.config.copr_repos:
             lines.append("# Enable COPR repositories")
             for repo in self.config.copr_repos:
@@ -4018,28 +4170,6 @@ class App:
             *using_image_lines,
         ]
         return "\n".join(sections).rstrip() + "\n"
-
-    def generate_justfile(self) -> str:
-        # just is included by the upstream template ecosystem, so we keep a tiny
-        # helper target for local builds even though this beginner tool no longer
-        # manages local-install workflows itself.
-        return textwrap.dedent(
-            f"""\
-            export image_name := env("IMAGE_NAME", "{self.config.repo_name}")
-            export default_tag := env("DEFAULT_TAG", "latest")
-
-            [private]
-            default:
-                @just --list
-
-            build $target_image=image_name $tag=default_tag:
-                #!/usr/bin/env bash
-                podman build \\
-                    --pull=newer \\
-                    --tag "${{target_image}}:${{tag}}" \\
-                    .
-            """
-        )
 
     def run_main(self) -> None:
         if not command_exists("gum"):
