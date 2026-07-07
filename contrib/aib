@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+#
+# aib — run Atomic Image Builder as a container. No local clone or
+# dependency install required; podman is the only prerequisite.
+#
+# Install:
+#   curl -fsSL https://raw.githubusercontent.com/Danathar/atomic-image-builder/main/contrib/aib -o ~/.local/bin/aib
+#   chmod +x ~/.local/bin/aib
+#
+# Usage:
+#   aib
+#
+# Config:
+#   AIB_IMAGE   Image to run. Default: ghcr.io/danathar/atomic-image-builder:latest
+#
+# What this script mounts or passes into the container, and why:
+#
+#   -e GH_TOKEN=...
+#       When the host has `gh` logged in, forwards a token so the container
+#       does not need its own login. Read once via `gh auth token`; never
+#       written to disk by this script.
+#
+#   -v aib-gh:/root/.config/gh
+#       Used instead of GH_TOKEN when the host has no working `gh` login.
+#       This is a podman-managed named volume, not a bind mount, so an
+#       in-container `gh auth login` (device-code flow) persists across runs
+#       without ever touching the host's own ~/.config/gh.
+#
+#   -v <tmp file>:<path>:ro,Z  and  -e AIB_RPM_OSTREE_STATUS_FILE=<path>
+#       When the host has `rpm-ostree`, this script captures
+#       `rpm-ostree status --json` from the host (the container has no way
+#       to reach the host's rpm-ostreed itself) and mounts the result
+#       read-only, so the tool's Scan OS menu can read real host state. If
+#       the host has no rpm-ostree, this is skipped silently — the Scan OS
+#       menu will just report it is unavailable. The temp file is removed
+#       on exit.
+#
+#   -v /etc/localtime:/etc/localtime:ro
+#       So the daily-rebuild note the tool prints shows the correct local
+#       time instead of defaulting to UTC.
+#
+# Known limitation: local Podman test builds are not available through this
+# wrapper (no podman-socket passthrough in v1). Inside the container the
+# tool's own "podman is required to run a local test build" message is the
+# expected, correct degradation — see README.md.
+
+set -euo pipefail
+
+AIB_IMAGE="${AIB_IMAGE:-ghcr.io/danathar/atomic-image-builder:latest}"
+
+if ! command -v podman >/dev/null 2>&1; then
+    echo "aib: podman is required but was not found on PATH. Install podman and try again." >&2
+    exit 1
+fi
+
+podman_args=(--rm -it)
+
+# --- GitHub auth -------------------------------------------------------
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    podman_args+=(-e "GH_TOKEN=$(gh auth token)")
+else
+    podman_args+=(-v "aib-gh:/root/.config/gh")
+fi
+
+# --- OS scan support -----------------------------------------------------
+status_file=""
+# shellcheck disable=SC2329 # invoked indirectly via `trap cleanup EXIT` below
+cleanup() {
+    if [ -n "$status_file" ]; then
+        rm -f "$status_file"
+    fi
+}
+trap cleanup EXIT
+
+if command -v rpm-ostree >/dev/null 2>&1; then
+    status_file="$(mktemp)"
+    if rpm-ostree status --json >"$status_file" 2>/dev/null; then
+        podman_args+=(
+            -v "${status_file}:/run/aib-rpm-ostree-status.json:ro,Z"
+            -e "AIB_RPM_OSTREE_STATUS_FILE=/run/aib-rpm-ostree-status.json"
+        )
+    else
+        rm -f "$status_file"
+        status_file=""
+    fi
+fi
+
+# --- Nice-to-haves ---------------------------------------------------------
+if [ -e /etc/localtime ]; then
+    podman_args+=(-v "/etc/localtime:/etc/localtime:ro")
+fi
+
+# Not `exec`: the EXIT trap above must fire to clean up the temp status
+# file, and `exec` would replace this shell (and its pending trap) with
+# podman before that could happen. Preserve podman's exit code as our own.
+podman run "${podman_args[@]}" "$AIB_IMAGE" "$@"
+exit $?
