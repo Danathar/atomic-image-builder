@@ -27,3 +27,46 @@ jobs:
 
       - name: Run ruff
         run: ruff check
+
+  container-build:
+    name: Build container image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+
+      # Path-scoped without a third-party action: only build when this push
+      # or PR actually touches something baked into the image. That is the
+      # Containerfile, its entrypoint, the tool script, and the bundled
+      # template snapshots — all of which are COPY'd in. contrib/aib is the
+      # host-side wrapper and is NOT in the image, so it is intentionally not
+      # a trigger here. Falls back to building when the diff base can't be
+      # resolved (e.g. a brand new branch with no prior commit) so this never
+      # silently skips.
+      - name: Check for container-related changes
+        id: changed
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          if [ -z "$base" ] || ! git cat-file -e "$base" 2>/dev/null; then
+            echo "any_changed=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$base" "${{ github.sha }}" -- Containerfile container/ atomic_image_builder.py template_snapshots/; then
+            echo "any_changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "any_changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build image
+        if: steps.changed.outputs.any_changed == 'true'
+        run: podman build -t aib-ci-test -f Containerfile .
+
+      - name: Smoke test --version
+        if: steps.changed.outputs.any_changed == 'true'
+        run: podman run --rm aib-ci-test --version

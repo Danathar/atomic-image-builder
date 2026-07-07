@@ -1,0 +1,56 @@
+---
+name: Publish Image
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Build and publish image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Determine version, short SHA, and lowercased owner
+        id: meta
+        run: |
+          VERSION="$(python3 ./atomic_image_builder.py --version | awk '{print $2}')"
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          # GHCR image references must be lowercase; the owner login may not be
+          # (e.g. "Danathar"). Lowercase it before building the registry path.
+          OWNER_LC="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "owner_lc=${OWNER_LC}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        id: build-image
+        uses: redhat-actions/buildah-build@7a95fa7ee0f02d552a32753e7414641a04307056 # v2
+        with:
+          image: atomic-image-builder
+          tags: latest ${{ steps.meta.outputs.version }} ${{ steps.meta.outputs.short_sha }}
+          containerfiles: |
+            ./Containerfile
+          platforms: linux/amd64
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push to GHCR
+        id: push-to-ghcr
+        uses: redhat-actions/push-to-registry@5ed88d269cf581ea9ef6dd6806d01562096bee9c # v2
+        with:
+          image: ${{ steps.build-image.outputs.image }}
+          tags: ${{ steps.build-image.outputs.tags }}
+          registry: ghcr.io/${{ steps.meta.outputs.owner_lc }}
