@@ -956,6 +956,30 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(any("gh auth login" in message for level, message in app.gum.messages if level == "hint"))
         self.assertEqual(stub.prompts, ["Press Enter to exit to the terminal..."])
 
+    def test_github_setup_guide_configures_git_credential_helper_after_login(self) -> None:
+        # After a successful `gh auth login`, the guide must run
+        # `gh auth setup-git` so the raw `git push` in build/update flows can
+        # authenticate — the user may have declined gh's own Git prompt.
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda *_a, **_k: ["I already have a GitHub account - log me in"]
+        stub.confirm = lambda *_a, **_k: True
+        app.gum = stub
+
+        calls: list[list[str]] = []
+
+        def fake_run(args, **_kwargs):
+            calls.append(list(args))
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with patch("atomic_image_builder.run", side_effect=fake_run):
+            app.github_setup_guide()
+
+        self.assertIn(["gh", "auth", "login"], calls)
+        self.assertIn(["gh", "auth", "setup-git"], calls)
+        # setup-git must come after a successful login, not before.
+        self.assertLess(calls.index(["gh", "auth", "login"]), calls.index(["gh", "auth", "setup-git"]))
+
     def test_run_includes_args_on_error(self) -> None:
         proc = subprocess.CompletedProcess(["git", "fake-verb"], returncode=1, stdout="", stderr="fatal: boom")
         with patch("atomic_image_builder.subprocess.run", return_value=proc):

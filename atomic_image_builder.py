@@ -1365,6 +1365,13 @@ class App:
             raise SystemExit(0)
         if run(["gh", "auth", "login"], check=False, capture=False).returncode != 0:
             raise SystemExit("GitHub login failed. Try: gh auth login")
+        # The build and update flows push over HTTPS with raw `git push`, which
+        # needs gh configured as git's credential helper. `gh auth login` only
+        # does that if the user answered yes to its "Authenticate Git" prompt,
+        # so configure it explicitly here (best-effort, mirroring
+        # container/entrypoint.sh) — otherwise the first push fails even though
+        # login and preflight succeeded.
+        run(["gh", "auth", "setup-git"], check=False, capture=False)
 
     def main_menu(self) -> None:
         # The main menu loops forever so the app drops the user back here after
