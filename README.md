@@ -125,6 +125,65 @@ If the script is not already executable on your system, make it executable once:
 chmod +x atomic_image_builder.py
 ```
 
+## Run with Podman (containerized)
+
+An alternative to the clone-and-run install above — the clone-and-run method
+stays the primary, recommended way to use this tool. This runs it as a
+container instead, with every dependency (`gum`, `git`, `gh`, `cosign`,
+`rpm-ostree` client) bundled in. Podman is the only prerequisite.
+
+### Using the wrapper script
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Danathar/atomic-image-builder/main/contrib/aib -o ~/.local/bin/aib
+chmod +x ~/.local/bin/aib
+aib
+```
+
+The wrapper forwards your host's `gh` login when there is one (otherwise it
+persists an in-container login across runs in a podman-managed volume),
+makes your host's `rpm-ostree` state available to the Scan OS menu, and
+mounts your local timezone. See the comments at the top of
+[`contrib/aib`](contrib/aib) for exactly what it mounts and why.
+
+### Plain `podman run`
+
+If you would rather not use the wrapper script:
+
+```bash
+podman run --rm -it \
+  -e GH_TOKEN="$(gh auth token)" \
+  ghcr.io/danathar/atomic-image-builder:latest
+```
+
+### Distrobox
+
+[Distrobox](https://distrobox.it/) integrates the container with your host:
+it shares your home directory, so your host `gh` login is reused directly,
+and host system access, so the Scan OS menu can read the host's `rpm-ostree`
+state — no wrapper or manual mounts needed:
+
+```bash
+distrobox create --name aib --image ghcr.io/danathar/atomic-image-builder:latest
+distrobox enter aib -- atomic-image-builder
+```
+
+### Limitations of running in a container
+
+| Feature | Containerized (`podman run` or distrobox) |
+|---|---|
+| Create/update image repos, view build status, rotate signing key | Full fidelity |
+| Scan OS & Migrate Layered Packages | Works via the `aib` wrapper or distrobox; unavailable with a bare `podman run` (no host state) |
+| Local Podman test build | Not available — the option reports this and does nothing; see below |
+
+The image includes `podman` only because `rpm-ostree` (a required dependency
+the tool checks for at startup) pulls it in transitively. A nested build
+inside the container is not supported, so the image tells the tool to make
+its "Test build locally (podman)" option show a clean "not available in this
+environment" message rather than attempt a build that would fail. Run the
+tool from a local clone (the primary install method) if you need local test
+builds.
+
 ## Usage
 
 Run the beginner app:

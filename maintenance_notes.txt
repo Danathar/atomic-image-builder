@@ -69,6 +69,42 @@ the patch_image_template_env unit tests) — treat a template refresh that
 touches image-template.env or the Justfile's dotenv lines as a signal to
 manually verify a generated repo's image-template.env has the right values.
 
+Scan Override: AIB_RPM_OSTREE_STATUS_FILE
+------------------------------------------
+scan_os() normally invokes `rpm-ostree status --json` directly on the host. That
+does not work from inside a container, since the client talks to the host's
+rpm-ostreed over the system D-Bus, which the container does not have access to.
+
+When AIB_RPM_OSTREE_STATUS_FILE is set, scan_os() reads that path's contents as
+the `rpm-ostree status --json` output instead of invoking rpm-ostree at all (the
+command_exists("rpm-ostree") check is skipped too, since nothing is invoked). A
+missing or unreadable file, or a file whose contents are not valid JSON, produces
+the same "Failed to read rpm-ostree status." error path as a real invocation
+failure would.
+
+The container wrapper (contrib/aib) is the only intended consumer: it captures
+`rpm-ostree status --json` on the host, mounts the result read-only into the
+container, and points this variable at the in-container path. This variable is
+not documented in the beginner-facing README; it is an integration detail of the
+container distribution, not a user-facing setting.
+
+Local Build Disable: AIB_DISABLE_LOCAL_BUILD
+--------------------------------------------
+When AIB_DISABLE_LOCAL_BUILD is set (to any non-empty value), the "Test build
+locally (podman)" option in test_build_locally() short-circuits with a clean
+"not available in this environment" message instead of rendering the project
+and invoking podman.
+
+The container image (Containerfile) sets this. Inside the image, podman is
+present only as a transitive dependency of rpm-ostree (rpm-ostree -> bootc ->
+podman), so command_exists("podman") is true and the tool would otherwise
+attempt a nested build, which is not supported in the container and fails.
+The env var makes it degrade cleanly instead. Like AIB_RPM_OSTREE_STATUS_FILE,
+this is an integration detail of the container distribution, not a
+user-facing setting, and is deliberately not documented in the README as a
+knob (its effect is described there as a limitation of running in a
+container).
+
 Rechunk Step Naming (Chunkah)
 -----------------------------
 patch_container_rechunk_step() swaps the bundled workflow's rpm-ostree rechunk

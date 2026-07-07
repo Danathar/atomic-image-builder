@@ -39,3 +39,12 @@ python3 maintenance_audit.py --check-action-updates
 ```
 
 The full audit also runs weekly and on demand through the repository workflow at `.github/workflows/maintenance-audit.yml`.
+
+## Container Image
+
+The tool is also published as a container image (see README.md's "Run with Podman" section for end-user usage). `Containerfile` at the repo root defines the image, built from `atomic_image_builder.py` and the bundled `template_snapshots/`. `.github/workflows/publish-image.yml` builds and pushes it to `ghcr.io/danathar/atomic-image-builder` — tagged `latest`, the tool's `VERSION`, and the short commit SHA — only when a GitHub release is published or the workflow is dispatched manually, never on every push. `.github/workflows/ci.yml`'s `container-build` job builds (but does not push) the Containerfile on any push or PR that touches `Containerfile`, `container/`, or `contrib/aib`, as a smoke test. To build and test the image locally:
+
+```bash
+podman build -t aib-local -f Containerfile .
+podman run --rm aib-local --version
+```
