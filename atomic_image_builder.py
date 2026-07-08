@@ -3441,6 +3441,15 @@ class App:
         # the ARG_MAX one. Matched on upstream's exact current literal text;
         # if upstream changes this recipe's shape, this silently no-ops like
         # every other patcher in this file.
+        #
+        # Cleanup of the temp config file uses `trap ... EXIT`, not a plain
+        # `rm -f` at the end of the recipe. The recipe runs under `set -e`;
+        # a bare trailing `rm -f` only runs on the success path, so if
+        # `podman run` (chunkah) fails, `set -e` aborts the script right
+        # there and the temp file -- containing the full image inspect
+        # output -- is left behind. `trap` guarantees the cleanup runs on
+        # every exit path, failure included. Flagged by a maintainer
+        # (renner0e) reviewing the upstream issue for this same fix.
         old_block = (
             '    export CHUNKAH_CONFIG_STR=$(podman inspect "${target_image}")\n'
             '    podman run --rm --mount=type=image,src="${target_image}",target=/chunkah \\\n'
@@ -3455,6 +3464,7 @@ class App:
         )
         new_block = (
             '    CHUNKAH_CONFIG_FILE=$(mktemp)\n'
+            '    trap \'rm -f "${CHUNKAH_CONFIG_FILE}"\' EXIT\n'
             '    podman inspect "${target_image}" > "${CHUNKAH_CONFIG_FILE}"\n'
             '    podman run --rm --mount=type=image,src="${target_image}",target=/chunkah \\\n'
             '    -v "${CHUNKAH_CONFIG_FILE}:/chunkah-config.json:ro,Z" quay.io/coreos/chunkah:latest \\\n'
@@ -3466,7 +3476,6 @@ class App:
             '    --label ostree.commit- --label ostree.final-diffid- \\\n'
             '    --config /chunkah-config.json \\\n'
             '    --tag "${target_image}:${tag}" | podman load\n'
-            '    rm -f "${CHUNKAH_CONFIG_FILE}"\n'
         )
         if old_block not in justfile_text:
             return justfile_text

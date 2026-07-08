@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -3918,7 +3919,12 @@ class BuilderTests(unittest.TestCase):
         # also verified live, not just plausible.
         self.assertIn('/chunkah-config.json:ro,Z"', result)
         self.assertIn("--config /chunkah-config.json", result)
-        self.assertIn('rm -f "${CHUNKAH_CONFIG_FILE}"', result)
+        # Cleanup is via trap, not a bare trailing `rm -f` -- a bare `rm -f`
+        # after the podman pipeline only runs on the success path under
+        # `set -e`, leaving the temp file behind on failure. The trap
+        # guarantees cleanup on every exit path.
+        self.assertIn('trap \'rm -f "${CHUNKAH_CONFIG_FILE}"\' EXIT', result)
+        self.assertNotIn('podman load\n    rm -f "${CHUNKAH_CONFIG_FILE}"', result)
 
     def test_patch_container_rechunk_config_arg_is_idempotent(self) -> None:
         app = self.make_app()
@@ -3926,6 +3932,76 @@ class BuilderTests(unittest.TestCase):
         once = app.patch_container_rechunk_config_arg(snapshot_text)
         twice = app.patch_container_rechunk_config_arg(once)
         self.assertEqual(once, twice)
+
+    @unittest.skipUnless(shutil.which("bash"), "requires a real bash to exercise trap semantics")
+    def test_patch_container_rechunk_config_arg_temp_file_survives_failed_run_without_trap(self) -> None:
+        # Control case, proving the bug renner0e flagged is real: with a bare
+        # trailing `rm -f` (no trap) and `set -e`, a failing `podman run`
+        # aborts the script before cleanup ever runs, leaking the temp file.
+        leftover = self._run_rechunk_recipe_body(
+            recipe_body=(
+                'CHUNKAH_CONFIG_FILE=$(mktemp)\n'
+                'podman inspect "${target_image}" > "${CHUNKAH_CONFIG_FILE}"\n'
+                'podman run --rm quay.io/coreos/chunkah:latest build | podman load\n'
+                'rm -f "${CHUNKAH_CONFIG_FILE}"\n'
+            ),
+        )
+        self.assertEqual(len(leftover), 1)
+
+    @unittest.skipUnless(shutil.which("bash"), "requires a real bash to exercise trap semantics")
+    def test_patch_container_rechunk_config_arg_cleans_up_temp_file_on_failure(self) -> None:
+        # Runs the actual production-generated recipe body (not a hand
+        # duplicate) under a real bash, with a podman stub whose `run` call
+        # always fails, and asserts the trap still removes the temp file --
+        # proving the fix, not just asserting the text contains "trap".
+        app = self.make_app()
+        existing = (CONTAINERFILE_TEMPLATE_DIR / "Justfile").read_text()
+        patched = app.patch_container_rechunk_config_arg(existing)
+
+        lines = patched.splitlines()
+        start = next(i for i, line in enumerate(lines) if line.startswith("rechunk $target_image"))
+        body_lines: list[str] = []
+        for line in lines[start + 1 :]:
+            if line == "" or line.startswith("    "):
+                body_lines.append(line[4:] if line.startswith("    ") else line)
+            else:
+                break
+        recipe_body = "\n".join(body_lines)
+
+        leftover = self._run_rechunk_recipe_body(recipe_body=recipe_body)
+        self.assertEqual(leftover, [])
+
+    def _run_rechunk_recipe_body(self, *, recipe_body: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            fake_bin = tmp_path / "bin"
+            fake_bin.mkdir()
+            podman_stub = fake_bin / "podman"
+            podman_stub.write_text(
+                "#!/usr/bin/env bash\n"
+                'if [ "$1" = "inspect" ]; then echo "{}"; exit 0; fi\n'
+                'if [ "$1" = "run" ]; then echo "boom" >&2; exit 1; fi\n'
+                "exit 0\n"
+            )
+            podman_stub.chmod(0o755)
+            temp_file_dir = tmp_path / "tmpdir"
+            temp_file_dir.mkdir()
+
+            env = dict(os.environ)
+            env["PATH"] = f"{fake_bin}:{env['PATH']}"
+            env["TMPDIR"] = str(temp_file_dir)
+            env["target_image"] = "dummy-image"
+            env["tag"] = "latest"
+            script = "set -euo pipefail\n" + recipe_body
+            proc = subprocess.run(
+                ["bash", "-c", script],
+                env=env,
+                cwd=str(tmp_path),
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(proc.returncode, 0, f"expected the recipe body to fail; stderr={proc.stderr!r}")
+            return [item.name for item in temp_file_dir.iterdir()]
 
     def test_patch_container_rechunk_config_arg_no_ops_on_unmatched_text(self) -> None:
         app = self.make_app()

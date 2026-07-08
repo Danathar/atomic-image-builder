@@ -161,3 +161,27 @@ because it runs against the real bundled snapshot.
 
 This was also reported upstream to ublue-os/image-template so the fix can
 land there directly and this patcher can eventually be retired.
+
+Chunkah Config Temp File Cleanup: trap, not a trailing rm -f
+---------------------------------------------------------------
+The rechunk recipe's temp config file (CHUNKAH_CONFIG_FILE, see above) is
+cleaned up via `trap 'rm -f "${CHUNKAH_CONFIG_FILE}"' EXIT`, registered
+immediately after the file is created, not a bare `rm -f` at the end of the
+recipe. The recipe runs under `set -e`: a bare trailing `rm -f` only runs on
+the success path, so if `podman run` (chunkah) fails, `set -e` aborts the
+script right there and the temp file, containing the full image inspect
+output, is left behind in TMPDIR. `trap ... EXIT` guarantees the cleanup
+command runs on every exit path, success or failure.
+
+The original fix (see above) shipped with the bare trailing `rm -f` and this
+exact gap; it was flagged by a maintainer (renner0e) reviewing the upstream
+issue filed for the ARG_MAX fix, and confirmed here as a real, reproducible
+leak, not just a theoretical one:
+test_patch_container_rechunk_config_arg_temp_file_survives_failed_run_without_trap
+runs a stripped-down bare-rm-f version of the recipe body under a real bash
+with a podman stub that fails, and shows the temp file surviving.
+test_patch_container_rechunk_config_arg_cleans_up_temp_file_on_failure runs
+the actual patched recipe body (extracted from patch_container_rechunk_config_arg's
+real output, not a hand-copied duplicate) the same way and shows the trap
+does clean it up. Both tests require a real bash and are skipped if one
+isn't available.
