@@ -120,6 +120,17 @@ this today only because they run against the real bundled snapshot — if that
 snapshot's step text ever drifts, re-check those tests still assert something
 meaningful rather than trivially passing on a no-op.
 
+The same function also strips upstream's trailing "if you are feeling
+adventurous, use the new distro agnostic rechunker" comment block once the
+active step above it has been switched to Chunkah — left in place, it reads
+as self-contradictory (a live Chunkah step immediately followed by comment
+text suggesting you switch to Chunkah, plus a now-redundant commented copy of
+that same step). Matched on upstream's exact literal text, same no-op-on-
+drift convention as everything else here. Found via live use: a real
+generated repo (not a test) showed the leftover block and it was genuinely
+confusing to read, even though the build itself was unaffected — the active
+step was already correct.
+
 Rechunk Recipe ARG_MAX Fix (CHUNKAH_CONFIG_STR)
 ------------------------------------------------
 The bundled Justfile's `rechunk` recipe (upstream, unpatched) does:
@@ -161,6 +172,37 @@ because it runs against the real bundled snapshot.
 
 This was also reported upstream to ublue-os/image-template so the fix can
 land there directly and this patcher can eventually be retired.
+
+Batched dnf5 Package Lookups (lookup_host_packages)
+-----------------------------------------------------
+lookup_host_packages() checks every requested package name in a single dnf5
+repoquery call instead of one call per package. dnf5's first repoquery
+invocation pays a real, sometimes very large (tens of seconds) cost to warm
+its metadata cache; every call after that on a warm cache is fast. When the
+old code ran one dnf5 process per package in a loop, that warm-up cost was
+paid on the first package and only the first package's "Checking package
+name" spinner was ever visible for more than a fraction of a second, even
+though every package genuinely was being checked correctly. Found by
+timestamp-analyzing a real asciinema demo recording: the "tmux" spinner ran
+for 46 real seconds (458 rendered frames) while the very next package,
+"htop", finished in 0.20s (3 frames) — not a logic bug, but confusing enough
+to look like one.
+
+lookup_host_package(package) still exists as a single-package convenience
+wrapper around lookup_host_packages([package]); it is the batched call that
+actually avoids the per-package dnf5 cost, so callers that check more than
+one package at a time (_filter_manual_packages) must call the plural form
+directly rather than looping over the singular one.
+
+The dnf5 --qf format string was changed from "%{name}" to "%{name}\n". This
+matters only in the batched case: dnf5 concatenates multiple results with no
+separator at all when the format string has none (confirmed live: two
+results printed back to back as a single unparseable "htoptmux"-style
+string), so parsing per-package results out of a multi-package query
+requires the explicit newline. search_host_packages() already did this
+correctly elsewhere in this file; lookup_host_package() was the one call
+site that had been missing it, invisibly, because a single-package query
+never has more than one result to separate.
 
 Chunkah Config Temp File Cleanup: trap, not a trailing rm -f
 ---------------------------------------------------------------
