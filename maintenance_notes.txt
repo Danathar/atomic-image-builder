@@ -120,6 +120,17 @@ this today only because they run against the real bundled snapshot — if that
 snapshot's step text ever drifts, re-check those tests still assert something
 meaningful rather than trivially passing on a no-op.
 
+The same function also strips upstream's trailing "if you are feeling
+adventurous, use the new distro agnostic rechunker" comment block once the
+active step above it has been switched to Chunkah — left in place, it reads
+as self-contradictory (a live Chunkah step immediately followed by comment
+text suggesting you switch to Chunkah, plus a now-redundant commented copy of
+that same step). Matched on upstream's exact literal text, same no-op-on-
+drift convention as everything else here. Found via live use: a real
+generated repo (not a test) showed the leftover block and it was genuinely
+confusing to read, even though the build itself was unaffected — the active
+step was already correct.
+
 Rechunk Recipe ARG_MAX Fix (CHUNKAH_CONFIG_STR)
 ------------------------------------------------
 The bundled Justfile's `rechunk` recipe (upstream, unpatched) does:

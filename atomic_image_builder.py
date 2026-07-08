@@ -3594,7 +3594,29 @@ class App:
                 output.append(line.replace("command -v just) ostree-rechunk", "command -v just) rechunk"))
                 continue
             output.append(line)
-        return ensure_trailing_newline("\n".join(output))
+        patched = ensure_trailing_newline("\n".join(output))
+
+        # Once the step above is switched to Chunkah, upstream's own
+        # commented-out "if you are feeling adventurous" alternative is
+        # stale: it still suggests switching to Chunkah, and still contains
+        # a commented copy of the very step that's now active just above
+        # it. Strip it so the generated workflow doesn't carry a confusing,
+        # self-contradictory leftover. Matched on upstream's exact current
+        # literal text, same as every other patcher in this file: silently
+        # no-ops if that text has drifted.
+        stale_comment_block = (
+            "      # If you are feeling adventurous, use the new distro agnostic rechunker\n"
+            "      # https://github.com/coreos/chunkah\n"
+            "      # You can delete the Rechunk with rpm-ostree portion then if you use this\n"
+            "      #- name: Rechunk with Chunkah\n"
+            "      #  id: rechunk\n"
+            "      #  run: |\n"
+            "      #    sudo -E $(command -v just) rechunk \\\n"
+            "      #      ${IMAGE_NAME} \\\n"
+            "      #      ${DEFAULT_TAG}\n"
+            "\n"
+        )
+        return patched.replace(stale_comment_block, "", 1)
 
     def patch_container_disk_workflow(self, existing_text: str, *, default_branch: str = "main") -> str:
         lines = [pin_action_uses_line(line) for line in existing_text.splitlines()]

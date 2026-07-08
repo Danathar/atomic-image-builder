@@ -409,12 +409,13 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("IMAGE_DESC:", result)
 
         # Chunkah is enabled by default over the rpm-ostree rechunker, and the
-        # commented-out Chunkah alternative block in the snapshot is untouched.
+        # now-stale commented-out Chunkah alternative block is stripped.
         self.assertIn("- name: Rechunk with Chunkah", result)
         self.assertIn("command -v just) rechunk", result)
         self.assertNotIn("- name: Rechunk with rpm-ostree", result)
         self.assertNotIn("command -v just) ostree-rechunk", result)
-        self.assertIn("#- name: Rechunk with Chunkah", result)
+        self.assertNotIn("#- name: Rechunk with Chunkah", result)
+        self.assertNotIn("feeling adventurous", result)
 
     def test_patch_container_rechunk_step_is_idempotent(self) -> None:
         app = self.make_app()
@@ -436,6 +437,50 @@ class BuilderTests(unittest.TestCase):
         )
         result = app.patch_container_rechunk_step(workflow)
         self.assertEqual(result, ensure_trailing_newline(workflow))
+
+    def test_patch_container_rechunk_step_strips_stale_comment_block(self) -> None:
+        # Once the active step is switched to Chunkah, upstream's leftover
+        # "if you are feeling adventurous" comment block (which itself
+        # contains a now-redundant commented copy of the same step) should
+        # be removed rather than left dangling below the active step, and
+        # exactly one blank line should separate the rechunk step from the
+        # next one.
+        app = self.make_app()
+        snapshot_text = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        result = app.patch_container_rechunk_step(snapshot_text)
+        self.assertNotIn("feeling adventurous", result)
+        self.assertNotIn("#- name: Rechunk with Chunkah", result)
+        self.assertIn(
+            '            ${DEFAULT_TAG}\n'
+            '\n'
+            '      - name: Generate Build Tags\n',
+            result,
+        )
+
+    def test_patch_container_rechunk_step_no_ops_stale_comment_strip_on_unmatched_text(self) -> None:
+        # If the active step is present but the trailing comment block's
+        # text doesn't match upstream's exact current wording, the strip
+        # silently no-ops rather than mangling unrelated content.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build_push:
+                steps:
+                  - name: Rechunk with rpm-ostree
+                    id: rechunk
+                    run: |
+                      sudo -E $(command -v just) ostree-rechunk \\
+                        ${IMAGE_NAME} \\
+                        ${DEFAULT_TAG}
+
+                  # A completely different trailing comment.
+                  - name: Generate Build Tags
+            """
+        )
+        result = app.patch_container_rechunk_step(workflow)
+        self.assertIn("- name: Rechunk with Chunkah", result)
+        self.assertIn("A completely different trailing comment.", result)
 
     def test_patch_workflow_branch_filters_adds_missing_branches_blocks(self) -> None:
         app = self.make_app()
