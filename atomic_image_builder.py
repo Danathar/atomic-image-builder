@@ -2485,8 +2485,9 @@ class App:
         missing: list[str] = []
         missing_but_copr_may_provide: list[str] = []
         unchecked: list[str] = []
+        lookup_results = self.lookup_host_packages(packages)
         for package in packages:
-            available = self.lookup_host_package(package)
+            available = lookup_results[package]
             if available is True:
                 accepted.append(package)
             elif available is False:
@@ -2531,19 +2532,41 @@ class App:
         # removals that are not installed in the chosen base image.
         return self._filter_manual_packages(packages, mode="removed")
 
-    def lookup_host_package(self, package: str) -> bool | None:
+    def lookup_host_packages(self, packages: Sequence[str]) -> dict[str, bool | None]:
         # Host-side dnf5 checks are a lightweight "spellcheck" for manual RPM
         # names. They are not a perfect model of the final image build, but they
         # catch obvious mistakes like typos before we create a repo.
-        if package in self.package_lookup_cache:
-            return self.package_lookup_cache[package]
+        #
+        # This checks every requested package in a single dnf5 invocation
+        # rather than one invocation per package. dnf5's first repoquery call
+        # pays a real, human-perceptible cost to warm its metadata cache;
+        # every call after that is fast. One call per package meant only the
+        # first package's "Checking package name" spinner was ever visible
+        # for more than a flash, even though every package genuinely was
+        # being checked -- discovered by watching a real demo recording.
+        results: dict[str, bool | None] = {}
+        to_check: list[str] = []
+        for package in packages:
+            if package in self.package_lookup_cache:
+                results[package] = self.package_lookup_cache[package]
+            elif package not in to_check:
+                to_check.append(package)
+        if not to_check:
+            return results
         if not command_exists("dnf5"):
-            self.package_lookup_cache[package] = None
-            return None
+            for package in to_check:
+                self.package_lookup_cache[package] = None
+                results[package] = None
+            return results
         state_dir = Path(tempfile.gettempdir()) / f"{TOOL_SLUG}-dnf5"
         state_dir.mkdir(parents=True, exist_ok=True)
+        title = (
+            f"Checking package name: {to_check[0]}"
+            if len(to_check) == 1
+            else f"Checking package names: {', '.join(to_check)}"
+        )
         proc = self.gum.spinner_result(
-            f"Checking package name: {package}",
+            title,
             [
                 "env",
                 f"XDG_STATE_HOME={state_dir}",
@@ -2551,25 +2574,33 @@ class App:
                 "repoquery",
                 "--available",
                 "--qf",
-                "%{name}",
+                "%{name}\n",
                 "--latest-limit",
                 "1",
-                package,
+                *to_check,
             ],
         )
+        # %{name}\n means one result per line even when multiple packages are
+        # queried at once; without the trailing newline in the format string,
+        # multiple results print back to back with no separator at all.
         names = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
-        if package in names:
-            self.package_lookup_cache[package] = True
-            return True
         detail = "\n".join(part for part in [proc.stdout, proc.stderr] if part).lower()
-        if any(marker in detail for marker in DNF5_MISSING_MARKERS):
-            self.package_lookup_cache[package] = False
-            return False
-        if proc.returncode == 0 and not names:
-            self.package_lookup_cache[package] = False
-            return False
-        self.package_lookup_cache[package] = None
-        return None
+        has_missing_marker = any(marker in detail for marker in DNF5_MISSING_MARKERS)
+        for package in to_check:
+            if package in names:
+                outcome: bool | None = True
+            elif has_missing_marker:
+                outcome = False
+            elif proc.returncode == 0:
+                outcome = False
+            else:
+                outcome = None
+            self.package_lookup_cache[package] = outcome
+            results[package] = outcome
+        return results
+
+    def lookup_host_package(self, package: str) -> bool | None:
+        return self.lookup_host_packages([package])[package]
 
     def search_host_packages(self, term: str) -> tuple[list[tuple[str, str]], bool, str | None]:
         normalized = " ".join(term.split())

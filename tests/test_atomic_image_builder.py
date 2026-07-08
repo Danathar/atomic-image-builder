@@ -1057,7 +1057,7 @@ class BuilderTests(unittest.TestCase):
     def test_add_packages_to_config_accepts_valid_tokens(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_package", side_effect=[True, True]):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
             added = app.add_packages_to_config(["tmux", "ripgrep"], source_label="manual entry")
         self.assertTrue(added)
         self.assertEqual(app.config.packages, ["tmux", "ripgrep"])
@@ -1074,7 +1074,7 @@ class BuilderTests(unittest.TestCase):
     def test_add_packages_to_config_rejects_missing_manual_packages(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_package", return_value=False):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
             added = app.add_packages_to_config(["nethock"], source_label="manual entry")
         self.assertFalse(added)
         self.assertEqual(app.config.packages, [])
@@ -1083,7 +1083,7 @@ class BuilderTests(unittest.TestCase):
     def test_add_packages_to_config_keeps_checked_manual_packages_only(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_package", side_effect=[True, False]):
+        with patch.object(app, "lookup_host_packages", return_value={"tmux": True, "nethock": False}):
             added = app.add_packages_to_config(["tmux", "nethock"], source_label="manual entry")
         self.assertTrue(added)
         self.assertEqual(app.config.packages, ["tmux"])
@@ -1092,7 +1092,7 @@ class BuilderTests(unittest.TestCase):
     def test_add_packages_to_config_warns_when_manual_check_is_unavailable(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_package", return_value=None):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: None for p in pkgs}):
             added = app.add_packages_to_config(["tmux"], source_label="manual entry")
         self.assertTrue(added)
         self.assertEqual(app.config.packages, ["tmux"])
@@ -1102,7 +1102,7 @@ class BuilderTests(unittest.TestCase):
         app = self.make_app()
         app.config.copr_repos = ["foo/bar"]
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_package", return_value=False):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
             added = app.add_packages_to_config(["nethock"], source_label="manual entry")
         self.assertTrue(added)
         self.assertEqual(app.config.packages, ["nethock"])
@@ -1111,7 +1111,7 @@ class BuilderTests(unittest.TestCase):
     def test_add_removed_packages_to_config_accepts_valid_tokens(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_package", side_effect=[True, True]):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
             added = app.add_removed_packages_to_config(["vim-enhanced", "nano"], source_label="manual entry")
         self.assertTrue(added)
         self.assertEqual(app.config.removed_packages, ["vim-enhanced", "nano"])
@@ -1128,7 +1128,7 @@ class BuilderTests(unittest.TestCase):
     def test_add_removed_packages_to_config_rejects_missing_manual_packages(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_package", return_value=False):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
             added = app.add_removed_packages_to_config(["nethock"], source_label="manual entry")
         self.assertFalse(added)
         self.assertEqual(app.config.removed_packages, [])
@@ -1165,6 +1165,132 @@ class BuilderTests(unittest.TestCase):
         app.add_services_manually()
         self.assertEqual(app.config.services, [])
         self.assertFalse(any(level == "success" for level, _message in stub.messages))
+
+    def test_lookup_host_packages_checks_multiple_packages_in_one_dnf5_call(self) -> None:
+        # A single, real demo recording showed the "Checking package name"
+        # spinner staying on the first package for 46 real seconds (dnf5's
+        # cache warm-up) while every package after it flashed by in a
+        # fraction of a second -- because each one was its own dnf5 call.
+        # This asserts the fix directly: one dnf5 invocation covers every
+        # requested package.
+        app = self.make_app()
+        stub = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            calls.append(list(command))
+            return subprocess.CompletedProcess(list(command), 0, "tmux\nhtop\n", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            results = app.lookup_host_packages(["tmux", "htop", "nethock"])
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn("tmux", calls[0])
+        self.assertIn("htop", calls[0])
+        self.assertIn("nethock", calls[0])
+        self.assertIn("%{name}\n", calls[0])
+        self.assertEqual(results, {"tmux": True, "htop": True, "nethock": False})
+
+    def test_lookup_host_packages_skips_already_cached_packages(self) -> None:
+        app = self.make_app()
+        app.package_lookup_cache["tmux"] = True
+        stub = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            calls.append(list(command))
+            return subprocess.CompletedProcess(list(command), 0, "htop\n", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            results = app.lookup_host_packages(["tmux", "htop"])
+
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("tmux", calls[0])
+        self.assertIn("htop", calls[0])
+        self.assertEqual(results, {"tmux": True, "htop": True})
+
+    def test_lookup_host_packages_does_not_call_dnf5_when_everything_is_cached(self) -> None:
+        app = self.make_app()
+        app.package_lookup_cache["tmux"] = True
+        app.package_lookup_cache["htop"] = False
+        stub = GumStub()
+        stub.spinner_result = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not run dnf5"))
+        app.gum = stub
+        results = app.lookup_host_packages(["tmux", "htop"])
+        self.assertEqual(results, {"tmux": True, "htop": False})
+
+    def test_lookup_host_packages_returns_none_for_all_when_dnf5_missing(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not run dnf5"))
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=False):
+            results = app.lookup_host_packages(["tmux", "htop"])
+        self.assertEqual(results, {"tmux": None, "htop": None})
+        self.assertEqual(app.package_lookup_cache["tmux"], None)
+
+    def test_lookup_host_packages_treats_returncode_zero_absence_as_missing(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, _command, *, cwd=None: subprocess.CompletedProcess(
+            _command, 0, "", ""
+        )
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            results = app.lookup_host_packages(["fake-pkg-one", "fake-pkg-two"])
+        self.assertEqual(results, {"fake-pkg-one": False, "fake-pkg-two": False})
+
+    def test_lookup_host_packages_returns_none_when_uncheckable(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, _command, *, cwd=None: subprocess.CompletedProcess(
+            _command, 1, "", "some unrelated dnf5 error"
+        )
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            results = app.lookup_host_packages(["tmux"])
+        self.assertEqual(results, {"tmux": None})
+
+    def test_lookup_host_packages_uses_singular_title_for_one_package(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        titles: list[str] = []
+
+        def fake_spinner_result(title, command, *, cwd=None):
+            titles.append(title)
+            return subprocess.CompletedProcess(list(command), 0, "tmux\n", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            app.lookup_host_packages(["tmux"])
+        self.assertEqual(titles, ["Checking package name: tmux"])
+
+    def test_lookup_host_packages_uses_plural_title_for_multiple_packages(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        titles: list[str] = []
+
+        def fake_spinner_result(title, command, *, cwd=None):
+            titles.append(title)
+            return subprocess.CompletedProcess(list(command), 0, "tmux\nhtop\n", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            app.lookup_host_packages(["tmux", "htop"])
+        self.assertEqual(titles, ["Checking package names: tmux, htop"])
+
+    def test_lookup_host_package_delegates_to_batched_lookup(self) -> None:
+        app = self.make_app()
+        with patch.object(app, "lookup_host_packages", return_value={"tmux": True}) as mock:
+            result = app.lookup_host_package("tmux")
+        mock.assert_called_once_with(["tmux"])
+        self.assertTrue(result)
 
     def test_search_host_packages_parses_results_and_limits_output(self) -> None:
         app = self.make_app()
@@ -1325,7 +1451,7 @@ class BuilderTests(unittest.TestCase):
         stub = GumStub()
         stub.write = lambda **_kwargs: "tmux"
         app.gum = stub
-        with patch.object(app, "lookup_host_package", return_value=True):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
             app.manual_packages()
         self.assertEqual(app.config.packages, ["tmux"])
         self.assertEqual(app.gum.prompts, ["Added 1 package(s). Press Enter to return to the package menu..."])
@@ -1335,7 +1461,7 @@ class BuilderTests(unittest.TestCase):
         stub = GumStub()
         stub.write = lambda **_kwargs: "nethock"
         app.gum = stub
-        with patch.object(app, "lookup_host_package", return_value=False):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
             app.manual_packages()
         self.assertEqual(app.config.packages, [])
         self.assertEqual(app.gum.prompts, ["No packages were added. Press Enter to return to the package menu..."])
@@ -1345,7 +1471,7 @@ class BuilderTests(unittest.TestCase):
         stub = GumStub()
         stub.write = lambda **_kwargs: "tmux,htop, vim"
         app.gum = stub
-        with patch.object(app, "lookup_host_package", return_value=True):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
             app.manual_packages()
         self.assertEqual(app.config.packages, ["tmux", "htop", "vim"])
 
@@ -3400,7 +3526,7 @@ class BuilderTests(unittest.TestCase):
         stub.choose = lambda _options, **_kwargs: ["Add package names to remove"]
         stub.write = lambda **_kwargs: "vim-enhanced"
         app.gum = stub
-        with patch.object(app, "lookup_host_package", return_value=True):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
             app.manage_removed_packages()
         self.assertIn("vim-enhanced", app.config.removed_packages)
 
@@ -3410,7 +3536,7 @@ class BuilderTests(unittest.TestCase):
         stub.choose = lambda _options, **_kwargs: ["Add package names to remove"]
         stub.write = lambda **_kwargs: "vim-enhanced,nano"
         app.gum = stub
-        with patch.object(app, "lookup_host_package", return_value=True):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
             app.manage_removed_packages()
         self.assertEqual(app.config.removed_packages, ["vim-enhanced", "nano"])
 
@@ -3482,7 +3608,7 @@ class BuilderTests(unittest.TestCase):
 
         stub.input = fake_input
         app.gum = stub
-        with patch.object(app, "lookup_host_package", return_value=True):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
             app.add_copr()
         self.assertEqual(app.config.copr_repos, ["kwizart/fedy"])
         self.assertEqual(app.config.packages, ["tmux", "htop"])
