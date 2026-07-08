@@ -119,3 +119,45 @@ test_patch_container_workflow_matches_current_upstream_snapshot_shape catch
 this today only because they run against the real bundled snapshot — if that
 snapshot's step text ever drifts, re-check those tests still assert something
 meaningful rather than trivially passing on a no-op.
+
+Rechunk Recipe ARG_MAX Fix (CHUNKAH_CONFIG_STR)
+------------------------------------------------
+The bundled Justfile's `rechunk` recipe (upstream, unpatched) does:
+
+    export CHUNKAH_CONFIG_STR=$(podman inspect "${target_image}")
+    podman run --rm ... -e CHUNKAH_CONFIG_STR quay.io/coreos/chunkah:latest ...
+
+For a base image that is itself already chunked — which in practice means
+most Universal Blue images (Bazzite, Aurora, Bluefin, and their DX variants
+are all built via a chunked pipeline upstream) — the `podman inspect` output's
+layer-history array is large enough that exporting it as a shell environment
+variable exceeds the kernel's argument/environment size limit. Every
+subsequent podman invocation in that shell then fails outright with
+"/usr/bin/podman: Argument list too long" (exit 126), before chunkah ever
+runs. Fedora Atomic base images (Silverblue, Kinoite, etc.) are not
+pre-chunked upstream, so this specific combination — Containerfile method +
+a Universal Blue base — was the one untested path when Chunkah rechunking was
+turned on by default; discovered via a real demo build against
+ghcr.io/ublue-os/bluefin:stable.
+
+patch_container_rechunk_config_arg() (called from patch_container_justfile(),
+so it applies to every new repo and to every existing repo's next update)
+rewrites the recipe to write the inspect output to a temp file and pass it to
+chunkah via its documented `--config <path>` flag (mounted into the container)
+instead of the environment variable. This has no size limit. The mount uses
+the `Z` SELinux relabel flag — without it, chunkah fails a second, different
+way ("Permission denied" reading the mounted file) on SELinux-enforcing hosts
+such as GitHub's ubuntu-24.04 runners and any Fedora/bootc box. Both failure
+modes, and the fix, were verified by actually running the unpatched and
+patched recipes against a real pulled ghcr.io/ublue-os/bluefin:stable image,
+not just asserted in unit tests.
+
+Matched on upstream's exact current literal text, same as every other patcher
+in this file: if a future template refresh changes the rechunk recipe's
+shape, this silently no-ops and generated/updated repos go back to hitting
+the ARG_MAX crash on Universal Blue bases.
+test_patch_container_rechunk_config_arg_fixes_real_snapshot catches this only
+because it runs against the real bundled snapshot.
+
+This was also reported upstream to ublue-os/image-template so the fix can
+land there directly and this patcher can eventually be retired.

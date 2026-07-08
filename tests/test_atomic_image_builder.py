@@ -3712,16 +3712,18 @@ class BuilderTests(unittest.TestCase):
 
     # ── Justfile / image-template.env restore-from-snapshot ─────────────
 
-    def test_patch_container_justfile_no_ops_on_new_upstream_justfile_syntax(self) -> None:
+    def test_patch_container_justfile_no_ops_image_name_patch_on_new_upstream_syntax(self) -> None:
         # The current bundled Justfile sources image name via image-template.env
         # (env_var(...), no inline default) rather than the older env("IMAGE_NAME",
-        # "default") form patch_container_justfile targets. It must silently
-        # leave this shape untouched; patch_image_template_env is what wires the
-        # repo name into the newer template instead.
+        # "default") form the image-name patch targets. That specific patch must
+        # silently leave this line untouched; patch_image_template_env is what
+        # wires the repo name into the newer template instead. (The rechunk
+        # ARG_MAX fix inside the same patch_container_justfile call is a
+        # separate, always-applicable patch -- see the rechunk-config-arg tests
+        # above, including test_patch_container_justfile_also_fixes_rechunk_config_arg.)
         app = self.make_app()
         existing = (CONTAINERFILE_TEMPLATE_DIR / "Justfile").read_text()
         result = app.patch_container_justfile(existing)
-        self.assertEqual(result, ensure_trailing_newline(existing))
         self.assertIn('export image_name := env_var("IMAGE_NAME")', result)
 
     def test_write_project_files_restores_missing_justfile_and_env_from_snapshot(self) -> None:
@@ -3734,8 +3736,11 @@ class BuilderTests(unittest.TestCase):
             app.write_project_files(repo_dir, include_workflow=True)
             justfile = (repo_dir / "Justfile").read_text()
             env_text = (repo_dir / "image-template.env").read_text()
-        template_justfile = ensure_trailing_newline((CONTAINERFILE_TEMPLATE_DIR / "Justfile").read_text())
-        self.assertEqual(justfile, template_justfile)
+        # A restored-then-written Justfile is the bundled snapshot after the
+        # same patching every Justfile goes through (patch_container_justfile),
+        # not the raw snapshot byte-for-byte.
+        expected_justfile = app.patch_container_justfile((CONTAINERFILE_TEMPLATE_DIR / "Justfile").read_text())
+        self.assertEqual(justfile, expected_justfile)
         self.assertIn("IMAGE_NAME=test-image", env_text)
         self.assertIn('REPO_ORGANIZATION="example"', env_text)
         self.assertIn('IMAGE_DESC="Test image"', env_text)
@@ -3749,7 +3754,9 @@ class BuilderTests(unittest.TestCase):
             app.write_project_files(repo_dir, include_workflow=True)
             justfile_after = (repo_dir / "Justfile").read_text()
             env_text = (repo_dir / "image-template.env").read_text()
-        self.assertEqual(justfile_after, ensure_trailing_newline(justfile_before))
+        # Not restored from the snapshot (it already existed) -- but every
+        # Justfile still goes through patch_container_justfile unconditionally.
+        self.assertEqual(justfile_after, app.patch_container_justfile(justfile_before))
         self.assertIn("IMAGE_NAME=test-image", env_text)
 
     def test_write_project_files_does_not_add_env_file_to_old_shape_repos(self) -> None:
@@ -3787,7 +3794,9 @@ class BuilderTests(unittest.TestCase):
             app.write_project_files(repo_dir, include_workflow=True)
             justfile_after = (repo_dir / "Justfile").read_text()
             env_text = (repo_dir / "image-template.env").read_text()
-        self.assertEqual(justfile_after, ensure_trailing_newline(justfile_before))
+        # Justfile isn't restored (it already existed), but it still goes
+        # through patch_container_justfile unconditionally, same as above.
+        self.assertEqual(justfile_after, app.patch_container_justfile(justfile_before))
         self.assertIn("IMAGE_NAME=test-image", env_text)
         self.assertIn('REPO_ORGANIZATION="example"', env_text)
         self.assertIn('IMAGE_DESC="Test image"', env_text)
@@ -3886,6 +3895,62 @@ class BuilderTests(unittest.TestCase):
         existing = 'export image_name := env("IMAGE_NAME", "old")'
         result = app.patch_container_justfile(existing)
         self.assertTrue(result.endswith("\n"))
+
+    # ── rechunk recipe ARG_MAX fix (chunkah --config file, not env var) ─
+
+    def test_patch_container_rechunk_config_arg_fixes_real_snapshot(self) -> None:
+        # The bundled Justfile's rechunk recipe exports the full `podman
+        # inspect` output as an env var, which exceeds the kernel's
+        # argument/environment size limit for already-chunked base images
+        # (i.e. most Universal Blue images) and crashes every subsequent
+        # podman call in that shell with "Argument list too long". Verified
+        # live against a real ghcr.io/ublue-os/bluefin:stable pull: the
+        # unpatched recipe reproduces that exact failure, and this patched
+        # recipe completes a real chunkah build against the same image.
+        app = self.make_app()
+        existing = (CONTAINERFILE_TEMPLATE_DIR / "Justfile").read_text()
+        result = app.patch_container_rechunk_config_arg(existing)
+        self.assertNotEqual(existing, result)
+        self.assertNotIn("-e CHUNKAH_CONFIG_STR", result)
+        self.assertIn("CHUNKAH_CONFIG_FILE=$(mktemp)", result)
+        # SELinux-enforcing hosts (Fedora/bootc runners) need the mount
+        # relabeled or chunkah gets "Permission denied" reading the file —
+        # also verified live, not just plausible.
+        self.assertIn('/chunkah-config.json:ro,Z"', result)
+        self.assertIn("--config /chunkah-config.json", result)
+        self.assertIn('rm -f "${CHUNKAH_CONFIG_FILE}"', result)
+
+    def test_patch_container_rechunk_config_arg_is_idempotent(self) -> None:
+        app = self.make_app()
+        snapshot_text = (CONTAINERFILE_TEMPLATE_DIR / "Justfile").read_text()
+        once = app.patch_container_rechunk_config_arg(snapshot_text)
+        twice = app.patch_container_rechunk_config_arg(once)
+        self.assertEqual(once, twice)
+
+    def test_patch_container_rechunk_config_arg_no_ops_on_unmatched_text(self) -> None:
+        app = self.make_app()
+        justfile = textwrap.dedent(
+            """\
+            build:
+                podman build .
+
+            custom-target:
+                echo "custom"
+            """
+        )
+        result = app.patch_container_rechunk_config_arg(justfile)
+        self.assertEqual(justfile, result)
+
+    def test_patch_container_justfile_also_fixes_rechunk_config_arg(self) -> None:
+        # patch_container_justfile is the actual production entry point (used
+        # for both new repos and updates to existing ones) — confirm the
+        # ARG_MAX fix is wired into it, not just reachable as a standalone
+        # method nothing calls.
+        app = self.make_app()
+        existing = (CONTAINERFILE_TEMPLATE_DIR / "Justfile").read_text()
+        result = app.patch_container_justfile(existing)
+        self.assertNotIn("-e CHUNKAH_CONFIG_STR", result)
+        self.assertIn("--config /chunkah-config.json", result)
 
     # ── write_installer_configs missing template error path ────────────
 

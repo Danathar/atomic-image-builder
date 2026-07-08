@@ -3418,7 +3418,59 @@ class App:
             count=1,
             flags=re.MULTILINE,
         )
+        updated = self.patch_container_rechunk_config_arg(updated)
         return ensure_trailing_newline(updated)
+
+    def patch_container_rechunk_config_arg(self, justfile_text: str) -> str:
+        # The bundled Justfile's `rechunk` recipe exports the full `podman
+        # inspect` output as the CHUNKAH_CONFIG_STR environment variable, then
+        # passes it to `podman run -e CHUNKAH_CONFIG_STR ...`. For a base image
+        # that is itself already chunked -- which in practice means most
+        # Universal Blue images (Bazzite, Aurora, Bluefin, ...) -- the inspect
+        # output's layer-history array is large enough that exporting it
+        # exceeds the kernel's argument/environment size limit, and every
+        # subsequent podman invocation in that shell fails with "Argument list
+        # too long" (exit 126). See maintenance_notes.txt.
+        #
+        # chunkah also accepts this same data via a mounted file (--config
+        # <path>, per its own README), which has no such limit. Rewrite the
+        # recipe to use that instead. The mount's `Z` flag is load-bearing on
+        # SELinux-enforcing hosts (Fedora/bootc runners): without it the
+        # container gets "Permission denied" reading the mounted file, a
+        # second real failure mode this patch was verified against, not just
+        # the ARG_MAX one. Matched on upstream's exact current literal text;
+        # if upstream changes this recipe's shape, this silently no-ops like
+        # every other patcher in this file.
+        old_block = (
+            '    export CHUNKAH_CONFIG_STR=$(podman inspect "${target_image}")\n'
+            '    podman run --rm --mount=type=image,src="${target_image}",target=/chunkah \\\n'
+            '    -e CHUNKAH_CONFIG_STR quay.io/coreos/chunkah:latest \\\n'
+            '    build \\\n'
+            '    --verbose \\\n'
+            '    --compressed \\\n'
+            '    --max-layers 128 \\\n'
+            '    --prune /sysroot/ \\\n'
+            '    --label ostree.commit- --label ostree.final-diffid- \\\n'
+            '    --tag "${target_image}:${tag}" | podman load\n'
+        )
+        new_block = (
+            '    CHUNKAH_CONFIG_FILE=$(mktemp)\n'
+            '    podman inspect "${target_image}" > "${CHUNKAH_CONFIG_FILE}"\n'
+            '    podman run --rm --mount=type=image,src="${target_image}",target=/chunkah \\\n'
+            '    -v "${CHUNKAH_CONFIG_FILE}:/chunkah-config.json:ro,Z" quay.io/coreos/chunkah:latest \\\n'
+            '    build \\\n'
+            '    --verbose \\\n'
+            '    --compressed \\\n'
+            '    --max-layers 128 \\\n'
+            '    --prune /sysroot/ \\\n'
+            '    --label ostree.commit- --label ostree.final-diffid- \\\n'
+            '    --config /chunkah-config.json \\\n'
+            '    --tag "${target_image}:${tag}" | podman load\n'
+            '    rm -f "${CHUNKAH_CONFIG_FILE}"\n'
+        )
+        if old_block not in justfile_text:
+            return justfile_text
+        return justfile_text.replace(old_block, new_block, 1)
 
     def patch_image_template_env(self, existing_text: str) -> str:
         # image-template.env is dotenv-loaded by the Justfile, and its values are
