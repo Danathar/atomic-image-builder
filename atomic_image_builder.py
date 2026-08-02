@@ -36,7 +36,7 @@ TOOL_SLUG = "atomic-image-builder"
 STATE_FILE = f".{TOOL_SLUG}.json"
 DEFAULT_REPO_NAME = "my-atomic-image"
 DEFAULT_GITHUB_BUILD_CRON = "05 10 * * *"
-FEDORA_ATOMIC_FALLBACK_TAG = "43"
+FEDORA_ATOMIC_FALLBACK_TAG = "44"
 UNIVERSAL_BLUE_BREW_IMAGE = "ghcr.io/ublue-os/brew:latest"
 MAX_UI_WIDTH = 120
 ACCENT_COLOR = 117
@@ -76,12 +76,13 @@ DNF5_MISSING_MARKERS = (
 # The human-readable tag is kept as a comment so maintainers can still tell what
 # upstream version the pin came from.
 ACTION_PINS: dict[str, tuple[str, str]] = {
-    "actions/checkout": ("9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0", "v7"),
+    "actions/checkout": ("3d3c42e5aac5ba805825da76410c181273ba90b1", "v7"),
+    "actions/setup-python": ("5fda3b95a4ea91299a34e894583c3862153e4b97", "v7"),
     "ublue-os/remove-unwanted-software": ("cc0becac701cf642c8f0a6613bbdaf5dc36b259e", "v9"),
     "docker/metadata-action": ("dc802804100637a589fabce1cb79ff13a1411302", "v6.2.0"),
-    "redhat-actions/buildah-build": ("7a95fa7ee0f02d552a32753e7414641a04307056", "v2"),
-    "docker/login-action": ("af1e73f918a031802d376d3c8bbc3fe56130a9b0", "v4.4.0"),
-    "redhat-actions/push-to-registry": ("5ed88d269cf581ea9ef6dd6806d01562096bee9c", "v2"),
+    "redhat-actions/buildah-build": ("3a51aade9afa17e5c78256bcbe2e1ee08c7b995b", "v3.0.2"),
+    "docker/login-action": ("dbcb813823bdd20940b903addbd779551569679f", "v4.6.0"),
+    "redhat-actions/push-to-registry": ("94ade333c38ecc0e60e94785125d9a52ca423b37", "v3.0.0"),
     "sigstore/cosign-installer": ("6f9f17788090df1f26f669e9d70d6ae9567deba6", "v4.1.2"),
     "actions/upload-artifact": ("043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "v7.0.1"),
     "blue-build/github-action": ("836161eb076426a451e6a0054f722b1153b8b3ad", "v1.12"),
@@ -477,6 +478,22 @@ def patch_workflow_signing_steps(workflow_text: str, *, branch_if: str, sign_if:
 
     flush_step()
     return "\n".join(output)
+
+
+def patch_cosign_compatibility(workflow_text: str) -> str:
+    """Keep existing managed workflows compatible with Cosign 3.x."""
+    lines: list[str] = []
+    for line in workflow_text.splitlines():
+        if "cosign-release:" in line:
+            line = re.sub(r"(cosign-release:\s*['\"])v[^'\"]+(['\"])", r"\1v3.1.2\2", line)
+        if re.search(r"\bcosign\s+sign\b", line) and "--key env://" in line and "--new-bundle-format=" not in line:
+            line = line.replace(
+                "cosign sign -y ",
+                "cosign sign -y --new-bundle-format=false --use-signing-config=false ",
+                1,
+            )
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[str, str]]) -> str:
@@ -2130,11 +2147,28 @@ class App:
         # We probe for the secret before trying to generate or upload a new key.
         # That keeps updates idempotent and avoids silently rotating keys.
         if not command_exists("gh"):
-            return False
-        proc = run(["gh", "secret", "list", "-R", f"{owner}/{repo}"], check=False)
+            raise CommandError(
+                "Signing-secret status could not be verified because gh is not installed; no signing keys were changed."
+            )
+        proc = run(["gh", "secret", "list", "-R", f"{owner}/{repo}", "--json", "name"], check=False)
         if proc.returncode != 0:
-            return False
-        return any(line.split()[0] == secret_name for line in proc.stdout.splitlines() if line.strip())
+            raise CommandError(
+                "Signing-secret status could not be verified; no signing keys were changed."
+            )
+        try:
+            payload = json.loads(proc.stdout)
+        except (json.JSONDecodeError, TypeError):
+            raise CommandError(
+                "Signing-secret status could not be verified because gh returned invalid data; no signing keys were changed."
+            ) from None
+        if not isinstance(payload, list) or any(
+            not isinstance(item, dict) or set(item) != {"name"} or not isinstance(item["name"], str)
+            for item in payload
+        ):
+            raise CommandError(
+                "Signing-secret status could not be verified because gh returned an unexpected response; no signing keys were changed."
+            )
+        return any(item["name"] == secret_name for item in payload)
 
     def repo_file_exists(self, owner: str, repo: str, path: str) -> bool:
         proc = run(["gh", "api", f"/repos/{owner}/{repo}/contents/{path}"], check=False)
@@ -3287,22 +3321,35 @@ class App:
         self.gum.enter_to_continue("Press Enter to return to the main menu...")
 
     def repo_diff_summary(self, repo_dir: Path) -> str:
-        diff = run(["git", "diff", "--stat"], cwd=repo_dir, check=False).stdout.strip()
-        if not diff:
-            diff = run(["git", "status", "--porcelain"], cwd=repo_dir, check=False).stdout.strip()
-        return diff
+        parts: list[str] = []
+        tracked_diff = run(["git", "diff", "--stat"], cwd=repo_dir).stdout.strip()
+        if tracked_diff:
+            parts.append(tracked_diff)
+        untracked = self.repo_untracked_files(repo_dir)
+        if untracked:
+            parts.append("\n".join(f"?? {path}" for path in untracked))
+        return "\n".join(parts)
+
+    def repo_untracked_files(self, repo_dir: Path) -> list[str]:
+        proc = run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=repo_dir,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise CommandError(f"Could not enumerate untracked files in {repo_dir}.")
+        return [path for path in proc.stdout.split("\0") if path]
 
     def repo_full_diff(self, repo_dir: Path) -> str:
         parts: list[str] = []
-        tracked_diff = run(["git", "diff"], cwd=repo_dir, check=False).stdout.strip()
+        tracked_diff = run(["git", "diff"], cwd=repo_dir).stdout.strip()
         if tracked_diff:
             parts.append(tracked_diff)
-        status = run(["git", "status", "--porcelain"], cwd=repo_dir, check=False).stdout
-        for line in status.splitlines():
-            if not line.startswith("?? "):
-                continue
-            path = line[3:]
-            untracked_diff = run(["git", "diff", "--no-index", "--", "/dev/null", path], cwd=repo_dir, check=False).stdout.strip()
+        for path in self.repo_untracked_files(repo_dir):
+            proc = run(["git", "diff", "--no-index", "--", "/dev/null", path], cwd=repo_dir, check=False)
+            if proc.returncode not in (0, 1):
+                raise CommandError(f"Could not generate a full diff for untracked file {path}.")
+            untracked_diff = proc.stdout.strip()
             if untracked_diff:
                 parts.append(untracked_diff)
         if not parts:
@@ -3453,25 +3500,29 @@ class App:
         return ensure_trailing_newline(updated)
 
     def patch_container_rechunk_config_arg(self, justfile_text: str) -> str:
-        # The bundled Justfile's `rechunk` recipe exports the full `podman
-        # inspect` output as the CHUNKAH_CONFIG_STR environment variable, then
-        # passes it to `podman run -e CHUNKAH_CONFIG_STR ...`. For a base image
-        # that is itself already chunked -- which in practice means most
-        # Universal Blue images (Bazzite, Aurora, Bluefin, ...) -- the inspect
-        # output's layer-history array is large enough that exporting it
-        # exceeds the kernel's argument/environment size limit, and every
-        # subsequent podman invocation in that shell fails with "Argument list
-        # too long" (exit 126). See maintenance_notes.txt.
+        # Existing managed repositories may still have either of two unsafe
+        # `rechunk` shapes. The older one exports the full `podman inspect`
+        # output as CHUNKAH_CONFIG_STR, then passes it to
+        # `podman run -e CHUNKAH_CONFIG_STR ...`. For a base image that is
+        # itself already chunked -- which in practice means most Universal
+        # Blue images (Bazzite, Aurora, Bluefin, ...) -- that environment can
+        # exceed the kernel's argument/environment size limit, making every
+        # subsequent podman invocation fail with "Argument list too long."
+        # A newer upstream shape derives a local mktemp directory from
+        # target_image; registry-qualified names contain slashes, which mktemp
+        # interprets as nonexistent parent directories. Rewrite both exact
+        # legacy shapes while leaving the corrected bundled snapshot unchanged.
+        # See maintenance_notes.txt.
         #
         # chunkah also accepts this same data via a mounted file (--config
-        # <path>, per its own README), which has no such limit. Rewrite the
-        # recipe to use that instead. The mount's `Z` flag is load-bearing on
+        # <path>, per its own README), which has no such limit. Rewrite legacy
+        # recipes to use that instead. The mount's `Z` flag is load-bearing on
         # SELinux-enforcing hosts (Fedora/bootc runners): without it the
         # container gets "Permission denied" reading the mounted file, a
         # second real failure mode this patch was verified against, not just
-        # the ARG_MAX one. Matched on upstream's exact current literal text;
-        # if upstream changes this recipe's shape, this silently no-ops like
-        # every other patcher in this file.
+        # the ARG_MAX one. Matched on the legacy recipe's exact literal text;
+        # if that recipe's shape differs, this silently no-ops like every
+        # other patcher in this file.
         #
         # Cleanup of the temp config file uses `trap ... EXIT`, not a plain
         # `rm -f` at the end of the recipe. The recipe runs under `set -e`;
@@ -3481,6 +3532,10 @@ class App:
         # output -- is left behind. `trap` guarantees the cleanup runs on
         # every exit path, failure included. Flagged by a maintainer
         # (renner0e) reviewing the upstream issue for this same fix.
+        vulnerable_output_dir = '    CHUNKAH_OUTPUT_DIR="$(mktemp -d ./"${target_image}"_chunkah_XXXXXX)"'
+        safe_output_dir = '    CHUNKAH_OUTPUT_DIR="$(mktemp -d ./aib_chunkah_XXXXXX)"'
+        updated = justfile_text.replace(vulnerable_output_dir, safe_output_dir, 1)
+
         old_block = (
             '    export CHUNKAH_CONFIG_STR=$(podman inspect "${target_image}")\n'
             '    podman run --rm --mount=type=image,src="${target_image}",target=/chunkah \\\n'
@@ -3508,9 +3563,9 @@ class App:
             '    --config /chunkah-config.json \\\n'
             '    --tag "${target_image}:${tag}" | podman load\n'
         )
-        if old_block not in justfile_text:
-            return justfile_text
-        return justfile_text.replace(old_block, new_block, 1)
+        if old_block in updated:
+            updated = updated.replace(old_block, new_block, 1)
+        return updated
 
     def patch_image_template_env(self, existing_text: str) -> str:
         # image-template.env is dotenv-loaded by the Justfile, and its values are
@@ -3601,6 +3656,7 @@ class App:
                 continue
             output.append(line)
         text = patch_workflow_signing_steps("\n".join(output), branch_if=branch_if, sign_if=sign_if)
+        text = patch_cosign_compatibility(text)
         text = self.patch_workflow_branch_filters(text, default_branch)
         text = ensure_workflow_job_env_entries(
             text,
@@ -3980,7 +4036,7 @@ class App:
         readme_path.write_text(self.generate_readme())
 
         existing_gitignore = gitignore_path.read_text().splitlines() if gitignore_path.exists() else []
-        for entry in ["cosign.key", "_build*/", "output/"]:
+        for entry in ["cosign.key", "_build*/", "output/", "*_chunkah_*"]:
             if entry not in existing_gitignore:
                 existing_gitignore.append(entry)
         gitignore_path.write_text(ensure_trailing_newline("\n".join(existing_gitignore)))
@@ -4221,6 +4277,7 @@ class App:
             "          tags: ${{ steps.metadata.outputs.tags }}",
             "          labels: ${{ steps.metadata.outputs.labels }}",
             "          oci: false",
+            "          squash: false",
             "",
             "      - name: Login to GHCR",
             f"        uses: {pinned_action('docker/login-action')}",
@@ -4248,14 +4305,14 @@ class App:
                     f"        uses: {pinned_action('sigstore/cosign-installer')}",
                     f"        if: {sign_if}",
                     "        with:",
-                    "          cosign-release: 'v2.6.3'",
+                    "          cosign-release: 'v3.1.2'",
                     "",
                     "      - name: Sign container image",
                     f"        if: {sign_if}",
                     "        run: |",
                     '          IMAGE_FULL="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"',
                     "          for tag in ${{ steps.metadata.outputs.tags }}; do",
-                    "            cosign sign -y --key env://COSIGN_PRIVATE_KEY $IMAGE_FULL:$tag",
+                    "            cosign sign -y --new-bundle-format=false --use-signing-config=false --key env://COSIGN_PRIVATE_KEY $IMAGE_FULL:$tag",
                     "          done",
                 ]
             )

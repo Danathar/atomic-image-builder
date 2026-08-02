@@ -35,8 +35,8 @@ RUN dnf5 -y install dnf5-plugins curl && \
 # its published sha256 before installing — no unverified curl|install.
 # Bump both the URL and the checksum together when updating this pin.
 RUN curl -fsSL -o /tmp/cosign.rpm \
-      https://github.com/sigstore/cosign/releases/download/v3.1.1/cosign-3.1.1-1.x86_64.rpm && \
-    echo "daa90177c32a62550676ba1cf6be153291d601e53fa0e46a852fc5af020e5674  /tmp/cosign.rpm" | sha256sum -c - && \
+      https://github.com/sigstore/cosign/releases/download/v3.1.2/cosign-3.1.2-1.x86_64.rpm && \
+    echo "72382d1ef1cc824e1c10acfbe7f76af76fb294a10b0d16f31b978350ec4bc3e9  /tmp/cosign.rpm" | sha256sum -c - && \
     dnf5 -y install /tmp/cosign.rpm && \
     rm -f /tmp/cosign.rpm && \
     dnf5 clean all

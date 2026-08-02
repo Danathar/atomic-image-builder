@@ -18,6 +18,11 @@ TEMPLATE_SOURCES: list[tuple[str, str]] = [
     ("template_snapshots/containerfile/.template-source", "template_snapshots/containerfile/.github/workflows/build.yml"),
     ("template_snapshots/bluebuild/.template-source", "template_snapshots/bluebuild/.github/workflows/build.yml"),
 ]
+WORKFLOW_DIRS: tuple[Path, ...] = (
+    Path(".github/workflows"),
+    Path("template_snapshots/containerfile/.github/workflows"),
+    Path("template_snapshots/bluebuild/.github/workflows"),
+)
 REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 USES_RE = re.compile(r"^\s*(?:-\s*)?uses:\s+([^@\s]+)@([^\s#]+)")
 VERSION_TAG_RE = re.compile(r"^v(\d+)(?:\.(\d+))?(?:\.(\d+))?$")
@@ -89,6 +94,17 @@ def iter_workflow_action_refs(text: str) -> list[tuple[str, str]]:
     return refs
 
 
+def iter_local_workflow_paths(repo_root: Path) -> list[Path]:
+    paths: set[Path] = set()
+    for workflow_dir in WORKFLOW_DIRS:
+        directory = repo_root / workflow_dir
+        if not directory.is_dir():
+            continue
+        paths.update(directory.rglob("*.yml"))
+        paths.update(directory.rglob("*.yaml"))
+    return sorted(paths)
+
+
 def audit_local_snapshot(repo_root: Path) -> list[str]:
     findings: list[str] = []
     for source_rel, workflow_rel in TEMPLATE_SOURCES:
@@ -103,8 +119,7 @@ def audit_local_snapshot(repo_root: Path) -> list[str]:
                 findings.append(str(exc))
         if not workflow_path.is_file():
             findings.append(f"Missing template workflow file: {workflow_path}")
-            continue
-
+    for workflow_path in iter_local_workflow_paths(repo_root):
         try:
             workflow_text = workflow_path.read_text()
         except OSError as exc:
@@ -114,12 +129,12 @@ def audit_local_snapshot(repo_root: Path) -> list[str]:
         for action, ref in iter_workflow_action_refs(workflow_text):
             pin = ACTION_REF_PINS.get(f"{action}@{ref}") or ACTION_PINS.get(action)
             if pin is None:
-                findings.append(f"Template workflow action {action}@{ref} is not covered by ACTION_PINS or ACTION_REF_PINS.")
+                findings.append(f"Workflow action {action}@{ref} in {workflow_path} is not covered by ACTION_PINS or ACTION_REF_PINS.")
                 continue
             sha, _label = pin
             if ref != sha:
                 findings.append(
-                    f"Template workflow action {action}@{ref} does not match the pin table SHA {sha}."
+                    f"Workflow action {action}@{ref} in {workflow_path} does not match the pin table SHA {sha}."
                 )
     return findings
 
