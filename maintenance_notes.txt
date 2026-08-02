@@ -160,9 +160,15 @@ flag. This avoids both the ARG_MAX and SELinux permission failures.
 The refreshed bundled template now carries the upstream OCI-directory recipe:
 it uses a config temp file, a temporary `*_chunkah_*` output directory, an EXIT
 trap for both, `SOURCE_DATE_EPOCH=0`, and `--output oci:/run/out/chunked`, then
-pulls and retags the resulting OCI image. The patcher intentionally no-ops on
-that current shape and remains covered by the current-snapshot and explicit
-legacy-fixture tests.
+pulls and retags the resulting OCI image. The upstream revision originally
+derived that temporary directory from `${target_image}`. Registry-qualified
+image names contain slashes (for example `ghcr.io/acme/image`), which made
+`mktemp` interpret parts of the image name as nonexistent parent directories.
+The bundled snapshot instead uses the generic local template
+`./aib_chunkah_XXXXXX`, and patch_container_rechunk_config_arg() rewrites that
+exact vulnerable upstream form in existing managed repositories. The patcher
+no-ops on the corrected current shape and remains covered by current-snapshot,
+qualified-image, and explicit legacy-fixture tests.
 
 Batched dnf5 Package Lookups (lookup_host_packages)
 -----------------------------------------------------

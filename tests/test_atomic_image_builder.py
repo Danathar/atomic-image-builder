@@ -4210,7 +4210,8 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(existing, result)
         self.assertNotIn("CHUNKAH_CONFIG_STR", result)
         self.assertIn('CHUNKAH_CONFIG_FILE="$(mktemp)"', result)
-        self.assertIn('CHUNKAH_OUTPUT_DIR="$(mktemp -d ./"${target_image}"_chunkah_XXXXXX)"', result)
+        self.assertIn('CHUNKAH_OUTPUT_DIR="$(mktemp -d ./aib_chunkah_XXXXXX)"', result)
+        self.assertNotIn('mktemp -d ./"${target_image}"_chunkah_', result)
         self.assertIn('trap \'rm -f "${CHUNKAH_CONFIG_FILE}"; rm -rf "${CHUNKAH_OUTPUT_DIR}"\' EXIT', result)
         self.assertIn('src="${target_image}:${tag}"', result)
         self.assertIn("-e SOURCE_DATE_EPOCH=0", result)
@@ -4251,6 +4252,12 @@ class BuilderTests(unittest.TestCase):
         # guarantees cleanup on every exit path.
         self.assertIn('trap \'rm -f "${CHUNKAH_CONFIG_FILE}"\' EXIT', result)
         self.assertNotIn('podman load\n    rm -f "${CHUNKAH_CONFIG_FILE}"', result)
+
+    def test_patch_container_rechunk_config_arg_repairs_qualified_image_mktemp_template(self) -> None:
+        app = self.make_app()
+        vulnerable = '    CHUNKAH_OUTPUT_DIR="$(mktemp -d ./"${target_image}"_chunkah_XXXXXX)"\n'
+        result = app.patch_container_rechunk_config_arg(vulnerable)
+        self.assertEqual(result, '    CHUNKAH_OUTPUT_DIR="$(mktemp -d ./aib_chunkah_XXXXXX)"\n')
 
     def test_patch_container_rechunk_config_arg_is_idempotent(self) -> None:
         app = self.make_app()
@@ -4294,10 +4301,13 @@ class BuilderTests(unittest.TestCase):
                 break
         recipe_body = "\n".join(body_lines)
 
-        leftover = self._run_rechunk_recipe_body(recipe_body=recipe_body)
+        leftover = self._run_rechunk_recipe_body(
+            recipe_body=recipe_body,
+            target_image="ghcr.io/acme/image",
+        )
         self.assertEqual(leftover, [])
 
-    def _run_rechunk_recipe_body(self, *, recipe_body: str) -> list[str]:
+    def _run_rechunk_recipe_body(self, *, recipe_body: str, target_image: str = "dummy-image") -> list[str]:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             fake_bin = tmp_path / "bin"
@@ -4316,7 +4326,7 @@ class BuilderTests(unittest.TestCase):
             env = dict(os.environ)
             env["PATH"] = f"{fake_bin}:{env['PATH']}"
             env["TMPDIR"] = str(temp_file_dir)
-            env["target_image"] = "dummy-image"
+            env["target_image"] = target_image
             env["tag"] = "latest"
             script = "set -euo pipefail\n" + recipe_body
             proc = subprocess.run(
@@ -4327,7 +4337,9 @@ class BuilderTests(unittest.TestCase):
                 text=True,
             )
             self.assertNotEqual(proc.returncode, 0, f"expected the recipe body to fail; stderr={proc.stderr!r}")
-            return [item.name for item in temp_file_dir.iterdir()]
+            leftovers = [f"tmpdir/{item.name}" for item in temp_file_dir.iterdir()]
+            leftovers.extend(item.name for item in tmp_path.glob("*_chunkah_*"))
+            return leftovers
 
     def test_patch_container_rechunk_config_arg_no_ops_on_unmatched_text(self) -> None:
         app = self.make_app()
@@ -4350,9 +4362,15 @@ class BuilderTests(unittest.TestCase):
         # method nothing calls.
         app = self.make_app()
         existing = (CONTAINERFILE_TEMPLATE_DIR / "Justfile").read_text()
+        existing = existing.replace(
+            'CHUNKAH_OUTPUT_DIR="$(mktemp -d ./aib_chunkah_XXXXXX)"',
+            'CHUNKAH_OUTPUT_DIR="$(mktemp -d ./"${target_image}"_chunkah_XXXXXX)"',
+        )
         result = app.patch_container_justfile(existing)
         self.assertNotIn("-e CHUNKAH_CONFIG_STR", result)
         self.assertIn("--config /chunkah-config.json", result)
+        self.assertIn('CHUNKAH_OUTPUT_DIR="$(mktemp -d ./aib_chunkah_XXXXXX)"', result)
+        self.assertNotIn('mktemp -d ./"${target_image}"_chunkah_', result)
 
     # ── write_installer_configs missing template error path ────────────
 

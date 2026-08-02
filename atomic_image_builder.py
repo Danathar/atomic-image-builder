@@ -3500,18 +3500,19 @@ class App:
         return ensure_trailing_newline(updated)
 
     def patch_container_rechunk_config_arg(self, justfile_text: str) -> str:
-        # Existing managed repositories may still have the legacy `rechunk`
-        # recipe that exports the full `podman inspect` output as the
-        # CHUNKAH_CONFIG_STR environment variable, then passes it to
+        # Existing managed repositories may still have either of two unsafe
+        # `rechunk` shapes. The older one exports the full `podman inspect`
+        # output as CHUNKAH_CONFIG_STR, then passes it to
         # `podman run -e CHUNKAH_CONFIG_STR ...`. For a base image that is
         # itself already chunked -- which in practice means most Universal
-        # Blue images (Bazzite, Aurora, Bluefin, ...) -- the inspect output's
-        # layer-history array is large enough that exporting it exceeds the
-        # kernel's argument/environment size limit, and every subsequent
-        # podman invocation in that shell fails with "Argument list too long"
-        # (exit 126). The current bundled snapshot already uses the safe
-        # config-file form, so this patch intentionally no-ops for it. See
-        # maintenance_notes.txt.
+        # Blue images (Bazzite, Aurora, Bluefin, ...) -- that environment can
+        # exceed the kernel's argument/environment size limit, making every
+        # subsequent podman invocation fail with "Argument list too long."
+        # A newer upstream shape derives a local mktemp directory from
+        # target_image; registry-qualified names contain slashes, which mktemp
+        # interprets as nonexistent parent directories. Rewrite both exact
+        # legacy shapes while leaving the corrected bundled snapshot unchanged.
+        # See maintenance_notes.txt.
         #
         # chunkah also accepts this same data via a mounted file (--config
         # <path>, per its own README), which has no such limit. Rewrite legacy
@@ -3531,6 +3532,10 @@ class App:
         # output -- is left behind. `trap` guarantees the cleanup runs on
         # every exit path, failure included. Flagged by a maintainer
         # (renner0e) reviewing the upstream issue for this same fix.
+        vulnerable_output_dir = '    CHUNKAH_OUTPUT_DIR="$(mktemp -d ./"${target_image}"_chunkah_XXXXXX)"'
+        safe_output_dir = '    CHUNKAH_OUTPUT_DIR="$(mktemp -d ./aib_chunkah_XXXXXX)"'
+        updated = justfile_text.replace(vulnerable_output_dir, safe_output_dir, 1)
+
         old_block = (
             '    export CHUNKAH_CONFIG_STR=$(podman inspect "${target_image}")\n'
             '    podman run --rm --mount=type=image,src="${target_image}",target=/chunkah \\\n'
@@ -3558,9 +3563,9 @@ class App:
             '    --config /chunkah-config.json \\\n'
             '    --tag "${target_image}:${tag}" | podman load\n'
         )
-        if old_block not in justfile_text:
-            return justfile_text
-        return justfile_text.replace(old_block, new_block, 1)
+        if old_block in updated:
+            updated = updated.replace(old_block, new_block, 1)
+        return updated
 
     def patch_image_template_env(self, existing_text: str) -> str:
         # image-template.env is dotenv-loaded by the Justfile, and its values are
