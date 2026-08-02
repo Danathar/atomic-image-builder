@@ -15,10 +15,11 @@
 #
 # What this script mounts or passes into the container, and why:
 #
-#   -e GH_TOKEN=...
+#   -e GH_TOKEN
 #       When the host has `gh` logged in, forwards a token so the container
-#       does not need its own login. Read once via `gh auth token`; never
-#       written to disk by this script.
+#       does not need its own login. The value is exported in this wrapper's
+#       environment and is never placed in the Podman command line or written
+#       to disk by this script.
 #
 #   -v aib-gh:/root/.config/gh
 #       Used instead of GH_TOKEN when the host has no working `gh` login.
@@ -57,7 +58,9 @@ podman_args=(--rm -it)
 
 # --- GitHub auth -------------------------------------------------------
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-    podman_args+=(-e "GH_TOKEN=$(gh auth token)")
+    GH_TOKEN="$(gh auth token)"
+    export GH_TOKEN
+    podman_args+=(-e GH_TOKEN)
 else
     podman_args+=(-v "aib-gh:/root/.config/gh")
 fi

@@ -362,6 +362,24 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("  pull_request:\n    branches:\n      - master", patched)
         self.assertIn("  push:\n    branches:\n      - master", patched)
 
+    def test_patch_container_workflow_updates_legacy_cosign_compatibility(self) -> None:
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build:
+                steps:
+                  - name: Install Cosign
+                    with:
+                      cosign-release: 'v2.6.3'
+                  - name: Sign
+                    run: cosign sign -y --key env://COSIGN_PRIVATE_KEY image:latest
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn("cosign-release: 'v3.1.2'", patched)
+        self.assertIn("cosign sign -y --new-bundle-format=false --use-signing-config=false --key", patched)
+
     def test_patch_container_workflow_golden(self) -> None:
         expected_path = Path(__file__).parent / "fixtures/workflows/container_expected.yml"
         input_path = Path(__file__).parent / "fixtures/workflows/container_input.yml"
@@ -371,7 +389,7 @@ class BuilderTests(unittest.TestCase):
 
     def test_patch_container_workflow_matches_current_upstream_snapshot_shape(self) -> None:
         # Coverage for the "rewrite in just" upstream refresh (image-template @
-        # f9a9e4f8): the current build.yml has no job-level env: block and no
+        # ac6ef404): the current build.yml has no job-level env: block and no
         # IMAGE_DESC: line (description now flows through
         # patch_image_template_env instead), so this exercises the from-scratch
         # env-block insertion and behavior-based signing-step detection against
@@ -572,6 +590,56 @@ class BuilderTests(unittest.TestCase):
             with patch("atomic_image_builder.command_exists", side_effect=lambda name: False if name == "cosign" else True):
                 with self.assertRaisesRegex(CommandError, "brew install cosign"):
                     app.ensure_signing_ready("example", "test-image")
+
+    def test_repo_secret_exists_returns_true_for_exact_secret_name(self) -> None:
+        app = self.make_app()
+        completed = subprocess.CompletedProcess(
+            ["gh", "secret", "list"], 0, '[{"name":"OTHER"},{"name":"SIGNING_SECRET"}]', ""
+        )
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", return_value=completed) as run_mock:
+                self.assertTrue(app.repo_secret_exists("example", "test-image", "SIGNING_SECRET"))
+        run_mock.assert_called_once_with(
+            ["gh", "secret", "list", "-R", "example/test-image", "--json", "name"], check=False
+        )
+
+    def test_repo_secret_exists_returns_false_for_valid_empty_list(self) -> None:
+        app = self.make_app()
+        completed = subprocess.CompletedProcess(["gh", "secret", "list"], 0, "[]", "")
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", return_value=completed):
+                self.assertFalse(app.repo_secret_exists("example", "test-image", "SIGNING_SECRET"))
+
+    def test_repo_secret_exists_fails_closed_for_probe_errors(self) -> None:
+        app = self.make_app()
+        cases = [
+            subprocess.CompletedProcess(["gh"], 1, "", "network failure"),
+            subprocess.CompletedProcess(["gh"], 0, "not json", ""),
+            subprocess.CompletedProcess(["gh"], 0, '{"name":"SIGNING_SECRET"}', ""),
+            subprocess.CompletedProcess(["gh"], 0, '[{"name":42}]', ""),
+        ]
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            for completed in cases:
+                with self.subTest(stdout=completed.stdout, returncode=completed.returncode):
+                    with patch("atomic_image_builder.run", return_value=completed):
+                        with self.assertRaisesRegex(CommandError, "status could not be verified"):
+                            app.repo_secret_exists("example", "test-image", "SIGNING_SECRET")
+
+    def test_ensure_signing_ready_does_not_change_keys_when_secret_probe_fails(self) -> None:
+        app = self.make_app()
+        calls: list[list[str]] = []
+
+        def fake_run(args, **kwargs):
+            calls.append(list(args))
+            return subprocess.CompletedProcess(list(args), 1, "", "probe failed")
+
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with self.assertRaisesRegex(CommandError, "status could not be verified"):
+                    app.ensure_signing_ready("example", "test-image")
+
+        self.assertFalse(any(call[:2] == ["cosign", "generate-key-pair"] for call in calls))
+        self.assertFalse(any(call[:3] == ["gh", "secret", "set"] for call in calls))
 
     def test_ensure_signing_ready_uploads_password_and_private_key_secrets(self) -> None:
         app = self.make_app()
@@ -1794,8 +1862,10 @@ class BuilderTests(unittest.TestCase):
                 if diff_calls["count"] == 1:
                     return subprocess.CompletedProcess(list(args), 0, " build_files/build.sh | 1 +\n", "")
                 return subprocess.CompletedProcess(list(args), 0, " build_files/build.sh | 1 +\n cosign.pub | 1 +\n", "")
-            if list(args) == ["git", "status", "--porcelain"]:
-                return subprocess.CompletedProcess(list(args), 0, "", "")
+            if list(args) == ["git", "ls-files", "--others", "--exclude-standard", "-z"]:
+                return subprocess.CompletedProcess(
+                    list(args), 0, "" if diff_calls["count"] == 1 else "cosign.pub\0", ""
+                )
             if list(args) == ["git", "diff"]:
                 return subprocess.CompletedProcess(list(args), 0, "diff --git a/x b/x\n", "")
             return subprocess.CompletedProcess(list(args), 0, "", "")
@@ -2066,7 +2136,7 @@ class BuilderTests(unittest.TestCase):
                 result = app.scan_os()
 
         self.assertTrue(result)
-        self.assertEqual(app.config.base_image_uri, "quay.io/fedora-ostree-desktops/kinoite:43")
+        self.assertEqual(app.config.base_image_uri, "quay.io/fedora-ostree-desktops/kinoite:44")
         self.assertEqual(app.config.base_image_name, "Fedora Kinoite")
 
     def test_scan_os_honors_status_file_override(self) -> None:
@@ -2418,7 +2488,8 @@ class BuilderTests(unittest.TestCase):
         workflow = app.generate_container_workflow(default_branch="master")
         self.assertIn("  pull_request:\n    branches:\n      - master", workflow)
         self.assertIn("  push:\n    branches:\n      - master", workflow)
-        self.assertIn("          cosign-release: 'v2.6.3'", workflow)
+        self.assertIn("          cosign-release: 'v3.1.2'", workflow)
+        self.assertIn("--new-bundle-format=false --use-signing-config=false", workflow)
 
     def test_select_repo_manual_entry_recovers_after_missing_repo(self) -> None:
         app = self.make_app()
@@ -2703,6 +2774,66 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("diff --git", diff)
         self.assertIn("new.txt", diff)
         self.assertIn("+hello world", diff)
+
+    def test_repo_diff_summary_includes_tracked_and_untracked_files(self) -> None:
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+            tracked = repo_dir / "tracked.txt"
+            tracked.write_text("before\n")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo_dir, check=True)
+            tracked.write_text("after\n")
+            (repo_dir / "cosign.pub").write_text("PUBLIC KEY\n")
+
+            summary = app.repo_diff_summary(repo_dir)
+
+        self.assertIn("tracked.txt", summary)
+        self.assertIn("?? cosign.pub", summary)
+
+    def test_repo_untracked_files_fails_closed_when_git_probe_fails(self) -> None:
+        app = self.make_app()
+        failed = subprocess.CompletedProcess(
+            ["git", "ls-files"], 128, "", "fatal: not a git repository"
+        )
+        with patch("atomic_image_builder.run", return_value=failed):
+            with self.assertRaisesRegex(CommandError, "Could not enumerate untracked files"):
+                app.repo_untracked_files(Path("/tmp/not-a-repository"))
+
+    def test_repo_full_diff_fails_closed_when_untracked_diff_fails(self) -> None:
+        app = self.make_app()
+        results = [
+            subprocess.CompletedProcess(["git", "diff"], 0, "", ""),
+            subprocess.CompletedProcess(["git", "ls-files"], 0, "cosign.pub\0", ""),
+            subprocess.CompletedProcess(
+                ["git", "diff", "--no-index"], 128, "", "fatal: unable to read cosign.pub"
+            ),
+        ]
+        with patch("atomic_image_builder.run", side_effect=results):
+            with self.assertRaisesRegex(CommandError, "Could not generate a full diff for untracked file cosign.pub"):
+                app.repo_full_diff(Path("/tmp/example-repository"))
+
+    def test_repo_full_diff_includes_nested_untracked_files(self) -> None:
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=repo_dir, check=True)
+            nested = repo_dir / "new directory" / "nested.txt"
+            nested.parent.mkdir()
+            nested.write_text("nested content\n")
+            diff = app.repo_full_diff(repo_dir)
+
+        self.assertIn("new directory/nested.txt", diff)
+        self.assertIn("+nested content", diff)
+
+    def test_contrib_wrapper_does_not_put_github_token_in_podman_argv(self) -> None:
+        wrapper = (Path(__file__).resolve().parents[1] / "contrib/aib").read_text()
+        self.assertIn("podman_args+=(-e GH_TOKEN)", wrapper)
+        self.assertIn('GH_TOKEN="$(gh auth token)"', wrapper)
+        self.assertNotIn('GH_TOKEN=$(gh auth token)', wrapper)
 
     def test_show_summary_uses_pager_for_read_only_view(self) -> None:
         app = self.make_app()
@@ -4070,17 +4201,41 @@ class BuilderTests(unittest.TestCase):
 
     # ── rechunk recipe ARG_MAX fix (chunkah --config file, not env var) ─
 
-    def test_patch_container_rechunk_config_arg_fixes_real_snapshot(self) -> None:
-        # The bundled Justfile's rechunk recipe exports the full `podman
-        # inspect` output as an env var, which exceeds the kernel's
-        # argument/environment size limit for already-chunked base images
-        # (i.e. most Universal Blue images) and crashes every subsequent
-        # podman call in that shell with "Argument list too long". Verified
-        # live against a real ghcr.io/ublue-os/bluefin:stable pull: the
-        # unpatched recipe reproduces that exact failure, and this patched
-        # recipe completes a real chunkah build against the same image.
+    def test_patch_container_rechunk_config_arg_is_noop_for_current_snapshot(self) -> None:
+        # The refreshed upstream snapshot already uses a config file, an OCI
+        # output directory, and an EXIT trap for both temporary resources.
         app = self.make_app()
         existing = (CONTAINERFILE_TEMPLATE_DIR / "Justfile").read_text()
+        result = app.patch_container_rechunk_config_arg(existing)
+        self.assertEqual(existing, result)
+        self.assertNotIn("CHUNKAH_CONFIG_STR", result)
+        self.assertIn('CHUNKAH_CONFIG_FILE="$(mktemp)"', result)
+        self.assertIn('CHUNKAH_OUTPUT_DIR="$(mktemp -d ./"${target_image}"_chunkah_XXXXXX)"', result)
+        self.assertIn('trap \'rm -f "${CHUNKAH_CONFIG_FILE}"; rm -rf "${CHUNKAH_OUTPUT_DIR}"\' EXIT', result)
+        self.assertIn('src="${target_image}:${tag}"', result)
+        self.assertIn("-e SOURCE_DATE_EPOCH=0", result)
+        self.assertIn("--output oci:/run/out/chunked", result)
+        self.assertIn("podman pull \"oci:${CHUNKAH_OUTPUT_DIR}/chunked\"", result)
+
+    def test_patch_container_rechunk_config_arg_keeps_legacy_justfile_safe(self) -> None:
+        app = self.make_app()
+        existing = textwrap.dedent(
+            '''\
+            rechunk $target_image=image_name $tag=default_tag:
+                #!/usr/bin/env bash
+                set -xeuo pipefail
+                export CHUNKAH_CONFIG_STR=$(podman inspect "${target_image}")
+                podman run --rm --mount=type=image,src="${target_image}",target=/chunkah \\
+                -e CHUNKAH_CONFIG_STR quay.io/coreos/chunkah:latest \\
+                build \\
+                --verbose \\
+                --compressed \\
+                --max-layers 128 \\
+                --prune /sysroot/ \\
+                --label ostree.commit- --label ostree.final-diffid- \\
+                --tag "${target_image}:${tag}" | podman load
+            '''
+        )
         result = app.patch_container_rechunk_config_arg(existing)
         self.assertNotEqual(existing, result)
         self.assertNotIn("-e CHUNKAH_CONFIG_STR", result)

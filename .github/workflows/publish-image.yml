@@ -16,7 +16,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Determine version, short SHA, and lowercased owner
         id: meta
@@ -26,22 +26,25 @@ jobs:
           # GHCR image references must be lowercase; the owner login may not be
           # (e.g. "Danathar"). Lowercase it before building the registry path.
           OWNER_LC="${GITHUB_REPOSITORY_OWNER,,}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "owner_lc=${OWNER_LC}" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=${VERSION}"
+            echo "short_sha=${SHORT_SHA}"
+            echo "owner_lc=${OWNER_LC}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build image
         id: build-image
-        uses: redhat-actions/buildah-build@7a95fa7ee0f02d552a32753e7414641a04307056 # v2
+        uses: redhat-actions/buildah-build@3a51aade9afa17e5c78256bcbe2e1ee08c7b995b # v3.0.2
         with:
           image: atomic-image-builder
           tags: latest ${{ steps.meta.outputs.version }} ${{ steps.meta.outputs.short_sha }}
           containerfiles: |
             ./Containerfile
           platforms: linux/amd64
+          squash: false
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -49,7 +52,7 @@ jobs:
 
       - name: Push to GHCR
         id: push-to-ghcr
-        uses: redhat-actions/push-to-registry@5ed88d269cf581ea9ef6dd6806d01562096bee9c # v2
+        uses: redhat-actions/push-to-registry@94ade333c38ecc0e60e94785125d9a52ca423b37 # v3.0.0
         with:
           image: ${{ steps.build-image.outputs.image }}
           tags: ${{ steps.build-image.outputs.tags }}

@@ -41,7 +41,7 @@ failure mode is hard to notice otherwise.
 Containerfile-Method Image Identity: image-template.env
 --------------------------------------------------------
 Since the ublue-os/image-template "rewrite in just" refresh (revision
-f9a9e4f8), the bundled Containerfile-method Justfile no longer takes an inline
+ac6ef404), the bundled Containerfile-method Justfile no longer takes an inline
 IMAGE_NAME default (env("IMAGE_NAME", "...")). It instead dotenv-loads
 image-template.env and reads IMAGE_NAME, REPO_ORGANIZATION, and IMAGE_DESC from
 there via env_var(...), which has no fallback if the key is missing.
@@ -133,7 +133,7 @@ step was already correct.
 
 Rechunk Recipe ARG_MAX Fix (CHUNKAH_CONFIG_STR)
 ------------------------------------------------
-The bundled Justfile's `rechunk` recipe (upstream, unpatched) does:
+Older managed repositories may still have a `rechunk` recipe that does:
 
     export CHUNKAH_CONFIG_STR=$(podman inspect "${target_image}")
     podman run --rm ... -e CHUNKAH_CONFIG_STR quay.io/coreos/chunkah:latest ...
@@ -152,26 +152,17 @@ turned on by default; discovered via a real demo build against
 ghcr.io/ublue-os/bluefin:stable.
 
 patch_container_rechunk_config_arg() (called from patch_container_justfile(),
-so it applies to every new repo and to every existing repo's next update)
-rewrites the recipe to write the inspect output to a temp file and pass it to
-chunkah via its documented `--config <path>` flag (mounted into the container)
-instead of the environment variable. This has no size limit. The mount uses
-the `Z` SELinux relabel flag — without it, chunkah fails a second, different
-way ("Permission denied" reading the mounted file) on SELinux-enforcing hosts
-such as GitHub's ubuntu-24.04 runners and any Fedora/bootc box. Both failure
-modes, and the fix, were verified by actually running the unpatched and
-patched recipes against a real pulled ghcr.io/ublue-os/bluefin:stable image,
-not just asserted in unit tests.
+so it applies to existing repositories on their next update) rewrites that
+legacy shape to write the inspect output to a temp file and pass it to chunkah
+via its documented `--config <path>` flag, mounted with the `Z` SELinux relabel
+flag. This avoids both the ARG_MAX and SELinux permission failures.
 
-Matched on upstream's exact current literal text, same as every other patcher
-in this file: if a future template refresh changes the rechunk recipe's
-shape, this silently no-ops and generated/updated repos go back to hitting
-the ARG_MAX crash on Universal Blue bases.
-test_patch_container_rechunk_config_arg_fixes_real_snapshot catches this only
-because it runs against the real bundled snapshot.
-
-This was also reported upstream to ublue-os/image-template so the fix can
-land there directly and this patcher can eventually be retired.
+The refreshed bundled template now carries the upstream OCI-directory recipe:
+it uses a config temp file, a temporary `*_chunkah_*` output directory, an EXIT
+trap for both, `SOURCE_DATE_EPOCH=0`, and `--output oci:/run/out/chunked`, then
+pulls and retags the resulting OCI image. The patcher intentionally no-ops on
+that current shape and remains covered by the current-snapshot and explicit
+legacy-fixture tests.
 
 Batched dnf5 Package Lookups (lookup_host_packages)
 -----------------------------------------------------
@@ -204,16 +195,14 @@ correctly elsewhere in this file; lookup_host_package() was the one call
 site that had been missing it, invisibly, because a single-package query
 never has more than one result to separate.
 
-Chunkah Config Temp File Cleanup: trap, not a trailing rm -f
+Chunkah Config and Output Cleanup: trap, not trailing rm commands
 ---------------------------------------------------------------
-The rechunk recipe's temp config file (CHUNKAH_CONFIG_FILE, see above) is
-cleaned up via `trap 'rm -f "${CHUNKAH_CONFIG_FILE}"' EXIT`, registered
-immediately after the file is created, not a bare `rm -f` at the end of the
-recipe. The recipe runs under `set -e`: a bare trailing `rm -f` only runs on
-the success path, so if `podman run` (chunkah) fails, `set -e` aborts the
-script right there and the temp file, containing the full image inspect
-output, is left behind in TMPDIR. `trap ... EXIT` guarantees the cleanup
-command runs on every exit path, success or failure.
+The current recipe registers `trap 'rm -f "${CHUNKAH_CONFIG_FILE}"; rm -rf
+"${CHUNKAH_OUTPUT_DIR}"' EXIT` immediately after creating both temporary
+resources. The recipe runs under `set -e`: trailing cleanup commands only run
+on success, so a failed Chunkah invocation could otherwise leave the inspect
+data or OCI output directory behind. The EXIT trap guarantees cleanup on every
+exit path. The legacy patcher uses the same trap for the config file.
 
 The original fix (see above) shipped with the bare trailing `rm -f` and this
 exact gap; it was flagged by a maintainer (renner0e) reviewing the upstream
