@@ -41,7 +41,7 @@ failure mode is hard to notice otherwise.
 Containerfile-Method Image Identity: image-template.env
 --------------------------------------------------------
 Since the ublue-os/image-template "rewrite in just" refresh (revision
-ac6ef404), the bundled Containerfile-method Justfile no longer takes an inline
+a18ae9b5), the bundled Containerfile-method Justfile no longer takes an inline
 IMAGE_NAME default (env("IMAGE_NAME", "...")). It instead dotenv-loads
 image-template.env and reads IMAGE_NAME, REPO_ORGANIZATION, and IMAGE_DESC from
 there via env_var(...), which has no fallback if the key is missing.
