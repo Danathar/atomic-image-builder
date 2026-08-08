@@ -17,6 +17,7 @@ from atomic_image_builder import (
     ACTION_REF_PINS,
     BASE_IMAGES,
     BLUEBUILD_RECIPE_SCHEMA,
+    BLUEBUILD_TEMPLATE_DIR,
     COMMON_SERVICES,
     CONTAINERFILE_TEMPLATE_DIR,
     DEFAULT_GITHUB_BUILD_CRON,
@@ -2707,6 +2708,20 @@ class BuilderTests(unittest.TestCase):
     def test_bundled_template_snapshots_exist(self) -> None:
         self.assertTrue((CONTAINERFILE_TEMPLATE_DIR / "Containerfile").is_file())
         self.assertTrue((CONTAINERFILE_TEMPLATE_DIR / ".template-source").is_file())
+
+    def test_current_containerfile_snapshot_uses_local_ostree_chunker_image(self) -> None:
+        justfile = (CONTAINERFILE_TEMPLATE_DIR / "Justfile").read_text()
+        self.assertIn(
+            'RPM_OSTREE_CHUNKER_IMAGE="localhost/${target_image}:${tag}"',
+            justfile,
+        )
+        self.assertIn("      --pull=never \\", justfile)
+        self.assertNotIn('RPM_OSTREE_CHUNKER_IMAGE="quay.io/fedora/fedora-bootc:latest"', justfile)
+
+    def test_current_bluebuild_snapshot_defaults_to_latest_image_version(self) -> None:
+        recipe = (BLUEBUILD_TEMPLATE_DIR / "recipes/recipe.yml").read_text()
+        self.assertIn("image-version: latest # You can pin to a specific version of Fedora as well", recipe)
+        self.assertNotIn("image-version: 42", recipe)
 
     def test_clone_container_template_uses_bundled_snapshot(self) -> None:
         app = self.make_app()
