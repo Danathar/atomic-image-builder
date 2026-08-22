@@ -503,6 +503,23 @@ def patch_workflow_signing_steps(workflow_text: str, *, branch_if: str, sign_if:
     return "\n".join(output)
 
 
+# A YAML mapping key, with or without an inline comment after it:
+#   push:
+#   workflow_dispatch: # allow manually triggering builds
+WORKFLOW_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.-]*):(\s|$)")
+
+
+def workflow_key(stripped_line: str) -> str | None:
+    """Return the mapping key a stripped YAML line declares, if any.
+
+    Comparing against a literal "push:" misses the equally valid
+    "push: # only the default branch", and the bundled snapshots do carry
+    inline comments on trigger keys.
+    """
+    match = WORKFLOW_KEY_RE.match(stripped_line)
+    return match.group(1) if match else None
+
+
 def patch_cosign_compatibility(workflow_text: str) -> str:
     """Keep existing managed workflows compatible with Cosign 3.x."""
     lines = workflow_text.splitlines()
@@ -3853,7 +3870,7 @@ class App:
             line = lines[index]
             stripped = line.strip()
             indent = len(line) - len(line.lstrip())
-            if indent == 2 and stripped in {"pull_request:", "push:"}:
+            if indent == 2 and workflow_key(stripped) in {"pull_request", "push"}:
                 output.append(line)
                 index += 1
                 block_start = index
@@ -3861,7 +3878,16 @@ class App:
                     block_line = lines[index]
                     block_stripped = block_line.strip()
                     block_indent = len(block_line) - len(block_line.lstrip())
-                    if block_indent <= 2 and block_stripped.endswith(":"):
+                    # A sibling trigger ends the block. Testing for a trailing
+                    # colon missed any key carrying an inline comment - the
+                    # bundled BlueBuild snapshot literally ships
+                    # "  workflow_dispatch: # allow manually triggering builds"
+                    # - so the sibling was absorbed into the previous block. If
+                    # that sibling owns a branches: key, branches_found flips on
+                    # the wrong trigger, the filter is written there instead,
+                    # and the block we were actually patching never gets one:
+                    # PR builds then fire from every branch.
+                    if block_indent <= 2 and workflow_key(block_stripped) is not None:
                         break
                     index += 1
                 block = lines[block_start:index]
@@ -3873,7 +3899,7 @@ class App:
                     block_line = block[block_index]
                     block_stripped = block_line.strip()
                     block_indent = len(block_line) - len(block_line.lstrip())
-                    if block_indent == 4 and block_stripped == "branches:":
+                    if block_indent == 4 and workflow_key(block_stripped) == "branches":
                         prefix = block_line[: len(block_line) - len(block_line.lstrip())]
                         patched_block.append(block_line)
                         patched_block.append(f"{prefix}  - {default_branch}")

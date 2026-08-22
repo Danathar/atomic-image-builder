@@ -628,6 +628,68 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("  push:\n    branches:\n      - master\n    paths-ignore:", patched)
         self.assertIn("  pull_request:\n    branches:\n      - master\n  workflow_dispatch:", patched)
 
+    def test_patch_workflow_branch_filters_ends_block_at_commented_sibling(self) -> None:
+        # The bundled BlueBuild snapshot ships
+        #   workflow_dispatch: # allow manually triggering builds
+        # which does not end in a colon and so was absorbed into the preceding
+        # trigger's block.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Workflow
+            on:
+              pull_request:
+              workflow_dispatch: # allow manually triggering builds
+            jobs:
+              build:
+                steps:
+                  - run: true
+            """
+        )
+        patched = app.patch_workflow_branch_filters(workflow, "master")
+        self.assertIn(
+            "  pull_request:\n    branches:\n      - master\n  workflow_dispatch: # allow",
+            patched,
+        )
+        self.assertEqual(app.patch_workflow_branch_filters(patched, "master"), patched)
+
+    def test_patch_workflow_branch_filters_does_not_skip_commented_push_trigger(self) -> None:
+        # The real breakage: when the swallowed sibling owns a branches: key,
+        # branches_found flipped on the wrong trigger, so pull_request never got
+        # a filter and PR builds fired from every branch.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Workflow
+            on:
+              pull_request:
+              push: # only the default branch
+                branches:
+                  - main
+            jobs:
+              build:
+                steps:
+                  - run: true
+            """
+        )
+        patched = app.patch_workflow_branch_filters(workflow, "release")
+        self.assertIn("  pull_request:\n    branches:\n      - release", patched)
+        self.assertIn("  push: # only the default branch\n    branches:\n      - release", patched)
+        self.assertNotIn("- main", patched)
+        self.assertEqual(patched.count("branches:"), 2)
+
+    def test_patch_workflow_branch_filters_bundled_bluebuild_snapshot(self) -> None:
+        app = self.make_bluebuild_app()
+        snapshot = (
+            BLUEBUILD_TEMPLATE_DIR / ".github" / "workflows" / "build.yml"
+        ).read_text()
+        patched = app.patch_workflow_branch_filters(snapshot, "main")
+        # workflow_dispatch must stay a sibling trigger, not part of pull_request.
+        self.assertIn("  pull_request:\n    branches:\n      - main", patched)
+        self.assertIn("  workflow_dispatch: # allow manually triggering builds", patched)
+        self.assertIn("  push:\n    branches:\n      - main\n    paths-ignore:", patched)
+        self.assertEqual(app.patch_workflow_branch_filters(patched, "main"), patched)
+
     def test_validate_config_rejects_unsafe_package_token(self) -> None:
         app = self.make_app()
         app.config.packages = ["tmux", "bad;rm"]
