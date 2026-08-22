@@ -183,6 +183,26 @@ class BuilderTests(unittest.TestCase):
             "ghcr.io/ublue-os/bluefin:stable",
         )
 
+    def test_normalize_container_image_reference_handles_unverified_image_docker_prefix(self) -> None:
+        # A host rebased with signature verification disabled reports this form.
+        self.assertEqual(
+            normalize_container_image_reference("ostree-unverified-image:docker://ghcr.io/ublue-os/aurora:stable"),
+            "ghcr.io/ublue-os/aurora:stable",
+        )
+
+    def test_normalize_container_image_reference_handles_unverified_image_registry_transport(self) -> None:
+        self.assertEqual(
+            normalize_container_image_reference("ostree-unverified-image:registry:ghcr.io/ublue-os/aurora:stable"),
+            "ghcr.io/ublue-os/aurora:stable",
+        )
+
+    def test_normalize_container_image_reference_preserves_digest_pins(self) -> None:
+        digest = "ghcr.io/ublue-os/bazzite@sha256:" + "a" * 64
+        self.assertEqual(
+            normalize_container_image_reference(f"ostree-unverified-image:docker://{digest}"),
+            digest,
+        )
+
     def test_normalize_container_image_reference_handles_docker_scheme(self) -> None:
         self.assertEqual(
             normalize_container_image_reference("docker://ghcr.io/ublue-os/aurora:stable"),

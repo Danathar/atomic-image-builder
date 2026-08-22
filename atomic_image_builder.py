@@ -281,16 +281,28 @@ def normalize_container_image_reference(container_ref: str) -> str:
     # the deployment was created. Normalize those into a plain image reference
     # so scan results can be matched against our curated base-image list.
     base = container_ref.strip()
-    if base.startswith("ostree-image-signed:docker://"):
-        return base[len("ostree-image-signed:docker://") :]
-    if base.startswith("ostree-unverified-registry:"):
-        return base[len("ostree-unverified-registry:") :]
-    if base.startswith("ostree-remote-image:") or base.startswith("ostree-remote-registry:"):
-        parts = base.split(":", 2)
-        if len(parts) == 3:
-            base = parts[2]
-    if base.startswith("docker://"):
-        return base[len("docker://") :]
+    # "ostree-image-signed:" and "ostree-unverified-image:" are the signed and
+    # signature-disabled spellings of the same thing: an origin prefix followed
+    # by a transport-qualified reference. Both must be stripped, then the
+    # transport below. Handling only the signed spelling meant a host rebased
+    # with verification off fell through unchanged and never matched the curated
+    # list, so choose_base_image discarded a base image that is on it.
+    for origin_prefix in ("ostree-image-signed:", "ostree-unverified-image:"):
+        if base.startswith(origin_prefix):
+            base = base[len(origin_prefix) :]
+            break
+    else:
+        if base.startswith("ostree-unverified-registry:"):
+            base = base[len("ostree-unverified-registry:") :]
+        elif base.startswith(("ostree-remote-image:", "ostree-remote-registry:")):
+            # These carry the ostree remote name as a second field:
+            # ostree-remote-image:<remote>:docker://<ref>
+            parts = base.split(":", 2)
+            if len(parts) == 3:
+                base = parts[2]
+    for transport in ("docker://", "registry:"):
+        if base.startswith(transport):
+            return base[len(transport) :]
     return base
 
 
