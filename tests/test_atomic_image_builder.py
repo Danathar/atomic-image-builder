@@ -3409,6 +3409,82 @@ class BuilderTests(unittest.TestCase):
         # Should not leave a double blank line after removal.
         self.assertNotIn("\n\n\n", result)
 
+    def test_render_containerfile_removes_brew_block_separated_by_blank_line(self) -> None:
+        # A hand-edited Containerfile may put a blank line between the brew COPY
+        # and its systemctl preset RUN. Removing only the COPY leaves the RUN
+        # presetting units nothing provides any more, and the build fails.
+        app = self.make_app()
+        app.config.brew_enabled = False
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable
+
+            COPY --from=ghcr.io/ublue-os/brew:latest /system_files /
+
+            RUN --mount=type=cache,dst=/var/cache \\
+                /usr/bin/systemctl preset brew-setup.service && \\
+                /usr/bin/systemctl preset brew-update.timer
+
+            RUN --mount=type=bind,from=ctx,source=/,target=/ctx \\
+                /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertNotIn("brew", result.lower())
+        self.assertNotIn("system_files", result)
+        self.assertIn("/ctx/build.sh", result)
+        self.assertNotIn("\n\n\n", result)
+
+    def test_render_containerfile_brew_removal_keeps_unrelated_following_run(self) -> None:
+        # With no brew RUN to absorb, the neighbouring RUN must survive.
+        app = self.make_app()
+        app.config.brew_enabled = False
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable
+
+            COPY --from=ghcr.io/ublue-os/brew:latest /system_files /
+
+            RUN /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertNotIn("system_files", result)
+        self.assertIn("RUN /ctx/build.sh", result)
+
+    def test_render_containerfile_brew_removal_is_idempotent(self) -> None:
+        app = self.make_app()
+        app.config.brew_enabled = False
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable
+
+            COPY --from=ghcr.io/ublue-os/brew:latest /system_files /
+
+            RUN --mount=type=cache,dst=/var/cache \\
+                /usr/bin/systemctl preset brew-setup.service
+
+            RUN /ctx/build.sh
+        """)
+        once = app.render_containerfile(existing)
+        self.assertEqual(app.render_containerfile(once), once)
+
+    def test_render_containerfile_replaces_blank_separated_brew_block(self) -> None:
+        # Re-enabling must collapse the split block into exactly one canonical
+        # block, not leave the old RUN alongside the new one.
+        app = self.make_app()
+        app.config.brew_enabled = True
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable
+
+            COPY --from=ghcr.io/ublue-os/brew:latest /system_files /
+
+            RUN --mount=type=cache,dst=/var/cache \\
+                /usr/bin/systemctl preset brew-setup.service
+
+            RUN /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertEqual(result.count("/system_files"), 1)
+        self.assertEqual(result.count("brew-setup.service"), 1)
+        self.assertIn("brew-upgrade.timer", result)
+        self.assertIn("RUN /ctx/build.sh", result)
+
     def test_render_containerfile_replaces_existing_brew_block(self) -> None:
         app = self.make_app()
         app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"

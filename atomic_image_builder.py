@@ -3558,18 +3558,26 @@ class App:
         for i, line in enumerate(lines):
             if line.strip().startswith("COPY --from=") and "brew" in line.lower() and "/system_files" in line:
                 brew_start = i
-                # The block includes a following RUN for systemctl preset.
+                # The block is the COPY plus the systemctl preset RUN that
+                # depends on the units the COPY installs. Blank lines between
+                # the two are legal and a hand-edited Containerfile may well
+                # have them; the old scan stopped at the first blank line, so
+                # disabling Homebrew deleted only the COPY and left the RUN
+                # behind, presetting units nothing provides any more and
+                # breaking the build.
                 brew_end = i + 1
-                for j in range(i + 1, len(lines)):
-                    stripped = lines[j].strip()
-                    if not stripped:
-                        brew_end = j + 1
-                        break
-                    if stripped.endswith("\\"):
-                        brew_end = j + 1
-                        continue
-                    brew_end = j + 1
-                    break
+                probe = i + 1
+                while probe < len(lines) and not lines[probe].strip():
+                    probe += 1
+                if probe < len(lines) and lines[probe].strip().startswith("RUN"):
+                    run_end = probe
+                    while run_end < len(lines) and lines[run_end].rstrip().endswith("\\"):
+                        run_end += 1
+                    # Only absorb the RUN when it is actually the brew preset -
+                    # "brew" appears on the continuation lines, not the RUN line
+                    # itself - so an unrelated neighbouring RUN is never eaten.
+                    if "brew" in " ".join(lines[probe : run_end + 1]).lower():
+                        brew_end = run_end + 1
                 # Consume a trailing blank line so removal/replacement
                 # does not leave a double blank.
                 if brew_end < len(lines) and not lines[brew_end].strip():
