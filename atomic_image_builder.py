@@ -146,7 +146,17 @@ def determine_fedora_atomic_default_tag(
     version_id = data.get("VERSION_ID", "")
     if not version_id.isdigit():
         return fallback
-    return str(max(int(fallback), int(version_id)))
+    # Track a host that is ahead of the pinned fallback, but only by one
+    # release. quay.io/fedora-ostree-desktops publishes a tag per Fedora
+    # release, and a pre-release host (Rawhide, or Branched well before GA)
+    # reports a VERSION_ID whose tag does not exist yet. Taking an unbounded
+    # max meant such a host produced curated URIs like
+    # ".../silverblue:47", the repo was created and pushed successfully, and
+    # the GitHub build then failed on FROM with a manifest-unknown error the
+    # user has no way to diagnose. Nothing here can verify the tag resolves
+    # without a network call, so bound it instead: one release ahead covers a
+    # host that upgraded before this constant was bumped.
+    return str(min(int(fallback) + 1, max(int(fallback), int(version_id))))
 
 
 FEDORA_ATOMIC_DEFAULT_TAG = determine_fedora_atomic_default_tag()

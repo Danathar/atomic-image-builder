@@ -727,6 +727,39 @@ class BuilderTests(unittest.TestCase):
             os_release.write_text('ID="fedora"\nVERSION_ID="44"\n')
             self.assertEqual(determine_fedora_atomic_default_tag(os_release_path=os_release), "44")
 
+    def test_determine_fedora_atomic_default_tag_caps_one_release_ahead(self) -> None:
+        # A pre-release host (Rawhide, or Branched well before GA) reports a
+        # VERSION_ID whose fedora-ostree-desktops tag does not exist yet. The
+        # repo would be created and pushed fine and the build would then fail on
+        # FROM with manifest-unknown, which the user cannot diagnose.
+        ahead = str(int(FEDORA_ATOMIC_FALLBACK_TAG) + 1)
+        way_ahead = str(int(FEDORA_ATOMIC_FALLBACK_TAG) + 5)
+        with tempfile.TemporaryDirectory() as tmp:
+            os_release = Path(tmp) / "os-release"
+            os_release.write_text(f"ID=fedora\nVERSION_ID={ahead}\n")
+            self.assertEqual(determine_fedora_atomic_default_tag(os_release_path=os_release), ahead)
+            os_release.write_text(f"ID=fedora\nVERSION_ID={way_ahead}\n")
+            self.assertEqual(determine_fedora_atomic_default_tag(os_release_path=os_release), ahead)
+
+    def test_determine_fedora_atomic_default_tag_ignores_older_fedora_host(self) -> None:
+        older = str(int(FEDORA_ATOMIC_FALLBACK_TAG) - 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            os_release = Path(tmp) / "os-release"
+            os_release.write_text(f"ID=fedora\nVERSION_ID={older}\n")
+            self.assertEqual(
+                determine_fedora_atomic_default_tag(os_release_path=os_release),
+                FEDORA_ATOMIC_FALLBACK_TAG,
+            )
+
+    def test_determine_fedora_atomic_default_tag_ignores_non_numeric_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            os_release = Path(tmp) / "os-release"
+            os_release.write_text("ID=fedora\nVERSION_ID=rawhide\n")
+            self.assertEqual(
+                determine_fedora_atomic_default_tag(os_release_path=os_release),
+                FEDORA_ATOMIC_FALLBACK_TAG,
+            )
+
     def test_determine_fedora_atomic_default_tag_keeps_fallback_for_non_fedora_hosts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             os_release = Path(tmp) / "os-release"
