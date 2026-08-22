@@ -4099,6 +4099,40 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(found, {"repo-a"})
         rest_mock.assert_called_once()
 
+    def test_batch_check_state_files_null_data_falls_back(self) -> None:
+        """gh exits 0 for GraphQL-level errors, returning an explicit null data."""
+        app = self.make_app()
+        repos = [{"name": "repo-a"}, {"name": "repo-b"}]
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(
+            ["gh"], 0, '{"data": null, "errors": [{"message": "Bad credentials"}]}', ""
+        )):
+            with patch.object(app, "repo_has_state_file", side_effect=[True, False]) as rest_mock:
+                found = app.batch_check_state_files("testuser", repos)
+        self.assertEqual(found, {"repo-a"})
+        self.assertEqual(rest_mock.call_count, 2)
+
+    def test_batch_check_state_files_non_dict_json_falls_back(self) -> None:
+        """Valid JSON that is not an object must fall back, not raise."""
+        app = self.make_app()
+        repos = [{"name": "repo-a"}]
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(
+            ["gh"], 0, "[]", ""
+        )):
+            with patch.object(app, "repo_has_state_file", return_value=True) as rest_mock:
+                found = app.batch_check_state_files("testuser", repos)
+        self.assertEqual(found, {"repo-a"})
+        rest_mock.assert_called_once()
+
+    def test_batch_check_state_files_null_alias_entry_is_skipped(self) -> None:
+        """A per-alias null (repo vanished mid-query) must not raise."""
+        app = self.make_app()
+        repos = [{"name": "repo-a"}, {"name": "repo-b"}]
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(
+            ["gh"], 0, '{"data": {"r0": null, "r1": {"object": {"id": "x"}}}}', ""
+        )):
+            found = app.batch_check_state_files("testuser", repos)
+        self.assertEqual(found, {"repo-b"})
+
     # ── Justfile / image-template.env restore-from-snapshot ─────────────
 
     def test_patch_container_justfile_no_ops_image_name_patch_on_new_upstream_syntax(self) -> None:

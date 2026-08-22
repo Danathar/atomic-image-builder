@@ -2216,24 +2216,33 @@ class App:
                 f'{{ object(expression: "HEAD:{STATE_FILE}") {{ id }} }}'
             )
         query = "query { " + " ".join(fragments) + " }"
+
+        def rest_fallback() -> set[str]:
+            # Serial REST checks: slower, but the only way to answer once the
+            # batched GraphQL call has not given us a usable payload.
+            return {
+                item["name"] for item in repos
+                if self.repo_has_state_file(owner, item["name"])
+            }
+
         proc = run(["gh", "api", "graphql", "-f", f"query={query}"], check=False)
         if proc.returncode != 0 or not proc.stdout.strip():
-            # Fall back to serial REST checks
-            return {
-                item["name"] for item in repos
-                if self.repo_has_state_file(owner, item["name"])
-            }
+            return rest_fallback()
         try:
-            data = json.loads(proc.stdout).get("data", {})
-        except (json.JSONDecodeError, AttributeError):
-            return {
-                item["name"] for item in repos
-                if self.repo_has_state_file(owner, item["name"])
-            }
+            payload = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return rest_fallback()
+        # gh exits 0 for a GraphQL-level failure, which comes back as an
+        # explicit {"data": null, "errors": [...]}. .get("data", {}) would hand
+        # back that null - the default only applies to a *missing* key - and the
+        # alias loop below would then raise AttributeError outside any handler.
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            return rest_fallback()
         found: set[str] = set()
         for alias, name in alias_map.items():
             repo_data = data.get(alias)
-            if repo_data and repo_data.get("object"):
+            if isinstance(repo_data, dict) and repo_data.get("object"):
                 found.add(name)
         return found
 
