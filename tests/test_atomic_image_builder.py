@@ -1119,11 +1119,140 @@ class BuilderTests(unittest.TestCase):
             with patch("atomic_image_builder.command_exists", return_value=True):
                 with patch("atomic_image_builder.run", side_effect=fake_run):
                     with patch("atomic_image_builder.secrets.token_urlsafe", return_value="ROTATE_PASSWORD"):
-                        with patch("atomic_image_builder.shutil.copy2", side_effect=OSError("disk full")):
+                        # The new public key is written straight into the repo,
+                        # so simulate the failure on that write.
+                        real_write_text = Path.write_text
+
+                        def failing_write_text(self, *args, **kwargs):
+                            if self.name == "cosign.pub" and self.parent == repo_dir:
+                                raise OSError("disk full")
+                            return real_write_text(self, *args, **kwargs)
+
+                        with patch.object(Path, "write_text", failing_write_text):
                             app.rotate_signing_key(repo_dir)
 
         self.assertTrue(any(level == "warn" and "half-complete" in message for level, message in app.gum.messages))
         self.assertFalse(any(call[:2] == ["git", "push"] for call in calls))
+
+    # ── shared signing-key provisioning ─────────────────────────────────
+    # ensure_signing_ready and rotate_signing_key run the same generate-and-
+    # upload sequence through generate_and_upload_signing_key. These pin the
+    # two callers' differing failure contracts so the shared helper cannot
+    # drift one of them.
+
+    def signing_run_stub(self, *, signing_secret_rc: int = 0, password_rc: int = 0):
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                assert cwd is not None
+                (cwd / "cosign.key").write_text("PRIVATE KEY")
+                (cwd / "cosign.pub").write_text("NEW PUBLIC KEY\n")
+                return subprocess.CompletedProcess(list(args), 0, "", "")
+            if args[:3] == ["gh", "secret", "set"]:
+                name = args[3]
+                rc = password_rc if name == "COSIGN_PASSWORD" else signing_secret_rc
+                return subprocess.CompletedProcess(list(args), rc, "", "")
+            if args[:3] == ["gh", "secret", "list"]:
+                return subprocess.CompletedProcess(list(args), 0, "[]", "")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        return fake_run
+
+    def test_ensure_signing_ready_raises_when_user_declines_retry(self) -> None:
+        app = self.make_app()
+        app.config.method = "containerfile"
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: False
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=self.signing_run_stub(signing_secret_rc=1)):
+                with self.assertRaisesRegex(CommandError, "half-complete"):
+                    app.ensure_signing_ready("example", "test-image")
+
+    def test_ensure_signing_ready_bluebuild_raises_distinct_decline_error(self) -> None:
+        app = self.make_bluebuild_app()
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: False
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=self.signing_run_stub(signing_secret_rc=1)):
+                with self.assertRaisesRegex(CommandError, "SIGNING_SECRET upload was not completed"):
+                    app.ensure_signing_ready("example", "test-image")
+
+    def test_rotate_signing_key_warns_and_returns_when_user_declines_retry(self) -> None:
+        # Rotation reports and returns rather than raising, so the update menu
+        # survives.
+        app = self.make_app()
+        app.config.method = "containerfile"
+        stub = GumStub()
+        confirms = iter([True, False])
+        stub.confirm = lambda _prompt, default=False: next(confirms, False)
+        app.gum = stub
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            self.init_signing_repo(repo_dir)
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=self.signing_run_stub(signing_secret_rc=1)):
+                    app.rotate_signing_key(repo_dir)
+        self.assertTrue(
+            any(level == "warn" and "half-complete" in message for level, message in stub.messages)
+        )
+
+    def test_rotate_signing_key_reports_keypair_failure_without_raising(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: True
+        app.gum = stub
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                return subprocess.CompletedProcess(list(args), 1, "", "cosign exploded")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            self.init_signing_repo(repo_dir)
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    app.rotate_signing_key(repo_dir)
+        self.assertTrue(
+            any(level == "error" and "cosign keypair" in message for level, message in stub.messages)
+        )
+
+    def test_generate_and_upload_signing_key_skips_password_for_bluebuild(self) -> None:
+        app = self.make_bluebuild_app()
+        app.gum = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            calls.append(list(args))
+            return self.signing_run_stub()(args, cwd=cwd, env=env, check=check, capture=capture, stdin=stdin)
+
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                pub = app.generate_and_upload_signing_key(
+                    "example", "test-image", upload_failed_note="x", half_complete_note="y"
+                )
+        self.assertEqual(pub, "NEW PUBLIC KEY\n")
+        secret_names = [call[3] for call in calls if call[:3] == ["gh", "secret", "set"]]
+        self.assertEqual(secret_names, ["SIGNING_SECRET"])
+
+    def test_generate_and_upload_signing_key_uploads_both_for_containerfile(self) -> None:
+        app = self.make_app()
+        app.config.method = "containerfile"
+        app.gum = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            calls.append(list(args))
+            return self.signing_run_stub()(args, cwd=cwd, env=env, check=check, capture=capture, stdin=stdin)
+
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                app.generate_and_upload_signing_key(
+                    "example", "test-image", upload_failed_note="x", half_complete_note="y"
+                )
+        secret_names = [call[3] for call in calls if call[:3] == ["gh", "secret", "set"]]
+        self.assertEqual(secret_names, ["COSIGN_PASSWORD", "SIGNING_SECRET"])
 
     def test_rotate_signing_key_happy_path(self) -> None:
         app = self.make_app()

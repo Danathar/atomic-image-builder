@@ -2355,6 +2355,68 @@ class App:
                 found.add(name)
         return found
 
+    def generate_and_upload_signing_key(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        upload_failed_note: str,
+        half_complete_note: str,
+    ) -> str | None:
+        """Generate a cosign keypair and upload the signing secrets to GitHub.
+
+        Returns the new public key text, or None if the user declined to retry a
+        failed SIGNING_SECRET upload. Raises CommandError if the keypair cannot
+        be generated or a secret cannot be uploaded.
+
+        Both signing entry points - first-time setup in ensure_signing_ready and
+        rotation in rotate_signing_key - previously carried their own copy of
+        this sequence, so any change to the retry semantics applied to only one
+        of them. The two notes are the only wording that legitimately differs:
+        one is setting signing up, the other is replacing a working key.
+        """
+        bluebuild_signing = self.config.method == "bluebuild"
+        # BlueBuild generates its key with an empty password and never uploads
+        # COSIGN_PASSWORD; the Containerfile workflow needs both.
+        cosign_password = "" if bluebuild_signing else secrets.token_urlsafe(32)
+        with tempfile.TemporaryDirectory(prefix=f"{TOOL_SLUG}-signing.") as tmp:
+            tmpdir = Path(tmp)
+            env = os.environ.copy()
+            env["COSIGN_PASSWORD"] = cosign_password
+            proc = run(["cosign", "generate-key-pair"], cwd=tmpdir, env=env, check=False)
+            key_path = tmpdir / "cosign.key"
+            pub_path = tmpdir / "cosign.pub"
+            if proc.returncode != 0 or not key_path.exists() or not pub_path.exists():
+                raise CommandError("Unable to generate a cosign keypair. Fix cosign first, then try again.")
+            if not bluebuild_signing:
+                password_proc = run(
+                    ["gh", "secret", "set", "COSIGN_PASSWORD", "-R", f"{owner}/{repo}"],
+                    cwd=tmpdir,
+                    stdin=cosign_password,
+                    check=False,
+                )
+                if password_proc.returncode != 0:
+                    raise CommandError("Unable to upload COSIGN_PASSWORD to GitHub. Check your gh login and repo access, then try again.")
+            while True:
+                secret_proc = run(
+                    ["gh", "secret", "set", "SIGNING_SECRET", "-R", f"{owner}/{repo}"],
+                    cwd=tmpdir,
+                    stdin=key_path.read_text(),
+                    check=False,
+                )
+                if secret_proc.returncode == 0:
+                    return pub_path.read_text()
+                if bluebuild_signing:
+                    self.gum.error(upload_failed_note)
+                    if not self.gum.confirm("Retry uploading SIGNING_SECRET now?", default=True):
+                        return None
+                    continue
+                # COSIGN_PASSWORD is already uploaded, so GitHub is now
+                # half-configured: stopping here leaves signing broken.
+                self.gum.error(half_complete_note)
+                if not self.gum.confirm("Retry uploading SIGNING_SECRET now?", default=True):
+                    return None
+
     def ensure_signing_ready(self, owner: str, repo: str, *, repo_dir: Path | None = None) -> bool:
         # Signed images are required for this tool, so "ready" means:
         # - the repo already has a compatible SIGNING_SECRET, or
@@ -2389,50 +2451,23 @@ class App:
             return True
         if not command_exists("cosign"):
             raise CommandError("cosign is required for signed images. Install it with: brew install cosign")
-        cosign_password = "" if bluebuild_signing else secrets.token_urlsafe(32)
-        with tempfile.TemporaryDirectory(prefix=f"{TOOL_SLUG}-signing.") as tmp:
-            tmpdir = Path(tmp)
-            env = os.environ.copy()
-            env["COSIGN_PASSWORD"] = cosign_password
-            proc = run(["cosign", "generate-key-pair"], cwd=tmpdir, env=env, check=False)
-            key_path = tmpdir / "cosign.key"
-            pub_path = tmpdir / "cosign.pub"
-            if proc.returncode != 0 or not key_path.exists() or not pub_path.exists():
-                raise CommandError("Unable to generate a cosign keypair. Fix cosign first, then try again.")
-            if not bluebuild_signing:
-                password_proc = run(
-                    ["gh", "secret", "set", "COSIGN_PASSWORD", "-R", f"{owner}/{repo}"],
-                    cwd=tmpdir,
-                    stdin=cosign_password,
-                    check=False,
-                )
-                if password_proc.returncode != 0:
-                    raise CommandError("Unable to upload COSIGN_PASSWORD to GitHub. Check your gh login and repo access, then try again.")
-            while True:
-                secret_proc = run(
-                    ["gh", "secret", "set", "SIGNING_SECRET", "-R", f"{owner}/{repo}"],
-                    cwd=tmpdir,
-                    stdin=key_path.read_text(),
-                    check=False,
-                )
-                if secret_proc.returncode == 0:
-                    break
-                if bluebuild_signing:
-                    self.gum.error("Could not upload SIGNING_SECRET to GitHub. Check your gh login and repo access, then try again.")
-                    if not self.gum.confirm("Retry uploading SIGNING_SECRET now?", default=True):
-                        raise CommandError("SIGNING_SECRET upload was not completed.")
-                    continue
-                # COSIGN_PASSWORD already uploaded — GitHub is now half-configured.
-                self.gum.error(
-                    "Could not upload SIGNING_SECRET to GitHub. Signing setup is half-complete — "
-                    "COSIGN_PASSWORD is set but SIGNING_SECRET is not, and image builds will fail signing until this finishes."
-                )
-                if not self.gum.confirm("Retry uploading SIGNING_SECRET now?", default=True):
-                    raise CommandError(
-                        "Aborting with signing setup half-complete. Re-run this tool to finish "
-                        "uploading SIGNING_SECRET before pushing new commits."
-                    )
-            self.generated_cosign_pub = pub_path.read_text()
+        pub_text = self.generate_and_upload_signing_key(
+            owner,
+            repo,
+            upload_failed_note="Could not upload SIGNING_SECRET to GitHub. Check your gh login and repo access, then try again.",
+            half_complete_note=(
+                "Could not upload SIGNING_SECRET to GitHub. Signing setup is half-complete — "
+                "COSIGN_PASSWORD is set but SIGNING_SECRET is not, and image builds will fail signing until this finishes."
+            ),
+        )
+        if pub_text is None:
+            if bluebuild_signing:
+                raise CommandError("SIGNING_SECRET upload was not completed.")
+            raise CommandError(
+                "Aborting with signing setup half-complete. Re-run this tool to finish "
+                "uploading SIGNING_SECRET before pushing new commits."
+            )
+        self.generated_cosign_pub = pub_text
         # The public key is kept in memory for the current run so it can be
         # written into the repo files that we are about to generate.
         if bluebuild_signing:
@@ -2461,71 +2496,46 @@ class App:
             return
 
         bluebuild_signing = self.config.method == "bluebuild"
-        cosign_password = "" if bluebuild_signing else secrets.token_urlsafe(32)
-        with tempfile.TemporaryDirectory(prefix=f"{TOOL_SLUG}-signing.") as tmp:
-            tmpdir = Path(tmp)
-            env = os.environ.copy()
-            env["COSIGN_PASSWORD"] = cosign_password
-            proc = run(["cosign", "generate-key-pair"], cwd=tmpdir, env=env, check=False)
-            key_path = tmpdir / "cosign.key"
-            pub_path = tmpdir / "cosign.pub"
-            if proc.returncode != 0 or not key_path.exists() or not pub_path.exists():
-                self.gum.error("Unable to generate a cosign keypair. Fix cosign first, then try again.")
-                return
-            if not bluebuild_signing:
-                password_proc = run(
-                    ["gh", "secret", "set", "COSIGN_PASSWORD", "-R", f"{owner}/{repo}"],
-                    cwd=tmpdir,
-                    stdin=cosign_password,
-                    check=False,
-                )
-                if password_proc.returncode != 0:
-                    self.gum.error("Unable to upload COSIGN_PASSWORD to GitHub. Check your gh login and repo access, then try again.")
-                    return
-            while True:
-                secret_proc = run(
-                    ["gh", "secret", "set", "SIGNING_SECRET", "-R", f"{owner}/{repo}"],
-                    cwd=tmpdir,
-                    stdin=key_path.read_text(),
-                    check=False,
-                )
-                if secret_proc.returncode == 0:
-                    break
-                if bluebuild_signing:
-                    self.gum.error("Could not upload SIGNING_SECRET to GitHub. Rotation was not applied.")
-                    if not self.gum.confirm("Retry uploading SIGNING_SECRET now?", default=True):
-                        return
-                    continue
-                # COSIGN_PASSWORD already uploaded — GitHub is now half-rotated.
-                # Pressing on without the new key would leave signing broken.
-                self.gum.error(
+        try:
+            pub_text = self.generate_and_upload_signing_key(
+                owner,
+                repo,
+                upload_failed_note="Could not upload SIGNING_SECRET to GitHub. Rotation was not applied.",
+                half_complete_note=(
                     "Could not upload SIGNING_SECRET to GitHub. Rotation is half-complete — "
                     "your next image build will fail signing until this finishes."
-                )
-                if not self.gum.confirm("Retry uploading SIGNING_SECRET now?", default=True):
-                    self.gum.warn(
-                        "Aborting with rotation half-complete. Re-run 'Rotate signing key (cosign)' "
-                        "before pushing new commits, or your GitHub Actions signing step will fail."
-                    )
-                    return
-            try:
-                shutil.copy2(pub_path, repo_dir / "cosign.pub")
-                self.configure_temp_repo_git_identity(repo_dir)
-                run(["git", "add", "cosign.pub"], cwd=repo_dir)
-                run(["git", "commit", "-m", "Rotate cosign signing key"], cwd=repo_dir)
-                commit_sha = run(["git", "rev-parse", "--short", "HEAD"], cwd=repo_dir).stdout.strip()
-                run(["git", "push", "origin", "HEAD"], cwd=repo_dir, capture=False)
-            except (CommandError, OSError) as exc:
-                # GitHub already has the new secrets. Surface the split state so the
-                # user knows to re-run rotation instead of trusting a silent failure.
-                self.gum.error(
-                    f"Uploaded new signing secrets to GitHub but could not write, commit, or push cosign.pub: {exc}"
-                )
+                ),
+            )
+        except CommandError as exc:
+            self.gum.error(str(exc))
+            return
+        if pub_text is None:
+            if not bluebuild_signing:
+                # COSIGN_PASSWORD was already replaced, so the repo's key and
+                # GitHub's secrets no longer agree.
                 self.gum.warn(
-                    "Rotation is half-complete — GitHub secrets and the repo's cosign.pub are out of sync. "
-                    "Re-run 'Rotate signing key (cosign)' before pushing new commits."
+                    "Aborting with rotation half-complete. Re-run 'Rotate signing key (cosign)' "
+                    "before pushing new commits, or your GitHub Actions signing step will fail."
                 )
-                return
+            return
+        try:
+            (repo_dir / "cosign.pub").write_text(pub_text)
+            self.configure_temp_repo_git_identity(repo_dir)
+            run(["git", "add", "cosign.pub"], cwd=repo_dir)
+            run(["git", "commit", "-m", "Rotate cosign signing key"], cwd=repo_dir)
+            commit_sha = run(["git", "rev-parse", "--short", "HEAD"], cwd=repo_dir).stdout.strip()
+            run(["git", "push", "origin", "HEAD"], cwd=repo_dir, capture=False)
+        except (CommandError, OSError) as exc:
+            # GitHub already has the new secrets. Surface the split state so the
+            # user knows to re-run rotation instead of trusting a silent failure.
+            self.gum.error(
+                f"Uploaded new signing secrets to GitHub but could not write, commit, or push cosign.pub: {exc}"
+            )
+            self.gum.warn(
+                "Rotation is half-complete — GitHub secrets and the repo's cosign.pub are out of sync. "
+                "Re-run 'Rotate signing key (cosign)' before pushing new commits."
+            )
+            return
         self.gum.success(f"Rotated cosign signing key in commit {commit_sha}. GitHub secrets were updated.")
         self.gum.warn("Pre-rotation signatures remain valid in the registry; re-pull or re-verify after rotation.")
         self.gum.enter_to_continue("Press Enter to return to the update menu...")
