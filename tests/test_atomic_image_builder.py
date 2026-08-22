@@ -3630,6 +3630,59 @@ class BuilderTests(unittest.TestCase):
         # Should not leave double blank lines after replacement.
         self.assertNotIn("\n\n\n", result)
 
+    # ── state file must not publish the host inventory ──────────────────
+
+    def scanned_app(self) -> App:
+        app = self.make_app()
+        app.config.packages = ["tmux"]
+        app.config.scanned_packages = ["tmux", "steam", "private-tool", "vpn-client"]
+        app.config.scanned_removed = ["firefox"]
+        return app
+
+    def test_state_payload_omits_scanned_inventory(self) -> None:
+        # The state file is committed and pushed to a repo created --public, so
+        # the full layered-package list would become world-readable, including
+        # packages the user deselected and never intended to carry over.
+        payload = self.scanned_app().state_payload()
+        self.assertNotIn("scanned_packages", payload)
+        self.assertNotIn("scanned_removed", payload)
+        serialized = json.dumps(payload)
+        for leaked in ("steam", "private-tool", "vpn-client", "firefox"):
+            self.assertNotIn(leaked, serialized)
+        # The package the user actually chose to carry over still belongs here.
+        self.assertEqual(payload["packages"], ["tmux"])
+
+    def test_state_payload_records_carried_flag_instead(self) -> None:
+        self.assertTrue(self.scanned_app().state_payload()["scan_customizations_carried"])
+
+    def test_state_payload_carried_flag_false_without_scan(self) -> None:
+        app = self.make_app()
+        app.config.packages = ["tmux"]
+        self.assertFalse(app.state_payload()["scan_customizations_carried"])
+
+    def test_carried_scan_customizations_survives_state_roundtrip(self) -> None:
+        # The README and post-build summary wording depends on this, and it must
+        # keep working on a later update when only the state file is available.
+        payload = self.scanned_app().state_payload()
+        reloaded = App()
+        reloaded.config = config_from_state_payload(payload)
+        self.assertTrue(reloaded.carried_scan_customizations())
+
+    def test_state_payload_strips_inventory_written_by_older_versions(self) -> None:
+        # A repo written before this change still carries the lists; reading it
+        # must work, and rewriting must clean them out.
+        legacy = self.scanned_app().state_payload()
+        legacy["scanned_packages"] = ["tmux", "steam", "private-tool"]
+        legacy["scanned_removed"] = ["firefox"]
+        del legacy["scan_customizations_carried"]
+        app = App()
+        app.config = config_from_state_payload(legacy)
+        self.assertTrue(app.carried_scan_customizations())
+        rewritten = app.state_payload()
+        self.assertNotIn("scanned_packages", rewritten)
+        self.assertNotIn("scanned_removed", rewritten)
+        self.assertNotIn("steam", json.dumps(rewritten))
+
     def test_config_from_state_payload_roundtrips_brew_enabled(self) -> None:
         cfg = config_from_state_payload({"brew_enabled": True})
         self.assertTrue(cfg.brew_enabled)

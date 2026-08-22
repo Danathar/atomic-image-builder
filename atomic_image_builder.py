@@ -210,8 +210,13 @@ class Config:
     brew_enabled: bool = False
     signing_enabled: bool = False
     github_user: str = ""
+    # The scan lists hold the running host's complete layered-package and
+    # base-removal inventory. They stay in memory to drive the selection screens
+    # and are deliberately NOT written to the state file - see state_payload().
+    # scan_customizations_carried is the one bit anything downstream needs.
     scanned_packages: list[str] = field(default_factory=list)
     scanned_removed: list[str] = field(default_factory=list)
+    scan_customizations_carried: bool = False
 
     def normalize(self) -> None:
         # Every menu appends to lists over time. Normalizing here keeps ordering
@@ -396,7 +401,7 @@ def config_from_state_payload(data: object) -> Config:
             if not isinstance(value, str):
                 raise ValueError(f"{name} must be a string")
             setattr(cfg, name, value)
-    for bool_field in ("brew_enabled", "signing_enabled"):
+    for bool_field in ("brew_enabled", "signing_enabled", "scan_customizations_carried"):
         if bool_field in data:
             value = data[bool_field]
             if not isinstance(value, bool):
@@ -2246,7 +2251,11 @@ class App:
     def carried_scan_customizations(self) -> bool:
         scanned_packages = set(self.config.scanned_packages)
         scanned_removed = set(self.config.scanned_removed)
-        return any(pkg in scanned_packages for pkg in self.config.packages) or any(pkg in scanned_removed for pkg in self.config.removed_packages)
+        if scanned_packages or scanned_removed:
+            return any(pkg in scanned_packages for pkg in self.config.packages) or any(pkg in scanned_removed for pkg in self.config.removed_packages)
+        # Loaded from a state file rather than a live scan: the inventory is not
+        # persisted, so fall back to the flag recorded when it was written.
+        return self.config.scan_customizations_carried
 
     def scheduled_rebuild_note(self) -> str:
         return format_daily_rebuild_note(DEFAULT_GITHUB_BUILD_CRON)
@@ -3567,6 +3576,17 @@ class App:
         # updates. Generated files are considered outputs, not the primary state.
         self.validate_config()
         payload = asdict(self.config)
+        # scanned_packages/scanned_removed are the user's complete host software
+        # inventory, including packages they looked at and deliberately did not
+        # carry over. This file is committed and pushed to a repo created with
+        # `gh repo create --public`, so writing them publishes that inventory to
+        # anyone who looks. Nothing downstream reads the lists - the only
+        # consumer, carried_scan_customizations(), needs a single boolean - so
+        # record that instead. Popping also strips the lists from repos written
+        # by an earlier version on their next update.
+        payload["scan_customizations_carried"] = self.carried_scan_customizations()
+        payload.pop("scanned_packages", None)
+        payload.pop("scanned_removed", None)
         payload["tool_version"] = VERSION
         payload["state_version"] = 1
         return payload
