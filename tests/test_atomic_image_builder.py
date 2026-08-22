@@ -3534,20 +3534,44 @@ class BuilderTests(unittest.TestCase):
             ("ghcr.io/ublue-os/bazzite", "latest"),
         )
 
-    def test_split_image_ref_does_not_split_digest_pinned_ref(self) -> None:
-        # A digest ref has no tag; its colon belongs to the digest and must not
-        # be treated as the image-version separator.
+    def test_split_image_ref_rejects_digest_pinned_ref(self) -> None:
+        # A digest ref has no tag, and its colon belongs to the digest. BlueBuild
+        # rejoins base-image and image-version with a colon, so there is no pair
+        # that can represent a digest: "...@sha256:aaa...:latest" is unparseable
+        # and fails every build. Refusing beats emitting a broken recipe.
         app = self.make_app()
         digest = "ghcr.io/ublue-os/bazzite@sha256:" + "a" * 64
-        self.assertEqual(app._split_image_ref(digest), (digest, "latest"))
+        with self.assertRaisesRegex(CommandError, "digest-pinned"):
+            app._split_image_ref(digest)
 
-    def test_generate_recipe_keeps_digest_pinned_base_image_whole(self) -> None:
+    def test_split_image_ref_still_splits_tagged_refs(self) -> None:
+        app = self.make_app()
+        self.assertEqual(
+            app._split_image_ref("ghcr.io/ublue-os/bazzite:stable"),
+            ("ghcr.io/ublue-os/bazzite", "stable"),
+        )
+        self.assertEqual(
+            app._split_image_ref("ghcr.io/ublue-os/bazzite"),
+            ("ghcr.io/ublue-os/bazzite", "latest"),
+        )
+
+    def test_validate_config_rejects_digest_base_image_for_bluebuild(self) -> None:
+        # Reachable from a real scan: a host booted on a digest-pinned
+        # deployment, the curated-tag offer declined, then BlueBuild chosen.
         app = self.make_bluebuild_app()
-        digest = "ghcr.io/ublue-os/bazzite@sha256:" + "a" * 64
-        app.config.base_image_uri = digest
-        recipe = app.generate_recipe()
-        self.assertIn(f"base-image: {digest}", recipe)
-        self.assertIn('image-version: "latest"', recipe)
+        app.config.base_image_uri = "ghcr.io/ublue-os/bazzite@sha256:" + "a" * 64
+        with self.assertRaisesRegex(CommandError, "digest-pinned base image"):
+            app.validate_config()
+
+    def test_validate_config_allows_digest_base_image_for_containerfile(self) -> None:
+        # The Containerfile path writes the reference into FROM verbatim, so a
+        # digest pin is legitimate there and must keep working.
+        app = self.make_app()
+        app.config.method = "containerfile"
+        app.config.base_image_uri = "ghcr.io/ublue-os/bazzite@sha256:" + "a" * 64
+        app.validate_config()
+        containerfile = app.render_containerfile()
+        self.assertIn("@sha256:" + "a" * 64, containerfile)
 
     def test_generate_recipe_basic(self) -> None:
         app = self.make_bluebuild_app()

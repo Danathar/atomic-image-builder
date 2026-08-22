@@ -3490,6 +3490,18 @@ class App:
             raise CommandError("Base image URI is missing or invalid.")
         if not self.match_base_image(self.config.base_image_uri):
             raise CommandError(f"Choose one of the supported base images: {supported_base_image_names()}.")
+        if self.config.method == "bluebuild" and "@" in self.config.base_image_uri:
+            # match_base_image deliberately accepts a digest-pinned ref (a scanned
+            # host is often booted on one), and the Containerfile path writes it
+            # into FROM verbatim. BlueBuild splits the reference into base-image
+            # and image-version and rejoins them with a colon, so a digest becomes
+            # "...@sha256:abc...:latest" - unparseable, and every build fails.
+            # Stop here with something actionable rather than pushing a dead repo.
+            raise CommandError(
+                "BlueBuild cannot use a digest-pinned base image "
+                f"({self.config.base_image_uri}). Choose a tagged base image, or use the "
+                "Containerfile method, which supports digest pins."
+            )
         self.validate_token_list(self.config.packages, PACKAGE_TOKEN_RE, "package")
         self.validate_token_list(self.config.removed_packages, PACKAGE_TOKEN_RE, "removed package")
         self.validate_token_list(self.config.copr_repos, COPR_REPO_RE, "COPR repository")
@@ -4016,10 +4028,16 @@ class App:
         # BlueBuild recipes separate "base-image" and "image-version" so we need
         # to split a combined URI like "ghcr.io/ublue-os/bazzite:stable".
         # A digest-pinned ref ("...@sha256:...") has no tag and its colon belongs
-        # to the digest, so never split on it or the recipe gets a bogus
-        # image-version.
+        # to the digest, so it cannot be split into this pair at all: BlueBuild
+        # rejoins the two as "<base-image>:<image-version>", which for a digest
+        # would yield "...@sha256:abc...:latest" and fail every build. Callers
+        # must reject digests before they get here - validate_config does - so
+        # reaching this branch is a bug, not a user error.
         if "@" in uri:
-            return uri, "latest"
+            raise CommandError(
+                "BlueBuild recipes cannot express a digest-pinned base image. "
+                f"Choose a tagged base image instead of {uri}, or use the Containerfile method."
+            )
         if ":" in uri:
             base, tag = uri.rsplit(":", 1)
             return base, tag
