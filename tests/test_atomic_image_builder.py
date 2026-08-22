@@ -2831,6 +2831,48 @@ class BuilderTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 gum.confirm("Continue?")
 
+    # ── gum flag-injection guards ───────────────────────────────────────
+    # gum parses any leading-dash positional as a flag and exits 80. Captured
+    # command output routinely starts with a dash (buildah "--> <layer>" step
+    # markers, diff lines), and run(check=True) would turn that into a
+    # CommandError raised from a display call, unwinding the whole wizard.
+
+    def captured_args(self, call) -> list[str]:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum"], 0, "", "")
+        with patch("atomic_image_builder.run", return_value=completed) as run_mock:
+            call(gum)
+        return list(run_mock.call_args[0][0])
+
+    def assert_dash_text_is_positional(self, args: list[str], text: str) -> None:
+        self.assertIn("--", args, f"missing -- separator in {args!r}")
+        self.assertIn(text, args)
+        self.assertLess(args.index("--"), args.index(text))
+
+    def test_gum_style_passes_dash_leading_text_after_separator(self) -> None:
+        text = "--> 8a3f0c1 error building layer"
+        args = self.captured_args(lambda g: g.style(text, width=40))
+        self.assert_dash_text_is_positional(args, text)
+
+    def test_gum_log_passes_dash_leading_text_after_separator(self) -> None:
+        text = "--force is not supported here"
+        args = self.captured_args(lambda g: g.error(text))
+        self.assert_dash_text_is_positional(args, text)
+
+    def test_gum_confirm_keeps_default_flag_before_separator(self) -> None:
+        # The prompt must sit after the separator while --default stays a flag.
+        prompt = "--> retry the build?"
+        args = self.captured_args(lambda g: g.confirm(prompt, default=True))
+        self.assert_dash_text_is_positional(args, prompt)
+        self.assertIn("--default=true", args)
+        self.assertLess(args.index("--default=true"), args.index("--"))
+
+    def test_gum_style_survives_real_gum_with_dash_text(self) -> None:
+        # Integration check against the actual binary, skipped when absent.
+        if shutil.which("gum") is None:
+            self.skipTest("gum is not installed")
+        Gum().style("--> 8a3f0c1 step marker", width=40)
+
     def test_update_task_choices_show_current_status(self) -> None:
         app = self.make_app()
         app.config.packages = ["tmux", "ripgrep"]

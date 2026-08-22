@@ -638,6 +638,12 @@ class Gum:
                     args.append(flag)
             else:
                 args.extend([flag, str(value)])
+        # Everything after this point is content, not flags. Without the
+        # separator, text that happens to start with a dash (buildah's "--> id"
+        # step markers in a captured build log, a git error, a diff line) is
+        # parsed as an unknown flag and gum exits 80, which run(check=True)
+        # turns into a CommandError thrown from a *display* call.
+        args.append("--")
         args.extend(lines)
         output = run(args).stdout.rstrip("\n")
         if output and not ANSI_RE.search(output):
@@ -684,7 +690,7 @@ class Gum:
         return None
 
     def log(self, level: str, message: str) -> None:
-        run(["gum", "log", "--level", level, message], capture=False)
+        run(["gum", "log", "--level", level, "--", message], capture=False)
 
     def success(self, message: str) -> None:
         self.log("info", message)
@@ -714,8 +720,11 @@ class Gum:
         print()
 
     def confirm(self, prompt: str, *, default: bool = True) -> bool:
-        args = ["gum", "confirm", "--no-show-help", prompt]
+        args = ["gum", "confirm", "--no-show-help"]
         args.append("--default=true" if default else "--default=false")
+        # Separator last, so --default is still parsed as a flag and only the
+        # prompt is positional. See the note in style().
+        args.extend(["--", prompt])
         proc = run(args, check=False, capture=False)
         if proc.returncode == 130:
             raise KeyboardInterrupt()
