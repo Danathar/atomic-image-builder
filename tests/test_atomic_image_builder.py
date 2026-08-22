@@ -41,6 +41,7 @@ from atomic_image_builder import (
     ensure_trailing_newline,
     format_daily_rebuild_note,
     normalize_container_image_reference,
+    string_list,
 )
 
 
@@ -2207,6 +2208,76 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(
             any(level == "error" and "rpm-ostree" in message for level, message in stub.messages)
         )
+
+    def scan_with_status(self, payload: str, stub: GumStub | None = None) -> tuple[App, GumStub, bool]:
+        # Shared driver for the malformed-status cases below: valid JSON that is
+        # not the object shape scan_os expects must reach the friendly error
+        # rather than an AttributeError out of .get()/.strip().
+        app = self.make_app()
+        app.github_user = "example"
+        stub = stub if stub is not None else GumStub()
+        app.gum = stub
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = Path(tmp) / "rpm-ostree-status.json"
+            status_path.write_text(payload)
+            with patch("atomic_image_builder.command_exists", return_value=False):
+                with patch.dict("os.environ", {"AIB_RPM_OSTREE_STATUS_FILE": str(status_path)}):
+                    result = app.scan_os()
+        return app, stub, result
+
+    def test_scan_os_status_file_override_json_array_returns_false(self) -> None:
+        _, stub, result = self.scan_with_status("[]")
+        self.assertFalse(result)
+        self.assertTrue(
+            any(level == "error" and "rpm-ostree" in message for level, message in stub.messages)
+        )
+
+    def test_scan_os_status_file_override_json_scalar_returns_false(self) -> None:
+        _, stub, result = self.scan_with_status('"a string, not an object"')
+        self.assertFalse(result)
+        self.assertTrue(
+            any(level == "error" and "rpm-ostree" in message for level, message in stub.messages)
+        )
+
+    def test_scan_os_status_file_override_non_dict_deployments_returns_false(self) -> None:
+        _, stub, result = self.scan_with_status('{"deployments": [1, 2]}')
+        self.assertFalse(result)
+        self.assertTrue(
+            any(level == "error" and "deployment" in message.lower() for level, message in stub.messages)
+        )
+
+    def test_scan_os_status_file_override_non_string_container_ref_returns_false(self) -> None:
+        _, stub, result = self.scan_with_status(
+            '{"deployments": [{"booted": true, "container-image-reference": 123}]}'
+        )
+        self.assertFalse(result)
+        self.assertTrue(
+            any(level == "error" and "container image reference" in message for level, message in stub.messages)
+        )
+
+    def test_scan_os_status_file_override_drops_non_string_packages(self) -> None:
+        # Non-string entries must be dropped, and a field that is a bare string
+        # instead of a list must NOT be iterated into individual characters.
+        class ChoosingStub(GumStub):
+            def choose(self, items, **_kwargs):
+                return list(items)
+
+        app, _, result = self.scan_with_status(
+            '{"deployments": [{"booted": true, '
+            '"container-image-reference": "ostree-image-signed:docker://ghcr.io/ublue-os/bazzite:stable", '
+            '"requested-packages": [1, "vim", null, "git"], '
+            '"requested-base-removals": "notalist"}]}',
+            stub=ChoosingStub(),
+        )
+        self.assertTrue(result)
+        self.assertEqual(app.config.scanned_packages, ["vim", "git"])
+        self.assertEqual(app.config.scanned_removed, [])
+
+    def test_string_list_coerces_untrusted_json_values(self) -> None:
+        self.assertEqual(string_list(["a", 1, None, "b"]), ["a", "b"])
+        self.assertEqual(string_list("abc"), [])
+        self.assertEqual(string_list(None), [])
+        self.assertEqual(string_list({"a": "b"}), [])
 
     def test_scan_os_status_file_override_non_utf8_returns_false(self) -> None:
         app = self.make_app()

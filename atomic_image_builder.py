@@ -235,6 +235,17 @@ def unique(values: Iterable[str]) -> list[str]:
     return output
 
 
+def string_list(value: object) -> list[str]:
+    # rpm-ostree status is untrusted input: it can be a stale override file or a
+    # future schema change. Any field we expect to be a list of package names may
+    # arrive as null, a bare string, or a list with non-string entries, so coerce
+    # to a clean list of strings instead of letting unique() hit .strip() on an
+    # int. A bare string is NOT iterated into characters - it is rejected.
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
 def sanitize_slug(value: str, default: str = DEFAULT_REPO_NAME) -> str:
     # GitHub repo names cannot contain spaces, so we translate user-friendly
     # input into a slug before running stricter validation.
@@ -2034,7 +2045,14 @@ class App:
         except json.JSONDecodeError:
             self.gum.error("Failed to read rpm-ostree status.")
             return False
-        deployments = status.get("deployments", [])
+        # Valid JSON is not necessarily the object shape we expect: an override
+        # file may hold `[]`, and a future rpm-ostree could change the schema.
+        # Everything below must reach the friendly error, not an AttributeError.
+        if not isinstance(status, dict):
+            self.gum.error("Failed to read rpm-ostree status.")
+            return False
+        raw_deployments = status.get("deployments")
+        deployments = [item for item in raw_deployments if isinstance(item, dict)] if isinstance(raw_deployments, list) else []
         booted = next((item for item in deployments if item.get("booted")), deployments[0] if deployments else {})
         if not booted:
             self.gum.error("No deployment information found.")
@@ -2045,7 +2063,7 @@ class App:
             or booted.get("origin")
             or ""
         )
-        if not container_ref.strip():
+        if not isinstance(container_ref, str) or not container_ref.strip():
             # A booted deployment without a container-image-reference or origin
             # (e.g. a legacy ostree-commit deployment) cannot be carried into an
             # image repo. Bail instead of proceeding with an empty base image.
@@ -2054,8 +2072,8 @@ class App:
             )
             return False
         base = normalize_container_image_reference(container_ref)
-        self.config.scanned_packages = unique(booted.get("requested-packages", []))
-        self.config.scanned_removed = unique(booted.get("requested-base-removals", []))
+        self.config.scanned_packages = unique(string_list(booted.get("requested-packages")))
+        self.config.scanned_removed = unique(string_list(booted.get("requested-base-removals")))
         self.config.removed_packages = list(self.config.scanned_removed)
 
         self.config.base_image_uri = base
