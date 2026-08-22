@@ -3035,6 +3035,13 @@ class App:
             if isinstance(created_at, str):
                 try:
                     created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    if created.tzinfo is None:
+                        # A timestamp with no Z and no offset (a GHES instance, or
+                        # a future change in gh's output) parses fine but yields a
+                        # naive datetime, and subtracting it from an aware `now`
+                        # raises TypeError. GitHub reports UTC, so read it as UTC
+                        # rather than dropping the column to "unknown".
+                        created = created.replace(tzinfo=timezone.utc)
                     delta = now - created
                     if delta.days:
                         when = f"{delta.days}d ago"
@@ -3042,7 +3049,7 @@ class App:
                         hours = delta.seconds // 3600
                         minutes = (delta.seconds % 3600) // 60
                         when = f"{hours}h ago" if hours else f"{minutes}m ago"
-                except ValueError:
+                except (ValueError, TypeError, OverflowError):
                     when = "unknown"
             self.gum.hint(f"{icon:<7} {workflow:<22} {title:<38} {when:<12} {item.get('url') or ''}")
         self.gum.enter_to_continue("Press Enter to return to the main menu...")

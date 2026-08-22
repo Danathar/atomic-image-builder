@@ -4133,6 +4133,45 @@ class BuilderTests(unittest.TestCase):
             found = app.batch_check_state_files("testuser", repos)
         self.assertEqual(found, {"repo-b"})
 
+    # ── render_build_status timestamp handling ──────────────────────────
+
+    def run_build_status(self, created_at: object) -> GumStub:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        payload = json.dumps([{
+            "databaseId": 1,
+            "displayTitle": "Build",
+            "status": "completed",
+            "conclusion": "success",
+            "createdAt": created_at,
+            "url": "https://example.invalid/run/1",
+            "workflowName": "build",
+        }])
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(
+            ["gh"], 0, payload, ""
+        )):
+            app.render_build_status("testuser", "test-image")
+        return stub
+
+    def test_render_build_status_handles_naive_timestamp(self) -> None:
+        # No Z and no offset: parses to a naive datetime, which previously
+        # raised TypeError on the subtraction against an aware `now`.
+        recent = (datetime.now(timezone.utc) - timedelta(hours=2)).replace(tzinfo=None)
+        stub = self.run_build_status(recent.isoformat())
+        row = next(m for _, m in stub.messages if "example.invalid" in m)
+        self.assertIn("2h ago", row)
+
+    def test_render_build_status_handles_unparseable_timestamp(self) -> None:
+        stub = self.run_build_status("not a timestamp")
+        row = next(m for _, m in stub.messages if "example.invalid" in m)
+        self.assertIn("unknown", row)
+
+    def test_render_build_status_handles_non_string_timestamp(self) -> None:
+        stub = self.run_build_status(12345)
+        row = next(m for _, m in stub.messages if "example.invalid" in m)
+        self.assertIn("unknown", row)
+
     # ── Justfile / image-template.env restore-from-snapshot ─────────────
 
     def test_patch_container_justfile_no_ops_image_name_patch_on_new_upstream_syntax(self) -> None:
