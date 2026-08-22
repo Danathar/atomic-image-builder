@@ -627,6 +627,56 @@ class BuilderTests(unittest.TestCase):
                         with self.assertRaisesRegex(CommandError, "status could not be verified"):
                             app.repo_secret_exists("example", "test-image", "SIGNING_SECRET")
 
+    def test_ensure_signing_ready_fails_closed_when_cosign_password_missing(self) -> None:
+        # SIGNING_SECRET present but COSIGN_PASSWORD absent: the Containerfile
+        # workflow cannot decrypt the key, so this must not report ready.
+        app = self.make_app()
+        app.config.method = "containerfile"
+        secrets_present = ["SIGNING_SECRET"]
+        completed = subprocess.CompletedProcess(
+            ["gh", "secret", "list"], 0, json.dumps([{"name": n} for n in secrets_present]), ""
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / "cosign.pub").write_text("PUBLIC KEY\n")
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", return_value=completed):
+                    with self.assertRaisesRegex(CommandError, "COSIGN_PASSWORD is missing"):
+                        app.ensure_signing_ready("example", "test-image", repo_dir=repo_dir)
+
+    def test_ensure_signing_ready_accepts_both_secrets_present(self) -> None:
+        app = self.make_app()
+        app.config.method = "containerfile"
+        completed = subprocess.CompletedProcess(
+            ["gh", "secret", "list"], 0,
+            '[{"name":"SIGNING_SECRET"},{"name":"COSIGN_PASSWORD"}]', ""
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / "cosign.pub").write_text("PUBLIC KEY\n")
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", return_value=completed):
+                    self.assertTrue(
+                        app.ensure_signing_ready("example", "test-image", repo_dir=repo_dir)
+                    )
+
+    def test_ensure_signing_ready_bluebuild_does_not_require_cosign_password(self) -> None:
+        # BlueBuild generates its key with an empty password and never uploads
+        # COSIGN_PASSWORD, so requiring it there would be a false failure.
+        app = self.make_app()
+        app.config.method = "bluebuild"
+        completed = subprocess.CompletedProcess(
+            ["gh", "secret", "list"], 0, '[{"name":"SIGNING_SECRET"}]', ""
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / "cosign.pub").write_text("PUBLIC KEY\n")
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", return_value=completed):
+                    self.assertTrue(
+                        app.ensure_signing_ready("example", "test-image", repo_dir=repo_dir)
+                    )
+
     def test_ensure_signing_ready_does_not_change_keys_when_secret_probe_fails(self) -> None:
         app = self.make_app()
         calls: list[list[str]] = []

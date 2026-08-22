@@ -2270,6 +2270,22 @@ class App:
                     "SIGNING_SECRET is configured on GitHub but cosign.pub is missing from this repo. "
                     "The public key cannot be recovered; use 'Rotate signing key (cosign)' from the update menu to restore signing."
                 )
+            if not bluebuild_signing and not self.repo_secret_exists(owner, repo, "COSIGN_PASSWORD"):
+                # The Containerfile workflow signs with
+                #   cosign sign --key env://COSIGN_PRIVATE_KEY
+                # under COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}, and the
+                # key we generate is encrypted with a random password. With the
+                # secret missing that expands to an empty string, cosign cannot
+                # decrypt the key, and signing fails on every build. Fail closed
+                # here the same way the missing-cosign.pub case above does,
+                # rather than reporting signing ready. BlueBuild is exempt: it
+                # generates its key with an empty password and never uploads the
+                # secret. rotate_signing_key() is the repair path.
+                raise CommandError(
+                    "SIGNING_SECRET is configured on GitHub but COSIGN_PASSWORD is missing. "
+                    "The signing key cannot be decrypted without it, so image builds would fail signing. "
+                    "Use 'Rotate signing key (cosign)' from the update menu to regenerate both secrets."
+                )
             return True
         if not command_exists("cosign"):
             raise CommandError("cosign is required for signed images. Install it with: brew install cosign")
