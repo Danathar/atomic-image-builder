@@ -3089,6 +3089,64 @@ class BuilderTests(unittest.TestCase):
             self.skipTest("gum is not installed")
         Gum().style("--> 8a3f0c1 step marker", width=40)
 
+    # ── menu-screen error containment ───────────────────────────────────
+
+    def test_run_screen_action_contains_command_error(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+
+        def boom() -> None:
+            raise CommandError("Invalid package value: bad;rm")
+
+        app.run_screen_action(boom, return_hint="Press Enter to return...")
+        self.assertTrue(
+            any(level == "error" and "bad;rm" in message for level, message in stub.messages)
+        )
+        self.assertIn("Press Enter to return...", stub.prompts)
+
+    def test_run_screen_action_lets_screen_back_through(self) -> None:
+        # ScreenBack is navigation, not failure: the caller still owns it.
+        app = self.make_app()
+        app.gum = GumStub()
+
+        def back() -> None:
+            raise ScreenBack()
+
+        with self.assertRaises(ScreenBack):
+            app.run_screen_action(back, return_hint="unused")
+
+    def test_review_new_image_keeps_config_when_local_build_fails(self) -> None:
+        # A failing local test build must return to the review screen with the
+        # wizard's state intact, not unwind to main_menu and discard it.
+        app = self.make_app()
+        app.config.method = "containerfile"
+        app.config.packages = ["tmux", "ripgrep"]
+
+        class Stub(GumStub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            def choose(self, options, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return [next(o for o in options if "Test build locally" in o)]
+                return [next(o for o in options if o.startswith("Start GitHub build"))]
+
+        app.gum = Stub()
+        with patch.object(
+            App, "test_build_locally", side_effect=CommandError("Invalid package value: bad;rm")
+        ):
+            action = app.review_new_image(step=5, total_steps=5)
+
+        self.assertEqual(action, "build")
+        self.assertEqual(app.config.packages, ["tmux", "ripgrep"])
+        self.assertEqual(app.config.method, "containerfile")
+        self.assertTrue(
+            any(level == "error" and "bad;rm" in message for level, message in app.gum.messages)
+        )
+
     def test_update_task_choices_show_current_status(self) -> None:
         app = self.make_app()
         app.config.packages = ["tmux", "ripgrep"]

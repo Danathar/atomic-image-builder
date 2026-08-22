@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, tzinfo
@@ -2045,6 +2045,19 @@ class App:
         lines = [*intro_lines, "", *body]
         self.gum.pager(self.read_only_pager_text("Review Build Configuration", lines))
 
+    def run_screen_action(self, action: Callable[[], object], *, return_hint: str) -> None:
+        # An action launched from a menu screen must not unwind past that
+        # screen. main_menu catches CommandError, so an error escaping from
+        # here drops the user at the main menu having lost the whole
+        # in-progress wizard or update session - method, base image, repo name,
+        # description and every package selection. Report it and stay put, the
+        # way the "Start GitHub build" branch already does for do_build.
+        try:
+            action()
+        except CommandError as exc:
+            self.gum.error(str(exc))
+            self.gum.enter_to_continue(return_hint)
+
     def review_new_image(self, *, step: int, total_steps: int) -> str:
         while True:
             self.show_step_header("Review and Create Image", step=step, total_steps=total_steps)
@@ -2067,7 +2080,10 @@ class App:
             if selected == build_label:
                 return "build"
             if selected == local_build_label:
-                self.test_build_locally()
+                self.run_screen_action(
+                    self.test_build_locally,
+                    return_hint="Press Enter to return to the review screen...",
+                )
                 continue
             if selected == method_label:
                 return "method"
@@ -3211,10 +3227,16 @@ class App:
                 self.show_summary(next_hint="This is the full configuration summary.")
                 continue
             if selected == local_build_label:
-                self.test_build_locally()
+                self.run_screen_action(
+                    self.test_build_locally,
+                    return_hint="Press Enter to return to the update menu...",
+                )
                 continue
             if selected == rotate_label:
-                self.rotate_signing_key(repo_dir)
+                self.run_screen_action(
+                    lambda: self.rotate_signing_key(repo_dir),
+                    return_hint="Press Enter to return to the update menu...",
+                )
                 continue
             task = mapping[selected]
             try:
