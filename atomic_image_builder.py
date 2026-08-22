@@ -474,8 +474,16 @@ def patch_signing_step_block(step_lines: Sequence[str], *, branch_if: str, sign_
     return [patched[0], f"{indent}if: {sign_if}", *patched[1:]]
 
 
-def patch_workflow_signing_steps(workflow_text: str, *, branch_if: str, sign_if: str) -> str:
-    lines = workflow_text.splitlines()
+def patch_workflow_steps(workflow_text: str, patch_step: Callable[[list[str]], list[str]]) -> list[str]:
+    """Split a workflow into step blocks and run patch_step over each one.
+
+    A step block is a "- " item directly under a `steps:` key, plus every line
+    indented beneath it. Lines outside any step pass through untouched.
+
+    Both workflow patchers walked their own byte-identical copy of this state
+    machine, so a correction to the step-boundary rules reached only one of
+    them. Returns the output lines; the caller decides how to join them.
+    """
     output: list[str] = []
     current_step: list[str] = []
     in_steps = False
@@ -485,10 +493,10 @@ def patch_workflow_signing_steps(workflow_text: str, *, branch_if: str, sign_if:
         nonlocal current_step
         if not current_step:
             return
-        output.extend(patch_signing_step_block(current_step, branch_if=branch_if, sign_if=sign_if))
+        output.extend(patch_step(current_step))
         current_step = []
 
-    for line in lines:
+    for line in workflow_text.splitlines():
         stripped = line.strip()
         indent = len(line) - len(line.lstrip())
 
@@ -515,7 +523,16 @@ def patch_workflow_signing_steps(workflow_text: str, *, branch_if: str, sign_if:
             output.append(line)
 
     flush_step()
-    return "\n".join(output)
+    return output
+
+
+def patch_workflow_signing_steps(workflow_text: str, *, branch_if: str, sign_if: str) -> str:
+    return "\n".join(
+        patch_workflow_steps(
+            workflow_text,
+            lambda step: patch_signing_step_block(step, branch_if=branch_if, sign_if=sign_if),
+        )
+    )
 
 
 # A YAML mapping key, with or without an inline comment after it:
@@ -3988,12 +4005,6 @@ class App:
         return ensure_trailing_newline("\n".join(output))
 
     def patch_bluebuild_action_inputs(self, workflow_text: str) -> str:
-        lines = workflow_text.splitlines()
-        output: list[str] = []
-        current_step: list[str] = []
-        in_steps = False
-        steps_indent: int | None = None
-
         def patch_step(step_lines: list[str]) -> list[str]:
             if not step_lines:
                 return []
@@ -4059,41 +4070,7 @@ class App:
             )
             return step_lines[: with_index + 1] + wanted_lines + step_lines[with_index + 1 :]
 
-        def flush_step() -> None:
-            nonlocal current_step
-            if not current_step:
-                return
-            output.extend(patch_step(current_step))
-            current_step = []
-
-        for line in lines:
-            stripped = line.strip()
-            indent = len(line) - len(line.lstrip())
-
-            if in_steps and steps_indent is not None and indent <= steps_indent and stripped and not stripped.startswith("#"):
-                flush_step()
-                in_steps = False
-                steps_indent = None
-
-            if stripped == "steps:":
-                flush_step()
-                in_steps = True
-                steps_indent = indent
-                output.append(line)
-                continue
-
-            if in_steps and steps_indent is not None and indent == steps_indent + 2 and stripped.startswith("- "):
-                flush_step()
-                current_step = [line]
-                continue
-
-            if current_step:
-                current_step.append(line)
-            else:
-                output.append(line)
-
-        flush_step()
-        return ensure_trailing_newline("\n".join(output))
+        return ensure_trailing_newline("\n".join(patch_workflow_steps(workflow_text, patch_step)))
 
     def patch_bluebuild_workflow(self, existing_text: str, *, default_branch: str = "main") -> str:
         # The BlueBuild workflow is simpler than the Containerfile one: a single

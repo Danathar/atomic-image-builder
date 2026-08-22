@@ -43,6 +43,7 @@ from atomic_image_builder import (
     format_daily_rebuild_note,
     normalize_container_image_reference,
     patch_cosign_compatibility,
+    patch_workflow_steps,
     string_list,
 )
 
@@ -4309,6 +4310,53 @@ class BuilderTests(unittest.TestCase):
         )
         keys = self.action_input_keys(app.patch_bluebuild_action_inputs(template))
         self.assertEqual(sorted(keys), ["build_opts", "chunkah", "push", "recipe"])
+
+    def test_patch_workflow_steps_splits_steps_and_passes_others_through(self) -> None:
+        # The shared step walker both workflow patchers now use.
+        seen: list[list[str]] = []
+
+        def record(step_lines: list[str]) -> list[str]:
+            seen.append(list(step_lines))
+            return step_lines
+
+        workflow = textwrap.dedent(
+            """\
+            name: Workflow
+            on:
+              push:
+            jobs:
+              build:
+                steps:
+                  - name: One
+                    run: echo one
+                  - name: Two
+                    run: echo two
+                if: always()
+            """
+        )
+        output = patch_workflow_steps(workflow, record)
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[0][0].strip(), "- name: One")
+        self.assertEqual(seen[1][0].strip(), "- name: Two")
+        self.assertIn("    run: echo two", seen[1][1])
+        # Nothing is lost or reordered when the patcher is a no-op.
+        self.assertEqual("\n".join(output), workflow.rstrip("\n"))
+
+    def test_patch_workflow_steps_ignores_text_outside_steps(self) -> None:
+        seen: list[list[str]] = []
+        workflow = textwrap.dedent(
+            """\
+            name: Workflow
+            on:
+              push:
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+            """
+        )
+        output = patch_workflow_steps(workflow, lambda step: (seen.append(step), step)[1])
+        self.assertEqual(seen, [])
+        self.assertEqual("\n".join(output), workflow.rstrip("\n"))
 
     def test_clone_bluebuild_template_copies_snapshot(self) -> None:
         app = self.make_bluebuild_app()
