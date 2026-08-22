@@ -3912,21 +3912,56 @@ class App:
                     break
             if with_index is None:
                 return step_lines
+            entry_indent = len(entry_prefix)
+
+            def drop_entries(source: list[str], prefixes: tuple[str, ...]) -> list[str]:
+                # Drop "key: value" entries by key, along with any block-scalar
+                # or continuation lines indented under them, so removing an
+                # entry cannot leave orphaned value lines behind.
+                kept: list[str] = []
+                skipping = False
+                for candidate in source:
+                    if candidate.startswith(prefixes):
+                        skipping = True
+                        continue
+                    if skipping:
+                        candidate_stripped = candidate.strip()
+                        candidate_indent = len(candidate) - len(candidate.lstrip())
+                        if candidate_stripped and candidate_indent > entry_indent:
+                            continue
+                        skipping = False
+                    kept.append(candidate)
+                return kept
+
             # rechunk/build_chunked_oci conflict with chunkah in the action's
             # input validation, so drop them before adding chunkah below (a
             # hand-edited or previously-generated workflow may already set one).
             conflicting_prefixes = (f"{entry_prefix}rechunk:", f"{entry_prefix}build_chunked_oci:")
-            step_lines = [line for line in step_lines if not line.startswith(conflicting_prefixes)]
+            step_lines = drop_entries(step_lines, conflicting_prefixes)
             wanted_lines = [
                 f"{entry_prefix}push: ${{{{ github.event_name != 'pull_request' && github.ref == format('refs/heads/{{0}}', github.event.repository.default_branch) && 'true' || 'false' }}}}",
                 f"{entry_prefix}build_opts: ${{{{ github.event_name == 'pull_request' && '--no-sign' || '' }}}}",
                 # Chunkah is the newer, distro-agnostic rechunker (blue-build/github-action v1.12+).
                 f"{entry_prefix}chunkah: 'true'",
             ]
-            missing = [line for line in wanted_lines if line not in step_lines]
-            if not missing:
+            if all(line in step_lines for line in wanted_lines):
                 return step_lines
-            return step_lines[: with_index + 1] + missing + step_lines[with_index + 1 :]
+            # These three inputs are ours to own, so strip any existing spelling
+            # by key and reinsert canonically. Deciding "missing" by exact line
+            # equality left a differently-valued `push:` in place (hand-edited,
+            # or written by an older version of this tool with different
+            # expression text) and inserted a second one, producing duplicate
+            # keys in a single mapping - which GitHub Actions rejects outright,
+            # so no build runs at all. This is the same prefix-based removal
+            # already used for rechunk/build_chunked_oci just above.
+            wanted_prefixes = tuple(
+                f"{entry_prefix}{key}:" for key in ("push", "build_opts", "chunkah")
+            )
+            step_lines = drop_entries(step_lines, wanted_prefixes)
+            with_index = next(
+                idx for idx, step_line in enumerate(step_lines) if step_line.strip() == "with:"
+            )
+            return step_lines[: with_index + 1] + wanted_lines + step_lines[with_index + 1 :]
 
         def flush_step() -> None:
             nonlocal current_step

@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -3770,6 +3771,133 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("build_chunked_oci: true", result)
         self.assertIn("chunkah: 'true'", result)
         self.assertEqual(result.count("chunkah:"), 1)
+
+    def test_patch_bluebuild_action_inputs_replaces_existing_push_value(self) -> None:
+        # A `push:` with a different value (hand-edited, or written by an older
+        # version of this tool) must be replaced, not joined by a second copy.
+        # Duplicate keys in one mapping make GitHub Actions reject the workflow
+        # outright, so no build runs at all.
+        app = self.make_bluebuild_app()
+        template = textwrap.dedent(
+            """\
+            jobs:
+              bluebuild:
+                steps:
+                  - name: Build Custom Image
+                    uses: blue-build/github-action@v1.12
+                    with:
+                      push: 'true'
+                      recipe: ${{ matrix.recipe }}
+            """
+        )
+        result = app.patch_bluebuild_action_inputs(template)
+        self.assertEqual(result.count("push:"), 1)
+        self.assertNotIn("push: 'true'", result)
+        self.assertIn("github.event.repository.default_branch", result)
+        # An input we do not own must survive untouched.
+        self.assertIn("recipe: ${{ matrix.recipe }}", result)
+        self.assertEqual(app.patch_bluebuild_action_inputs(result), result)
+
+    def test_patch_bluebuild_action_inputs_replaces_existing_build_opts_and_chunkah(self) -> None:
+        app = self.make_bluebuild_app()
+        template = textwrap.dedent(
+            """\
+            jobs:
+              bluebuild:
+                steps:
+                  - name: Build Custom Image
+                    uses: blue-build/github-action@v1.12
+                    with:
+                      build_opts: '--verbose'
+                      chunkah: 'false'
+                      recipe: ${{ matrix.recipe }}
+            """
+        )
+        result = app.patch_bluebuild_action_inputs(template)
+        self.assertEqual(result.count("build_opts:"), 1)
+        self.assertEqual(result.count("chunkah:"), 1)
+        self.assertNotIn("--verbose", result)
+        self.assertNotIn("chunkah: 'false'", result)
+        self.assertIn("chunkah: 'true'", result)
+        self.assertEqual(app.patch_bluebuild_action_inputs(result), result)
+
+    def test_patch_bluebuild_action_inputs_removes_block_scalar_value_lines(self) -> None:
+        # Removing an entry must take its continuation lines with it, or the
+        # orphaned value line lands in the mapping as invalid YAML.
+        app = self.make_bluebuild_app()
+        template = textwrap.dedent(
+            """\
+            jobs:
+              bluebuild:
+                steps:
+                  - name: Build Custom Image
+                    uses: blue-build/github-action@v1.12
+                    with:
+                      push: >-
+                        true
+                      recipe: ${{ matrix.recipe }}
+            """
+        )
+        result = app.patch_bluebuild_action_inputs(template)
+        self.assertEqual(result.count("push:"), 1)
+        self.assertNotIn(">-", result)
+        self.assertNotIn("\n                        true", result)
+        self.assertIn("recipe: ${{ matrix.recipe }}", result)
+
+    def action_input_keys(self, workflow_text: str) -> list[str]:
+        """Keys directly under the blue-build action step's `with:` mapping.
+
+        Counting bare substrings over the whole file would also pick up the
+        top-level `on: push:` trigger, which is unrelated.
+        """
+        keys: list[str] = []
+        entry_indent: int | None = None
+        for line in workflow_text.splitlines():
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            if stripped == "with:":
+                entry_indent = indent + 2
+                continue
+            if entry_indent is None:
+                continue
+            if stripped and indent < entry_indent:
+                entry_indent = None
+                continue
+            match = re.match(r"([A-Za-z_][A-Za-z0-9_]*):", stripped)
+            if match and indent == entry_indent:
+                keys.append(match.group(1))
+        return keys
+
+    def test_patch_bluebuild_action_inputs_bundled_snapshot_has_no_duplicate_keys(self) -> None:
+        snapshot = (
+            BLUEBUILD_TEMPLATE_DIR / ".github" / "workflows" / "build.yml"
+        ).read_text()
+        app = self.make_bluebuild_app()
+        result = app.patch_bluebuild_action_inputs(snapshot)
+        keys = self.action_input_keys(result)
+        self.assertEqual(len(keys), len(set(keys)), f"duplicate action inputs: {keys}")
+        for key in ("push", "build_opts", "chunkah"):
+            self.assertIn(key, keys)
+        self.assertEqual(app.patch_bluebuild_action_inputs(result), result)
+
+    def test_patch_bluebuild_action_inputs_no_duplicates_when_keys_preexist(self) -> None:
+        app = self.make_bluebuild_app()
+        template = textwrap.dedent(
+            """\
+            jobs:
+              bluebuild:
+                steps:
+                  - name: Build Custom Image
+                    uses: blue-build/github-action@v1.12
+                    with:
+                      push: 'true'
+                      build_opts: '--verbose'
+                      chunkah: 'false'
+                      recipe: ${{ matrix.recipe }}
+            """
+        )
+        keys = self.action_input_keys(app.patch_bluebuild_action_inputs(template))
+        self.assertEqual(sorted(keys), ["build_opts", "chunkah", "push", "recipe"])
 
     def test_clone_bluebuild_template_copies_snapshot(self) -> None:
         app = self.make_bluebuild_app()
