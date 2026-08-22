@@ -493,17 +493,53 @@ def patch_workflow_signing_steps(workflow_text: str, *, branch_if: str, sign_if:
 
 def patch_cosign_compatibility(workflow_text: str) -> str:
     """Keep existing managed workflows compatible with Cosign 3.x."""
-    lines: list[str] = []
-    for line in workflow_text.splitlines():
+    lines = workflow_text.splitlines()
+    for index, line in enumerate(lines):
         if "cosign-release:" in line:
-            line = re.sub(r"(cosign-release:\s*['\"])v[^'\"]+(['\"])", r"\1v3.1.2\2", line)
-        if re.search(r"\bcosign\s+sign\b", line) and "--key env://" in line and "--new-bundle-format=" not in line:
-            line = line.replace(
-                "cosign sign -y ",
-                "cosign sign -y --new-bundle-format=false --use-signing-config=false ",
-                1,
+            lines[index] = re.sub(r"(cosign-release:\s*['\"])v[^'\"]+(['\"])", r"\1v3.1.2\2", line)
+
+    # `cosign sign` is routinely written across shell line continuations, so the
+    # guard has to consider the whole logical command. Testing each physical
+    # line in isolation meant a split invocation matched nothing - the verb line
+    # has no `--key env://` and the key line has no `cosign sign` - and the
+    # workflow was published still carrying the exact Cosign 3.x incompatibility
+    # this function exists to remove.
+    index = 0
+    while index < len(lines):
+        start = index
+        while lines[index].rstrip().endswith("\\") and index + 1 < len(lines):
+            index += 1
+        logical = " ".join(part.rstrip().rstrip("\\") for part in lines[start:index + 1])
+        index += 1
+        if not re.search(r"\bcosign\s+sign\b", logical):
+            continue
+        if "--key env://" not in logical or "--new-bundle-format=" in logical:
+            continue
+        # Insert directly after the `cosign sign` verb instead of matching a
+        # literal "cosign sign -y " prefix. The confirmation flag may be spelled
+        # --yes, may be absent, or may sit on a later continuation line, and in
+        # each of those cases the old prefix replace silently did nothing while
+        # the guard above reported the line as needing a fix.
+        for offset in range(start, index):
+            patched, count = re.subn(
+                r"\bcosign(\s+)sign\b",
+                r"cosign\1sign --new-bundle-format=false --use-signing-config=false",
+                lines[offset],
+                count=1,
             )
-        lines.append(line)
+            if count:
+                lines[offset] = patched
+                break
+        else:
+            # The verb itself is split across a continuation. Rather than
+            # publishing a workflow we know signs incompatibly, fail closed.
+            raise CommandError(
+                "This workflow has a 'cosign sign --key env://' command that needs the Cosign 3.x "
+                "compatibility flags, but the 'cosign sign' command is split across line "
+                "continuations in a way this tool cannot rewrite safely. Add "
+                "'--new-bundle-format=false --use-signing-config=false' to that command by hand, "
+                "then run this update again."
+            )
     return "\n".join(lines)
 
 

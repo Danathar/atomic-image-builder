@@ -41,6 +41,7 @@ from atomic_image_builder import (
     ensure_trailing_newline,
     format_daily_rebuild_note,
     normalize_container_image_reference,
+    patch_cosign_compatibility,
     string_list,
 )
 
@@ -380,7 +381,89 @@ class BuilderTests(unittest.TestCase):
         )
         patched = app.patch_container_workflow(workflow)
         self.assertIn("cosign-release: 'v3.1.2'", patched)
-        self.assertIn("cosign sign -y --new-bundle-format=false --use-signing-config=false --key", patched)
+        self.assertIn(
+            "cosign sign --new-bundle-format=false --use-signing-config=false -y --key", patched
+        )
+        # The stale, unpatched form must be gone entirely.
+        self.assertNotIn("cosign sign -y --key", patched)
+
+    # ── patch_cosign_compatibility shapes ───────────────────────────────
+    # This patcher is a migration path for managed repos generated before the
+    # Cosign 3.x flags existed. A silent no-op here publishes a workflow whose
+    # signing step cosign 3.x rejects, so every shape below asserts the
+    # replacement is present, the stale form absent, and the result idempotent.
+
+    def assert_cosign_patched(self, text: str) -> str:
+        patched = patch_cosign_compatibility(text)
+        self.assertIn("--new-bundle-format=false", patched)
+        self.assertIn("--use-signing-config=false", patched)
+        self.assertEqual(patch_cosign_compatibility(patched), patched, "not idempotent")
+        return patched
+
+    def test_patch_cosign_compatibility_bundled_snapshot_shape(self) -> None:
+        snapshot = (
+            CONTAINERFILE_TEMPLATE_DIR / ".github" / "workflows" / "build.yml"
+        ).read_text()
+        self.assert_cosign_patched(snapshot)
+
+    def test_patch_cosign_compatibility_handles_line_continuations(self) -> None:
+        text = (
+            "        run: |\n"
+            "          cosign sign -y \\\n"
+            "            --key env://COSIGN_PRIVATE_KEY \\\n"
+            "            ${IMAGE}\n"
+        )
+        patched = self.assert_cosign_patched(text)
+        # The continuation structure must survive the rewrite.
+        self.assertIn("--key env://COSIGN_PRIVATE_KEY \\", patched)
+        self.assertEqual(len(patched.splitlines()), len(text.splitlines()))
+
+    def test_patch_cosign_compatibility_handles_long_yes_flag(self) -> None:
+        text = "          cosign sign --yes --key env://COSIGN_PRIVATE_KEY ${IMAGE}"
+        patched = self.assert_cosign_patched(text)
+        self.assertNotIn("cosign sign --yes --key", patched)
+
+    def test_patch_cosign_compatibility_handles_absent_confirm_flag(self) -> None:
+        text = "          cosign sign --key env://COSIGN_PRIVATE_KEY ${IMAGE}"
+        self.assert_cosign_patched(text)
+
+    def test_patch_cosign_compatibility_leaves_keyless_signing_alone(self) -> None:
+        text = "          cosign sign -y ghcr.io/example/test-image:latest"
+        self.assertEqual(patch_cosign_compatibility(text), text)
+
+    def test_patch_cosign_compatibility_fails_closed_on_split_verb(self) -> None:
+        # `cosign` and `sign` on separate physical lines: no single line can be
+        # rewritten, and silently emitting the incompatible command is worse
+        # than stopping with an explanation.
+        text = (
+            "          cosign \\\n"
+            "            sign -y --key env://COSIGN_PRIVATE_KEY ${IMAGE}\n"
+        )
+        with self.assertRaisesRegex(CommandError, "split across line continuations"):
+            patch_cosign_compatibility(text)
+
+    def test_patch_container_workflow_patches_continuation_signing_end_to_end(self) -> None:
+        # Exercise it through the real generated-repo path, not just the helper.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build:
+                steps:
+                  - name: Install Cosign
+                    with:
+                      cosign-release: 'v2.6.3'
+                  - name: Sign
+                    run: |
+                      cosign sign -y \\
+                        --key env://COSIGN_PRIVATE_KEY \\
+                        image:latest
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn("cosign-release: 'v3.1.2'", patched)
+        self.assertIn("--new-bundle-format=false", patched)
+        self.assertNotIn("cosign sign -y \\", patched)
 
     def test_patch_container_workflow_golden(self) -> None:
         expected_path = Path(__file__).parent / "fixtures/workflows/container_expected.yml"
