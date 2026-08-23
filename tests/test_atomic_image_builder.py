@@ -4306,6 +4306,34 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("\n                        true", result)
         self.assertIn("recipe: ${{ matrix.recipe }}", result)
 
+    def test_patch_bluebuild_action_inputs_keeps_dropping_across_blank_scalar_lines(self) -> None:
+        # Block scalars (">-", "|") legitimately contain blank lines. Treating
+        # a blank line as the end of the dropped entry kept the scalar's
+        # remaining lines - orphaned under with: once their key was gone, which
+        # GitHub Actions rejects as invalid YAML.
+        app = self.make_bluebuild_app()
+        template = textwrap.dedent(
+            """\
+            jobs:
+              bluebuild:
+                steps:
+                  - name: Build Custom Image
+                    uses: blue-build/github-action@v1.12
+                    with:
+                      push: >-
+                        ${{ github.event_name != 'pull_request'
+
+                        && github.ref == 'refs/heads/main' }}
+                      recipe: ${{ matrix.recipe }}
+            """
+        )
+        result = app.patch_bluebuild_action_inputs(template)
+        self.assertEqual(result.count("push:"), 1)
+        self.assertNotIn(">-", result)
+        self.assertNotIn("refs/heads/main' }}", result)
+        self.assertIn("recipe: ${{ matrix.recipe }}", result)
+        self.assertEqual(app.patch_bluebuild_action_inputs(result), result)
+
     def action_input_keys(self, workflow_text: str) -> list[str]:
         """Keys directly under the blue-build action step's `with:` mapping.
 

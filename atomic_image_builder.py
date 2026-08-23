@@ -4073,7 +4073,14 @@ class App:
                     if skipping:
                         candidate_stripped = candidate.strip()
                         candidate_indent = len(candidate) - len(candidate.lstrip())
-                        if candidate_stripped and candidate_indent > entry_indent:
+                        # A blank line does not end the entry: block scalars
+                        # (">-", "|") legitimately contain blank lines, and
+                        # treating one as a terminator kept the scalar's
+                        # remaining lines - orphaned under with: once their key
+                        # was gone, which GitHub Actions rejects as invalid
+                        # YAML. Only a nonblank line at the entry's own
+                        # indentation or less closes it.
+                        if not candidate_stripped or candidate_indent > entry_indent:
                             continue
                         skipping = False
                     kept.append(candidate)
