@@ -2340,6 +2340,151 @@ class BuilderTests(unittest.TestCase):
 
         self.assertIn(("warn", MANAGED_REPO_WARNING), app.gum.messages)
 
+    def test_push_update_returns_when_no_changes_detected(self) -> None:
+        # An empty pre-signing diff must end the flow before any confirm,
+        # signing setup, or git write happens.
+        app = self.make_app()
+        app.github_user = "example"
+        app.config.github_user = "example"
+        stub = GumStub()
+        confirm_prompts: list[str] = []
+        stub.confirm = lambda prompt, default=False: confirm_prompts.append(prompt) or default
+        app.gum = stub
+
+        run_calls: list[list[str]] = []
+
+        def fake_run(args, **_kwargs):
+            run_calls.append(list(args))
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with patch.object(app, "repo_default_branch", return_value="main"):
+                    with patch.object(app, "ensure_signing_ready") as ensure_mock:
+                        with patch.object(app, "write_project_files", return_value=None):
+                            app.push_update("example", "test-image", repo_dir)
+
+        self.assertIn(("warn", "No changes detected."), stub.messages)
+        self.assertEqual(confirm_prompts, [])
+        ensure_mock.assert_not_called()
+        self.assertTrue(all(call[:2] not in (["git", "add"], ["git", "push"]) for call in run_calls))
+
+    def test_push_update_shows_full_diff_when_requested(self) -> None:
+        app = self.make_app()
+        app.github_user = "example"
+        app.config.github_user = "example"
+        confirm_results = iter([True, True])
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: next(confirm_results)
+        paged: list[str] = []
+        stub.pager = lambda text: paged.append(text)
+        app.gum = stub
+
+        def fake_run(args, **_kwargs):
+            if list(args) == ["git", "diff", "--stat"]:
+                return subprocess.CompletedProcess(list(args), 0, " build_files/build.sh | 1 +\n", "")
+            if list(args) == ["git", "diff"]:
+                return subprocess.CompletedProcess(list(args), 0, "diff --git a/x b/x\n", "")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with patch.object(app, "repo_default_branch", return_value="main"):
+                    with patch.object(app, "ensure_signing_ready", return_value=True):
+                        with patch.object(app, "write_project_files", return_value=None):
+                            app.push_update("example", "test-image", repo_dir)
+
+        self.assertEqual(len(paged), 1)
+        self.assertIn("diff --git a/x b/x", paged[0])
+        self.assertTrue(any(level == "success" and "Pushed changes" in message for level, message in stub.messages))
+
+    def test_push_update_returns_when_signing_leaves_no_changes(self) -> None:
+        # If regenerating with signing produces an empty diff there is nothing
+        # to push; the flow must stop before committing.
+        app = self.make_app()
+        app.github_user = "example"
+        app.config.github_user = "example"
+        confirm_results = iter([False, True])
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: next(confirm_results)
+        app.gum = stub
+
+        diff_calls = {"count": 0}
+        run_calls: list[list[str]] = []
+
+        def fake_run(args, **_kwargs):
+            run_calls.append(list(args))
+            if list(args) == ["git", "diff", "--stat"]:
+                diff_calls["count"] += 1
+                if diff_calls["count"] == 1:
+                    return subprocess.CompletedProcess(list(args), 0, " build_files/build.sh | 1 +\n", "")
+                return subprocess.CompletedProcess(list(args), 0, "", "")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with patch.object(app, "repo_default_branch", return_value="main"):
+                    with patch.object(app, "ensure_signing_ready", return_value=True):
+                        with patch.object(app, "write_project_files", return_value=None):
+                            app.push_update("example", "test-image", repo_dir)
+
+        self.assertIn(("warn", "No changes detected."), stub.messages)
+        self.assertTrue(all(call[:2] not in (["git", "add"], ["git", "push"]) for call in run_calls))
+
+    def test_push_update_shows_final_full_diff_before_reconfirming(self) -> None:
+        # When signing changes the diff, asking to view the final full diff
+        # must show it, and the push must still wait for the re-confirm.
+        app = self.make_app()
+        app.github_user = "example"
+        app.config.github_user = "example"
+        confirm_results = iter([False, True, True, True])
+        stub = GumStub()
+        events: list[tuple[str, str]] = []
+
+        def fake_confirm(prompt, default=False):
+            events.append(("confirm", prompt))
+            return next(confirm_results)
+
+        stub.confirm = fake_confirm
+        stub.pager = lambda text: events.append(("pager", text))
+        app.gum = stub
+
+        diff_calls = {"count": 0}
+        run_calls: list[list[str]] = []
+
+        def fake_run(args, **_kwargs):
+            run_calls.append(list(args))
+            if list(args) == ["git", "diff", "--stat"]:
+                diff_calls["count"] += 1
+                if diff_calls["count"] == 1:
+                    return subprocess.CompletedProcess(list(args), 0, " build_files/build.sh | 1 +\n", "")
+                return subprocess.CompletedProcess(list(args), 0, " build_files/build.sh | 1 +\n cosign.pub | 1 +\n", "")
+            if list(args) == ["git", "diff"]:
+                return subprocess.CompletedProcess(list(args), 0, "diff --git a/cosign.pub b/cosign.pub\n", "")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with patch.object(app, "repo_default_branch", return_value="main"):
+                    with patch.object(app, "ensure_signing_ready", return_value=True):
+                        with patch.object(app, "write_project_files", return_value=None):
+                            app.push_update("example", "test-image", repo_dir)
+
+        paged = [text for kind, text in events if kind == "pager"]
+        self.assertEqual(len(paged), 1)
+        self.assertIn("diff --git a/cosign.pub b/cosign.pub", paged[0])
+        # The final full diff must be shown before the re-confirm is asked, so
+        # the user approves what will actually be pushed.
+        pager_index = events.index(("pager", paged[0]))
+        reconfirm_index = events.index(("confirm", "Push final changes to example/test-image?"))
+        self.assertLess(pager_index, reconfirm_index)
+        self.assertIn(["git", "push", "origin", "HEAD"], run_calls)
+        self.assertTrue(any(level == "success" and "Pushed changes" in message for level, message in stub.messages))
+
     def test_create_new_image_starts_from_fresh_config(self) -> None:
         app = self.make_app()
         app.github_user = "example"
