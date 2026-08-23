@@ -1270,6 +1270,68 @@ class BuilderTests(unittest.TestCase):
             any(level == "error" and "cosign keypair" in message for level, message in stub.messages)
         )
 
+    def test_rotate_signing_key_warns_when_repo_cannot_be_identified(self) -> None:
+        # Without an owner/repo there is nothing safe to rotate against.
+        app = self.make_app()
+        app.config.github_user = ""
+        app.config.repo_name = ""
+        stub = GumStub()
+        app.gum = stub
+        with patch.object(app, "generate_and_upload_signing_key") as generate_mock:
+            app.rotate_signing_key(Path("/nonexistent"))
+
+        generate_mock.assert_not_called()
+        self.assertTrue(
+            any(level == "warn" and "configured image repo" in message for level, message in stub.messages)
+        )
+
+    def test_rotate_signing_key_returns_when_confirm_is_declined(self) -> None:
+        # Rotation overwrites real key material; declining the confirm must
+        # short-circuit before any tool check or key generation happens.
+        app = self.make_app()
+        stub = GumStub()
+        prompts: list[str] = []
+
+        def fake_confirm(prompt, default=False):
+            prompts.append(prompt)
+            self.assertFalse(default)
+            return False
+
+        stub.confirm = fake_confirm
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists") as exists_mock:
+            with patch.object(app, "generate_and_upload_signing_key") as generate_mock:
+                app.rotate_signing_key(Path("/nonexistent"))
+
+        generate_mock.assert_not_called()
+        exists_mock.assert_not_called()
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("Rotate the cosign signing key?", prompts[0])
+
+    def test_rotate_signing_key_warns_when_one_tool_is_missing(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: True
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name != "cosign"):
+            with patch.object(app, "generate_and_upload_signing_key") as generate_mock:
+                app.rotate_signing_key(Path("/nonexistent"))
+
+        generate_mock.assert_not_called()
+        self.assertIn(("warn", "cosign is required to rotate the signing key."), stub.messages)
+
+    def test_rotate_signing_key_warns_when_both_tools_are_missing(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: True
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=False):
+            with patch.object(app, "generate_and_upload_signing_key") as generate_mock:
+                app.rotate_signing_key(Path("/nonexistent"))
+
+        generate_mock.assert_not_called()
+        self.assertIn(("warn", "cosign, gh are required to rotate the signing key."), stub.messages)
+
     def test_generate_and_upload_signing_key_skips_password_for_bluebuild(self) -> None:
         app = self.make_bluebuild_app()
         app.gum = GumStub()
@@ -2340,6 +2402,151 @@ class BuilderTests(unittest.TestCase):
 
         self.assertIn(("warn", MANAGED_REPO_WARNING), app.gum.messages)
 
+    def test_push_update_returns_when_no_changes_detected(self) -> None:
+        # An empty pre-signing diff must end the flow before any confirm,
+        # signing setup, or git write happens.
+        app = self.make_app()
+        app.github_user = "example"
+        app.config.github_user = "example"
+        stub = GumStub()
+        confirm_prompts: list[str] = []
+        stub.confirm = lambda prompt, default=False: confirm_prompts.append(prompt) or default
+        app.gum = stub
+
+        run_calls: list[list[str]] = []
+
+        def fake_run(args, **_kwargs):
+            run_calls.append(list(args))
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with patch.object(app, "repo_default_branch", return_value="main"):
+                    with patch.object(app, "ensure_signing_ready") as ensure_mock:
+                        with patch.object(app, "write_project_files", return_value=None):
+                            app.push_update("example", "test-image", repo_dir)
+
+        self.assertIn(("warn", "No changes detected."), stub.messages)
+        self.assertEqual(confirm_prompts, [])
+        ensure_mock.assert_not_called()
+        self.assertTrue(all(call[:2] not in (["git", "add"], ["git", "push"]) for call in run_calls))
+
+    def test_push_update_shows_full_diff_when_requested(self) -> None:
+        app = self.make_app()
+        app.github_user = "example"
+        app.config.github_user = "example"
+        confirm_results = iter([True, True])
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: next(confirm_results)
+        paged: list[str] = []
+        stub.pager = lambda text: paged.append(text)
+        app.gum = stub
+
+        def fake_run(args, **_kwargs):
+            if list(args) == ["git", "diff", "--stat"]:
+                return subprocess.CompletedProcess(list(args), 0, " build_files/build.sh | 1 +\n", "")
+            if list(args) == ["git", "diff"]:
+                return subprocess.CompletedProcess(list(args), 0, "diff --git a/x b/x\n", "")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with patch.object(app, "repo_default_branch", return_value="main"):
+                    with patch.object(app, "ensure_signing_ready", return_value=True):
+                        with patch.object(app, "write_project_files", return_value=None):
+                            app.push_update("example", "test-image", repo_dir)
+
+        self.assertEqual(len(paged), 1)
+        self.assertIn("diff --git a/x b/x", paged[0])
+        self.assertTrue(any(level == "success" and "Pushed changes" in message for level, message in stub.messages))
+
+    def test_push_update_returns_when_signing_leaves_no_changes(self) -> None:
+        # If regenerating with signing produces an empty diff there is nothing
+        # to push; the flow must stop before committing.
+        app = self.make_app()
+        app.github_user = "example"
+        app.config.github_user = "example"
+        confirm_results = iter([False, True])
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: next(confirm_results)
+        app.gum = stub
+
+        diff_calls = {"count": 0}
+        run_calls: list[list[str]] = []
+
+        def fake_run(args, **_kwargs):
+            run_calls.append(list(args))
+            if list(args) == ["git", "diff", "--stat"]:
+                diff_calls["count"] += 1
+                if diff_calls["count"] == 1:
+                    return subprocess.CompletedProcess(list(args), 0, " build_files/build.sh | 1 +\n", "")
+                return subprocess.CompletedProcess(list(args), 0, "", "")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with patch.object(app, "repo_default_branch", return_value="main"):
+                    with patch.object(app, "ensure_signing_ready", return_value=True):
+                        with patch.object(app, "write_project_files", return_value=None):
+                            app.push_update("example", "test-image", repo_dir)
+
+        self.assertIn(("warn", "No changes detected."), stub.messages)
+        self.assertTrue(all(call[:2] not in (["git", "add"], ["git", "push"]) for call in run_calls))
+
+    def test_push_update_shows_final_full_diff_before_reconfirming(self) -> None:
+        # When signing changes the diff, asking to view the final full diff
+        # must show it, and the push must still wait for the re-confirm.
+        app = self.make_app()
+        app.github_user = "example"
+        app.config.github_user = "example"
+        confirm_results = iter([False, True, True, True])
+        stub = GumStub()
+        events: list[tuple[str, str]] = []
+
+        def fake_confirm(prompt, default=False):
+            events.append(("confirm", prompt))
+            return next(confirm_results)
+
+        stub.confirm = fake_confirm
+        stub.pager = lambda text: events.append(("pager", text))
+        app.gum = stub
+
+        diff_calls = {"count": 0}
+        run_calls: list[list[str]] = []
+
+        def fake_run(args, **_kwargs):
+            run_calls.append(list(args))
+            if list(args) == ["git", "diff", "--stat"]:
+                diff_calls["count"] += 1
+                if diff_calls["count"] == 1:
+                    return subprocess.CompletedProcess(list(args), 0, " build_files/build.sh | 1 +\n", "")
+                return subprocess.CompletedProcess(list(args), 0, " build_files/build.sh | 1 +\n cosign.pub | 1 +\n", "")
+            if list(args) == ["git", "diff"]:
+                return subprocess.CompletedProcess(list(args), 0, "diff --git a/cosign.pub b/cosign.pub\n", "")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with patch.object(app, "repo_default_branch", return_value="main"):
+                    with patch.object(app, "ensure_signing_ready", return_value=True):
+                        with patch.object(app, "write_project_files", return_value=None):
+                            app.push_update("example", "test-image", repo_dir)
+
+        paged = [text for kind, text in events if kind == "pager"]
+        self.assertEqual(len(paged), 1)
+        self.assertIn("diff --git a/cosign.pub b/cosign.pub", paged[0])
+        # The final full diff must be shown before the re-confirm is asked, so
+        # the user approves what will actually be pushed.
+        pager_index = events.index(("pager", paged[0]))
+        reconfirm_index = events.index(("confirm", "Push final changes to example/test-image?"))
+        self.assertLess(pager_index, reconfirm_index)
+        self.assertIn(["git", "push", "origin", "HEAD"], run_calls)
+        self.assertTrue(any(level == "success" and "Pushed changes" in message for level, message in stub.messages))
+
     def test_create_new_image_starts_from_fresh_config(self) -> None:
         app = self.make_app()
         app.github_user = "example"
@@ -2394,6 +2601,53 @@ class BuilderTests(unittest.TestCase):
         self.assertIn(("error", "build boom"), stub.messages)
         self.assertTrue(stub.prompts)
         self.assertEqual(app.config.repo_name, "sentinel-repo")
+
+    def test_create_new_image_returns_after_successful_build(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        with patch.object(app, "choose_method", return_value=None):
+            with patch.object(app, "choose_base_image", return_value=None):
+                with patch.object(app, "configure_repo", return_value=None):
+                    with patch.object(app, "select_packages", return_value=None):
+                        # A single review action: if the wizard looped back to
+                        # review after a successful build, next() would raise
+                        # StopIteration and fail the test.
+                        with patch.object(app, "review_new_image", side_effect=iter(["build"])):
+                            with patch.object(app, "do_build", return_value=True) as build_mock:
+                                app.create_new_image()
+        build_mock.assert_called_once()
+
+    def test_create_new_image_review_actions_route_to_matching_step(self) -> None:
+        # Each review action must jump back to its own wizard step; a wrong
+        # mapping would re-run the wrong screen after a partial edit.
+        app = self.make_app()
+        app.gum = GumStub()
+        events: list[str] = []
+        review_actions = iter(["method", "base", "repo", "software", "cancel"])
+
+        def record(name):
+            return lambda **_kwargs: events.append(name)
+
+        def fake_review(**_kwargs):
+            events.append("review")
+            return next(review_actions)
+
+        with patch.object(app, "choose_method", side_effect=record("method")):
+            with patch.object(app, "choose_base_image", side_effect=record("base")):
+                with patch.object(app, "configure_repo", side_effect=record("repo")):
+                    with patch.object(app, "select_packages", side_effect=record("software")):
+                        with patch.object(app, "review_new_image", side_effect=fake_review):
+                            app.create_new_image()
+
+        # The step run immediately after each review is the one the action
+        # named; the wizard then walks forward to review again.
+        resumed_steps = [
+            events[i + 1]
+            for i, name in enumerate(events)
+            if name == "review" and i + 1 < len(events)
+        ]
+        self.assertEqual(resumed_steps, ["method", "base", "repo", "software"])
+        self.assertEqual(events[-1], "review")
 
     def test_main_menu_recovers_from_command_error(self) -> None:
         # A CommandError raised by any dispatched action must be reported and
@@ -2912,6 +3166,42 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(context_exists[0])
         self.assertTrue(containerfile_exists[0])
         self.assertTrue(any(level == "success" and "atomic-image-builder-local-test:dryrun" in message for level, message in stub.messages))
+
+    def test_test_build_locally_hints_when_method_is_not_containerfile(self) -> None:
+        app = self.make_app()
+        app.config.method = "bluebuild"
+        stub = GumStub()
+        app.gum = stub
+        with patch.object(app, "seed_project_template") as seed_mock:
+            app.test_build_locally()
+
+        seed_mock.assert_not_called()
+        self.assertTrue(
+            any(level == "hint" and "Containerfile-only" in message for level, message in stub.messages)
+        )
+
+    def test_test_build_locally_reports_failure_with_stderr_tail(self) -> None:
+        # A non-zero podman exit must be reported as a failure, with only the
+        # last eight stderr lines surfaced as the hint.
+        app = self.make_app()
+        stub = GumStub()
+        stderr_lines = [f"line {i}" for i in range(1, 11)]
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            return subprocess.CompletedProcess(list(command), 125, "", "\n".join(stderr_lines))
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            app.test_build_locally()
+
+        self.assertTrue(
+            any(level == "error" and "failed with exit status 125" in message for level, message in stub.messages)
+        )
+        self.assertFalse(any(level == "success" for level, _message in stub.messages))
+        tails = [message for level, message in stub.messages if level == "hint"]
+        self.assertIn("\n".join(stderr_lines[-8:]), tails)
+        self.assertTrue(all("line 1\n" not in tail for tail in tails))
 
     def test_search_packages_uses_value_delimiter_for_selected_results(self) -> None:
         app = self.make_app()
@@ -5281,6 +5571,93 @@ class BuilderTests(unittest.TestCase):
         stub.choose = lambda _options, **_kwargs: (_ for _ in ()).throw(ScreenBack())
         app.gum = stub
         self.assertFalse(app.update_menu())
+
+    def menu_stub_choosing(self, first_label: str) -> GumStub:
+        """A GumStub whose choose picks first_label once, then cancels."""
+        calls = [0]
+
+        def fake_choose(options, **_kwargs):
+            calls[0] += 1
+            if calls[0] == 1:
+                self.assertIn(first_label, options)
+                return [first_label]
+            return ["Cancel and go back"]
+
+        stub = GumStub()
+        stub.choose = fake_choose
+        return stub
+
+    def test_update_menu_review_shows_full_summary(self) -> None:
+        app = self.make_app()
+        app.gum = self.menu_stub_choosing("Review current configuration")
+        with patch.object(app, "show_summary") as summary_mock:
+            self.assertFalse(app.update_menu())
+        summary_mock.assert_called_once()
+
+    def test_update_menu_runs_local_test_build(self) -> None:
+        app = self.make_app()
+        app.gum = self.menu_stub_choosing("Test build locally (podman)")
+        with patch.object(app, "test_build_locally") as build_mock:
+            self.assertFalse(app.update_menu())
+        build_mock.assert_called_once()
+
+    def test_update_menu_hides_local_build_for_bluebuild(self) -> None:
+        # The local test build is Containerfile-only, so the BlueBuild menu
+        # must not offer it at all.
+        app = self.make_app()
+        app.config.method = "bluebuild"
+        seen_options: list[str] = []
+
+        def fake_choose(options, **_kwargs):
+            seen_options.extend(options)
+            return ["Cancel and go back"]
+
+        stub = GumStub()
+        stub.choose = fake_choose
+        app.gum = stub
+        self.assertFalse(app.update_menu())
+        self.assertNotIn("Test build locally (podman)", seen_options)
+        self.assertIn("Rotate signing key (cosign)", seen_options)
+
+    def test_update_menu_rotates_signing_key_with_repo_dir(self) -> None:
+        app = self.make_app()
+        app.gum = self.menu_stub_choosing("Rotate signing key (cosign)")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            with patch.object(app, "rotate_signing_key") as rotate_mock:
+                self.assertFalse(app.update_menu(repo_dir))
+        rotate_mock.assert_called_once_with(repo_dir)
+
+    def test_update_menu_survives_command_error_from_screen_action(self) -> None:
+        # run_screen_action must contain a CommandError from the launched
+        # action so the update session is not lost to the main menu.
+        app = self.make_app()
+        stub = self.menu_stub_choosing("Rotate signing key (cosign)")
+        app.gum = stub
+        with patch.object(app, "rotate_signing_key", side_effect=CommandError("rotation boom")):
+            self.assertFalse(app.update_menu())
+        self.assertIn(("error", "rotation boom"), stub.messages)
+        self.assertIn("Press Enter to return to the update menu...", stub.prompts)
+
+    def test_update_menu_dispatches_to_manage_packages(self) -> None:
+        """Selecting 'Packages' from the menu dispatches to manage_packages."""
+        app = self.make_app()
+        call_count = [0]
+
+        def fake_choose(options, **_kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                for opt in options:
+                    if "Packages" in opt and "Removed" not in opt:
+                        return [opt]
+            return ["Cancel and go back"]
+
+        stub = GumStub()
+        stub.choose = fake_choose
+        app.gum = stub
+        with patch.object(app, "manage_packages") as mock:
+            app.update_menu()
+        mock.assert_called_once()
 
     # ── require_github auth gate ───────────────────────────────────────
 
