@@ -2442,9 +2442,14 @@ class BuilderTests(unittest.TestCase):
         app.config.github_user = "example"
         confirm_results = iter([False, True, True, True])
         stub = GumStub()
-        stub.confirm = lambda _prompt, default=False: next(confirm_results)
-        paged: list[str] = []
-        stub.pager = lambda text: paged.append(text)
+        events: list[tuple[str, str]] = []
+
+        def fake_confirm(prompt, default=False):
+            events.append(("confirm", prompt))
+            return next(confirm_results)
+
+        stub.confirm = fake_confirm
+        stub.pager = lambda text: events.append(("pager", text))
         app.gum = stub
 
         diff_calls = {"count": 0}
@@ -2469,8 +2474,14 @@ class BuilderTests(unittest.TestCase):
                         with patch.object(app, "write_project_files", return_value=None):
                             app.push_update("example", "test-image", repo_dir)
 
+        paged = [text for kind, text in events if kind == "pager"]
         self.assertEqual(len(paged), 1)
         self.assertIn("diff --git a/cosign.pub b/cosign.pub", paged[0])
+        # The final full diff must be shown before the re-confirm is asked, so
+        # the user approves what will actually be pushed.
+        pager_index = events.index(("pager", paged[0]))
+        reconfirm_index = events.index(("confirm", "Push final changes to example/test-image?"))
+        self.assertLess(pager_index, reconfirm_index)
         self.assertIn(["git", "push", "origin", "HEAD"], run_calls)
         self.assertTrue(any(level == "success" and "Pushed changes" in message for level, message in stub.messages))
 
