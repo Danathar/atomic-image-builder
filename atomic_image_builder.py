@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, tzinfo
@@ -146,7 +146,17 @@ def determine_fedora_atomic_default_tag(
     version_id = data.get("VERSION_ID", "")
     if not version_id.isdigit():
         return fallback
-    return str(max(int(fallback), int(version_id)))
+    # Track a host that is ahead of the pinned fallback, but only by one
+    # release. quay.io/fedora-ostree-desktops publishes a tag per Fedora
+    # release, and a pre-release host (Rawhide, or Branched well before GA)
+    # reports a VERSION_ID whose tag does not exist yet. Taking an unbounded
+    # max meant such a host produced curated URIs like
+    # ".../silverblue:47", the repo was created and pushed successfully, and
+    # the GitHub build then failed on FROM with a manifest-unknown error the
+    # user has no way to diagnose. Nothing here can verify the tag resolves
+    # without a network call, so bound it instead: one release ahead covers a
+    # host that upgraded before this constant was bumped.
+    return str(min(int(fallback) + 1, max(int(fallback), int(version_id))))
 
 
 FEDORA_ATOMIC_DEFAULT_TAG = determine_fedora_atomic_default_tag()
@@ -210,8 +220,13 @@ class Config:
     brew_enabled: bool = False
     signing_enabled: bool = False
     github_user: str = ""
+    # The scan lists hold the running host's complete layered-package and
+    # base-removal inventory. They stay in memory to drive the selection screens
+    # and are deliberately NOT written to the state file - see state_payload().
+    # scan_customizations_carried is the one bit anything downstream needs.
     scanned_packages: list[str] = field(default_factory=list)
     scanned_removed: list[str] = field(default_factory=list)
+    scan_customizations_carried: bool = False
 
     def normalize(self) -> None:
         # Every menu appends to lists over time. Normalizing here keeps ordering
@@ -233,6 +248,17 @@ def unique(values: Iterable[str]) -> list[str]:
             output.append(stripped)
             seen.add(stripped)
     return output
+
+
+def string_list(value: object) -> list[str]:
+    # rpm-ostree status is untrusted input: it can be a stale override file or a
+    # future schema change. Any field we expect to be a list of package names may
+    # arrive as null, a bare string, or a list with non-string entries, so coerce
+    # to a clean list of strings instead of letting unique() hit .strip() on an
+    # int. A bare string is NOT iterated into characters - it is rejected.
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
 
 
 def sanitize_slug(value: str, default: str = DEFAULT_REPO_NAME) -> str:
@@ -270,16 +296,28 @@ def normalize_container_image_reference(container_ref: str) -> str:
     # the deployment was created. Normalize those into a plain image reference
     # so scan results can be matched against our curated base-image list.
     base = container_ref.strip()
-    if base.startswith("ostree-image-signed:docker://"):
-        return base[len("ostree-image-signed:docker://") :]
-    if base.startswith("ostree-unverified-registry:"):
-        return base[len("ostree-unverified-registry:") :]
-    if base.startswith("ostree-remote-image:") or base.startswith("ostree-remote-registry:"):
-        parts = base.split(":", 2)
-        if len(parts) == 3:
-            base = parts[2]
-    if base.startswith("docker://"):
-        return base[len("docker://") :]
+    # "ostree-image-signed:" and "ostree-unverified-image:" are the signed and
+    # signature-disabled spellings of the same thing: an origin prefix followed
+    # by a transport-qualified reference. Both must be stripped, then the
+    # transport below. Handling only the signed spelling meant a host rebased
+    # with verification off fell through unchanged and never matched the curated
+    # list, so choose_base_image discarded a base image that is on it.
+    for origin_prefix in ("ostree-image-signed:", "ostree-unverified-image:"):
+        if base.startswith(origin_prefix):
+            base = base[len(origin_prefix) :]
+            break
+    else:
+        if base.startswith("ostree-unverified-registry:"):
+            base = base[len("ostree-unverified-registry:") :]
+        elif base.startswith(("ostree-remote-image:", "ostree-remote-registry:")):
+            # These carry the ostree remote name as a second field:
+            # ostree-remote-image:<remote>:docker://<ref>
+            parts = base.split(":", 2)
+            if len(parts) == 3:
+                base = parts[2]
+    for transport in ("docker://", "registry:"):
+        if base.startswith(transport):
+            return base[len(transport) :]
     return base
 
 
@@ -373,7 +411,7 @@ def config_from_state_payload(data: object) -> Config:
             if not isinstance(value, str):
                 raise ValueError(f"{name} must be a string")
             setattr(cfg, name, value)
-    for bool_field in ("brew_enabled", "signing_enabled"):
+    for bool_field in ("brew_enabled", "signing_enabled", "scan_customizations_carried"):
         if bool_field in data:
             value = data[bool_field]
             if not isinstance(value, bool):
@@ -436,8 +474,16 @@ def patch_signing_step_block(step_lines: Sequence[str], *, branch_if: str, sign_
     return [patched[0], f"{indent}if: {sign_if}", *patched[1:]]
 
 
-def patch_workflow_signing_steps(workflow_text: str, *, branch_if: str, sign_if: str) -> str:
-    lines = workflow_text.splitlines()
+def patch_workflow_steps(workflow_text: str, patch_step: Callable[[list[str]], list[str]]) -> list[str]:
+    """Split a workflow into step blocks and run patch_step over each one.
+
+    A step block is a "- " item directly under a `steps:` key, plus every line
+    indented beneath it. Lines outside any step pass through untouched.
+
+    Both workflow patchers walked their own byte-identical copy of this state
+    machine, so a correction to the step-boundary rules reached only one of
+    them. Returns the output lines; the caller decides how to join them.
+    """
     output: list[str] = []
     current_step: list[str] = []
     in_steps = False
@@ -447,10 +493,10 @@ def patch_workflow_signing_steps(workflow_text: str, *, branch_if: str, sign_if:
         nonlocal current_step
         if not current_step:
             return
-        output.extend(patch_signing_step_block(current_step, branch_if=branch_if, sign_if=sign_if))
+        output.extend(patch_step(current_step))
         current_step = []
 
-    for line in lines:
+    for line in workflow_text.splitlines():
         stripped = line.strip()
         indent = len(line) - len(line.lstrip())
 
@@ -477,22 +523,107 @@ def patch_workflow_signing_steps(workflow_text: str, *, branch_if: str, sign_if:
             output.append(line)
 
     flush_step()
-    return "\n".join(output)
+    return output
+
+
+def patch_workflow_signing_steps(workflow_text: str, *, branch_if: str, sign_if: str) -> str:
+    return "\n".join(
+        patch_workflow_steps(
+            workflow_text,
+            lambda step: patch_signing_step_block(step, branch_if=branch_if, sign_if=sign_if),
+        )
+    )
+
+
+# A YAML mapping key, with or without an inline comment after it:
+#   push:
+#   workflow_dispatch: # allow manually triggering builds
+WORKFLOW_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.-]*):(\s|$)")
+
+
+def workflow_key(stripped_line: str) -> str | None:
+    """Return the mapping key a stripped YAML line declares, if any.
+
+    Comparing against a literal "push:" misses the equally valid
+    "push: # only the default branch", and the bundled snapshots do carry
+    inline comments on trigger keys.
+
+    This deliberately also matches keys carrying an inline value, such as
+    "push: { branches: [main] }" - a sibling key with a value still ends the
+    previous trigger's block. Use workflow_block_key() when deciding whether a
+    key opens a block that nested lines may be appended under.
+    """
+    match = WORKFLOW_KEY_RE.match(stripped_line)
+    return match.group(1) if match else None
+
+
+# Like WORKFLOW_KEY_RE, but only when nothing follows the colon except an
+# optional inline comment - i.e. the key opens a block mapping.
+WORKFLOW_BLOCK_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.-]*):\s*(?:#.*)?$")
+
+
+def workflow_block_key(stripped_line: str) -> str | None:
+    """Return the key only when the line opens a block (no inline value).
+
+    workflow_key() answers "which key does this line declare" and is right for
+    sibling detection, but appending nested lines under a key is only valid
+    when the key has no value of its own: "push: { branches: [main] }" already
+    carries an inline flow mapping, and writing "branches:" beneath it produces
+    a YAML parse error, not a patched workflow.
+    """
+    match = WORKFLOW_BLOCK_KEY_RE.match(stripped_line)
+    return match.group(1) if match else None
 
 
 def patch_cosign_compatibility(workflow_text: str) -> str:
     """Keep existing managed workflows compatible with Cosign 3.x."""
-    lines: list[str] = []
-    for line in workflow_text.splitlines():
+    lines = workflow_text.splitlines()
+    for index, line in enumerate(lines):
         if "cosign-release:" in line:
-            line = re.sub(r"(cosign-release:\s*['\"])v[^'\"]+(['\"])", r"\1v3.1.2\2", line)
-        if re.search(r"\bcosign\s+sign\b", line) and "--key env://" in line and "--new-bundle-format=" not in line:
-            line = line.replace(
-                "cosign sign -y ",
-                "cosign sign -y --new-bundle-format=false --use-signing-config=false ",
-                1,
+            lines[index] = re.sub(r"(cosign-release:\s*['\"])v[^'\"]+(['\"])", r"\1v3.1.2\2", line)
+
+    # `cosign sign` is routinely written across shell line continuations, so the
+    # guard has to consider the whole logical command. Testing each physical
+    # line in isolation meant a split invocation matched nothing - the verb line
+    # has no `--key env://` and the key line has no `cosign sign` - and the
+    # workflow was published still carrying the exact Cosign 3.x incompatibility
+    # this function exists to remove.
+    index = 0
+    while index < len(lines):
+        start = index
+        while lines[index].rstrip().endswith("\\") and index + 1 < len(lines):
+            index += 1
+        logical = " ".join(part.rstrip().rstrip("\\") for part in lines[start:index + 1])
+        index += 1
+        if not re.search(r"\bcosign\s+sign\b", logical):
+            continue
+        if "--key env://" not in logical or "--new-bundle-format=" in logical:
+            continue
+        # Insert directly after the `cosign sign` verb instead of matching a
+        # literal "cosign sign -y " prefix. The confirmation flag may be spelled
+        # --yes, may be absent, or may sit on a later continuation line, and in
+        # each of those cases the old prefix replace silently did nothing while
+        # the guard above reported the line as needing a fix.
+        for offset in range(start, index):
+            patched, count = re.subn(
+                r"\bcosign(\s+)sign\b",
+                r"cosign\1sign --new-bundle-format=false --use-signing-config=false",
+                lines[offset],
+                count=1,
             )
-        lines.append(line)
+            if count:
+                lines[offset] = patched
+                break
+        else:
+            # The verb itself is split across a continuation. Rather than
+            # publishing a workflow we know signs incompatibly, fail closed.
+            raise CommandError(
+                "This workflow has a 'cosign sign --key env://' command that needs the Cosign 3.x "
+                "compatibility flags, but the 'cosign sign' command is split across line "
+                "continuations in a way this tool cannot rewrite safely. Add "
+                "'--new-bundle-format=false --use-signing-config=false' to that command by hand, "
+                "then run this update again."
+            )
     return "\n".join(lines)
 
 
@@ -627,6 +758,12 @@ class Gum:
                     args.append(flag)
             else:
                 args.extend([flag, str(value)])
+        # Everything after this point is content, not flags. Without the
+        # separator, text that happens to start with a dash (buildah's "--> id"
+        # step markers in a captured build log, a git error, a diff line) is
+        # parsed as an unknown flag and gum exits 80, which run(check=True)
+        # turns into a CommandError thrown from a *display* call.
+        args.append("--")
         args.extend(lines)
         output = run(args).stdout.rstrip("\n")
         if output and not ANSI_RE.search(output):
@@ -673,7 +810,7 @@ class Gum:
         return None
 
     def log(self, level: str, message: str) -> None:
-        run(["gum", "log", "--level", level, message], capture=False)
+        run(["gum", "log", "--level", level, "--", message], capture=False)
 
     def success(self, message: str) -> None:
         self.log("info", message)
@@ -703,8 +840,11 @@ class Gum:
         print()
 
     def confirm(self, prompt: str, *, default: bool = True) -> bool:
-        args = ["gum", "confirm", "--no-show-help", prompt]
+        args = ["gum", "confirm", "--no-show-help"]
         args.append("--default=true" if default else "--default=false")
+        # Separator last, so --default is still parsed as a flag and only the
+        # prompt is positional. See the note in style().
+        args.extend(["--", prompt])
         proc = run(args, check=False, capture=False)
         if proc.returncode == 130:
             raise KeyboardInterrupt()
@@ -1960,6 +2100,19 @@ class App:
         lines = [*intro_lines, "", *body]
         self.gum.pager(self.read_only_pager_text("Review Build Configuration", lines))
 
+    def run_screen_action(self, action: Callable[[], object], *, return_hint: str) -> None:
+        # An action launched from a menu screen must not unwind past that
+        # screen. main_menu catches CommandError, so an error escaping from
+        # here drops the user at the main menu having lost the whole
+        # in-progress wizard or update session - method, base image, repo name,
+        # description and every package selection. Report it and stay put, the
+        # way the "Start GitHub build" branch already does for do_build.
+        try:
+            action()
+        except CommandError as exc:
+            self.gum.error(str(exc))
+            self.gum.enter_to_continue(return_hint)
+
     def review_new_image(self, *, step: int, total_steps: int) -> str:
         while True:
             self.show_step_header("Review and Create Image", step=step, total_steps=total_steps)
@@ -1982,7 +2135,10 @@ class App:
             if selected == build_label:
                 return "build"
             if selected == local_build_label:
-                self.test_build_locally()
+                self.run_screen_action(
+                    self.test_build_locally,
+                    return_hint="Press Enter to return to the review screen...",
+                )
                 continue
             if selected == method_label:
                 return "method"
@@ -2034,7 +2190,14 @@ class App:
         except json.JSONDecodeError:
             self.gum.error("Failed to read rpm-ostree status.")
             return False
-        deployments = status.get("deployments", [])
+        # Valid JSON is not necessarily the object shape we expect: an override
+        # file may hold `[]`, and a future rpm-ostree could change the schema.
+        # Everything below must reach the friendly error, not an AttributeError.
+        if not isinstance(status, dict):
+            self.gum.error("Failed to read rpm-ostree status.")
+            return False
+        raw_deployments = status.get("deployments")
+        deployments = [item for item in raw_deployments if isinstance(item, dict)] if isinstance(raw_deployments, list) else []
         booted = next((item for item in deployments if item.get("booted")), deployments[0] if deployments else {})
         if not booted:
             self.gum.error("No deployment information found.")
@@ -2045,7 +2208,7 @@ class App:
             or booted.get("origin")
             or ""
         )
-        if not container_ref.strip():
+        if not isinstance(container_ref, str) or not container_ref.strip():
             # A booted deployment without a container-image-reference or origin
             # (e.g. a legacy ostree-commit deployment) cannot be carried into an
             # image repo. Bail instead of proceeding with an empty base image.
@@ -2054,8 +2217,8 @@ class App:
             )
             return False
         base = normalize_container_image_reference(container_ref)
-        self.config.scanned_packages = unique(booted.get("requested-packages", []))
-        self.config.scanned_removed = unique(booted.get("requested-base-removals", []))
+        self.config.scanned_packages = unique(string_list(booted.get("requested-packages")))
+        self.config.scanned_removed = unique(string_list(booted.get("requested-base-removals")))
         self.config.removed_packages = list(self.config.scanned_removed)
 
         self.config.base_image_uri = base
@@ -2138,7 +2301,11 @@ class App:
     def carried_scan_customizations(self) -> bool:
         scanned_packages = set(self.config.scanned_packages)
         scanned_removed = set(self.config.scanned_removed)
-        return any(pkg in scanned_packages for pkg in self.config.packages) or any(pkg in scanned_removed for pkg in self.config.removed_packages)
+        if scanned_packages or scanned_removed:
+            return any(pkg in scanned_packages for pkg in self.config.packages) or any(pkg in scanned_removed for pkg in self.config.removed_packages)
+        # Loaded from a state file rather than a live scan: the inventory is not
+        # persisted, so fall back to the flag recorded when it was written.
+        return self.config.scan_customizations_carried
 
     def scheduled_rebuild_note(self) -> str:
         return format_daily_rebuild_note(DEFAULT_GITHUB_BUILD_CRON)
@@ -2198,45 +2365,59 @@ class App:
                 f'{{ object(expression: "HEAD:{STATE_FILE}") {{ id }} }}'
             )
         query = "query { " + " ".join(fragments) + " }"
+
+        def rest_fallback() -> set[str]:
+            # Serial REST checks: slower, but the only way to answer once the
+            # batched GraphQL call has not given us a usable payload.
+            return {
+                item["name"] for item in repos
+                if self.repo_has_state_file(owner, item["name"])
+            }
+
         proc = run(["gh", "api", "graphql", "-f", f"query={query}"], check=False)
         if proc.returncode != 0 or not proc.stdout.strip():
-            # Fall back to serial REST checks
-            return {
-                item["name"] for item in repos
-                if self.repo_has_state_file(owner, item["name"])
-            }
+            return rest_fallback()
         try:
-            data = json.loads(proc.stdout).get("data", {})
-        except (json.JSONDecodeError, AttributeError):
-            return {
-                item["name"] for item in repos
-                if self.repo_has_state_file(owner, item["name"])
-            }
+            payload = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return rest_fallback()
+        # gh exits 0 for a GraphQL-level failure, which comes back as an
+        # explicit {"data": null, "errors": [...]}. .get("data", {}) would hand
+        # back that null - the default only applies to a *missing* key - and the
+        # alias loop below would then raise AttributeError outside any handler.
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            return rest_fallback()
         found: set[str] = set()
         for alias, name in alias_map.items():
             repo_data = data.get(alias)
-            if repo_data and repo_data.get("object"):
+            if isinstance(repo_data, dict) and repo_data.get("object"):
                 found.add(name)
         return found
 
-    def ensure_signing_ready(self, owner: str, repo: str, *, repo_dir: Path | None = None) -> bool:
-        # Signed images are required for this tool, so "ready" means:
-        # - the repo already has a compatible SIGNING_SECRET, or
-        # - we can create a cosign keypair and upload the needed secrets now
-        self.generated_cosign_pub = None
+    def generate_and_upload_signing_key(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        upload_failed_note: str,
+        half_complete_note: str,
+    ) -> str | None:
+        """Generate a cosign keypair and upload the signing secrets to GitHub.
+
+        Returns the new public key text, or None if the user declined to retry a
+        failed SIGNING_SECRET upload. Raises CommandError if the keypair cannot
+        be generated or a secret cannot be uploaded.
+
+        Both signing entry points - first-time setup in ensure_signing_ready and
+        rotation in rotate_signing_key - previously carried their own copy of
+        this sequence, so any change to the retry semantics applied to only one
+        of them. The two notes are the only wording that legitimately differs:
+        one is setting signing up, the other is replacing a working key.
+        """
         bluebuild_signing = self.config.method == "bluebuild"
-        if self.repo_secret_exists(owner, repo, "SIGNING_SECRET"):
-            if repo_dir is not None and not (repo_dir / "cosign.pub").exists():
-                # GitHub secrets are write-only, so the public half of the key
-                # cannot be recovered from SIGNING_SECRET. Rotation is the only
-                # way to restore signing when cosign.pub has gone missing.
-                raise CommandError(
-                    "SIGNING_SECRET is configured on GitHub but cosign.pub is missing from this repo. "
-                    "The public key cannot be recovered; use 'Rotate signing key (cosign)' from the update menu to restore signing."
-                )
-            return True
-        if not command_exists("cosign"):
-            raise CommandError("cosign is required for signed images. Install it with: brew install cosign")
+        # BlueBuild generates its key with an empty password and never uploads
+        # COSIGN_PASSWORD; the Containerfile workflow needs both.
         cosign_password = "" if bluebuild_signing else secrets.token_urlsafe(32)
         with tempfile.TemporaryDirectory(prefix=f"{TOOL_SLUG}-signing.") as tmp:
             tmpdir = Path(tmp)
@@ -2264,23 +2445,69 @@ class App:
                     check=False,
                 )
                 if secret_proc.returncode == 0:
-                    break
+                    return pub_path.read_text()
                 if bluebuild_signing:
-                    self.gum.error("Could not upload SIGNING_SECRET to GitHub. Check your gh login and repo access, then try again.")
+                    self.gum.error(upload_failed_note)
                     if not self.gum.confirm("Retry uploading SIGNING_SECRET now?", default=True):
-                        raise CommandError("SIGNING_SECRET upload was not completed.")
+                        return None
                     continue
-                # COSIGN_PASSWORD already uploaded — GitHub is now half-configured.
-                self.gum.error(
-                    "Could not upload SIGNING_SECRET to GitHub. Signing setup is half-complete — "
-                    "COSIGN_PASSWORD is set but SIGNING_SECRET is not, and image builds will fail signing until this finishes."
-                )
+                # COSIGN_PASSWORD is already uploaded, so GitHub is now
+                # half-configured: stopping here leaves signing broken.
+                self.gum.error(half_complete_note)
                 if not self.gum.confirm("Retry uploading SIGNING_SECRET now?", default=True):
-                    raise CommandError(
-                        "Aborting with signing setup half-complete. Re-run this tool to finish "
-                        "uploading SIGNING_SECRET before pushing new commits."
-                    )
-            self.generated_cosign_pub = pub_path.read_text()
+                    return None
+
+    def ensure_signing_ready(self, owner: str, repo: str, *, repo_dir: Path | None = None) -> bool:
+        # Signed images are required for this tool, so "ready" means:
+        # - the repo already has a compatible SIGNING_SECRET, or
+        # - we can create a cosign keypair and upload the needed secrets now
+        self.generated_cosign_pub = None
+        bluebuild_signing = self.config.method == "bluebuild"
+        if self.repo_secret_exists(owner, repo, "SIGNING_SECRET"):
+            if repo_dir is not None and not (repo_dir / "cosign.pub").exists():
+                # GitHub secrets are write-only, so the public half of the key
+                # cannot be recovered from SIGNING_SECRET. Rotation is the only
+                # way to restore signing when cosign.pub has gone missing.
+                raise CommandError(
+                    "SIGNING_SECRET is configured on GitHub but cosign.pub is missing from this repo. "
+                    "The public key cannot be recovered; use 'Rotate signing key (cosign)' from the update menu to restore signing."
+                )
+            if not bluebuild_signing and not self.repo_secret_exists(owner, repo, "COSIGN_PASSWORD"):
+                # The Containerfile workflow signs with
+                #   cosign sign --key env://COSIGN_PRIVATE_KEY
+                # under COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}, and the
+                # key we generate is encrypted with a random password. With the
+                # secret missing that expands to an empty string, cosign cannot
+                # decrypt the key, and signing fails on every build. Fail closed
+                # here the same way the missing-cosign.pub case above does,
+                # rather than reporting signing ready. BlueBuild is exempt: it
+                # generates its key with an empty password and never uploads the
+                # secret. rotate_signing_key() is the repair path.
+                raise CommandError(
+                    "SIGNING_SECRET is configured on GitHub but COSIGN_PASSWORD is missing. "
+                    "The signing key cannot be decrypted without it, so image builds would fail signing. "
+                    "Use 'Rotate signing key (cosign)' from the update menu to regenerate both secrets."
+                )
+            return True
+        if not command_exists("cosign"):
+            raise CommandError("cosign is required for signed images. Install it with: brew install cosign")
+        pub_text = self.generate_and_upload_signing_key(
+            owner,
+            repo,
+            upload_failed_note="Could not upload SIGNING_SECRET to GitHub. Check your gh login and repo access, then try again.",
+            half_complete_note=(
+                "Could not upload SIGNING_SECRET to GitHub. Signing setup is half-complete — "
+                "COSIGN_PASSWORD is set but SIGNING_SECRET is not, and image builds will fail signing until this finishes."
+            ),
+        )
+        if pub_text is None:
+            if bluebuild_signing:
+                raise CommandError("SIGNING_SECRET upload was not completed.")
+            raise CommandError(
+                "Aborting with signing setup half-complete. Re-run this tool to finish "
+                "uploading SIGNING_SECRET before pushing new commits."
+            )
+        self.generated_cosign_pub = pub_text
         # The public key is kept in memory for the current run so it can be
         # written into the repo files that we are about to generate.
         if bluebuild_signing:
@@ -2309,71 +2536,46 @@ class App:
             return
 
         bluebuild_signing = self.config.method == "bluebuild"
-        cosign_password = "" if bluebuild_signing else secrets.token_urlsafe(32)
-        with tempfile.TemporaryDirectory(prefix=f"{TOOL_SLUG}-signing.") as tmp:
-            tmpdir = Path(tmp)
-            env = os.environ.copy()
-            env["COSIGN_PASSWORD"] = cosign_password
-            proc = run(["cosign", "generate-key-pair"], cwd=tmpdir, env=env, check=False)
-            key_path = tmpdir / "cosign.key"
-            pub_path = tmpdir / "cosign.pub"
-            if proc.returncode != 0 or not key_path.exists() or not pub_path.exists():
-                self.gum.error("Unable to generate a cosign keypair. Fix cosign first, then try again.")
-                return
-            if not bluebuild_signing:
-                password_proc = run(
-                    ["gh", "secret", "set", "COSIGN_PASSWORD", "-R", f"{owner}/{repo}"],
-                    cwd=tmpdir,
-                    stdin=cosign_password,
-                    check=False,
-                )
-                if password_proc.returncode != 0:
-                    self.gum.error("Unable to upload COSIGN_PASSWORD to GitHub. Check your gh login and repo access, then try again.")
-                    return
-            while True:
-                secret_proc = run(
-                    ["gh", "secret", "set", "SIGNING_SECRET", "-R", f"{owner}/{repo}"],
-                    cwd=tmpdir,
-                    stdin=key_path.read_text(),
-                    check=False,
-                )
-                if secret_proc.returncode == 0:
-                    break
-                if bluebuild_signing:
-                    self.gum.error("Could not upload SIGNING_SECRET to GitHub. Rotation was not applied.")
-                    if not self.gum.confirm("Retry uploading SIGNING_SECRET now?", default=True):
-                        return
-                    continue
-                # COSIGN_PASSWORD already uploaded — GitHub is now half-rotated.
-                # Pressing on without the new key would leave signing broken.
-                self.gum.error(
+        try:
+            pub_text = self.generate_and_upload_signing_key(
+                owner,
+                repo,
+                upload_failed_note="Could not upload SIGNING_SECRET to GitHub. Rotation was not applied.",
+                half_complete_note=(
                     "Could not upload SIGNING_SECRET to GitHub. Rotation is half-complete — "
                     "your next image build will fail signing until this finishes."
-                )
-                if not self.gum.confirm("Retry uploading SIGNING_SECRET now?", default=True):
-                    self.gum.warn(
-                        "Aborting with rotation half-complete. Re-run 'Rotate signing key (cosign)' "
-                        "before pushing new commits, or your GitHub Actions signing step will fail."
-                    )
-                    return
-            try:
-                shutil.copy2(pub_path, repo_dir / "cosign.pub")
-                self.configure_temp_repo_git_identity(repo_dir)
-                run(["git", "add", "cosign.pub"], cwd=repo_dir)
-                run(["git", "commit", "-m", "Rotate cosign signing key"], cwd=repo_dir)
-                commit_sha = run(["git", "rev-parse", "--short", "HEAD"], cwd=repo_dir).stdout.strip()
-                run(["git", "push", "origin", "HEAD"], cwd=repo_dir, capture=False)
-            except (CommandError, OSError) as exc:
-                # GitHub already has the new secrets. Surface the split state so the
-                # user knows to re-run rotation instead of trusting a silent failure.
-                self.gum.error(
-                    f"Uploaded new signing secrets to GitHub but could not write, commit, or push cosign.pub: {exc}"
-                )
+                ),
+            )
+        except CommandError as exc:
+            self.gum.error(str(exc))
+            return
+        if pub_text is None:
+            if not bluebuild_signing:
+                # COSIGN_PASSWORD was already replaced, so the repo's key and
+                # GitHub's secrets no longer agree.
                 self.gum.warn(
-                    "Rotation is half-complete — GitHub secrets and the repo's cosign.pub are out of sync. "
-                    "Re-run 'Rotate signing key (cosign)' before pushing new commits."
+                    "Aborting with rotation half-complete. Re-run 'Rotate signing key (cosign)' "
+                    "before pushing new commits, or your GitHub Actions signing step will fail."
                 )
-                return
+            return
+        try:
+            (repo_dir / "cosign.pub").write_text(pub_text)
+            self.configure_temp_repo_git_identity(repo_dir)
+            run(["git", "add", "cosign.pub"], cwd=repo_dir)
+            run(["git", "commit", "-m", "Rotate cosign signing key"], cwd=repo_dir)
+            commit_sha = run(["git", "rev-parse", "--short", "HEAD"], cwd=repo_dir).stdout.strip()
+            run(["git", "push", "origin", "HEAD"], cwd=repo_dir, capture=False)
+        except (CommandError, OSError) as exc:
+            # GitHub already has the new secrets. Surface the split state so the
+            # user knows to re-run rotation instead of trusting a silent failure.
+            self.gum.error(
+                f"Uploaded new signing secrets to GitHub but could not write, commit, or push cosign.pub: {exc}"
+            )
+            self.gum.warn(
+                "Rotation is half-complete — GitHub secrets and the repo's cosign.pub are out of sync. "
+                "Re-run 'Rotate signing key (cosign)' before pushing new commits."
+            )
+            return
         self.gum.success(f"Rotated cosign signing key in commit {commit_sha}. GitHub secrets were updated.")
         self.gum.warn("Pre-rotation signatures remain valid in the registry; re-pull or re-verify after rotation.")
         self.gum.enter_to_continue("Press Enter to return to the update menu...")
@@ -3008,6 +3210,13 @@ class App:
             if isinstance(created_at, str):
                 try:
                     created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    if created.tzinfo is None:
+                        # A timestamp with no Z and no offset (a GHES instance, or
+                        # a future change in gh's output) parses fine but yields a
+                        # naive datetime, and subtracting it from an aware `now`
+                        # raises TypeError. GitHub reports UTC, so read it as UTC
+                        # rather than dropping the column to "unknown".
+                        created = created.replace(tzinfo=timezone.utc)
                     delta = now - created
                     if delta.days:
                         when = f"{delta.days}d ago"
@@ -3015,7 +3224,7 @@ class App:
                         hours = delta.seconds // 3600
                         minutes = (delta.seconds % 3600) // 60
                         when = f"{hours}h ago" if hours else f"{minutes}m ago"
-                except ValueError:
+                except (ValueError, TypeError, OverflowError):
                     when = "unknown"
             self.gum.hint(f"{icon:<7} {workflow:<22} {title:<38} {when:<12} {item.get('url') or ''}")
         self.gum.enter_to_continue("Press Enter to return to the main menu...")
@@ -3087,10 +3296,16 @@ class App:
                 self.show_summary(next_hint="This is the full configuration summary.")
                 continue
             if selected == local_build_label:
-                self.test_build_locally()
+                self.run_screen_action(
+                    self.test_build_locally,
+                    return_hint="Press Enter to return to the update menu...",
+                )
                 continue
             if selected == rotate_label:
-                self.rotate_signing_key(repo_dir)
+                self.run_screen_action(
+                    lambda: self.rotate_signing_key(repo_dir),
+                    return_hint="Press Enter to return to the update menu...",
+                )
                 continue
             task = mapping[selected]
             try:
@@ -3395,6 +3610,18 @@ class App:
             raise CommandError("Base image URI is missing or invalid.")
         if not self.match_base_image(self.config.base_image_uri):
             raise CommandError(f"Choose one of the supported base images: {supported_base_image_names()}.")
+        if self.config.method == "bluebuild" and "@" in self.config.base_image_uri:
+            # match_base_image deliberately accepts a digest-pinned ref (a scanned
+            # host is often booted on one), and the Containerfile path writes it
+            # into FROM verbatim. BlueBuild splits the reference into base-image
+            # and image-version and rejoins them with a colon, so a digest becomes
+            # "...@sha256:abc...:latest" - unparseable, and every build fails.
+            # Stop here with something actionable rather than pushing a dead repo.
+            raise CommandError(
+                "BlueBuild cannot use a digest-pinned base image "
+                f"({self.config.base_image_uri}). Choose a tagged base image, or use the "
+                "Containerfile method, which supports digest pins."
+            )
         self.validate_token_list(self.config.packages, PACKAGE_TOKEN_RE, "package")
         self.validate_token_list(self.config.removed_packages, PACKAGE_TOKEN_RE, "removed package")
         self.validate_token_list(self.config.copr_repos, COPR_REPO_RE, "COPR repository")
@@ -3409,6 +3636,17 @@ class App:
         # updates. Generated files are considered outputs, not the primary state.
         self.validate_config()
         payload = asdict(self.config)
+        # scanned_packages/scanned_removed are the user's complete host software
+        # inventory, including packages they looked at and deliberately did not
+        # carry over. This file is committed and pushed to a repo created with
+        # `gh repo create --public`, so writing them publishes that inventory to
+        # anyone who looks. Nothing downstream reads the lists - the only
+        # consumer, carried_scan_customizations(), needs a single boolean - so
+        # record that instead. Popping also strips the lists from repos written
+        # by an earlier version on their next update.
+        payload["scan_customizations_carried"] = self.carried_scan_customizations()
+        payload.pop("scanned_packages", None)
+        payload.pop("scanned_removed", None)
         payload["tool_version"] = VERSION
         payload["state_version"] = 1
         return payload
@@ -3439,18 +3677,26 @@ class App:
         for i, line in enumerate(lines):
             if line.strip().startswith("COPY --from=") and "brew" in line.lower() and "/system_files" in line:
                 brew_start = i
-                # The block includes a following RUN for systemctl preset.
+                # The block is the COPY plus the systemctl preset RUN that
+                # depends on the units the COPY installs. Blank lines between
+                # the two are legal and a hand-edited Containerfile may well
+                # have them; the old scan stopped at the first blank line, so
+                # disabling Homebrew deleted only the COPY and left the RUN
+                # behind, presetting units nothing provides any more and
+                # breaking the build.
                 brew_end = i + 1
-                for j in range(i + 1, len(lines)):
-                    stripped = lines[j].strip()
-                    if not stripped:
-                        brew_end = j + 1
-                        break
-                    if stripped.endswith("\\"):
-                        brew_end = j + 1
-                        continue
-                    brew_end = j + 1
-                    break
+                probe = i + 1
+                while probe < len(lines) and not lines[probe].strip():
+                    probe += 1
+                if probe < len(lines) and lines[probe].strip().startswith("RUN"):
+                    run_end = probe
+                    while run_end < len(lines) and lines[run_end].rstrip().endswith("\\"):
+                        run_end += 1
+                    # Only absorb the RUN when it is actually the brew preset -
+                    # "brew" appears on the continuation lines, not the RUN line
+                    # itself - so an unrelated neighbouring RUN is never eaten.
+                    if "brew" in " ".join(lines[probe : run_end + 1]).lower():
+                        brew_end = run_end + 1
                 # Consume a trailing blank line so removal/replacement
                 # does not leave a double blank.
                 if brew_end < len(lines) and not lines[brew_end].strip():
@@ -3726,7 +3972,11 @@ class App:
             line = lines[index]
             stripped = line.strip()
             indent = len(line) - len(line.lstrip())
-            if indent == 2 and stripped in {"pull_request:", "push:"}:
+            # Only block-style triggers can take an appended branches: block.
+            # An inline flow mapping such as "push: { branches: [main] }"
+            # already owns its filter inline; nesting another one under it is a
+            # parse error, so it is left exactly as written.
+            if indent == 2 and workflow_block_key(stripped) in {"pull_request", "push"}:
                 output.append(line)
                 index += 1
                 block_start = index
@@ -3734,7 +3984,16 @@ class App:
                     block_line = lines[index]
                     block_stripped = block_line.strip()
                     block_indent = len(block_line) - len(block_line.lstrip())
-                    if block_indent <= 2 and block_stripped.endswith(":"):
+                    # A sibling trigger ends the block. Testing for a trailing
+                    # colon missed any key carrying an inline comment - the
+                    # bundled BlueBuild snapshot literally ships
+                    # "  workflow_dispatch: # allow manually triggering builds"
+                    # - so the sibling was absorbed into the previous block. If
+                    # that sibling owns a branches: key, branches_found flips on
+                    # the wrong trigger, the filter is written there instead,
+                    # and the block we were actually patching never gets one:
+                    # PR builds then fire from every branch.
+                    if block_indent <= 2 and workflow_key(block_stripped) is not None:
                         break
                     index += 1
                 block = lines[block_start:index]
@@ -3746,8 +4005,20 @@ class App:
                     block_line = block[block_index]
                     block_stripped = block_line.strip()
                     block_indent = len(block_line) - len(block_line.lstrip())
-                    if block_indent == 4 and block_stripped == "branches:":
+                    if block_indent == 4 and workflow_key(block_stripped) == "branches":
                         prefix = block_line[: len(block_line) - len(block_line.lstrip())]
+                        if workflow_block_key(block_stripped) is None:
+                            # Inline flow form: "branches: [main]". Appending
+                            # "- <branch>" beneath it is a parse error, so
+                            # rewrite it to the same block form the other
+                            # branch writes - which also replaces the existing
+                            # entries with the default branch, exactly as the
+                            # block path below does.
+                            patched_block.append(f"{prefix}branches:")
+                            patched_block.append(f"{prefix}  - {default_branch}")
+                            branches_found = True
+                            block_index += 1
+                            continue
                         patched_block.append(block_line)
                         patched_block.append(f"{prefix}  - {default_branch}")
                         branches_found = True
@@ -3773,12 +4044,6 @@ class App:
         return ensure_trailing_newline("\n".join(output))
 
     def patch_bluebuild_action_inputs(self, workflow_text: str) -> str:
-        lines = workflow_text.splitlines()
-        output: list[str] = []
-        current_step: list[str] = []
-        in_steps = False
-        steps_indent: int | None = None
-
         def patch_step(step_lines: list[str]) -> list[str]:
             if not step_lines:
                 return []
@@ -3793,57 +4058,65 @@ class App:
                     break
             if with_index is None:
                 return step_lines
+            entry_indent = len(entry_prefix)
+
+            def drop_entries(source: list[str], prefixes: tuple[str, ...]) -> list[str]:
+                # Drop "key: value" entries by key, along with any block-scalar
+                # or continuation lines indented under them, so removing an
+                # entry cannot leave orphaned value lines behind.
+                kept: list[str] = []
+                skipping = False
+                for candidate in source:
+                    if candidate.startswith(prefixes):
+                        skipping = True
+                        continue
+                    if skipping:
+                        candidate_stripped = candidate.strip()
+                        candidate_indent = len(candidate) - len(candidate.lstrip())
+                        # A blank line does not end the entry: block scalars
+                        # (">-", "|") legitimately contain blank lines, and
+                        # treating one as a terminator kept the scalar's
+                        # remaining lines - orphaned under with: once their key
+                        # was gone, which GitHub Actions rejects as invalid
+                        # YAML. Only a nonblank line at the entry's own
+                        # indentation or less closes it.
+                        if not candidate_stripped or candidate_indent > entry_indent:
+                            continue
+                        skipping = False
+                    kept.append(candidate)
+                return kept
+
             # rechunk/build_chunked_oci conflict with chunkah in the action's
             # input validation, so drop them before adding chunkah below (a
             # hand-edited or previously-generated workflow may already set one).
             conflicting_prefixes = (f"{entry_prefix}rechunk:", f"{entry_prefix}build_chunked_oci:")
-            step_lines = [line for line in step_lines if not line.startswith(conflicting_prefixes)]
+            step_lines = drop_entries(step_lines, conflicting_prefixes)
             wanted_lines = [
                 f"{entry_prefix}push: ${{{{ github.event_name != 'pull_request' && github.ref == format('refs/heads/{{0}}', github.event.repository.default_branch) && 'true' || 'false' }}}}",
                 f"{entry_prefix}build_opts: ${{{{ github.event_name == 'pull_request' && '--no-sign' || '' }}}}",
                 # Chunkah is the newer, distro-agnostic rechunker (blue-build/github-action v1.12+).
                 f"{entry_prefix}chunkah: 'true'",
             ]
-            missing = [line for line in wanted_lines if line not in step_lines]
-            if not missing:
+            if all(line in step_lines for line in wanted_lines):
                 return step_lines
-            return step_lines[: with_index + 1] + missing + step_lines[with_index + 1 :]
+            # These three inputs are ours to own, so strip any existing spelling
+            # by key and reinsert canonically. Deciding "missing" by exact line
+            # equality left a differently-valued `push:` in place (hand-edited,
+            # or written by an older version of this tool with different
+            # expression text) and inserted a second one, producing duplicate
+            # keys in a single mapping - which GitHub Actions rejects outright,
+            # so no build runs at all. This is the same prefix-based removal
+            # already used for rechunk/build_chunked_oci just above.
+            wanted_prefixes = tuple(
+                f"{entry_prefix}{key}:" for key in ("push", "build_opts", "chunkah")
+            )
+            step_lines = drop_entries(step_lines, wanted_prefixes)
+            with_index = next(
+                idx for idx, step_line in enumerate(step_lines) if step_line.strip() == "with:"
+            )
+            return step_lines[: with_index + 1] + wanted_lines + step_lines[with_index + 1 :]
 
-        def flush_step() -> None:
-            nonlocal current_step
-            if not current_step:
-                return
-            output.extend(patch_step(current_step))
-            current_step = []
-
-        for line in lines:
-            stripped = line.strip()
-            indent = len(line) - len(line.lstrip())
-
-            if in_steps and steps_indent is not None and indent <= steps_indent and stripped and not stripped.startswith("#"):
-                flush_step()
-                in_steps = False
-                steps_indent = None
-
-            if stripped == "steps:":
-                flush_step()
-                in_steps = True
-                steps_indent = indent
-                output.append(line)
-                continue
-
-            if in_steps and steps_indent is not None and indent == steps_indent + 2 and stripped.startswith("- "):
-                flush_step()
-                current_step = [line]
-                continue
-
-            if current_step:
-                current_step.append(line)
-            else:
-                output.append(line)
-
-        flush_step()
-        return ensure_trailing_newline("\n".join(output))
+        return ensure_trailing_newline("\n".join(patch_workflow_steps(workflow_text, patch_step)))
 
     def patch_bluebuild_workflow(self, existing_text: str, *, default_branch: str = "main") -> str:
         # The BlueBuild workflow is simpler than the Containerfile one: a single
@@ -3921,10 +4194,16 @@ class App:
         # BlueBuild recipes separate "base-image" and "image-version" so we need
         # to split a combined URI like "ghcr.io/ublue-os/bazzite:stable".
         # A digest-pinned ref ("...@sha256:...") has no tag and its colon belongs
-        # to the digest, so never split on it or the recipe gets a bogus
-        # image-version.
+        # to the digest, so it cannot be split into this pair at all: BlueBuild
+        # rejoins the two as "<base-image>:<image-version>", which for a digest
+        # would yield "...@sha256:abc...:latest" and fail every build. Callers
+        # must reject digests before they get here - validate_config does - so
+        # reaching this branch is a bug, not a user error.
         if "@" in uri:
-            return uri, "latest"
+            raise CommandError(
+                "BlueBuild recipes cannot express a digest-pinned base image. "
+                f"Choose a tagged base image instead of {uri}, or use the Containerfile method."
+            )
         if ":" in uri:
             base, tag = uri.rsplit(":", 1)
             return base, tag

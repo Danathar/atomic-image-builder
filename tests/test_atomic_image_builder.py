@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -41,6 +42,9 @@ from atomic_image_builder import (
     ensure_trailing_newline,
     format_daily_rebuild_note,
     normalize_container_image_reference,
+    patch_cosign_compatibility,
+    patch_workflow_steps,
+    string_list,
 )
 
 
@@ -179,6 +183,26 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(
             normalize_container_image_reference("ostree-unverified-registry:ghcr.io/ublue-os/bluefin:stable"),
             "ghcr.io/ublue-os/bluefin:stable",
+        )
+
+    def test_normalize_container_image_reference_handles_unverified_image_docker_prefix(self) -> None:
+        # A host rebased with signature verification disabled reports this form.
+        self.assertEqual(
+            normalize_container_image_reference("ostree-unverified-image:docker://ghcr.io/ublue-os/aurora:stable"),
+            "ghcr.io/ublue-os/aurora:stable",
+        )
+
+    def test_normalize_container_image_reference_handles_unverified_image_registry_transport(self) -> None:
+        self.assertEqual(
+            normalize_container_image_reference("ostree-unverified-image:registry:ghcr.io/ublue-os/aurora:stable"),
+            "ghcr.io/ublue-os/aurora:stable",
+        )
+
+    def test_normalize_container_image_reference_preserves_digest_pins(self) -> None:
+        digest = "ghcr.io/ublue-os/bazzite@sha256:" + "a" * 64
+        self.assertEqual(
+            normalize_container_image_reference(f"ostree-unverified-image:docker://{digest}"),
+            digest,
         )
 
     def test_normalize_container_image_reference_handles_docker_scheme(self) -> None:
@@ -379,7 +403,89 @@ class BuilderTests(unittest.TestCase):
         )
         patched = app.patch_container_workflow(workflow)
         self.assertIn("cosign-release: 'v3.1.2'", patched)
-        self.assertIn("cosign sign -y --new-bundle-format=false --use-signing-config=false --key", patched)
+        self.assertIn(
+            "cosign sign --new-bundle-format=false --use-signing-config=false -y --key", patched
+        )
+        # The stale, unpatched form must be gone entirely.
+        self.assertNotIn("cosign sign -y --key", patched)
+
+    # ── patch_cosign_compatibility shapes ───────────────────────────────
+    # This patcher is a migration path for managed repos generated before the
+    # Cosign 3.x flags existed. A silent no-op here publishes a workflow whose
+    # signing step cosign 3.x rejects, so every shape below asserts the
+    # replacement is present, the stale form absent, and the result idempotent.
+
+    def assert_cosign_patched(self, text: str) -> str:
+        patched = patch_cosign_compatibility(text)
+        self.assertIn("--new-bundle-format=false", patched)
+        self.assertIn("--use-signing-config=false", patched)
+        self.assertEqual(patch_cosign_compatibility(patched), patched, "not idempotent")
+        return patched
+
+    def test_patch_cosign_compatibility_bundled_snapshot_shape(self) -> None:
+        snapshot = (
+            CONTAINERFILE_TEMPLATE_DIR / ".github" / "workflows" / "build.yml"
+        ).read_text()
+        self.assert_cosign_patched(snapshot)
+
+    def test_patch_cosign_compatibility_handles_line_continuations(self) -> None:
+        text = (
+            "        run: |\n"
+            "          cosign sign -y \\\n"
+            "            --key env://COSIGN_PRIVATE_KEY \\\n"
+            "            ${IMAGE}\n"
+        )
+        patched = self.assert_cosign_patched(text)
+        # The continuation structure must survive the rewrite.
+        self.assertIn("--key env://COSIGN_PRIVATE_KEY \\", patched)
+        self.assertEqual(len(patched.splitlines()), len(text.splitlines()))
+
+    def test_patch_cosign_compatibility_handles_long_yes_flag(self) -> None:
+        text = "          cosign sign --yes --key env://COSIGN_PRIVATE_KEY ${IMAGE}"
+        patched = self.assert_cosign_patched(text)
+        self.assertNotIn("cosign sign --yes --key", patched)
+
+    def test_patch_cosign_compatibility_handles_absent_confirm_flag(self) -> None:
+        text = "          cosign sign --key env://COSIGN_PRIVATE_KEY ${IMAGE}"
+        self.assert_cosign_patched(text)
+
+    def test_patch_cosign_compatibility_leaves_keyless_signing_alone(self) -> None:
+        text = "          cosign sign -y ghcr.io/example/test-image:latest"
+        self.assertEqual(patch_cosign_compatibility(text), text)
+
+    def test_patch_cosign_compatibility_fails_closed_on_split_verb(self) -> None:
+        # `cosign` and `sign` on separate physical lines: no single line can be
+        # rewritten, and silently emitting the incompatible command is worse
+        # than stopping with an explanation.
+        text = (
+            "          cosign \\\n"
+            "            sign -y --key env://COSIGN_PRIVATE_KEY ${IMAGE}\n"
+        )
+        with self.assertRaisesRegex(CommandError, "split across line continuations"):
+            patch_cosign_compatibility(text)
+
+    def test_patch_container_workflow_patches_continuation_signing_end_to_end(self) -> None:
+        # Exercise it through the real generated-repo path, not just the helper.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build:
+                steps:
+                  - name: Install Cosign
+                    with:
+                      cosign-release: 'v2.6.3'
+                  - name: Sign
+                    run: |
+                      cosign sign -y \\
+                        --key env://COSIGN_PRIVATE_KEY \\
+                        image:latest
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn("cosign-release: 'v3.1.2'", patched)
+        self.assertIn("--new-bundle-format=false", patched)
+        self.assertNotIn("cosign sign -y \\", patched)
 
     def test_patch_container_workflow_golden(self) -> None:
         expected_path = Path(__file__).parent / "fixtures/workflows/container_expected.yml"
@@ -523,6 +629,118 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("  push:\n    branches:\n      - master\n    paths-ignore:", patched)
         self.assertIn("  pull_request:\n    branches:\n      - master\n  workflow_dispatch:", patched)
 
+    def test_patch_workflow_branch_filters_ends_block_at_commented_sibling(self) -> None:
+        # The bundled BlueBuild snapshot ships
+        #   workflow_dispatch: # allow manually triggering builds
+        # which does not end in a colon and so was absorbed into the preceding
+        # trigger's block.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Workflow
+            on:
+              pull_request:
+              workflow_dispatch: # allow manually triggering builds
+            jobs:
+              build:
+                steps:
+                  - run: true
+            """
+        )
+        patched = app.patch_workflow_branch_filters(workflow, "master")
+        self.assertIn(
+            "  pull_request:\n    branches:\n      - master\n  workflow_dispatch: # allow",
+            patched,
+        )
+        self.assertEqual(app.patch_workflow_branch_filters(patched, "master"), patched)
+
+    def test_patch_workflow_branch_filters_does_not_skip_commented_push_trigger(self) -> None:
+        # The real breakage: when the swallowed sibling owns a branches: key,
+        # branches_found flipped on the wrong trigger, so pull_request never got
+        # a filter and PR builds fired from every branch.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Workflow
+            on:
+              pull_request:
+              push: # only the default branch
+                branches:
+                  - main
+            jobs:
+              build:
+                steps:
+                  - run: true
+            """
+        )
+        patched = app.patch_workflow_branch_filters(workflow, "release")
+        self.assertIn("  pull_request:\n    branches:\n      - release", patched)
+        self.assertIn("  push: # only the default branch\n    branches:\n      - release", patched)
+        self.assertNotIn("- main", patched)
+        self.assertEqual(patched.count("branches:"), 2)
+
+    def test_patch_workflow_branch_filters_bundled_bluebuild_snapshot(self) -> None:
+        app = self.make_bluebuild_app()
+        snapshot = (
+            BLUEBUILD_TEMPLATE_DIR / ".github" / "workflows" / "build.yml"
+        ).read_text()
+        patched = app.patch_workflow_branch_filters(snapshot, "main")
+        # workflow_dispatch must stay a sibling trigger, not part of pull_request.
+        self.assertIn("  pull_request:\n    branches:\n      - main", patched)
+        self.assertIn("  workflow_dispatch: # allow manually triggering builds", patched)
+        self.assertIn("  push:\n    branches:\n      - main\n    paths-ignore:", patched)
+        self.assertEqual(app.patch_workflow_branch_filters(patched, "main"), patched)
+
+    def test_patch_workflow_branch_filters_leaves_inline_trigger_mapping_untouched(self) -> None:
+        # "push: { branches: [main] }" carries its filter inline. Appending a
+        # nested branches: block beneath a valued key is a YAML parse error, so
+        # the trigger must be left exactly as written - while its block-style
+        # siblings still get patched.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Workflow
+            on:
+              push: { branches: [main] }
+              pull_request:
+              workflow_dispatch:
+            jobs:
+              build:
+                steps:
+                  - run: true
+            """
+        )
+        patched = app.patch_workflow_branch_filters(workflow, "master")
+        self.assertIn("  push: { branches: [main] }\n  pull_request:", patched)
+        self.assertIn("  pull_request:\n    branches:\n      - master\n  workflow_dispatch:", patched)
+        self.assertEqual(patched.count("branches:"), 2)
+        self.assertEqual(app.patch_workflow_branch_filters(patched, "master"), patched)
+
+    def test_patch_workflow_branch_filters_rewrites_inline_branches_list(self) -> None:
+        # An inline flow list under a block trigger - "branches: [main]" - took
+        # the block path, and "- master" was nested beneath the already-valued
+        # key: a parse error. It is rewritten to the block form, replacing the
+        # existing entries with the default branch exactly as the block path
+        # does.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Workflow
+            on:
+              push:
+                branches: [main, dev]
+              workflow_dispatch:
+            jobs:
+              build:
+                steps:
+                  - run: true
+            """
+        )
+        patched = app.patch_workflow_branch_filters(workflow, "master")
+        self.assertIn("  push:\n    branches:\n      - master\n  workflow_dispatch:", patched)
+        self.assertNotIn("[main, dev]", patched)
+        self.assertEqual(app.patch_workflow_branch_filters(patched, "master"), patched)
+
     def test_validate_config_rejects_unsafe_package_token(self) -> None:
         app = self.make_app()
         app.config.packages = ["tmux", "bad;rm"]
@@ -559,6 +777,39 @@ class BuilderTests(unittest.TestCase):
             os_release = Path(tmp) / "os-release"
             os_release.write_text('ID="fedora"\nVERSION_ID="44"\n')
             self.assertEqual(determine_fedora_atomic_default_tag(os_release_path=os_release), "44")
+
+    def test_determine_fedora_atomic_default_tag_caps_one_release_ahead(self) -> None:
+        # A pre-release host (Rawhide, or Branched well before GA) reports a
+        # VERSION_ID whose fedora-ostree-desktops tag does not exist yet. The
+        # repo would be created and pushed fine and the build would then fail on
+        # FROM with manifest-unknown, which the user cannot diagnose.
+        ahead = str(int(FEDORA_ATOMIC_FALLBACK_TAG) + 1)
+        way_ahead = str(int(FEDORA_ATOMIC_FALLBACK_TAG) + 5)
+        with tempfile.TemporaryDirectory() as tmp:
+            os_release = Path(tmp) / "os-release"
+            os_release.write_text(f"ID=fedora\nVERSION_ID={ahead}\n")
+            self.assertEqual(determine_fedora_atomic_default_tag(os_release_path=os_release), ahead)
+            os_release.write_text(f"ID=fedora\nVERSION_ID={way_ahead}\n")
+            self.assertEqual(determine_fedora_atomic_default_tag(os_release_path=os_release), ahead)
+
+    def test_determine_fedora_atomic_default_tag_ignores_older_fedora_host(self) -> None:
+        older = str(int(FEDORA_ATOMIC_FALLBACK_TAG) - 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            os_release = Path(tmp) / "os-release"
+            os_release.write_text(f"ID=fedora\nVERSION_ID={older}\n")
+            self.assertEqual(
+                determine_fedora_atomic_default_tag(os_release_path=os_release),
+                FEDORA_ATOMIC_FALLBACK_TAG,
+            )
+
+    def test_determine_fedora_atomic_default_tag_ignores_non_numeric_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            os_release = Path(tmp) / "os-release"
+            os_release.write_text("ID=fedora\nVERSION_ID=rawhide\n")
+            self.assertEqual(
+                determine_fedora_atomic_default_tag(os_release_path=os_release),
+                FEDORA_ATOMIC_FALLBACK_TAG,
+            )
 
     def test_determine_fedora_atomic_default_tag_keeps_fallback_for_non_fedora_hosts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -625,6 +876,56 @@ class BuilderTests(unittest.TestCase):
                     with patch("atomic_image_builder.run", return_value=completed):
                         with self.assertRaisesRegex(CommandError, "status could not be verified"):
                             app.repo_secret_exists("example", "test-image", "SIGNING_SECRET")
+
+    def test_ensure_signing_ready_fails_closed_when_cosign_password_missing(self) -> None:
+        # SIGNING_SECRET present but COSIGN_PASSWORD absent: the Containerfile
+        # workflow cannot decrypt the key, so this must not report ready.
+        app = self.make_app()
+        app.config.method = "containerfile"
+        secrets_present = ["SIGNING_SECRET"]
+        completed = subprocess.CompletedProcess(
+            ["gh", "secret", "list"], 0, json.dumps([{"name": n} for n in secrets_present]), ""
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / "cosign.pub").write_text("PUBLIC KEY\n")
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", return_value=completed):
+                    with self.assertRaisesRegex(CommandError, "COSIGN_PASSWORD is missing"):
+                        app.ensure_signing_ready("example", "test-image", repo_dir=repo_dir)
+
+    def test_ensure_signing_ready_accepts_both_secrets_present(self) -> None:
+        app = self.make_app()
+        app.config.method = "containerfile"
+        completed = subprocess.CompletedProcess(
+            ["gh", "secret", "list"], 0,
+            '[{"name":"SIGNING_SECRET"},{"name":"COSIGN_PASSWORD"}]', ""
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / "cosign.pub").write_text("PUBLIC KEY\n")
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", return_value=completed):
+                    self.assertTrue(
+                        app.ensure_signing_ready("example", "test-image", repo_dir=repo_dir)
+                    )
+
+    def test_ensure_signing_ready_bluebuild_does_not_require_cosign_password(self) -> None:
+        # BlueBuild generates its key with an empty password and never uploads
+        # COSIGN_PASSWORD, so requiring it there would be a false failure.
+        app = self.make_app()
+        app.config.method = "bluebuild"
+        completed = subprocess.CompletedProcess(
+            ["gh", "secret", "list"], 0, '[{"name":"SIGNING_SECRET"}]', ""
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / "cosign.pub").write_text("PUBLIC KEY\n")
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", return_value=completed):
+                    self.assertTrue(
+                        app.ensure_signing_ready("example", "test-image", repo_dir=repo_dir)
+                    )
 
     def test_ensure_signing_ready_does_not_change_keys_when_secret_probe_fails(self) -> None:
         app = self.make_app()
@@ -869,11 +1170,140 @@ class BuilderTests(unittest.TestCase):
             with patch("atomic_image_builder.command_exists", return_value=True):
                 with patch("atomic_image_builder.run", side_effect=fake_run):
                     with patch("atomic_image_builder.secrets.token_urlsafe", return_value="ROTATE_PASSWORD"):
-                        with patch("atomic_image_builder.shutil.copy2", side_effect=OSError("disk full")):
+                        # The new public key is written straight into the repo,
+                        # so simulate the failure on that write.
+                        real_write_text = Path.write_text
+
+                        def failing_write_text(self, *args, **kwargs):
+                            if self.name == "cosign.pub" and self.parent == repo_dir:
+                                raise OSError("disk full")
+                            return real_write_text(self, *args, **kwargs)
+
+                        with patch.object(Path, "write_text", failing_write_text):
                             app.rotate_signing_key(repo_dir)
 
         self.assertTrue(any(level == "warn" and "half-complete" in message for level, message in app.gum.messages))
         self.assertFalse(any(call[:2] == ["git", "push"] for call in calls))
+
+    # ── shared signing-key provisioning ─────────────────────────────────
+    # ensure_signing_ready and rotate_signing_key run the same generate-and-
+    # upload sequence through generate_and_upload_signing_key. These pin the
+    # two callers' differing failure contracts so the shared helper cannot
+    # drift one of them.
+
+    def signing_run_stub(self, *, signing_secret_rc: int = 0, password_rc: int = 0):
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                assert cwd is not None
+                (cwd / "cosign.key").write_text("PRIVATE KEY")
+                (cwd / "cosign.pub").write_text("NEW PUBLIC KEY\n")
+                return subprocess.CompletedProcess(list(args), 0, "", "")
+            if args[:3] == ["gh", "secret", "set"]:
+                name = args[3]
+                rc = password_rc if name == "COSIGN_PASSWORD" else signing_secret_rc
+                return subprocess.CompletedProcess(list(args), rc, "", "")
+            if args[:3] == ["gh", "secret", "list"]:
+                return subprocess.CompletedProcess(list(args), 0, "[]", "")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        return fake_run
+
+    def test_ensure_signing_ready_raises_when_user_declines_retry(self) -> None:
+        app = self.make_app()
+        app.config.method = "containerfile"
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: False
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=self.signing_run_stub(signing_secret_rc=1)):
+                with self.assertRaisesRegex(CommandError, "half-complete"):
+                    app.ensure_signing_ready("example", "test-image")
+
+    def test_ensure_signing_ready_bluebuild_raises_distinct_decline_error(self) -> None:
+        app = self.make_bluebuild_app()
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: False
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=self.signing_run_stub(signing_secret_rc=1)):
+                with self.assertRaisesRegex(CommandError, "SIGNING_SECRET upload was not completed"):
+                    app.ensure_signing_ready("example", "test-image")
+
+    def test_rotate_signing_key_warns_and_returns_when_user_declines_retry(self) -> None:
+        # Rotation reports and returns rather than raising, so the update menu
+        # survives.
+        app = self.make_app()
+        app.config.method = "containerfile"
+        stub = GumStub()
+        confirms = iter([True, False])
+        stub.confirm = lambda _prompt, default=False: next(confirms, False)
+        app.gum = stub
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            self.init_signing_repo(repo_dir)
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=self.signing_run_stub(signing_secret_rc=1)):
+                    app.rotate_signing_key(repo_dir)
+        self.assertTrue(
+            any(level == "warn" and "half-complete" in message for level, message in stub.messages)
+        )
+
+    def test_rotate_signing_key_reports_keypair_failure_without_raising(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: True
+        app.gum = stub
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                return subprocess.CompletedProcess(list(args), 1, "", "cosign exploded")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            self.init_signing_repo(repo_dir)
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    app.rotate_signing_key(repo_dir)
+        self.assertTrue(
+            any(level == "error" and "cosign keypair" in message for level, message in stub.messages)
+        )
+
+    def test_generate_and_upload_signing_key_skips_password_for_bluebuild(self) -> None:
+        app = self.make_bluebuild_app()
+        app.gum = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            calls.append(list(args))
+            return self.signing_run_stub()(args, cwd=cwd, env=env, check=check, capture=capture, stdin=stdin)
+
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                pub = app.generate_and_upload_signing_key(
+                    "example", "test-image", upload_failed_note="x", half_complete_note="y"
+                )
+        self.assertEqual(pub, "NEW PUBLIC KEY\n")
+        secret_names = [call[3] for call in calls if call[:3] == ["gh", "secret", "set"]]
+        self.assertEqual(secret_names, ["SIGNING_SECRET"])
+
+    def test_generate_and_upload_signing_key_uploads_both_for_containerfile(self) -> None:
+        app = self.make_app()
+        app.config.method = "containerfile"
+        app.gum = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            calls.append(list(args))
+            return self.signing_run_stub()(args, cwd=cwd, env=env, check=check, capture=capture, stdin=stdin)
+
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                app.generate_and_upload_signing_key(
+                    "example", "test-image", upload_failed_note="x", half_complete_note="y"
+                )
+        secret_names = [call[3] for call in calls if call[:3] == ["gh", "secret", "set"]]
+        self.assertEqual(secret_names, ["COSIGN_PASSWORD", "SIGNING_SECRET"])
 
     def test_rotate_signing_key_happy_path(self) -> None:
         app = self.make_app()
@@ -2208,6 +2638,76 @@ class BuilderTests(unittest.TestCase):
             any(level == "error" and "rpm-ostree" in message for level, message in stub.messages)
         )
 
+    def scan_with_status(self, payload: str, stub: GumStub | None = None) -> tuple[App, GumStub, bool]:
+        # Shared driver for the malformed-status cases below: valid JSON that is
+        # not the object shape scan_os expects must reach the friendly error
+        # rather than an AttributeError out of .get()/.strip().
+        app = self.make_app()
+        app.github_user = "example"
+        stub = stub if stub is not None else GumStub()
+        app.gum = stub
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = Path(tmp) / "rpm-ostree-status.json"
+            status_path.write_text(payload)
+            with patch("atomic_image_builder.command_exists", return_value=False):
+                with patch.dict("os.environ", {"AIB_RPM_OSTREE_STATUS_FILE": str(status_path)}):
+                    result = app.scan_os()
+        return app, stub, result
+
+    def test_scan_os_status_file_override_json_array_returns_false(self) -> None:
+        _, stub, result = self.scan_with_status("[]")
+        self.assertFalse(result)
+        self.assertTrue(
+            any(level == "error" and "rpm-ostree" in message for level, message in stub.messages)
+        )
+
+    def test_scan_os_status_file_override_json_scalar_returns_false(self) -> None:
+        _, stub, result = self.scan_with_status('"a string, not an object"')
+        self.assertFalse(result)
+        self.assertTrue(
+            any(level == "error" and "rpm-ostree" in message for level, message in stub.messages)
+        )
+
+    def test_scan_os_status_file_override_non_dict_deployments_returns_false(self) -> None:
+        _, stub, result = self.scan_with_status('{"deployments": [1, 2]}')
+        self.assertFalse(result)
+        self.assertTrue(
+            any(level == "error" and "deployment" in message.lower() for level, message in stub.messages)
+        )
+
+    def test_scan_os_status_file_override_non_string_container_ref_returns_false(self) -> None:
+        _, stub, result = self.scan_with_status(
+            '{"deployments": [{"booted": true, "container-image-reference": 123}]}'
+        )
+        self.assertFalse(result)
+        self.assertTrue(
+            any(level == "error" and "container image reference" in message for level, message in stub.messages)
+        )
+
+    def test_scan_os_status_file_override_drops_non_string_packages(self) -> None:
+        # Non-string entries must be dropped, and a field that is a bare string
+        # instead of a list must NOT be iterated into individual characters.
+        class ChoosingStub(GumStub):
+            def choose(self, items, **_kwargs):
+                return list(items)
+
+        app, _, result = self.scan_with_status(
+            '{"deployments": [{"booted": true, '
+            '"container-image-reference": "ostree-image-signed:docker://ghcr.io/ublue-os/bazzite:stable", '
+            '"requested-packages": [1, "vim", null, "git"], '
+            '"requested-base-removals": "notalist"}]}',
+            stub=ChoosingStub(),
+        )
+        self.assertTrue(result)
+        self.assertEqual(app.config.scanned_packages, ["vim", "git"])
+        self.assertEqual(app.config.scanned_removed, [])
+
+    def test_string_list_coerces_untrusted_json_values(self) -> None:
+        self.assertEqual(string_list(["a", 1, None, "b"]), ["a", "b"])
+        self.assertEqual(string_list("abc"), [])
+        self.assertEqual(string_list(None), [])
+        self.assertEqual(string_list({"a": "b"}), [])
+
     def test_scan_os_status_file_override_non_utf8_returns_false(self) -> None:
         app = self.make_app()
         app.github_user = "example"
@@ -2760,6 +3260,106 @@ class BuilderTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 gum.confirm("Continue?")
 
+    # ── gum flag-injection guards ───────────────────────────────────────
+    # gum parses any leading-dash positional as a flag and exits 80. Captured
+    # command output routinely starts with a dash (buildah "--> <layer>" step
+    # markers, diff lines), and run(check=True) would turn that into a
+    # CommandError raised from a display call, unwinding the whole wizard.
+
+    def captured_args(self, call) -> list[str]:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum"], 0, "", "")
+        with patch("atomic_image_builder.run", return_value=completed) as run_mock:
+            call(gum)
+        return list(run_mock.call_args[0][0])
+
+    def assert_dash_text_is_positional(self, args: list[str], text: str) -> None:
+        self.assertIn("--", args, f"missing -- separator in {args!r}")
+        self.assertIn(text, args)
+        self.assertLess(args.index("--"), args.index(text))
+
+    def test_gum_style_passes_dash_leading_text_after_separator(self) -> None:
+        text = "--> 8a3f0c1 error building layer"
+        args = self.captured_args(lambda g: g.style(text, width=40))
+        self.assert_dash_text_is_positional(args, text)
+
+    def test_gum_log_passes_dash_leading_text_after_separator(self) -> None:
+        text = "--force is not supported here"
+        args = self.captured_args(lambda g: g.error(text))
+        self.assert_dash_text_is_positional(args, text)
+
+    def test_gum_confirm_keeps_default_flag_before_separator(self) -> None:
+        # The prompt must sit after the separator while --default stays a flag.
+        prompt = "--> retry the build?"
+        args = self.captured_args(lambda g: g.confirm(prompt, default=True))
+        self.assert_dash_text_is_positional(args, prompt)
+        self.assertIn("--default=true", args)
+        self.assertLess(args.index("--default=true"), args.index("--"))
+
+    def test_gum_style_survives_real_gum_with_dash_text(self) -> None:
+        # Integration check against the actual binary, skipped when absent.
+        if shutil.which("gum") is None:
+            self.skipTest("gum is not installed")
+        Gum().style("--> 8a3f0c1 step marker", width=40)
+
+    # ── menu-screen error containment ───────────────────────────────────
+
+    def test_run_screen_action_contains_command_error(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+
+        def boom() -> None:
+            raise CommandError("Invalid package value: bad;rm")
+
+        app.run_screen_action(boom, return_hint="Press Enter to return...")
+        self.assertTrue(
+            any(level == "error" and "bad;rm" in message for level, message in stub.messages)
+        )
+        self.assertIn("Press Enter to return...", stub.prompts)
+
+    def test_run_screen_action_lets_screen_back_through(self) -> None:
+        # ScreenBack is navigation, not failure: the caller still owns it.
+        app = self.make_app()
+        app.gum = GumStub()
+
+        def back() -> None:
+            raise ScreenBack()
+
+        with self.assertRaises(ScreenBack):
+            app.run_screen_action(back, return_hint="unused")
+
+    def test_review_new_image_keeps_config_when_local_build_fails(self) -> None:
+        # A failing local test build must return to the review screen with the
+        # wizard's state intact, not unwind to main_menu and discard it.
+        app = self.make_app()
+        app.config.method = "containerfile"
+        app.config.packages = ["tmux", "ripgrep"]
+
+        class Stub(GumStub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            def choose(self, options, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return [next(o for o in options if "Test build locally" in o)]
+                return [next(o for o in options if o.startswith("Start GitHub build"))]
+
+        app.gum = Stub()
+        with patch.object(
+            App, "test_build_locally", side_effect=CommandError("Invalid package value: bad;rm")
+        ):
+            action = app.review_new_image(step=5, total_steps=5)
+
+        self.assertEqual(action, "build")
+        self.assertEqual(app.config.packages, ["tmux", "ripgrep"])
+        self.assertEqual(app.config.method, "containerfile")
+        self.assertTrue(
+            any(level == "error" and "bad;rm" in message for level, message in app.gum.messages)
+        )
+
     def test_update_task_choices_show_current_status(self) -> None:
         app = self.make_app()
         app.config.packages = ["tmux", "ripgrep"]
@@ -3142,6 +3742,82 @@ class BuilderTests(unittest.TestCase):
         # Should not leave a double blank line after removal.
         self.assertNotIn("\n\n\n", result)
 
+    def test_render_containerfile_removes_brew_block_separated_by_blank_line(self) -> None:
+        # A hand-edited Containerfile may put a blank line between the brew COPY
+        # and its systemctl preset RUN. Removing only the COPY leaves the RUN
+        # presetting units nothing provides any more, and the build fails.
+        app = self.make_app()
+        app.config.brew_enabled = False
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable
+
+            COPY --from=ghcr.io/ublue-os/brew:latest /system_files /
+
+            RUN --mount=type=cache,dst=/var/cache \\
+                /usr/bin/systemctl preset brew-setup.service && \\
+                /usr/bin/systemctl preset brew-update.timer
+
+            RUN --mount=type=bind,from=ctx,source=/,target=/ctx \\
+                /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertNotIn("brew", result.lower())
+        self.assertNotIn("system_files", result)
+        self.assertIn("/ctx/build.sh", result)
+        self.assertNotIn("\n\n\n", result)
+
+    def test_render_containerfile_brew_removal_keeps_unrelated_following_run(self) -> None:
+        # With no brew RUN to absorb, the neighbouring RUN must survive.
+        app = self.make_app()
+        app.config.brew_enabled = False
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable
+
+            COPY --from=ghcr.io/ublue-os/brew:latest /system_files /
+
+            RUN /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertNotIn("system_files", result)
+        self.assertIn("RUN /ctx/build.sh", result)
+
+    def test_render_containerfile_brew_removal_is_idempotent(self) -> None:
+        app = self.make_app()
+        app.config.brew_enabled = False
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable
+
+            COPY --from=ghcr.io/ublue-os/brew:latest /system_files /
+
+            RUN --mount=type=cache,dst=/var/cache \\
+                /usr/bin/systemctl preset brew-setup.service
+
+            RUN /ctx/build.sh
+        """)
+        once = app.render_containerfile(existing)
+        self.assertEqual(app.render_containerfile(once), once)
+
+    def test_render_containerfile_replaces_blank_separated_brew_block(self) -> None:
+        # Re-enabling must collapse the split block into exactly one canonical
+        # block, not leave the old RUN alongside the new one.
+        app = self.make_app()
+        app.config.brew_enabled = True
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable
+
+            COPY --from=ghcr.io/ublue-os/brew:latest /system_files /
+
+            RUN --mount=type=cache,dst=/var/cache \\
+                /usr/bin/systemctl preset brew-setup.service
+
+            RUN /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertEqual(result.count("/system_files"), 1)
+        self.assertEqual(result.count("brew-setup.service"), 1)
+        self.assertIn("brew-upgrade.timer", result)
+        self.assertIn("RUN /ctx/build.sh", result)
+
     def test_render_containerfile_replaces_existing_brew_block(self) -> None:
         app = self.make_app()
         app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
@@ -3166,6 +3842,59 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("/ctx/build.sh", result)
         # Should not leave double blank lines after replacement.
         self.assertNotIn("\n\n\n", result)
+
+    # ── state file must not publish the host inventory ──────────────────
+
+    def scanned_app(self) -> App:
+        app = self.make_app()
+        app.config.packages = ["tmux"]
+        app.config.scanned_packages = ["tmux", "steam", "private-tool", "vpn-client"]
+        app.config.scanned_removed = ["firefox"]
+        return app
+
+    def test_state_payload_omits_scanned_inventory(self) -> None:
+        # The state file is committed and pushed to a repo created --public, so
+        # the full layered-package list would become world-readable, including
+        # packages the user deselected and never intended to carry over.
+        payload = self.scanned_app().state_payload()
+        self.assertNotIn("scanned_packages", payload)
+        self.assertNotIn("scanned_removed", payload)
+        serialized = json.dumps(payload)
+        for leaked in ("steam", "private-tool", "vpn-client", "firefox"):
+            self.assertNotIn(leaked, serialized)
+        # The package the user actually chose to carry over still belongs here.
+        self.assertEqual(payload["packages"], ["tmux"])
+
+    def test_state_payload_records_carried_flag_instead(self) -> None:
+        self.assertTrue(self.scanned_app().state_payload()["scan_customizations_carried"])
+
+    def test_state_payload_carried_flag_false_without_scan(self) -> None:
+        app = self.make_app()
+        app.config.packages = ["tmux"]
+        self.assertFalse(app.state_payload()["scan_customizations_carried"])
+
+    def test_carried_scan_customizations_survives_state_roundtrip(self) -> None:
+        # The README and post-build summary wording depends on this, and it must
+        # keep working on a later update when only the state file is available.
+        payload = self.scanned_app().state_payload()
+        reloaded = App()
+        reloaded.config = config_from_state_payload(payload)
+        self.assertTrue(reloaded.carried_scan_customizations())
+
+    def test_state_payload_strips_inventory_written_by_older_versions(self) -> None:
+        # A repo written before this change still carries the lists; reading it
+        # must work, and rewriting must clean them out.
+        legacy = self.scanned_app().state_payload()
+        legacy["scanned_packages"] = ["tmux", "steam", "private-tool"]
+        legacy["scanned_removed"] = ["firefox"]
+        del legacy["scan_customizations_carried"]
+        app = App()
+        app.config = config_from_state_payload(legacy)
+        self.assertTrue(app.carried_scan_customizations())
+        rewritten = app.state_payload()
+        self.assertNotIn("scanned_packages", rewritten)
+        self.assertNotIn("scanned_removed", rewritten)
+        self.assertNotIn("steam", json.dumps(rewritten))
 
     def test_config_from_state_payload_roundtrips_brew_enabled(self) -> None:
         cfg = config_from_state_payload({"brew_enabled": True})
@@ -3288,20 +4017,44 @@ class BuilderTests(unittest.TestCase):
             ("ghcr.io/ublue-os/bazzite", "latest"),
         )
 
-    def test_split_image_ref_does_not_split_digest_pinned_ref(self) -> None:
-        # A digest ref has no tag; its colon belongs to the digest and must not
-        # be treated as the image-version separator.
+    def test_split_image_ref_rejects_digest_pinned_ref(self) -> None:
+        # A digest ref has no tag, and its colon belongs to the digest. BlueBuild
+        # rejoins base-image and image-version with a colon, so there is no pair
+        # that can represent a digest: "...@sha256:aaa...:latest" is unparseable
+        # and fails every build. Refusing beats emitting a broken recipe.
         app = self.make_app()
         digest = "ghcr.io/ublue-os/bazzite@sha256:" + "a" * 64
-        self.assertEqual(app._split_image_ref(digest), (digest, "latest"))
+        with self.assertRaisesRegex(CommandError, "digest-pinned"):
+            app._split_image_ref(digest)
 
-    def test_generate_recipe_keeps_digest_pinned_base_image_whole(self) -> None:
+    def test_split_image_ref_still_splits_tagged_refs(self) -> None:
+        app = self.make_app()
+        self.assertEqual(
+            app._split_image_ref("ghcr.io/ublue-os/bazzite:stable"),
+            ("ghcr.io/ublue-os/bazzite", "stable"),
+        )
+        self.assertEqual(
+            app._split_image_ref("ghcr.io/ublue-os/bazzite"),
+            ("ghcr.io/ublue-os/bazzite", "latest"),
+        )
+
+    def test_validate_config_rejects_digest_base_image_for_bluebuild(self) -> None:
+        # Reachable from a real scan: a host booted on a digest-pinned
+        # deployment, the curated-tag offer declined, then BlueBuild chosen.
         app = self.make_bluebuild_app()
-        digest = "ghcr.io/ublue-os/bazzite@sha256:" + "a" * 64
-        app.config.base_image_uri = digest
-        recipe = app.generate_recipe()
-        self.assertIn(f"base-image: {digest}", recipe)
-        self.assertIn('image-version: "latest"', recipe)
+        app.config.base_image_uri = "ghcr.io/ublue-os/bazzite@sha256:" + "a" * 64
+        with self.assertRaisesRegex(CommandError, "digest-pinned base image"):
+            app.validate_config()
+
+    def test_validate_config_allows_digest_base_image_for_containerfile(self) -> None:
+        # The Containerfile path writes the reference into FROM verbatim, so a
+        # digest pin is legitimate there and must keep working.
+        app = self.make_app()
+        app.config.method = "containerfile"
+        app.config.base_image_uri = "ghcr.io/ublue-os/bazzite@sha256:" + "a" * 64
+        app.validate_config()
+        containerfile = app.render_containerfile()
+        self.assertIn("@sha256:" + "a" * 64, containerfile)
 
     def test_generate_recipe_basic(self) -> None:
         app = self.make_bluebuild_app()
@@ -3480,6 +4233,208 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("build_chunked_oci: true", result)
         self.assertIn("chunkah: 'true'", result)
         self.assertEqual(result.count("chunkah:"), 1)
+
+    def test_patch_bluebuild_action_inputs_replaces_existing_push_value(self) -> None:
+        # A `push:` with a different value (hand-edited, or written by an older
+        # version of this tool) must be replaced, not joined by a second copy.
+        # Duplicate keys in one mapping make GitHub Actions reject the workflow
+        # outright, so no build runs at all.
+        app = self.make_bluebuild_app()
+        template = textwrap.dedent(
+            """\
+            jobs:
+              bluebuild:
+                steps:
+                  - name: Build Custom Image
+                    uses: blue-build/github-action@v1.12
+                    with:
+                      push: 'true'
+                      recipe: ${{ matrix.recipe }}
+            """
+        )
+        result = app.patch_bluebuild_action_inputs(template)
+        self.assertEqual(result.count("push:"), 1)
+        self.assertNotIn("push: 'true'", result)
+        self.assertIn("github.event.repository.default_branch", result)
+        # An input we do not own must survive untouched.
+        self.assertIn("recipe: ${{ matrix.recipe }}", result)
+        self.assertEqual(app.patch_bluebuild_action_inputs(result), result)
+
+    def test_patch_bluebuild_action_inputs_replaces_existing_build_opts_and_chunkah(self) -> None:
+        app = self.make_bluebuild_app()
+        template = textwrap.dedent(
+            """\
+            jobs:
+              bluebuild:
+                steps:
+                  - name: Build Custom Image
+                    uses: blue-build/github-action@v1.12
+                    with:
+                      build_opts: '--verbose'
+                      chunkah: 'false'
+                      recipe: ${{ matrix.recipe }}
+            """
+        )
+        result = app.patch_bluebuild_action_inputs(template)
+        self.assertEqual(result.count("build_opts:"), 1)
+        self.assertEqual(result.count("chunkah:"), 1)
+        self.assertNotIn("--verbose", result)
+        self.assertNotIn("chunkah: 'false'", result)
+        self.assertIn("chunkah: 'true'", result)
+        self.assertEqual(app.patch_bluebuild_action_inputs(result), result)
+
+    def test_patch_bluebuild_action_inputs_removes_block_scalar_value_lines(self) -> None:
+        # Removing an entry must take its continuation lines with it, or the
+        # orphaned value line lands in the mapping as invalid YAML.
+        app = self.make_bluebuild_app()
+        template = textwrap.dedent(
+            """\
+            jobs:
+              bluebuild:
+                steps:
+                  - name: Build Custom Image
+                    uses: blue-build/github-action@v1.12
+                    with:
+                      push: >-
+                        true
+                      recipe: ${{ matrix.recipe }}
+            """
+        )
+        result = app.patch_bluebuild_action_inputs(template)
+        self.assertEqual(result.count("push:"), 1)
+        self.assertNotIn(">-", result)
+        self.assertNotIn("\n                        true", result)
+        self.assertIn("recipe: ${{ matrix.recipe }}", result)
+
+    def test_patch_bluebuild_action_inputs_keeps_dropping_across_blank_scalar_lines(self) -> None:
+        # Block scalars (">-", "|") legitimately contain blank lines. Treating
+        # a blank line as the end of the dropped entry kept the scalar's
+        # remaining lines - orphaned under with: once their key was gone, which
+        # GitHub Actions rejects as invalid YAML.
+        app = self.make_bluebuild_app()
+        template = textwrap.dedent(
+            """\
+            jobs:
+              bluebuild:
+                steps:
+                  - name: Build Custom Image
+                    uses: blue-build/github-action@v1.12
+                    with:
+                      push: >-
+                        ${{ github.event_name != 'pull_request'
+
+                        && github.ref == 'refs/heads/main' }}
+                      recipe: ${{ matrix.recipe }}
+            """
+        )
+        result = app.patch_bluebuild_action_inputs(template)
+        self.assertEqual(result.count("push:"), 1)
+        self.assertNotIn(">-", result)
+        self.assertNotIn("refs/heads/main' }}", result)
+        self.assertIn("recipe: ${{ matrix.recipe }}", result)
+        self.assertEqual(app.patch_bluebuild_action_inputs(result), result)
+
+    def action_input_keys(self, workflow_text: str) -> list[str]:
+        """Keys directly under the blue-build action step's `with:` mapping.
+
+        Counting bare substrings over the whole file would also pick up the
+        top-level `on: push:` trigger, which is unrelated.
+        """
+        keys: list[str] = []
+        entry_indent: int | None = None
+        for line in workflow_text.splitlines():
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            if stripped == "with:":
+                entry_indent = indent + 2
+                continue
+            if entry_indent is None:
+                continue
+            if stripped and indent < entry_indent:
+                entry_indent = None
+                continue
+            match = re.match(r"([A-Za-z_][A-Za-z0-9_]*):", stripped)
+            if match and indent == entry_indent:
+                keys.append(match.group(1))
+        return keys
+
+    def test_patch_bluebuild_action_inputs_bundled_snapshot_has_no_duplicate_keys(self) -> None:
+        snapshot = (
+            BLUEBUILD_TEMPLATE_DIR / ".github" / "workflows" / "build.yml"
+        ).read_text()
+        app = self.make_bluebuild_app()
+        result = app.patch_bluebuild_action_inputs(snapshot)
+        keys = self.action_input_keys(result)
+        self.assertEqual(len(keys), len(set(keys)), f"duplicate action inputs: {keys}")
+        for key in ("push", "build_opts", "chunkah"):
+            self.assertIn(key, keys)
+        self.assertEqual(app.patch_bluebuild_action_inputs(result), result)
+
+    def test_patch_bluebuild_action_inputs_no_duplicates_when_keys_preexist(self) -> None:
+        app = self.make_bluebuild_app()
+        template = textwrap.dedent(
+            """\
+            jobs:
+              bluebuild:
+                steps:
+                  - name: Build Custom Image
+                    uses: blue-build/github-action@v1.12
+                    with:
+                      push: 'true'
+                      build_opts: '--verbose'
+                      chunkah: 'false'
+                      recipe: ${{ matrix.recipe }}
+            """
+        )
+        keys = self.action_input_keys(app.patch_bluebuild_action_inputs(template))
+        self.assertEqual(sorted(keys), ["build_opts", "chunkah", "push", "recipe"])
+
+    def test_patch_workflow_steps_splits_steps_and_passes_others_through(self) -> None:
+        # The shared step walker both workflow patchers now use.
+        seen: list[list[str]] = []
+
+        def record(step_lines: list[str]) -> list[str]:
+            seen.append(list(step_lines))
+            return step_lines
+
+        workflow = textwrap.dedent(
+            """\
+            name: Workflow
+            on:
+              push:
+            jobs:
+              build:
+                steps:
+                  - name: One
+                    run: echo one
+                  - name: Two
+                    run: echo two
+                if: always()
+            """
+        )
+        output = patch_workflow_steps(workflow, record)
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[0][0].strip(), "- name: One")
+        self.assertEqual(seen[1][0].strip(), "- name: Two")
+        self.assertIn("    run: echo two", seen[1][1])
+        # Nothing is lost or reordered when the patcher is a no-op.
+        self.assertEqual("\n".join(output), workflow.rstrip("\n"))
+
+    def test_patch_workflow_steps_ignores_text_outside_steps(self) -> None:
+        seen: list[list[str]] = []
+        workflow = textwrap.dedent(
+            """\
+            name: Workflow
+            on:
+              push:
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+            """
+        )
+        output = patch_workflow_steps(workflow, lambda step: (seen.append(step), step)[1])
+        self.assertEqual(seen, [])
+        self.assertEqual("\n".join(output), workflow.rstrip("\n"))
 
     def test_clone_bluebuild_template_copies_snapshot(self) -> None:
         app = self.make_bluebuild_app()
@@ -4027,6 +4982,79 @@ class BuilderTests(unittest.TestCase):
                 found = app.batch_check_state_files("testuser", repos)
         self.assertEqual(found, {"repo-a"})
         rest_mock.assert_called_once()
+
+    def test_batch_check_state_files_null_data_falls_back(self) -> None:
+        """gh exits 0 for GraphQL-level errors, returning an explicit null data."""
+        app = self.make_app()
+        repos = [{"name": "repo-a"}, {"name": "repo-b"}]
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(
+            ["gh"], 0, '{"data": null, "errors": [{"message": "Bad credentials"}]}', ""
+        )):
+            with patch.object(app, "repo_has_state_file", side_effect=[True, False]) as rest_mock:
+                found = app.batch_check_state_files("testuser", repos)
+        self.assertEqual(found, {"repo-a"})
+        self.assertEqual(rest_mock.call_count, 2)
+
+    def test_batch_check_state_files_non_dict_json_falls_back(self) -> None:
+        """Valid JSON that is not an object must fall back, not raise."""
+        app = self.make_app()
+        repos = [{"name": "repo-a"}]
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(
+            ["gh"], 0, "[]", ""
+        )):
+            with patch.object(app, "repo_has_state_file", return_value=True) as rest_mock:
+                found = app.batch_check_state_files("testuser", repos)
+        self.assertEqual(found, {"repo-a"})
+        rest_mock.assert_called_once()
+
+    def test_batch_check_state_files_null_alias_entry_is_skipped(self) -> None:
+        """A per-alias null (repo vanished mid-query) must not raise."""
+        app = self.make_app()
+        repos = [{"name": "repo-a"}, {"name": "repo-b"}]
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(
+            ["gh"], 0, '{"data": {"r0": null, "r1": {"object": {"id": "x"}}}}', ""
+        )):
+            found = app.batch_check_state_files("testuser", repos)
+        self.assertEqual(found, {"repo-b"})
+
+    # ── render_build_status timestamp handling ──────────────────────────
+
+    def run_build_status(self, created_at: object) -> GumStub:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        payload = json.dumps([{
+            "databaseId": 1,
+            "displayTitle": "Build",
+            "status": "completed",
+            "conclusion": "success",
+            "createdAt": created_at,
+            "url": "https://example.invalid/run/1",
+            "workflowName": "build",
+        }])
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(
+            ["gh"], 0, payload, ""
+        )):
+            app.render_build_status("testuser", "test-image")
+        return stub
+
+    def test_render_build_status_handles_naive_timestamp(self) -> None:
+        # No Z and no offset: parses to a naive datetime, which previously
+        # raised TypeError on the subtraction against an aware `now`.
+        recent = (datetime.now(timezone.utc) - timedelta(hours=2)).replace(tzinfo=None)
+        stub = self.run_build_status(recent.isoformat())
+        row = next(m for _, m in stub.messages if "example.invalid" in m)
+        self.assertIn("2h ago", row)
+
+    def test_render_build_status_handles_unparseable_timestamp(self) -> None:
+        stub = self.run_build_status("not a timestamp")
+        row = next(m for _, m in stub.messages if "example.invalid" in m)
+        self.assertIn("unknown", row)
+
+    def test_render_build_status_handles_non_string_timestamp(self) -> None:
+        stub = self.run_build_status(12345)
+        row = next(m for _, m in stub.messages if "example.invalid" in m)
+        self.assertIn("unknown", row)
 
     # ── Justfile / image-template.env restore-from-snapshot ─────────────
 
