@@ -2395,6 +2395,53 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(stub.prompts)
         self.assertEqual(app.config.repo_name, "sentinel-repo")
 
+    def test_create_new_image_returns_after_successful_build(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        with patch.object(app, "choose_method", return_value=None):
+            with patch.object(app, "choose_base_image", return_value=None):
+                with patch.object(app, "configure_repo", return_value=None):
+                    with patch.object(app, "select_packages", return_value=None):
+                        # A single review action: if the wizard looped back to
+                        # review after a successful build, next() would raise
+                        # StopIteration and fail the test.
+                        with patch.object(app, "review_new_image", side_effect=iter(["build"])):
+                            with patch.object(app, "do_build", return_value=True) as build_mock:
+                                app.create_new_image()
+        build_mock.assert_called_once()
+
+    def test_create_new_image_review_actions_route_to_matching_step(self) -> None:
+        # Each review action must jump back to its own wizard step; a wrong
+        # mapping would re-run the wrong screen after a partial edit.
+        app = self.make_app()
+        app.gum = GumStub()
+        events: list[str] = []
+        review_actions = iter(["method", "base", "repo", "software", "cancel"])
+
+        def record(name):
+            return lambda **_kwargs: events.append(name)
+
+        def fake_review(**_kwargs):
+            events.append("review")
+            return next(review_actions)
+
+        with patch.object(app, "choose_method", side_effect=record("method")):
+            with patch.object(app, "choose_base_image", side_effect=record("base")):
+                with patch.object(app, "configure_repo", side_effect=record("repo")):
+                    with patch.object(app, "select_packages", side_effect=record("software")):
+                        with patch.object(app, "review_new_image", side_effect=fake_review):
+                            app.create_new_image()
+
+        # The step run immediately after each review is the one the action
+        # named; the wizard then walks forward to review again.
+        resumed_steps = [
+            events[i + 1]
+            for i, name in enumerate(events)
+            if name == "review" and i + 1 < len(events)
+        ]
+        self.assertEqual(resumed_steps, ["method", "base", "repo", "software"])
+        self.assertEqual(events[-1], "review")
+
     def test_main_menu_recovers_from_command_error(self) -> None:
         # A CommandError raised by any dispatched action must be reported and
         # return to the main menu instead of propagating out of the app.
