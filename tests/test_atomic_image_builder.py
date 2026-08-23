@@ -21,6 +21,7 @@ from atomic_image_builder import (
     COMMON_SERVICES,
     CONTAINERFILE_TEMPLATE_DIR,
     DEFAULT_GITHUB_BUILD_CRON,
+    DEFAULT_REPO_NAME,
     FEDORA_ATOMIC_DEFAULT_TAG,
     FEDORA_ATOMIC_FALLBACK_TAG,
     MANAGED_REPO_WARNING,
@@ -3721,6 +3722,358 @@ class BuilderTests(unittest.TestCase):
         with patch.object(app, "add_services") as mock:
             app.manage_services()
         mock.assert_called_once()
+
+
+    # ── interactive wizard steps ───────────────────────────────────────
+    #
+    # These methods encode the selection decisions that drive what gets
+    # written into the generated Containerfile/recipe/workflow, and they were
+    # almost entirely uncovered: a regression here silently produces wrong
+    # build artifacts instead of failing loudly. Each test drives the real
+    # method through a GumStub, mocking only the neighbours it dispatches to.
+
+    def test_choose_method_sets_bluebuild_when_selected(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda options, **_kwargs: [options[1]]
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.choose_method(step=1, total_steps=5)
+        self.assertEqual(app.config.method, "bluebuild")
+        self.assertTrue(any(level == "success" and "BlueBuild" in msg for level, msg in stub.messages))
+
+    def test_choose_method_defaults_to_containerfile_on_empty_choice(self) -> None:
+        app = self.make_app()
+        app.config.method = "bluebuild"
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: []
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.choose_method()
+        self.assertEqual(app.config.method, "containerfile")
+
+    def test_choose_base_image_keeps_confirmed_detected_image(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.confirm = lambda *_a, **_k: True
+        stub.choose = lambda *_a, **_k: self.fail("choose must not run when the detected image is confirmed")
+        app.gum = stub
+        with patch.object(app, "offer_brew_if_applicable") as brew:
+            with redirect_stdout(io.StringIO()):
+                app.choose_base_image(step=2, total_steps=5)
+        brew.assert_called_once()
+        self.assertEqual(app.config.base_image_uri, "ghcr.io/ublue-os/bazzite:stable")
+
+    def test_choose_base_image_discards_unsupported_detected_image(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = "ghcr.io/example/not-curated:latest"
+        app.config.base_image_name = "Mystery"
+        stub = GumStub()
+        stub.choose = lambda options, **_kwargs: [next(o for o in options if "Aurora (KDE)" in o)]
+        app.gum = stub
+        with patch.object(app, "offer_brew_if_applicable"):
+            with redirect_stdout(io.StringIO()):
+                app.choose_base_image()
+        self.assertTrue(any(level == "warn" and "curated" in msg for level, msg in stub.messages))
+        self.assertEqual(app.config.base_image_name, "Aurora (KDE)")
+        self.assertEqual(app.config.base_image_uri, "ghcr.io/ublue-os/aurora:stable")
+
+    def test_choose_base_image_defaults_to_first_option_on_empty_choice(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = ""
+        app.config.base_image_name = ""
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: []
+        app.gum = stub
+        with patch.object(app, "offer_brew_if_applicable"):
+            with redirect_stdout(io.StringIO()):
+                app.choose_base_image()
+        self.assertEqual(app.config.base_image_name, BASE_IMAGES[0].name)
+        self.assertEqual(app.config.base_image_uri, BASE_IMAGES[0].image_uri)
+
+    def test_configure_repo_rejects_invalid_name_then_accepts_valid_one(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        name_attempts = iter(["My Repo.git", "shiny-image", "A custom description"])
+        stub.input = lambda **_kwargs: next(name_attempts)
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.configure_repo(step=3, total_steps=5)
+        self.assertEqual(app.config.repo_name, "shiny-image")
+        self.assertEqual(app.config.image_desc, "A custom description")
+        self.assertTrue(any(level == "error" and ".git" in msg for level, msg in stub.messages))
+        self.assertTrue(any("try another repository name" in prompt for prompt in stub.prompts))
+
+    def test_configure_repo_empty_inputs_keep_defaults(self) -> None:
+        app = self.make_app()
+        app.github_user = "example"
+        app.config.repo_name = ""
+        app.config.image_desc = "Existing description"
+        stub = GumStub()
+        stub.input = lambda **_kwargs: ""
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.configure_repo()
+        self.assertEqual(app.config.repo_name, DEFAULT_REPO_NAME)
+        self.assertEqual(app.config.image_desc, "Existing description")
+        self.assertTrue(any(level == "success" and "example/" in msg for level, msg in stub.messages))
+
+    def test_add_services_dispatches_both_entry_points_then_backs_out(self) -> None:
+        app = self.make_app()
+        selections = iter(
+            [
+                ["Choose from common services"],
+                ["Type service names manually (advanced)"],
+                ["Back"],
+            ]
+        )
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: next(selections)
+        app.gum = stub
+        with patch.object(app, "select_common_services") as common:
+            with patch.object(app, "add_services_manually") as manual:
+                with redirect_stdout(io.StringIO()):
+                    app.add_services()
+        common.assert_called_once()
+        manual.assert_called_once()
+
+    def test_add_services_escape_returns(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: (_ for _ in ()).throw(ScreenBack())
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.add_services()  # must return, not raise
+
+    def review_choice(self, app, label_fragment: str):
+        """Drive review_new_image one selection at a time by substring."""
+
+        def choose(options, **_kwargs):
+            if label_fragment == "":
+                return []
+            return [next(option for option in options if label_fragment in option)]
+
+        return choose
+
+    def test_review_new_image_returns_the_selected_section(self) -> None:
+        expectations = [
+            ("Start GitHub build", "build"),
+            ("Build method", "method"),
+            ("Software", "software"),
+            ("Repository settings", "repo"),
+            ("Base image", "base"),
+            ("Cancel and return", "cancel"),
+            ("", "cancel"),  # empty choice falls back to cancel
+        ]
+        for fragment, expected in expectations:
+            with self.subTest(fragment=fragment or "(empty)"):
+                app = self.make_app()
+                stub = GumStub()
+                stub.choose = self.review_choice(app, fragment)
+                app.gum = stub
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(app.review_new_image(step=5, total_steps=5), expected)
+
+    def test_review_new_image_full_config_and_local_build_loop_back(self) -> None:
+        app = self.make_app()
+        selections = iter(
+            [
+                ["View full configuration"],
+                ["Test build locally (podman)"],
+                ["Start GitHub build"],
+            ]
+        )
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: next(selections)
+        app.gum = stub
+        with patch.object(app, "show_summary") as summary:
+            with patch.object(app, "test_build_locally") as local:
+                with redirect_stdout(io.StringIO()):
+                    result = app.review_new_image(step=5, total_steps=5)
+        summary.assert_called_once()
+        local.assert_called_once()
+        self.assertEqual(result, "build")
+
+    def test_review_new_image_hides_local_build_for_bluebuild(self) -> None:
+        app = self.make_app()
+        app.config.method = "bluebuild"
+        seen: list[list[str]] = []
+
+        def choose(options, **_kwargs):
+            seen.append(list(options))
+            return [next(option for option in options if "Cancel and return" in option)]
+
+        stub = GumStub()
+        stub.choose = choose
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.review_new_image(step=5, total_steps=5)
+        self.assertFalse(any("podman" in option for option in seen[0]))
+
+    def scan_payload(self, packages: list[str], removals: list[str]) -> str:
+        return json.dumps(
+            {
+                "deployments": [
+                    {
+                        "booted": True,
+                        "container-image-reference": "docker://ghcr.io/ublue-os/bazzite:stable",
+                        "requested-packages": packages,
+                        "requested-base-removals": removals,
+                    }
+                ]
+            }
+        )
+
+    def run_scan(self, app, payload: str) -> bool:
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["rpm-ostree", "status", "--json", "--booted"], 0, payload, ""),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    return app.scan_os()
+
+    def test_scan_os_carries_selected_packages_and_removals(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        # First choose: keep only tmux of the layered packages. Second choose:
+        # keep the base removal selected.
+        selections = iter([["tmux"], ["firefox"]])
+        stub.choose = lambda _options, **_kwargs: next(selections)
+        app.gum = stub
+        result = self.run_scan(app, self.scan_payload(["tmux", "htop"], ["firefox"]))
+        self.assertTrue(result)
+        self.assertEqual(app.config.packages, ["tmux"])
+        self.assertEqual(app.config.removed_packages, ["firefox"])
+
+    def test_scan_os_escape_from_package_selection_aborts(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: (_ for _ in ()).throw(ScreenBack())
+        app.gum = stub
+        self.assertFalse(self.run_scan(app, self.scan_payload(["tmux"], [])))
+
+    def test_scan_os_escape_from_removal_selection_aborts(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        calls = [0]
+
+        def choose(_options, **_kwargs):
+            calls[0] += 1
+            if calls[0] == 1:
+                return ["tmux"]
+            raise ScreenBack()
+
+        stub.choose = choose
+        app.gum = stub
+        self.assertFalse(self.run_scan(app, self.scan_payload(["tmux"], ["firefox"])))
+
+    def test_scan_os_declining_empty_package_scan_aborts(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.confirm = lambda *_a, **_k: False
+        app.gum = stub
+        self.assertFalse(self.run_scan(app, self.scan_payload([], [])))
+        self.assertTrue(any(level == "warn" and "No layered packages" in msg for level, msg in stub.messages))
+
+    def test_manage_packages_dispatches_each_editing_task(self) -> None:
+        app = self.make_app()
+        app.config.packages = ["tmux", "htop"]
+        selections = iter(
+            [
+                ["Search package names"],
+                ["Type exact package names"],
+                ["Remove packages"],
+                ["Back"],
+            ]
+        )
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: next(selections)
+        app.gum = stub
+        with patch.object(app, "search_packages") as search:
+            with patch.object(app, "manual_packages") as manual:
+                with patch.object(app, "choose_to_remove", return_value=["tmux"]) as remove:
+                    with redirect_stdout(io.StringIO()):
+                        app.manage_packages()
+        search.assert_called_once()
+        manual.assert_called_once()
+        remove.assert_called_once_with(["tmux", "htop"], "Remove Packages")
+        self.assertEqual(app.config.packages, ["tmux"])
+
+    def test_manage_packages_inner_escape_returns_to_menu(self) -> None:
+        app = self.make_app()
+        selections = iter([["Search package names"], ["Back"]])
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: next(selections)
+        app.gum = stub
+        with patch.object(app, "search_packages", side_effect=ScreenBack()):
+            with redirect_stdout(io.StringIO()):
+                app.manage_packages()  # Esc inside a task loops back, Back exits
+
+    def test_manage_packages_escape_at_menu_returns(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: (_ for _ in ()).throw(ScreenBack())
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.manage_packages()  # must return, not raise
+
+    def test_choose_to_remove_warns_and_keeps_empty_list(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda *_a, **_k: self.fail("choose must not run with nothing to remove")
+        app.gum = stub
+        self.assertEqual(app.choose_to_remove([], "Remove Packages"), [])
+        self.assertTrue(any(level == "warn" and "Nothing to remove" in msg for level, msg in stub.messages))
+
+    def test_choose_to_remove_drops_selection_preserving_order(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["b", "d"]
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            kept = app.choose_to_remove(["a", "b", "c", "d"], "Remove Packages")
+        self.assertEqual(kept, ["a", "c"])
+
+    def test_render_preflight_failure_plain_text_fallback_lists_every_section(self) -> None:
+        # Users without gum installed hit this path when preflight fails; it
+        # had zero regression protection.
+        app = self.make_app()
+        stdout = io.StringIO()
+        with patch("atomic_image_builder.command_exists", return_value=False):
+            with redirect_stdout(stdout):
+                app.render_preflight_failure(
+                    missing_tools=["gum", "cosign"],
+                    missing_host_tools=["dnf5"],
+                    github_login_missing=True,
+                    github_account_error=True,
+                )
+        output = stdout.getvalue()
+        self.assertIn("Preflight Failed", output)
+        self.assertIn("Missing tools: gum, cosign", output)
+        self.assertIn("brew install gum cosign", output)
+        self.assertIn("Run: gh auth login", output)
+        self.assertIn("gh auth status && gh auth login", output)
+        self.assertIn("Missing host tools: dnf5", output)
+        self.assertIn("rpm-ostree", output)
+
+    def test_render_preflight_failure_gum_path_covers_account_and_host_sections(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.ensure_available = lambda: None
+        app.gum = stub
+        stdout = io.StringIO()
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with redirect_stdout(stdout):
+                app.render_preflight_failure(
+                    missing_tools=[],
+                    missing_host_tools=["dnf5", "rpm-ostree"],
+                    github_account_error=True,
+                )
+        hints = [msg for level, msg in stub.messages if level == "hint"]
+        self.assertTrue(any("gh auth status && gh auth login" in msg for msg in hints))
+        self.assertTrue(any("Missing host tools: dnf5, rpm-ostree" in msg for msg in hints))
+        self.assertEqual(stub.prompts, ["Press Enter to exit to the terminal..."])
 
     def test_manage_services_remove_calls_choose_to_remove(self) -> None:
         app = self.make_app()
