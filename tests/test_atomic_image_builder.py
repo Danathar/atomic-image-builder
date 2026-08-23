@@ -3400,6 +3400,61 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(any("Unable to confirm example/broken-repo" in message for level, message in app.gum.messages if level == "error"))
         self.assertEqual(app.gum.prompts, ["Press Enter to choose a different repository..."])
 
+    def test_select_repo_manual_entry_reprompts_on_empty_input(self) -> None:
+        # An empty manual entry loops back to the picker instead of asking
+        # GitHub to confirm an empty repository name.
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        manual_label = "Type a repository name manually"
+        existing_label = f"{'existing-repo':<30} (no description)"
+        filters = [manual_label, existing_label]
+        stub = GumStub()
+        stub.filter = lambda _options, **_kwargs: filters.pop(0)
+        stub.input = lambda **_kwargs: "   "
+        app.gum = stub
+        with patch.object(
+            app,
+            "gh_json_with_spinner",
+            return_value=[{"name": "existing-repo", "description": None}],
+        ):
+            with patch.object(app, "gh_json") as view_mock:
+                owner, repo = app.select_repo()
+
+        self.assertEqual((owner, repo), ("example", "existing-repo"))
+        view_mock.assert_not_called()
+
+    def test_select_repo_rejects_manual_repo_without_state_file(self) -> None:
+        # require_state_file is the gate that stops the update flow from being
+        # pointed at a GitHub repo this tool did not create. A repo without the
+        # state file must be refused and the picker re-shown, not returned.
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        manual_label = "Type a repository name manually"
+        inputs = iter(["foreign-repo", "managed-repo"])
+        stub = GumStub()
+        stub.filter = lambda _options, **_kwargs: manual_label
+        stub.input = lambda **_kwargs: next(inputs)
+        app.gum = stub
+        with patch.object(app, "gh_json_with_spinner", return_value=[]):
+            with patch.object(app, "gh_json", side_effect=[{"name": "foreign-repo"}, {"name": "managed-repo"}]):
+                with patch.object(app, "repo_has_state_file", side_effect=[False, True]) as state_mock:
+                    owner, repo = app.select_repo(require_state_file=True)
+
+        self.assertEqual((owner, repo), ("example", "managed-repo"))
+        self.assertEqual(
+            state_mock.call_args_list[0].args,
+            ("example", "foreign-repo"),
+        )
+        self.assertTrue(
+            any(
+                level == "error" and "example/foreign-repo was not created by this tool" in message
+                for level, message in app.gum.messages
+            )
+        )
+        self.assertIn("Press Enter to choose a different repository...", app.gum.prompts)
+
     def test_repo_default_branch_falls_back_to_rest_api_when_graphql_payload_is_null(self) -> None:
         app = self.make_app()
 
@@ -5603,6 +5658,97 @@ class BuilderTests(unittest.TestCase):
         with patch.object(app, "manage_packages") as mock:
             app.update_menu()
         mock.assert_called_once()
+
+    # ── require_github auth gate ───────────────────────────────────────
+
+    def test_require_github_errors_when_gh_is_missing(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=False):
+            with patch("atomic_image_builder.run") as run_mock:
+                self.assertFalse(app.require_github())
+
+        run_mock.assert_not_called()
+        self.assertFalse(app.github_available)
+        self.assertIn(("error", "GitHub CLI is required for this action."), stub.messages)
+        self.assertTrue(any(level == "hint" and "brew install gh" in message for level, message in stub.messages))
+
+    def test_require_github_runs_setup_guide_when_not_logged_in(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+
+        def fake_run(args, **_kwargs):
+            self.assertEqual(list(args), ["gh", "auth", "status"])
+            return subprocess.CompletedProcess(list(args), 1, "", "not logged in")
+
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with patch.object(app, "github_setup_guide") as guide_mock:
+                    with patch.object(app, "github_login_name", return_value="octocat"):
+                        self.assertTrue(app.require_github())
+
+        guide_mock.assert_called_once()
+        self.assertTrue(app.github_available)
+        self.assertEqual(app.github_user, "octocat")
+
+    def test_require_github_returns_false_when_setup_guide_is_escaped(self) -> None:
+        # Esc from the login guide raises ScreenBack; require_github must turn
+        # that into a plain False so callers back out instead of crashing.
+        app = self.make_app()
+        app.gum = GumStub()
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["gh", "auth", "status"], 1, "", ""),
+            ):
+                with patch.object(app, "github_setup_guide", side_effect=ScreenBack):
+                    self.assertFalse(app.require_github())
+
+        self.assertFalse(app.github_available)
+
+    def test_require_github_errors_when_login_name_lookup_fails(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["gh", "auth", "status"], 0, "", ""),
+            ):
+                with patch.object(app, "github_login_name", side_effect=CommandError("api down")):
+                    self.assertFalse(app.require_github())
+
+        self.assertFalse(app.github_available)
+        self.assertIn(("error", "Unable to determine GitHub username after login."), stub.messages)
+
+    def test_require_github_records_user_on_success(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["gh", "auth", "status"], 0, "", ""),
+            ):
+                with patch.object(app, "github_setup_guide") as guide_mock:
+                    with patch.object(app, "github_login_name", return_value="octocat"):
+                        self.assertTrue(app.require_github())
+
+        guide_mock.assert_not_called()
+        self.assertTrue(app.github_available)
+        self.assertEqual(app.github_user, "octocat")
+        self.assertEqual(app.config.github_user, "octocat")
+        self.assertIn(("success", "GitHub ready: octocat"), stub.messages)
+
+    def test_require_github_short_circuits_when_already_ready(self) -> None:
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "octocat"
+        app.gum = GumStub()
+        with patch("atomic_image_builder.run") as run_mock:
+            self.assertTrue(app.require_github())
+        run_mock.assert_not_called()
 
     # ── github_setup_guide interactive login flow ──────────────────────
 
