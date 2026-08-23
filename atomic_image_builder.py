@@ -547,8 +547,31 @@ def workflow_key(stripped_line: str) -> str | None:
     Comparing against a literal "push:" misses the equally valid
     "push: # only the default branch", and the bundled snapshots do carry
     inline comments on trigger keys.
+
+    This deliberately also matches keys carrying an inline value, such as
+    "push: { branches: [main] }" - a sibling key with a value still ends the
+    previous trigger's block. Use workflow_block_key() when deciding whether a
+    key opens a block that nested lines may be appended under.
     """
     match = WORKFLOW_KEY_RE.match(stripped_line)
+    return match.group(1) if match else None
+
+
+# Like WORKFLOW_KEY_RE, but only when nothing follows the colon except an
+# optional inline comment - i.e. the key opens a block mapping.
+WORKFLOW_BLOCK_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.-]*):\s*(?:#.*)?$")
+
+
+def workflow_block_key(stripped_line: str) -> str | None:
+    """Return the key only when the line opens a block (no inline value).
+
+    workflow_key() answers "which key does this line declare" and is right for
+    sibling detection, but appending nested lines under a key is only valid
+    when the key has no value of its own: "push: { branches: [main] }" already
+    carries an inline flow mapping, and writing "branches:" beneath it produces
+    a YAML parse error, not a patched workflow.
+    """
+    match = WORKFLOW_BLOCK_KEY_RE.match(stripped_line)
     return match.group(1) if match else None
 
 
@@ -3949,7 +3972,11 @@ class App:
             line = lines[index]
             stripped = line.strip()
             indent = len(line) - len(line.lstrip())
-            if indent == 2 and workflow_key(stripped) in {"pull_request", "push"}:
+            # Only block-style triggers can take an appended branches: block.
+            # An inline flow mapping such as "push: { branches: [main] }"
+            # already owns its filter inline; nesting another one under it is a
+            # parse error, so it is left exactly as written.
+            if indent == 2 and workflow_block_key(stripped) in {"pull_request", "push"}:
                 output.append(line)
                 index += 1
                 block_start = index
@@ -3980,6 +4007,18 @@ class App:
                     block_indent = len(block_line) - len(block_line.lstrip())
                     if block_indent == 4 and workflow_key(block_stripped) == "branches":
                         prefix = block_line[: len(block_line) - len(block_line.lstrip())]
+                        if workflow_block_key(block_stripped) is None:
+                            # Inline flow form: "branches: [main]". Appending
+                            # "- <branch>" beneath it is a parse error, so
+                            # rewrite it to the same block form the other
+                            # branch writes - which also replaces the existing
+                            # entries with the default branch, exactly as the
+                            # block path below does.
+                            patched_block.append(f"{prefix}branches:")
+                            patched_block.append(f"{prefix}  - {default_branch}")
+                            branches_found = True
+                            block_index += 1
+                            continue
                         patched_block.append(block_line)
                         patched_block.append(f"{prefix}  - {default_branch}")
                         branches_found = True

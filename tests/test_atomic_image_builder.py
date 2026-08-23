@@ -691,6 +691,56 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("  push:\n    branches:\n      - main\n    paths-ignore:", patched)
         self.assertEqual(app.patch_workflow_branch_filters(patched, "main"), patched)
 
+    def test_patch_workflow_branch_filters_leaves_inline_trigger_mapping_untouched(self) -> None:
+        # "push: { branches: [main] }" carries its filter inline. Appending a
+        # nested branches: block beneath a valued key is a YAML parse error, so
+        # the trigger must be left exactly as written - while its block-style
+        # siblings still get patched.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Workflow
+            on:
+              push: { branches: [main] }
+              pull_request:
+              workflow_dispatch:
+            jobs:
+              build:
+                steps:
+                  - run: true
+            """
+        )
+        patched = app.patch_workflow_branch_filters(workflow, "master")
+        self.assertIn("  push: { branches: [main] }\n  pull_request:", patched)
+        self.assertIn("  pull_request:\n    branches:\n      - master\n  workflow_dispatch:", patched)
+        self.assertEqual(patched.count("branches:"), 2)
+        self.assertEqual(app.patch_workflow_branch_filters(patched, "master"), patched)
+
+    def test_patch_workflow_branch_filters_rewrites_inline_branches_list(self) -> None:
+        # An inline flow list under a block trigger - "branches: [main]" - took
+        # the block path, and "- master" was nested beneath the already-valued
+        # key: a parse error. It is rewritten to the block form, replacing the
+        # existing entries with the default branch exactly as the block path
+        # does.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Workflow
+            on:
+              push:
+                branches: [main, dev]
+              workflow_dispatch:
+            jobs:
+              build:
+                steps:
+                  - run: true
+            """
+        )
+        patched = app.patch_workflow_branch_filters(workflow, "master")
+        self.assertIn("  push:\n    branches:\n      - master\n  workflow_dispatch:", patched)
+        self.assertNotIn("[main, dev]", patched)
+        self.assertEqual(app.patch_workflow_branch_filters(patched, "master"), patched)
+
     def test_validate_config_rejects_unsafe_package_token(self) -> None:
         app = self.make_app()
         app.config.packages = ["tmux", "bad;rm"]
