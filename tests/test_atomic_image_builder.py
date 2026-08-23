@@ -1270,6 +1270,68 @@ class BuilderTests(unittest.TestCase):
             any(level == "error" and "cosign keypair" in message for level, message in stub.messages)
         )
 
+    def test_rotate_signing_key_warns_when_repo_cannot_be_identified(self) -> None:
+        # Without an owner/repo there is nothing safe to rotate against.
+        app = self.make_app()
+        app.config.github_user = ""
+        app.config.repo_name = ""
+        stub = GumStub()
+        app.gum = stub
+        with patch.object(app, "generate_and_upload_signing_key") as generate_mock:
+            app.rotate_signing_key(Path("/nonexistent"))
+
+        generate_mock.assert_not_called()
+        self.assertTrue(
+            any(level == "warn" and "configured image repo" in message for level, message in stub.messages)
+        )
+
+    def test_rotate_signing_key_returns_when_confirm_is_declined(self) -> None:
+        # Rotation overwrites real key material; declining the confirm must
+        # short-circuit before any tool check or key generation happens.
+        app = self.make_app()
+        stub = GumStub()
+        prompts: list[str] = []
+
+        def fake_confirm(prompt, default=False):
+            prompts.append(prompt)
+            self.assertFalse(default)
+            return False
+
+        stub.confirm = fake_confirm
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists") as exists_mock:
+            with patch.object(app, "generate_and_upload_signing_key") as generate_mock:
+                app.rotate_signing_key(Path("/nonexistent"))
+
+        generate_mock.assert_not_called()
+        exists_mock.assert_not_called()
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("Rotate the cosign signing key?", prompts[0])
+
+    def test_rotate_signing_key_warns_when_one_tool_is_missing(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: True
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name != "cosign"):
+            with patch.object(app, "generate_and_upload_signing_key") as generate_mock:
+                app.rotate_signing_key(Path("/nonexistent"))
+
+        generate_mock.assert_not_called()
+        self.assertIn(("warn", "cosign is required to rotate the signing key."), stub.messages)
+
+    def test_rotate_signing_key_warns_when_both_tools_are_missing(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: True
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=False):
+            with patch.object(app, "generate_and_upload_signing_key") as generate_mock:
+                app.rotate_signing_key(Path("/nonexistent"))
+
+        generate_mock.assert_not_called()
+        self.assertIn(("warn", "cosign, gh are required to rotate the signing key."), stub.messages)
+
     def test_generate_and_upload_signing_key_skips_password_for_bluebuild(self) -> None:
         app = self.make_bluebuild_app()
         app.gum = GumStub()
@@ -3104,6 +3166,42 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(context_exists[0])
         self.assertTrue(containerfile_exists[0])
         self.assertTrue(any(level == "success" and "atomic-image-builder-local-test:dryrun" in message for level, message in stub.messages))
+
+    def test_test_build_locally_hints_when_method_is_not_containerfile(self) -> None:
+        app = self.make_app()
+        app.config.method = "bluebuild"
+        stub = GumStub()
+        app.gum = stub
+        with patch.object(app, "seed_project_template") as seed_mock:
+            app.test_build_locally()
+
+        seed_mock.assert_not_called()
+        self.assertTrue(
+            any(level == "hint" and "Containerfile-only" in message for level, message in stub.messages)
+        )
+
+    def test_test_build_locally_reports_failure_with_stderr_tail(self) -> None:
+        # A non-zero podman exit must be reported as a failure, with only the
+        # last eight stderr lines surfaced as the hint.
+        app = self.make_app()
+        stub = GumStub()
+        stderr_lines = [f"line {i}" for i in range(1, 11)]
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            return subprocess.CompletedProcess(list(command), 125, "", "\n".join(stderr_lines))
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            app.test_build_locally()
+
+        self.assertTrue(
+            any(level == "error" and "failed with exit status 125" in message for level, message in stub.messages)
+        )
+        self.assertFalse(any(level == "success" for level, _message in stub.messages))
+        tails = [message for level, message in stub.messages if level == "hint"]
+        self.assertIn("\n".join(stderr_lines[-8:]), tails)
+        self.assertTrue(all("line 1\n" not in tail for tail in tails))
 
     def test_search_packages_uses_value_delimiter_for_selected_results(self) -> None:
         app = self.make_app()
@@ -5418,6 +5516,93 @@ class BuilderTests(unittest.TestCase):
         stub.choose = lambda _options, **_kwargs: (_ for _ in ()).throw(ScreenBack())
         app.gum = stub
         self.assertFalse(app.update_menu())
+
+    def menu_stub_choosing(self, first_label: str) -> GumStub:
+        """A GumStub whose choose picks first_label once, then cancels."""
+        calls = [0]
+
+        def fake_choose(options, **_kwargs):
+            calls[0] += 1
+            if calls[0] == 1:
+                self.assertIn(first_label, options)
+                return [first_label]
+            return ["Cancel and go back"]
+
+        stub = GumStub()
+        stub.choose = fake_choose
+        return stub
+
+    def test_update_menu_review_shows_full_summary(self) -> None:
+        app = self.make_app()
+        app.gum = self.menu_stub_choosing("Review current configuration")
+        with patch.object(app, "show_summary") as summary_mock:
+            self.assertFalse(app.update_menu())
+        summary_mock.assert_called_once()
+
+    def test_update_menu_runs_local_test_build(self) -> None:
+        app = self.make_app()
+        app.gum = self.menu_stub_choosing("Test build locally (podman)")
+        with patch.object(app, "test_build_locally") as build_mock:
+            self.assertFalse(app.update_menu())
+        build_mock.assert_called_once()
+
+    def test_update_menu_hides_local_build_for_bluebuild(self) -> None:
+        # The local test build is Containerfile-only, so the BlueBuild menu
+        # must not offer it at all.
+        app = self.make_app()
+        app.config.method = "bluebuild"
+        seen_options: list[str] = []
+
+        def fake_choose(options, **_kwargs):
+            seen_options.extend(options)
+            return ["Cancel and go back"]
+
+        stub = GumStub()
+        stub.choose = fake_choose
+        app.gum = stub
+        self.assertFalse(app.update_menu())
+        self.assertNotIn("Test build locally (podman)", seen_options)
+        self.assertIn("Rotate signing key (cosign)", seen_options)
+
+    def test_update_menu_rotates_signing_key_with_repo_dir(self) -> None:
+        app = self.make_app()
+        app.gum = self.menu_stub_choosing("Rotate signing key (cosign)")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            with patch.object(app, "rotate_signing_key") as rotate_mock:
+                self.assertFalse(app.update_menu(repo_dir))
+        rotate_mock.assert_called_once_with(repo_dir)
+
+    def test_update_menu_survives_command_error_from_screen_action(self) -> None:
+        # run_screen_action must contain a CommandError from the launched
+        # action so the update session is not lost to the main menu.
+        app = self.make_app()
+        stub = self.menu_stub_choosing("Rotate signing key (cosign)")
+        app.gum = stub
+        with patch.object(app, "rotate_signing_key", side_effect=CommandError("rotation boom")):
+            self.assertFalse(app.update_menu())
+        self.assertIn(("error", "rotation boom"), stub.messages)
+        self.assertIn("Press Enter to return to the update menu...", stub.prompts)
+
+    def test_update_menu_dispatches_to_manage_packages(self) -> None:
+        """Selecting 'Packages' from the menu dispatches to manage_packages."""
+        app = self.make_app()
+        call_count = [0]
+
+        def fake_choose(options, **_kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                for opt in options:
+                    if "Packages" in opt and "Removed" not in opt:
+                        return [opt]
+            return ["Cancel and go back"]
+
+        stub = GumStub()
+        stub.choose = fake_choose
+        app.gum = stub
+        with patch.object(app, "manage_packages") as mock:
+            app.update_menu()
+        mock.assert_called_once()
 
     # ── github_setup_guide interactive login flow ──────────────────────
 
