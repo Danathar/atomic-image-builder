@@ -1,6 +1,10 @@
+import contextlib
+import io
+import json
 import subprocess
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,10 +13,31 @@ from maintenance_audit import (
     audit_action_update_availability,
     audit_local_snapshot,
     audit_upstream_drift,
+    github_api_json,
     is_newer_version_available,
     load_template_source,
+    main,
     parse_version_tag,
+    query_latest_github_semver_tag,
+    query_remote_head,
+    run_audit,
 )
+
+
+class FakeResponse:
+    """Minimal context-manager stand-in for urllib.request.urlopen."""
+
+    def __init__(self, payload: object) -> None:
+        self._body = json.dumps(payload)
+
+    def __enter__(self) -> "FakeResponse":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._body.encode()
 
 
 class MaintenanceAuditTests(unittest.TestCase):
@@ -122,3 +147,168 @@ class MaintenanceAuditTests(unittest.TestCase):
         actions = {"example/custom-action": ("deadbeef", "main")}
         findings = audit_action_update_availability(actions)
         self.assertEqual(findings, [])
+
+    def test_audit_action_update_availability_reports_query_failures(self) -> None:
+        actions = {"docker/login-action": ("deadbeef", "v4.0.0")}
+        with patch(
+            "maintenance_audit.query_latest_github_semver_tag",
+            side_effect=RuntimeError("rate limited"),
+        ):
+            findings = audit_action_update_availability(actions)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("Unable to query upstream tags", findings[0])
+        self.assertIn("rate limited", findings[0])
+
+    def test_audit_action_update_availability_quiet_when_current_or_untagged(self) -> None:
+        actions = {"docker/login-action": ("deadbeef", "v4.0.0")}
+        # No semver tag upstream at all, and an upstream that is not newer:
+        # both must produce no findings.
+        with patch("maintenance_audit.query_latest_github_semver_tag", return_value=None):
+            self.assertEqual(audit_action_update_availability(actions), [])
+        with patch("maintenance_audit.query_latest_github_semver_tag", return_value="v4.0.0"):
+            self.assertEqual(audit_action_update_availability(actions), [])
+
+    def test_query_remote_head_raises_on_git_failure_and_bad_output(self) -> None:
+        failed = subprocess.CompletedProcess(["git", "ls-remote"], 128, "", "fatal: not found")
+        with patch("maintenance_audit.subprocess.run", return_value=failed):
+            with self.assertRaisesRegex(RuntimeError, "not found"):
+                query_remote_head("https://github.com/example/repo.git")
+
+        garbled = subprocess.CompletedProcess(["git", "ls-remote"], 0, "not-a-sha\tHEAD\n", "")
+        with patch("maintenance_audit.subprocess.run", return_value=garbled):
+            with self.assertRaisesRegex(RuntimeError, "Unexpected ls-remote output"):
+                query_remote_head("https://github.com/example/repo.git")
+
+    def test_audit_upstream_drift_reports_query_failure_as_finding(self) -> None:
+        source = TemplateSource(
+            repo="https://github.com/example/repo.git",
+            revision="a" * 40,
+        )
+        with patch("maintenance_audit.query_remote_head", side_effect=RuntimeError("offline")):
+            findings = audit_upstream_drift(source)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("Unable to query upstream template HEAD", findings[0])
+        self.assertIn("offline", findings[0])
+
+    def test_github_api_json_sends_token_header_only_when_set(self) -> None:
+        captured: list = []
+
+        def fake_urlopen(request, timeout):
+            captured.append(request)
+            return FakeResponse({"ok": True})
+
+        with patch("maintenance_audit.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch.dict("os.environ", {"GITHUB_TOKEN": "secret-token"}, clear=False):
+                self.assertEqual(github_api_json("https://api.github.com/x"), {"ok": True})
+            with patch.dict("os.environ", {}, clear=True):
+                self.assertEqual(github_api_json("https://api.github.com/x"), {"ok": True})
+
+        with_token, without_token = captured
+        self.assertEqual(with_token.get_header("Authorization"), "Bearer secret-token")
+        self.assertIsNone(without_token.get_header("Authorization"))
+        self.assertEqual(with_token.get_header("Accept"), "application/vnd.github+json")
+
+    def test_github_api_json_wraps_http_and_url_errors(self) -> None:
+        http_error = urllib.error.HTTPError(
+            "https://api.github.com/x", 403, "Forbidden", {}, io.BytesIO(b"rate limit exceeded")
+        )
+        with patch("maintenance_audit.urllib.request.urlopen", side_effect=http_error):
+            with self.assertRaisesRegex(RuntimeError, "rate limit exceeded"):
+                github_api_json("https://api.github.com/x")
+
+        empty_body = urllib.error.HTTPError(
+            "https://api.github.com/x", 500, "Server Error", {}, io.BytesIO(b"")
+        )
+        with patch("maintenance_audit.urllib.request.urlopen", side_effect=empty_body):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 500"):
+                github_api_json("https://api.github.com/x")
+
+        url_error = urllib.error.URLError("name resolution failed")
+        with patch("maintenance_audit.urllib.request.urlopen", side_effect=url_error):
+            with self.assertRaisesRegex(RuntimeError, "name resolution failed"):
+                github_api_json("https://api.github.com/x")
+
+    def test_query_latest_github_semver_tag_picks_highest_and_skips_noise(self) -> None:
+        payload = [
+            "not-a-dict",
+            {"name": 42},
+            {"name": "main"},
+            {"name": "v1.9.9"},
+            {"name": "v2.0.1"},
+            {"name": "v2.0.0"},
+        ]
+        with patch("maintenance_audit.github_api_json", return_value=payload):
+            self.assertEqual(query_latest_github_semver_tag("example/action"), "v2.0.1")
+
+    def test_query_latest_github_semver_tag_handles_empty_and_bad_payloads(self) -> None:
+        with patch("maintenance_audit.github_api_json", return_value=[{"name": "main"}]):
+            self.assertIsNone(query_latest_github_semver_tag("example/action"))
+        with patch("maintenance_audit.github_api_json", return_value={"message": "Not Found"}):
+            with self.assertRaisesRegex(RuntimeError, "Unexpected tag payload"):
+                query_latest_github_semver_tag("example/action")
+
+    def test_run_audit_skip_upstream_runs_only_local_checks(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        with patch("maintenance_audit.audit_upstream_drift") as drift:
+            with patch("maintenance_audit.audit_action_update_availability") as updates:
+                findings = run_audit(repo_root, skip_upstream=True)
+        drift.assert_not_called()
+        updates.assert_not_called()
+        self.assertEqual(findings, [])
+
+    def test_run_audit_queries_drift_per_template_source(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        with patch(
+            "maintenance_audit.audit_upstream_drift", return_value=["drift finding"]
+        ) as drift:
+            findings = run_audit(repo_root, skip_upstream=False)
+        self.assertEqual(drift.call_count, 2)
+        self.assertEqual(findings, ["drift finding", "drift finding"])
+
+    def test_run_audit_tolerates_unloadable_source_when_querying_upstream(self) -> None:
+        # A missing/invalid .template-source is already reported by the local
+        # audit; the upstream pass must skip it rather than crash.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            with patch("maintenance_audit.audit_upstream_drift") as drift:
+                findings = run_audit(repo_root, skip_upstream=False)
+        drift.assert_not_called()
+        self.assertTrue(any("Missing template metadata file" in f for f in findings))
+
+    def test_run_audit_appends_action_update_findings_when_asked(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        with patch(
+            "maintenance_audit.audit_action_update_availability", return_value=["stale pin"]
+        ):
+            findings = run_audit(repo_root, skip_upstream=True, check_action_updates=True)
+        self.assertEqual(findings, ["stale pin"])
+
+    def test_main_passing_audit_prints_success_and_returns_zero(self) -> None:
+        stdout = io.StringIO()
+        with patch("maintenance_audit.run_audit", return_value=[]) as run:
+            with contextlib.redirect_stdout(stdout):
+                code = main(["--skip-upstream"])
+        self.assertEqual(code, 0)
+        self.assertIn("Maintenance audit passed.", stdout.getvalue())
+        self.assertEqual(run.call_args.kwargs["skip_upstream"], True)
+        self.assertEqual(run.call_args.kwargs["check_action_updates"], False)
+
+    def test_main_failing_audit_lists_findings_and_returns_one(self) -> None:
+        stdout = io.StringIO()
+        with patch("maintenance_audit.run_audit", return_value=["first", "second"]):
+            with contextlib.redirect_stdout(stdout):
+                code = main([])
+        self.assertEqual(code, 1)
+        output = stdout.getvalue()
+        self.assertIn("Maintenance audit failed:", output)
+        self.assertIn("- first", output)
+        self.assertIn("- second", output)
+
+    def test_main_forwards_repo_root_and_update_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("maintenance_audit.run_audit", return_value=[]) as run:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = main(["--repo-root", tmp, "--skip-upstream", "--check-action-updates"])
+        self.assertEqual(code, 0)
+        self.assertEqual(run.call_args.args[0], Path(tmp).resolve())
+        self.assertEqual(run.call_args.kwargs["check_action_updates"], True)
