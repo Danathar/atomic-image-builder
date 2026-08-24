@@ -365,6 +365,99 @@ class BuilderTests(unittest.TestCase):
         patched = app.patch_container_workflow(workflow)
         self.assertIn("paths-ignore: ['**/README.md', '.atomic-image-builder.json']", patched)
 
+    def test_patch_container_workflow_handles_empty_inline_paths_ignore(self) -> None:
+        # An empty inline list must not produce "[, '<state file>']".
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Build container image
+            on:
+              push:
+                paths-ignore: []
+            jobs:
+              build_push:
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v4
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn(f"paths-ignore: ['{STATE_FILE}']", patched)
+        self.assertNotIn("paths-ignore: []", patched)
+        self.assertEqual(app.patch_container_workflow(patched), patched)
+
+    def test_patch_container_workflow_anchors_state_ignore_to_readme_entry(self) -> None:
+        # Fallback for a workflow whose paths-ignore key is written in a form
+        # the key match does not see (YAML permits a quoted key). Without it
+        # the state file would never be added and every state-only commit
+        # would trigger a rebuild.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Build container image
+            on:
+              push:
+                "paths-ignore":
+                  - '**/README.md'
+            jobs:
+              build_push:
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v4
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn(f"      - '{STATE_FILE}'", patched)
+        # The anchor entry itself must survive, indented as it was.
+        self.assertIn("      - '**/README.md'", patched)
+        self.assertEqual(app.patch_container_workflow(patched), patched)
+
+    def test_patch_container_workflow_rewrites_image_desc_env_key(self) -> None:
+        # The bundled snapshot carries IMAGE_DESC in image-template.env, but a
+        # workflow that declares it as a YAML env key must still be rewritten
+        # to the configured description rather than keeping the placeholder.
+        app = self.make_app()
+        app.config.image_desc = 'Doug: my "daily" image'
+        workflow = textwrap.dedent(
+            """\
+            name: Build container image
+            env:
+              IMAGE_DESC: My Customized Bootc Image
+            jobs:
+              build_push:
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v4
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertNotIn("My Customized Bootc Image", patched)
+        # A description carrying a colon and quotes must be emitted as a
+        # quoted, escaped scalar or the workflow stops parsing.
+        self.assertIn('  IMAGE_DESC: "Doug: my \\"daily\\" image"', patched)
+        self.assertEqual(app.patch_container_workflow(patched), patched)
+
+    def test_patch_container_workflow_adds_state_ignore_only_once(self) -> None:
+        # Both the key branch and the README anchor can match the same
+        # workflow; only one entry may be inserted.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Build container image
+            on:
+              push:
+                paths-ignore:
+                  - '**/README.md'
+            jobs:
+              build_push:
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v4
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertEqual(patched.count(f"- '{STATE_FILE}'"), 1)
+
     def test_patch_container_workflow_updates_branch_filters_for_default_branch(self) -> None:
         app = self.make_app()
         workflow = textwrap.dedent(
@@ -4834,6 +4927,23 @@ class BuilderTests(unittest.TestCase):
         patched = app.patch_bluebuild_workflow(template)
         self.assertIn(STATE_FILE, patched)
 
+    def test_patch_bluebuild_workflow_anchors_state_ignore_to_md_entry(self) -> None:
+        # Fallback for a paths-ignore key written in a form the key match does
+        # not see. Without it the state file is never ignored and every
+        # state-only commit triggers a rebuild.
+        app = self.make_bluebuild_app()
+        template = '    "paths-ignore":\n      - "**.md"\n'
+        patched = app.patch_bluebuild_workflow(template)
+        self.assertIn(f"      - '{STATE_FILE}'", patched)
+        self.assertIn('      - "**.md"', patched)
+        self.assertEqual(app.patch_bluebuild_workflow(patched), patched)
+
+    def test_patch_bluebuild_workflow_adds_state_ignore_only_once(self) -> None:
+        app = self.make_bluebuild_app()
+        template = '    paths-ignore:\n      - "**.md"\n'
+        patched = app.patch_bluebuild_workflow(template)
+        self.assertEqual(patched.count(STATE_FILE), 1)
+
     def test_patch_bluebuild_workflow_adds_branch_filters_and_validation_only_inputs(self) -> None:
         app = self.make_bluebuild_app()
         template = textwrap.dedent(
@@ -5044,6 +5154,43 @@ class BuilderTests(unittest.TestCase):
         for key in ("push", "build_opts", "chunkah"):
             self.assertIn(key, keys)
         self.assertEqual(app.patch_bluebuild_action_inputs(result), result)
+
+    def test_patch_bluebuild_action_inputs_leaves_unrelated_steps_untouched(self) -> None:
+        # Only the blue-build action step owns these inputs; a checkout step
+        # that happens to carry a with: block must not gain them.
+        app = self.make_bluebuild_app()
+        template = textwrap.dedent(
+            """\
+            jobs:
+              bluebuild:
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v4
+                    with:
+                      fetch-depth: 0
+            """
+        )
+        patched = app.patch_bluebuild_action_inputs(template)
+        self.assertEqual(patched, ensure_trailing_newline(template))
+        self.assertNotIn("chunkah", patched)
+
+    def test_patch_bluebuild_action_inputs_skips_action_step_without_with_block(self) -> None:
+        # There is no inputs mapping to extend, so the step is returned as-is
+        # rather than guessing an indentation. The bundled-snapshot test above
+        # is what proves the real shape still gets patched.
+        app = self.make_bluebuild_app()
+        template = textwrap.dedent(
+            """\
+            jobs:
+              bluebuild:
+                steps:
+                  - name: Build
+                    uses: blue-build/github-action@836161eb076426a451e6a0054f722b1153b8b3ad # v1.12
+            """
+        )
+        patched = app.patch_bluebuild_action_inputs(template)
+        self.assertEqual(patched, ensure_trailing_newline(template))
+        self.assertNotIn("chunkah", patched)
 
     def test_patch_bluebuild_action_inputs_no_duplicates_when_keys_preexist(self) -> None:
         app = self.make_bluebuild_app()
