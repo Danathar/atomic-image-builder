@@ -6889,6 +6889,69 @@ class BuilderTests(unittest.TestCase):
                 app.search_packages()
         self.assertEqual(stub.prompts, ["No package changes were made. Press Enter to return to the package menu..."])
 
+    def test_ansi_color_code_returns_none_for_none_and_bool(self) -> None:
+        gum = Gum()
+        self.assertIsNone(gum.ansi_color_code(None, background=False))
+        self.assertIsNone(gum.ansi_color_code(True, background=False))
+        self.assertIsNone(gum.ansi_color_code(False, background=True))
+
+    def test_ansi_color_code_formats_int_as_256_color(self) -> None:
+        gum = Gum()
+        self.assertEqual(gum.ansi_color_code(117, background=False), "38;5;117")
+        self.assertEqual(gum.ansi_color_code(117, background=True), "48;5;117")
+
+    def test_ansi_color_code_formats_numeric_string_and_strips_whitespace(self) -> None:
+        gum = Gum()
+        self.assertEqual(gum.ansi_color_code(" 214 ", background=False), "38;5;214")
+        self.assertEqual(gum.ansi_color_code("9", background=True), "48;5;9")
+
+    def test_ansi_color_code_returns_none_for_non_numeric_or_empty_string(self) -> None:
+        gum = Gum()
+        self.assertIsNone(gum.ansi_color_code("red", background=False))
+        self.assertIsNone(gum.ansi_color_code("", background=False))
+        self.assertIsNone(gum.ansi_color_code("   ", background=False))
+
+    def test_apply_ansi_fallback_returns_plain_text_when_not_a_tty(self) -> None:
+        gum = Gum()
+        with patch("sys.stdout.isatty", return_value=False):
+            with patch.dict(os.environ, {"TERM": "xterm-256color"}):
+                self.assertEqual(gum.apply_ansi_fallback("hello", bold=True), "hello")
+
+    def test_apply_ansi_fallback_returns_plain_text_without_term_env(self) -> None:
+        gum = Gum()
+        with patch("sys.stdout.isatty", return_value=True):
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(gum.apply_ansi_fallback("hello", bold=True), "hello")
+
+    def test_apply_ansi_fallback_returns_plain_text_when_no_style_opts_given(self) -> None:
+        gum = Gum()
+        with patch("sys.stdout.isatty", return_value=True):
+            with patch.dict(os.environ, {"TERM": "xterm-256color"}):
+                self.assertEqual(gum.apply_ansi_fallback("hello", foreground=None), "hello")
+
+    def test_apply_ansi_fallback_wraps_text_with_combined_style_codes(self) -> None:
+        gum = Gum()
+        with patch("sys.stdout.isatty", return_value=True):
+            with patch.dict(os.environ, {"TERM": "xterm-256color"}):
+                result = gum.apply_ansi_fallback(
+                    "hello",
+                    bold=True,
+                    faint=True,
+                    italic=True,
+                    underline=True,
+                    strikethrough=True,
+                    foreground=117,
+                    background=234,
+                )
+        self.assertEqual(result, "\x1b[1;2;3;4;9;38;5;117;48;5;234mhello\x1b[0m")
+
+    def test_apply_ansi_fallback_ignores_unknown_and_falsy_opts(self) -> None:
+        gum = Gum()
+        with patch("sys.stdout.isatty", return_value=True):
+            with patch.dict(os.environ, {"TERM": "xterm-256color"}):
+                result = gum.apply_ansi_fallback("hello", bold=False, align="center", width=40)
+        self.assertEqual(result, "hello")
+
 
 if __name__ == "__main__":
     unittest.main()
