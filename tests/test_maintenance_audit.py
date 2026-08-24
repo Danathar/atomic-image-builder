@@ -21,6 +21,7 @@ from maintenance_audit import (
     query_latest_github_semver_tag,
     query_remote_head,
     run_audit,
+    version_tag_precision,
 )
 
 
@@ -50,6 +51,20 @@ class MaintenanceAuditTests(unittest.TestCase):
         self.assertFalse(is_newer_version_available("v6", "v6.0.2"))
         self.assertTrue(is_newer_version_available("v8", "v9"))
         self.assertTrue(is_newer_version_available("v4.0.0", "v4.1.1"))
+
+    def test_is_newer_version_available_at_minor_precision(self) -> None:
+        self.assertTrue(is_newer_version_available("v4.2", "v4.3"))
+        self.assertFalse(is_newer_version_available("v4.2", "v4.2.5"))
+
+    def test_is_newer_version_available_rejects_unparseable_tags(self) -> None:
+        self.assertFalse(is_newer_version_available("main", "v1"))
+        self.assertFalse(is_newer_version_available("v1", "main"))
+
+    def test_version_tag_precision_reports_specified_components(self) -> None:
+        self.assertEqual(version_tag_precision("v6"), 1)
+        self.assertEqual(version_tag_precision("v4.2"), 2)
+        self.assertEqual(version_tag_precision("v4.2.1"), 3)
+        self.assertIsNone(version_tag_precision("main"))
 
     def test_load_template_source_rejects_invalid_revision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
