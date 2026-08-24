@@ -4028,6 +4028,109 @@ class BuilderTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 gum.confirm("Continue?")
 
+    # ── gum.choose / gum.filter / gum.table ─────────────────────────────
+
+    def test_gum_choose_builds_minimal_args_and_returns_selected_lines(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "choose"], 0, "alpha\nbeta\n", "")
+        with patch.object(Gum, "interactive_stdout", return_value=completed) as stdout_mock:
+            result = gum.choose(["alpha", "beta", "gamma"])
+        self.assertEqual(result, ["alpha", "beta"])
+        args, kwargs = stdout_mock.call_args
+        call_args = args[0]
+        self.assertEqual(call_args[:4], ["gum", "choose", "--no-show-help", "--height"])
+        self.assertIn("10", call_args)
+        self.assertNotIn("--no-limit", call_args)
+        self.assertNotIn("--selected", call_args)
+        self.assertNotIn("--header", call_args)
+        self.assertEqual(kwargs["stdin"], "alpha\nbeta\ngamma\n")
+
+    def test_gum_choose_includes_optional_flags_when_provided(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "choose"], 0, "alpha\n", "")
+        with patch.object(Gum, "interactive_stdout", return_value=completed) as stdout_mock:
+            gum.choose(
+                ["alpha", "beta"],
+                height=5,
+                no_limit=True,
+                selected=["alpha"],
+                header="Pick one",
+                label_delimiter="|",
+                cursor_prefix=">",
+                selected_prefix="[x]",
+                unselected_prefix="[ ]",
+            )
+        call_args = stdout_mock.call_args[0][0]
+        self.assertIn("--no-limit", call_args)
+        self.assertIn("--selected", call_args)
+        self.assertIn("alpha", call_args[call_args.index("--selected") + 1])
+        self.assertIn("--header", call_args)
+        self.assertIn("Pick one", call_args)
+        self.assertIn("--label-delimiter", call_args)
+        self.assertIn("|", call_args)
+        self.assertIn("--cursor-prefix", call_args)
+        self.assertIn(">", call_args)
+        self.assertIn("--selected-prefix", call_args)
+        self.assertIn("[x]", call_args)
+        self.assertIn("--unselected-prefix", call_args)
+        self.assertIn("[ ]", call_args)
+
+    def test_gum_choose_drops_blank_lines_from_output(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "choose"], 0, "alpha\n\nbeta\n", "")
+        with patch.object(Gum, "interactive_stdout", return_value=completed):
+            result = gum.choose(["alpha", "beta"])
+        self.assertEqual(result, ["alpha", "beta"])
+
+    def test_gum_choose_raises_screen_back_when_cancelled(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "choose"], 1, "", "")
+        with patch.object(Gum, "interactive_stdout", return_value=completed):
+            with self.assertRaises(ScreenBack):
+                gum.choose(["alpha", "beta"])
+
+    def test_gum_choose_raises_keyboard_interrupt_on_ctrl_c(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "choose"], 130, "", "")
+        with patch.object(Gum, "interactive_stdout", return_value=completed):
+            with self.assertRaises(KeyboardInterrupt):
+                gum.choose(["alpha", "beta"])
+
+    def test_gum_filter_builds_args_and_returns_stripped_result(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "filter"], 0, "  beta  \n", "")
+        with patch.object(Gum, "interactive_stdout", return_value=completed) as stdout_mock:
+            result = gum.filter(["alpha", "beta"], height=15, placeholder="Type to search")
+        self.assertEqual(result, "beta")
+        args, kwargs = stdout_mock.call_args
+        call_args = args[0]
+        self.assertEqual(call_args[:3], ["gum", "filter", "--no-show-help"])
+        self.assertIn("15", call_args)
+        self.assertIn("--placeholder", call_args)
+        self.assertIn("Type to search", call_args)
+        self.assertEqual(kwargs["stdin"], "alpha\nbeta\n")
+
+    def test_gum_filter_raises_screen_back_when_cancelled(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "filter"], 1, "", "")
+        with patch.object(Gum, "interactive_stdout", return_value=completed):
+            with self.assertRaises(ScreenBack):
+                gum.filter(["alpha", "beta"])
+
+    def test_gum_table_builds_args_and_stdin_from_rows(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "table"], 0, "", "")
+        with patch("atomic_image_builder.run", return_value=completed) as run_mock:
+            gum.table([["a", "1"], ["b", "2"]], columns="Name,Count", widths="10,5")
+        args, kwargs = run_mock.call_args
+        call_args = args[0]
+        self.assertEqual(
+            call_args,
+            ["gum", "table", "--separator", "\t", "--columns", "Name,Count", "--widths", "10,5"],
+        )
+        self.assertEqual(kwargs["capture"], False)
+        self.assertEqual(kwargs["stdin"], "a\t1\nb\t2\n")
+
     # ── gum flag-injection guards ───────────────────────────────────────
     # gum parses any leading-dash positional as a flag and exits 80. Captured
     # command output routinely starts with a dash (buildah "--> <layer>" step
