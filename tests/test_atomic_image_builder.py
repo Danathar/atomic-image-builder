@@ -2664,6 +2664,76 @@ class BuilderTests(unittest.TestCase):
         self.assertIn(("error", "menu boom"), stub.messages)
         self.assertTrue(stub.prompts)
 
+    def test_main_menu_esc_exits_the_app(self) -> None:
+        # Esc at the top-level menu is the documented way out, so it must exit
+        # rather than loop forever.
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: (_ for _ in ()).throw(ScreenBack())
+        app.gum = stub
+        with self.assertRaises(SystemExit):
+            app.main_menu()
+
+    def test_main_menu_empty_choice_quits(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: []
+        app.gum = stub
+        with self.assertRaises(SystemExit):
+            app.main_menu()
+
+    def test_main_menu_scan_os_success_starts_scanned_wizard(self) -> None:
+        # A successful scan hands its findings to the wizard via scanned=True,
+        # which is what preserves the detected host state.
+        app = self.make_app()
+        stub = GumStub()
+        choices = ["Scan OS & Migrate Layered Packages", "Quit"]
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "scan_os", return_value=True):
+            with patch.object(app, "create_new_image") as create_mock:
+                with self.assertRaises(SystemExit):
+                    app.main_menu()
+        create_mock.assert_called_once_with(scanned=True)
+
+    def test_main_menu_scan_os_failure_does_not_start_wizard(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        choices = ["Scan OS & Migrate Layered Packages", "Quit"]
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "scan_os", return_value=False):
+            with patch.object(app, "create_new_image") as create_mock:
+                with self.assertRaises(SystemExit):
+                    app.main_menu()
+        create_mock.assert_not_called()
+
+    def test_main_menu_dispatches_to_update_existing_image(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        choices = ["Update Existing Image", "Quit"]
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "update_existing_image") as update_mock:
+            with patch.object(app, "view_build_status") as status_mock:
+                with self.assertRaises(SystemExit):
+                    app.main_menu()
+        update_mock.assert_called_once()
+        status_mock.assert_not_called()
+
+    def test_main_menu_dispatches_to_view_build_status(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        choices = ["View Build Status", "Quit"]
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "view_build_status") as status_mock:
+            with patch.object(app, "update_existing_image") as update_mock:
+                with self.assertRaises(SystemExit):
+                    app.main_menu()
+        status_mock.assert_called_once()
+        update_mock.assert_not_called()
+
     def test_scan_os_resets_stale_config_before_loading_host_state(self) -> None:
         app = self.make_app()
         app.github_user = "example"
@@ -2997,6 +3067,58 @@ class BuilderTests(unittest.TestCase):
                             with patch.object(app, "ensure_signing_ready") as ensure_mock:
                                 app.update_existing_image()
         ensure_mock.assert_not_called()
+
+    def test_update_existing_image_returns_when_github_is_unavailable(self) -> None:
+        # The auth gate is the first thing this flow checks; failing it must
+        # stop before any repo is picked or cloned.
+        app = self.make_app()
+        with patch.object(app, "require_github", return_value=False):
+            with patch.object(app, "select_repo") as select_mock:
+                with patch.object(app, "clone_repo") as clone_mock:
+                    app.update_existing_image()
+        select_mock.assert_not_called()
+        clone_mock.assert_not_called()
+
+    def test_update_existing_image_returns_when_repo_picker_is_escaped(self) -> None:
+        # Esc out of the repo picker backs out of the whole flow rather than
+        # cloning something the user never chose.
+        app = self.make_app()
+        with patch.object(app, "require_github", return_value=True):
+            with patch.object(app, "select_repo", side_effect=ScreenBack):
+                with patch.object(app, "clone_repo") as clone_mock:
+                    app.update_existing_image()
+        clone_mock.assert_not_called()
+
+    def test_update_existing_image_pushes_when_update_menu_saves(self) -> None:
+        # Saving from the update menu is what carries the flow through to the
+        # push, against the same temporary clone that was edited.
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        app.config.github_user = "example"
+        clone_dirs: list[Path] = []
+
+        def fake_clone(_owner, _repo, target):
+            clone_dirs.append(target)
+
+        with patch.object(app, "select_repo", return_value=("example", "test-image")):
+            with patch.object(app, "clone_repo", side_effect=fake_clone):
+                with patch.object(app, "load_repo_config") as load_mock:
+                    with patch.object(app, "update_menu", return_value=True) as menu_mock:
+                        with patch.object(app, "show_summary") as summary_mock:
+                            with patch.object(app, "push_update") as push_mock:
+                                app.update_existing_image()
+
+        summary_mock.assert_called_once()
+        push_mock.assert_called_once()
+        # Every stage must operate on the one clone: reading its config,
+        # editing it, and pushing it. A stage pointed elsewhere would push a
+        # tree that never received the edits.
+        self.assertEqual(load_mock.call_args.args[0], clone_dirs[0])
+        self.assertEqual(menu_mock.call_args.kwargs["repo_dir"], clone_dirs[0])
+        owner, repo, repo_dir = push_mock.call_args.args
+        self.assertEqual((owner, repo), ("example", "test-image"))
+        self.assertEqual(repo_dir, clone_dirs[0])
 
     def test_load_repo_config_keeps_authenticated_session_user(self) -> None:
         app = self.make_app()
@@ -3536,6 +3658,39 @@ class BuilderTests(unittest.TestCase):
         with patch.object(app, "gh_json", return_value=None):
             with self.assertRaisesRegex(CommandError, "Unable to determine GitHub username"):
                 app.github_login_name()
+
+    def test_github_login_name_wraps_api_command_error(self) -> None:
+        # The gh failure text is preserved so the caller can report why the
+        # lookup failed, not just that it did.
+        app = self.make_app()
+        with patch.object(app, "gh_json", side_effect=CommandError("gh api exploded")):
+            with self.assertRaisesRegex(CommandError, "gh api exploded"):
+                app.github_login_name()
+
+    def test_github_login_name_wraps_invalid_json(self) -> None:
+        app = self.make_app()
+        with patch.object(app, "gh_json", side_effect=json.JSONDecodeError("bad json", "x", 0)):
+            with self.assertRaisesRegex(CommandError, "Unable to determine GitHub username"):
+                app.github_login_name()
+
+    def test_github_login_name_rejects_missing_login_field(self) -> None:
+        app = self.make_app()
+        with patch.object(app, "gh_json", return_value={"id": 1}):
+            with self.assertRaisesRegex(CommandError, "login field missing"):
+                app.github_login_name()
+
+    def test_github_login_name_rejects_blank_login(self) -> None:
+        # A whitespace-only login would otherwise be accepted and then used to
+        # build owner/repo references.
+        app = self.make_app()
+        with patch.object(app, "gh_json", return_value={"login": "   "}):
+            with self.assertRaisesRegex(CommandError, "login field missing"):
+                app.github_login_name()
+
+    def test_github_login_name_strips_surrounding_whitespace(self) -> None:
+        app = self.make_app()
+        with patch.object(app, "gh_json", return_value={"login": " octocat \n"}):
+            self.assertEqual(app.github_login_name(), "octocat")
 
     def test_update_menu_restores_base_image_when_cancelled(self) -> None:
         app = self.make_app()
