@@ -2730,6 +2730,106 @@ class BuilderTests(unittest.TestCase):
         # Verify the warning was shown
         self.assertTrue(any("testing" in msg and "stable" in msg for _, msg in gum.messages))
 
+    def test_scan_os_returns_false_when_rpm_ostree_is_missing(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=False):
+            with patch("atomic_image_builder.run") as run_mock:
+                self.assertFalse(app.scan_os())
+
+        run_mock.assert_not_called()
+        self.assertTrue(
+            any(level == "error" and "rpm-ostree not found" in message for level, message in stub.messages)
+        )
+
+    def test_scan_os_retries_without_booted_and_uses_that_result(self) -> None:
+        # rpm-ostree on some hosts rejects or empties out `--booted`; the retry
+        # without it is what keeps scanning working there, so the fallback
+        # payload must be the one actually parsed.
+        app = self.make_app()
+        app.github_user = "example"
+        status_payload = json.dumps(
+            {
+                "deployments": [
+                    {
+                        "booted": True,
+                        "container-image-reference": "docker://ghcr.io/ublue-os/bazzite:stable",
+                        "requested-packages": [],
+                        "requested-base-removals": [],
+                    }
+                ]
+            }
+        )
+        commands: list[list[str]] = []
+
+        def fake_run(args, **_kwargs):
+            commands.append(list(args))
+            if "--booted" in args:
+                return subprocess.CompletedProcess(list(args), 1, "", "not booted")
+            return subprocess.CompletedProcess(list(args), 0, status_payload, "")
+
+        app.gum = GumStub()
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                self.assertTrue(app.scan_os())
+
+        self.assertEqual(
+            commands,
+            [
+                ["rpm-ostree", "status", "--json", "--booted"],
+                ["rpm-ostree", "status", "--json"],
+            ],
+        )
+        self.assertEqual(app.config.base_image_uri, "ghcr.io/ublue-os/bazzite:stable")
+
+    def test_scan_os_retries_without_booted_when_output_is_empty(self) -> None:
+        # A zero exit with empty stdout is the other shape that triggers the
+        # retry; exit status alone is not enough to accept the first attempt.
+        app = self.make_app()
+        app.github_user = "example"
+        status_payload = json.dumps(
+            {
+                "deployments": [
+                    {
+                        "booted": True,
+                        "container-image-reference": "docker://ghcr.io/ublue-os/bazzite:stable",
+                        "requested-packages": [],
+                        "requested-base-removals": [],
+                    }
+                ]
+            }
+        )
+        commands: list[list[str]] = []
+
+        def fake_run(args, **_kwargs):
+            commands.append(list(args))
+            if "--booted" in args:
+                return subprocess.CompletedProcess(list(args), 0, "   \n", "")
+            return subprocess.CompletedProcess(list(args), 0, status_payload, "")
+
+        app.gum = GumStub()
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                self.assertTrue(app.scan_os())
+
+        self.assertEqual(len(commands), 2)
+
+    def test_scan_os_returns_false_when_both_rpm_ostree_attempts_fail(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["rpm-ostree"], 1, "", "boom"),
+            ):
+                self.assertFalse(app.scan_os())
+
+        self.assertTrue(
+            any(level == "error" and "Failed to read rpm-ostree status" in message for level, message in stub.messages)
+        )
+
     def test_scan_os_returns_false_on_malformed_rpm_ostree_json(self) -> None:
         app = self.make_app()
         app.github_user = "example"
@@ -3454,6 +3554,80 @@ class BuilderTests(unittest.TestCase):
             )
         )
         self.assertIn("Press Enter to choose a different repository...", app.gum.prompts)
+
+    def test_copy_template_snapshot_errors_when_bundled_snapshot_is_missing(self) -> None:
+        # The snapshots are pinned inputs shipped with the tool; a missing one
+        # is a packaging fault that must fail closed rather than produce a
+        # half-seeded project tree.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "project"
+            missing_source = Path(tmp) / "no-such-snapshot"
+            with self.assertRaisesRegex(CommandError, "Bundled template snapshot not found for acme/template"):
+                app.copy_template_snapshot(target, repo="acme/template", source_dir=missing_source)
+            self.assertFalse(target.exists())
+
+    def test_copy_template_snapshot_refuses_to_overwrite_non_empty_target(self) -> None:
+        # Seeding into a directory that already holds files would clobber the
+        # user's work, so the collision is refused and the file left intact.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "snapshot"
+            source.mkdir()
+            (source / "Containerfile").write_text("FROM scratch\n")
+            target = Path(tmp) / "project"
+            target.mkdir()
+            existing = target / "keep-me.txt"
+            existing.write_text("user data\n")
+
+            with self.assertRaisesRegex(CommandError, "already exists and is not empty"):
+                app.copy_template_snapshot(target, repo="acme/template", source_dir=source)
+
+            self.assertEqual(existing.read_text(), "user data\n")
+            self.assertFalse((target / "Containerfile").exists())
+
+    def test_copy_template_snapshot_seeds_into_an_empty_existing_target(self) -> None:
+        # An empty target is replaced rather than refused, and the snapshot's
+        # metadata files are left out of the generated project.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "snapshot"
+            source.mkdir()
+            (source / "Containerfile").write_text("FROM scratch\n")
+            (source / ".template-source").write_text("upstream\n")
+            (source / "renovate.json5").write_text("{}\n")
+            target = Path(tmp) / "project"
+            target.mkdir()
+
+            app.copy_template_snapshot(target, repo="acme/template", source_dir=source)
+
+            self.assertEqual((target / "Containerfile").read_text(), "FROM scratch\n")
+            self.assertFalse((target / ".template-source").exists())
+            self.assertFalse((target / "renovate.json5").exists())
+
+    def test_repo_default_branch_uses_graphql_result_without_rest_fallback(self) -> None:
+        app = self.make_app()
+        with patch.object(app, "gh_json", return_value={"defaultBranchRef": {"name": "trunk"}}):
+            with patch("atomic_image_builder.run") as run_mock:
+                self.assertEqual(app.repo_default_branch("example", "test-image"), "trunk")
+        run_mock.assert_not_called()
+
+    def test_repo_default_branch_warns_when_rest_fallback_json_is_invalid(self) -> None:
+        # gh can exit 0 with output that is not JSON; the decode failure must
+        # fall through to the warning instead of raising.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        with patch.object(app, "gh_json", return_value=None):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["gh", "api"], 0, "not json at all", ""),
+            ):
+                self.assertEqual(app.repo_default_branch("example", "test-image"), "main")
+
+        self.assertTrue(
+            any(level == "warn" and "Could not detect the GitHub default branch" in message for level, message in stub.messages)
+        )
 
     def test_repo_default_branch_falls_back_to_rest_api_when_graphql_payload_is_null(self) -> None:
         app = self.make_app()
