@@ -3103,14 +3103,19 @@ class BuilderTests(unittest.TestCase):
 
         with patch.object(app, "select_repo", return_value=("example", "test-image")):
             with patch.object(app, "clone_repo", side_effect=fake_clone):
-                with patch.object(app, "load_repo_config", return_value=None):
-                    with patch.object(app, "update_menu", return_value=True):
+                with patch.object(app, "load_repo_config") as load_mock:
+                    with patch.object(app, "update_menu", return_value=True) as menu_mock:
                         with patch.object(app, "show_summary") as summary_mock:
                             with patch.object(app, "push_update") as push_mock:
                                 app.update_existing_image()
 
         summary_mock.assert_called_once()
         push_mock.assert_called_once()
+        # Every stage must operate on the one clone: reading its config,
+        # editing it, and pushing it. A stage pointed elsewhere would push a
+        # tree that never received the edits.
+        self.assertEqual(load_mock.call_args.args[0], clone_dirs[0])
+        self.assertEqual(menu_mock.call_args.kwargs["repo_dir"], clone_dirs[0])
         owner, repo, repo_dir = push_mock.call_args.args
         self.assertEqual((owner, repo), ("example", "test-image"))
         self.assertEqual(repo_dir, clone_dirs[0])
