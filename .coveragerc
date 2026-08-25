@@ -1,0 +1,18 @@
+# Coverage settings for CI and local runs.
+#
+# Keep this in sync with the two modules that ship in the image: the tool
+# itself and the maintenance audit helper. Tests are deliberately excluded
+# from measurement — covering the test file tells us nothing.
+
+[run]
+source =
+    atomic_image_builder
+    maintenance_audit
+
+[report]
+show_missing = True
+precision = 0
+exclude_also =
+    # The __main__ guard can only run when the file is executed directly,
+    # which the unittest suite never does.
+    if __name__ == .__main__.:
