@@ -702,6 +702,94 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("- name: Rechunk with Chunkah", result)
         self.assertIn("A completely different trailing comment.", result)
 
+    def test_patch_container_rechunk_step_handles_legacy_sudo_invocation(self) -> None:
+        # Existing managed repositories still carry the pre-rootless upstream
+        # shape (ublue-os/image-template before b9783f6), and they get patched
+        # in place on update rather than replaced from the bundled snapshot.
+        # Both spellings must keep working, or an update would rename the step
+        # to Chunkah while leaving it running rpm-ostree.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build_push:
+                steps:
+                  - name: Rechunk with rpm-ostree
+                    id: rechunk
+                    run: |
+                      sudo -E $(command -v just) ostree-rechunk \\
+                        ${IMAGE_NAME} \\
+                        ${DEFAULT_TAG}
+
+                  - name: Generate Build Tags
+            """
+        )
+        result = app.patch_container_rechunk_step(workflow)
+        self.assertIn("- name: Rechunk with Chunkah", result)
+        self.assertIn("sudo -E $(command -v just) rechunk", result)
+        self.assertNotIn("ostree-rechunk", result)
+
+    def test_patch_container_rechunk_step_handles_rootless_invocation(self) -> None:
+        # Upstream's rootless shape (b9783f6 onward) drops the sudo wrapper.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build_push:
+                steps:
+                  - name: Rechunk with rpm-ostree
+                    id: rechunk
+                    run: |
+                      just ostree-rechunk \\
+                        ${IMAGE_NAME} \\
+                        ${DEFAULT_TAG}
+
+                  - name: Generate Build Tags
+            """
+        )
+        result = app.patch_container_rechunk_step(workflow)
+        self.assertIn("- name: Rechunk with Chunkah", result)
+        self.assertIn("just rechunk", result)
+        self.assertNotIn("ostree-rechunk", result)
+
+    def test_patch_container_rechunk_step_strips_legacy_stale_comment_block(self) -> None:
+        # The stale-comment strip is literal-matched, and upstream shipped the
+        # commented alternative with the sudo wrapper before b9783f6. A repo
+        # created from that template must still get the block removed.
+        app = self.make_app()
+        workflow = (
+            "jobs:\n"
+            "  build_push:\n"
+            "    steps:\n"
+            "      - name: Rechunk with rpm-ostree\n"
+            "        id: rechunk\n"
+            "        run: |\n"
+            "          sudo -E $(command -v just) ostree-rechunk \\\n"
+            "            ${IMAGE_NAME} \\\n"
+            "            ${DEFAULT_TAG}\n"
+            "\n"
+            "      # If you are feeling adventurous, use the new distro agnostic rechunker\n"
+            "      # https://github.com/coreos/chunkah\n"
+            "      # You can delete the Rechunk with rpm-ostree portion then if you use this\n"
+            "      #- name: Rechunk with Chunkah\n"
+            "      #  id: rechunk\n"
+            "      #  run: |\n"
+            "      #    sudo -E $(command -v just) rechunk \\\n"
+            "      #      ${IMAGE_NAME} \\\n"
+            "      #      ${DEFAULT_TAG}\n"
+            "\n"
+            "      - name: Generate Build Tags\n"
+        )
+        result = app.patch_container_rechunk_step(workflow)
+        self.assertNotIn("feeling adventurous", result)
+        self.assertNotIn("#- name: Rechunk with Chunkah", result)
+        self.assertIn(
+            "            ${DEFAULT_TAG}\n"
+            "\n"
+            "      - name: Generate Build Tags\n",
+            result,
+        )
+
     def test_patch_workflow_branch_filters_adds_missing_branches_blocks(self) -> None:
         app = self.make_app()
         workflow = textwrap.dedent(
