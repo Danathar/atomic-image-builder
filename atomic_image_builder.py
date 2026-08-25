@@ -80,7 +80,7 @@ ACTION_PINS: dict[str, tuple[str, str]] = {
     "actions/setup-python": ("5fda3b95a4ea91299a34e894583c3862153e4b97", "v7"),
     "ublue-os/remove-unwanted-software": ("cc0becac701cf642c8f0a6613bbdaf5dc36b259e", "v9"),
     "docker/metadata-action": ("dc802804100637a589fabce1cb79ff13a1411302", "v6.2.0"),
-    "redhat-actions/buildah-build": ("3a51aade9afa17e5c78256bcbe2e1ee08c7b995b", "v3.0.2"),
+    "redhat-actions/buildah-build": ("719e3c40d8af9790c23eca13f7daa339f2867034", "v3.1.0"),
     "docker/login-action": ("dbcb813823bdd20940b903addbd779551569679f", "v4.6.0"),
     "redhat-actions/push-to-registry": ("94ade333c38ecc0e60e94785125d9a52ca423b37", "v3.0.0"),
     "sigstore/cosign-installer": ("6f9f17788090df1f26f669e9d70d6ae9567deba6", "v4.1.2"),
