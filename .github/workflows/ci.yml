@@ -53,6 +53,7 @@ jobs:
         run: |
           mkdir -p unit-coverage/data
           python3 -m coverage xml -o unit-coverage/coverage.xml
+          python3 -m coverage html -d unit-coverage/htmlcov
           cp .coverage unit-coverage/data/.coverage.unit
 
       - name: Upload unit coverage

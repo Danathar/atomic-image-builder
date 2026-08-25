@@ -4746,6 +4746,7 @@ def usage_text() -> str:
             "  -V, --version  Show the version and exit.",
             "",
             f"Requires {', '.join(PRECHECK_REQUIRED_TOOLS)} and a GitHub login (gh auth login).",
+            f"Also requires {', '.join(HOST_REQUIRED_TOOLS)}, already present on rpm-ostree desktops.",
         ]
     )
 

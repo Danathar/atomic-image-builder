@@ -1950,7 +1950,9 @@ class BuilderTests(unittest.TestCase):
         self.assertIn(f"Usage: {TOOL_SLUG}", usage)
         self.assertIn("--help", usage)
         self.assertIn("--version", usage)
-        for tool in atomic_image_builder.PRECHECK_REQUIRED_TOOLS:
+        # preflight() exits when either tuple has a missing tool, so the help
+        # text has to name both or it sends someone down a dead end.
+        for tool in (*atomic_image_builder.PRECHECK_REQUIRED_TOOLS, *atomic_image_builder.HOST_REQUIRED_TOOLS):
             self.assertIn(tool, usage)
 
     def test_main_prints_help_and_exits_without_running_app(self) -> None:
