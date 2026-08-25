@@ -7257,6 +7257,208 @@ class BuilderTests(unittest.TestCase):
                 result = gum.apply_ansi_fallback("hello", bold=False, align="center", width=40)
         self.assertEqual(result, "hello")
 
+    # ── select_packages wizard-step dispatch ───────────────────────────
+
+    def test_select_packages_dispatches_each_editing_task(self) -> None:
+        # The wizard's Software step is a plain if/elif chain keyed on the
+        # exact menu labels passed to gum.choose a few lines above. A typo or
+        # a reordering would silently route the user to the wrong editor, so
+        # walk every arm once and assert it reached the right handler.
+        app = self.make_app()
+        selections = iter(
+            [
+                ["Search package names"],
+                ["Type exact package names"],
+                ["Add a COPR repository"],
+                ["Add systemd services to enable"],
+                ["Removed base packages"],
+                ["Review current selections"],
+                ["Continue to review"],
+            ]
+        )
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: next(selections)
+        app.gum = stub
+        with patch.object(app, "search_packages") as search:
+            with patch.object(app, "manual_packages") as manual:
+                with patch.object(app, "add_copr") as copr:
+                    with patch.object(app, "add_services") as services:
+                        with patch.object(app, "manage_removed_packages") as removed:
+                            with patch.object(app, "view_selections") as review:
+                                with redirect_stdout(io.StringIO()):
+                                    app.select_packages()
+
+        search.assert_called_once()
+        manual.assert_called_once()
+        copr.assert_called_once()
+        services.assert_called_once()
+        removed.assert_called_once_with(return_to="package menu")
+        review.assert_called_once()
+
+    def test_select_packages_inner_escape_returns_to_the_step_menu(self) -> None:
+        # Esc inside an editing task means "back to the Software menu", not
+        # "abandon the wizard step" — the ScreenBack must not escape.
+        app = self.make_app()
+        selections = iter([["Search package names"], ["Continue to review"]])
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: next(selections)
+        app.gum = stub
+        with patch.object(app, "search_packages", side_effect=ScreenBack()) as search:
+            with redirect_stdout(io.StringIO()):
+                app.select_packages()
+
+        search.assert_called_once()
+
+    # ── search_packages result-screen branches ─────────────────────────
+
+    def test_search_packages_escape_at_results_returns(self) -> None:
+        # Esc on the results chooser backs out of search without touching the
+        # current selection.
+        app = self.make_app()
+        app.config.packages = ["fish"]
+        stub = GumStub()
+        stub.input = lambda **_kwargs: "fish"
+        stub.choose = lambda _options, **_kwargs: (_ for _ in ()).throw(ScreenBack())
+        app.gum = stub
+        with patch.object(app, "search_host_packages", return_value=([("fish", "Friendly shell")], False, None)):
+            with patch.object(app, "add_packages_to_config") as add_mock:
+                with redirect_stdout(io.StringIO()):
+                    app.search_packages()
+
+        self.assertEqual(app.config.packages, ["fish"])
+        add_mock.assert_not_called()
+        self.assertEqual(stub.prompts, [])
+
+    def test_search_packages_reports_added_and_removed_counts(self) -> None:
+        # Selecting a new match while deselecting an existing one has to report
+        # both halves; the counts come from measuring config.packages around
+        # add_packages_to_config, not from the picked list.
+        app = self.make_app()
+        app.config.packages = ["fish"]
+        stub = GumStub()
+        stub.input = lambda **_kwargs: "sh"
+        stub.choose = lambda _options, **_kwargs: ["tmux"]
+        app.gum = stub
+
+        def fake_add(names: list[str], *, source_label: str) -> bool:
+            app.config.packages.extend(names)
+            return True
+
+        results = [("fish", "Friendly shell"), ("tmux", "Terminal multiplexer")]
+        with patch.object(app, "search_host_packages", return_value=(results, False, None)):
+            with patch.object(app, "add_packages_to_config", side_effect=fake_add) as add_mock:
+                with redirect_stdout(io.StringIO()):
+                    app.search_packages()
+
+        add_mock.assert_called_once_with(["tmux"], source_label="search 'sh'")
+        self.assertEqual(app.config.packages, ["tmux"])
+        self.assertEqual(
+            stub.prompts,
+            ["Added 1 and removed 1 package(s). Press Enter to return to the package menu..."],
+        )
+
+    def test_search_packages_reports_added_count_only(self) -> None:
+        app = self.make_app()
+        app.config.packages = []
+        stub = GumStub()
+        stub.input = lambda **_kwargs: "tmux"
+        stub.choose = lambda _options, **_kwargs: ["tmux"]
+        app.gum = stub
+
+        def fake_add(names: list[str], *, source_label: str) -> bool:
+            app.config.packages.extend(names)
+            return True
+
+        with patch.object(app, "search_host_packages", return_value=([("tmux", "Terminal multiplexer")], False, None)):
+            with patch.object(app, "add_packages_to_config", side_effect=fake_add):
+                with redirect_stdout(io.StringIO()):
+                    app.search_packages()
+
+        self.assertEqual(app.config.packages, ["tmux"])
+        self.assertEqual(stub.prompts, ["Added 1 package(s). Press Enter to return to the package menu..."])
+
+    def test_search_packages_empty_term_returns_to_the_package_menu(self) -> None:
+        # An empty search term is how the user backs out of the prompt, so it
+        # must return before any lookup happens.
+        app = self.make_app()
+        stub = GumStub()
+        stub.input = lambda **_kwargs: "   "
+        app.gum = stub
+        with patch.object(app, "search_host_packages") as search_mock:
+            with redirect_stdout(io.StringIO()):
+                app.search_packages()
+
+        search_mock.assert_not_called()
+        self.assertEqual(stub.prompts, [])
+
+    def test_search_packages_reports_unavailable_search_and_returns(self) -> None:
+        # When search metadata is unavailable the message has to reach the user
+        # and the flow has to return rather than loop on a search that cannot
+        # work.
+        app = self.make_app()
+        stub = GumStub()
+        stub.input = lambda **_kwargs: "tmux"
+        app.gum = stub
+        with patch.object(app, "search_host_packages", return_value=([], False, "dnf5 makecache first")):
+            with redirect_stdout(io.StringIO()):
+                app.search_packages()
+
+        self.assertIn(("warn", "dnf5 makecache first"), stub.messages)
+        self.assertEqual(stub.prompts, ["Press Enter to return to the package menu..."])
+
+    def test_search_packages_no_matches_loops_for_another_term(self) -> None:
+        # No matches is not an error: the user gets a hint and another prompt,
+        # and only an empty term ends the loop.
+        app = self.make_app()
+        terms = iter(["doesnotexist", ""])
+        stub = GumStub()
+        stub.input = lambda **_kwargs: next(terms)
+        app.gum = stub
+        with patch.object(app, "search_host_packages", return_value=([], False, None)) as search_mock:
+            with redirect_stdout(io.StringIO()):
+                app.search_packages()
+
+        search_mock.assert_called_once_with("doesnotexist")
+        self.assertIn(("warn", "No package names matched 'doesnotexist'."), stub.messages)
+        self.assertEqual(stub.prompts, ["Press Enter to search again..."])
+
+    def test_search_packages_hints_when_results_are_truncated(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.input = lambda **_kwargs: "py"
+        stub.choose = lambda _options, **_kwargs: []
+        app.gum = stub
+        with patch.object(app, "search_host_packages", return_value=([("python3", "")], True, None)):
+            with redirect_stdout(io.StringIO()):
+                app.search_packages()
+
+        self.assertTrue(
+            any(level == "hint" and str(PACKAGE_SEARCH_LIMIT) in message for level, message in stub.messages)
+        )
+
+    def test_run_main_returns_after_preflight_when_gum_is_missing(self) -> None:
+        # preflight() may report and return rather than exit (for example when
+        # it only has warnings). run_main must still stop there instead of
+        # falling through into a menu that needs gum.
+        app = self.make_app()
+
+        def fake_exists(name: str) -> bool:
+            return name != "gum"
+
+        with patch("atomic_image_builder.command_exists", side_effect=fake_exists):
+            with patch.object(app, "preflight") as preflight_mock:
+                with patch.object(app, "clear") as clear_mock:
+                    with patch.object(app, "banner") as banner_mock:
+                        with patch.object(app, "startup_requirements") as startup_mock:
+                            with patch.object(app, "main_menu") as menu_mock:
+                                self.assertIsNone(app.run_main())
+
+        preflight_mock.assert_called_once_with()
+        clear_mock.assert_not_called()
+        banner_mock.assert_not_called()
+        startup_mock.assert_not_called()
+        menu_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
