@@ -2271,6 +2271,28 @@ class BuilderTests(unittest.TestCase):
             app.manual_packages()
         self.assertEqual(app.config.packages, ["tmux", "htop", "vim"])
 
+    def test_manual_packages_returns_silently_when_input_is_empty(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.write = lambda **_kwargs: "   "
+        app.gum = stub
+        app.manual_packages()
+        self.assertEqual(app.config.packages, [])
+        self.assertEqual(app.gum.prompts, [])
+
+    def test_manual_packages_pauses_with_missing_hint_when_some_packages_are_missing(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.write = lambda **_kwargs: "tmux nethock"
+        app.gum = stub
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {"tmux": True, "nethock": False}):
+            app.manual_packages()
+        self.assertEqual(app.config.packages, ["tmux"])
+        self.assertEqual(
+            app.gum.prompts,
+            ["Finished checking package names. Press Enter to return to the package menu..."],
+        )
+
     def test_select_common_services_replaces_curated_selection_only(self) -> None:
         app = self.make_app()
         app.config.services = ["custom.service", COMMON_SERVICES[0][1]]
@@ -2279,6 +2301,15 @@ class BuilderTests(unittest.TestCase):
         app.gum = stub
         app.select_common_services()
         self.assertEqual(app.config.services, ["custom.service", COMMON_SERVICES[1][1]])
+
+    def test_select_common_services_back_is_noop(self) -> None:
+        app = self.make_app()
+        app.config.services = ["custom.service", COMMON_SERVICES[0][1]]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: (_ for _ in ()).throw(ScreenBack())
+        app.gum = stub
+        app.select_common_services()
+        self.assertEqual(app.config.services, ["custom.service", COMMON_SERVICES[0][1]])
 
     def test_do_build_validates_before_creating_repo(self) -> None:
         app = self.make_app()
@@ -4570,6 +4601,21 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("Repository", paged[0])
         self.assertIn("Step 4 of 4.", paged[0])
 
+    def test_show_summary_includes_homebrew_status_for_non_universal_blue_base(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.brew_enabled = False
+        app.github_user = "example"
+        paged: list[str] = []
+        stub = GumStub()
+        stub.pager = lambda text: paged.append(text)
+        app.gum = stub
+        app.show_summary()
+
+        self.assertEqual(len(paged), 1)
+        self.assertIn("Homebrew", paged[0])
+        self.assertIn("Not included", paged[0])
+
     def test_view_selections_uses_pager_for_read_only_view(self) -> None:
         app = self.make_app()
         app.config.packages = ["tmux"]
@@ -4584,6 +4630,20 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("Current Selections", paged[0])
         self.assertIn("- tmux", paged[0])
         self.assertIn("- sshd.service", paged[0])
+
+    def test_view_selections_includes_homebrew_status_for_non_universal_blue_base(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.brew_enabled = True
+        paged: list[str] = []
+        stub = GumStub()
+        stub.pager = lambda text: paged.append(text)
+        app.gum = stub
+        app.view_selections()
+
+        self.assertEqual(len(paged), 1)
+        self.assertIn("Homebrew", paged[0])
+        self.assertIn("- Enabled", paged[0])
 
     def test_patch_container_workflow_injects_cosign_key_into_existing_job_env(self) -> None:
         app = self.make_app()
@@ -5036,6 +5096,23 @@ class BuilderTests(unittest.TestCase):
         app.config.brew_enabled = False
         app.offer_brew_if_applicable()
         self.assertFalse(app.config.brew_enabled)
+
+    def test_offer_brew_if_applicable_skips_prompt_for_universal_blue_base(self) -> None:
+        # Universal Blue images already bundle Homebrew, so there is nothing
+        # to offer and no prompt should be shown.
+        app = self.make_app()
+        app.config.base_image_uri = "ghcr.io/ublue-os/bazzite:stable"
+        app.config.brew_enabled = True
+        stub = GumStub()
+
+        def fail_confirm(*_args, **_kwargs):
+            raise AssertionError("confirm() should not be called for a Universal Blue base")
+
+        stub.confirm = fail_confirm
+        app.gum = stub
+        app.offer_brew_if_applicable()
+        self.assertFalse(app.config.brew_enabled)
+        self.assertEqual(app.gum.messages, [])
 
     def test_software_status_includes_brew_when_enabled(self) -> None:
         app = self.make_app()
@@ -6224,6 +6301,40 @@ class BuilderTests(unittest.TestCase):
             app.add_copr()
         self.assertEqual(app.config.copr_repos, ["kwizart/fedy"])
         self.assertEqual(app.config.packages, ["tmux", "htop"])
+
+    def test_add_copr_returns_silently_when_repo_is_empty(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.input = lambda **_kwargs: "   "
+        app.gum = stub
+        app.add_copr()
+        self.assertEqual(app.config.copr_repos, [])
+        self.assertEqual([m for m in app.gum.messages if m[0] == "error"], [])
+        self.assertEqual([m for m in app.gum.messages if m[0] == "success"], [])
+
+    def test_add_copr_rejects_invalid_repo_format(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.input = lambda *, prompt, **_kwargs: "not-a-valid-repo"
+        app.gum = stub
+        app.add_copr()
+        self.assertEqual(app.config.copr_repos, [])
+        self.assertIn(("error", "Enter the COPR repo as owner/project."), app.gum.messages)
+
+    def test_add_copr_returns_without_adding_repo_when_packages_fail_validation(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+
+        def fake_input(*, prompt, **_kwargs):
+            if prompt == "COPR repo: ":
+                return "kwizart/fedy"
+            return "bad;rm"
+
+        stub.input = fake_input
+        app.gum = stub
+        app.add_copr()
+        self.assertEqual(app.config.copr_repos, [])
+        self.assertEqual(app.config.packages, [])
 
     def test_manage_copr_repos_add_delegates_to_add_copr(self) -> None:
         app = self.make_app()
