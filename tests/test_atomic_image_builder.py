@@ -7259,25 +7259,43 @@ class BuilderTests(unittest.TestCase):
 
     # ── select_packages wizard-step dispatch ───────────────────────────
 
+    def pick_from_menu(self, stub: "GumStub", labels: list[str]):
+        """Answer gum.choose with `labels`, one per call, checking each is real.
+
+        A stub that returns hard-coded labels regardless of what was displayed
+        would keep passing if a menu label were renamed while its if/elif arm
+        kept the old spelling — exactly the break these dispatch tests exist to
+        catch. Asserting the label is in the options passed to choose() keeps
+        the test coupled to the menu the user actually sees.
+        """
+        remaining = iter(labels)
+
+        def choose(options, **_kwargs) -> list[str]:
+            label = next(remaining)
+            self.assertIn(label, list(options))
+            return [label]
+
+        stub.choose = choose
+        return stub
+
     def test_select_packages_dispatches_each_editing_task(self) -> None:
         # The wizard's Software step is a plain if/elif chain keyed on the
         # exact menu labels passed to gum.choose a few lines above. A typo or
         # a reordering would silently route the user to the wrong editor, so
         # walk every arm once and assert it reached the right handler.
         app = self.make_app()
-        selections = iter(
+        stub = self.pick_from_menu(
+            GumStub(),
             [
-                ["Search package names"],
-                ["Type exact package names"],
-                ["Add a COPR repository"],
-                ["Add systemd services to enable"],
-                ["Removed base packages"],
-                ["Review current selections"],
-                ["Continue to review"],
-            ]
+                "Search package names",
+                "Type exact package names",
+                "Add a COPR repository",
+                "Add systemd services to enable",
+                "Removed base packages",
+                "Review current selections",
+                "Continue to review",
+            ],
         )
-        stub = GumStub()
-        stub.choose = lambda _options, **_kwargs: next(selections)
         app.gum = stub
         with patch.object(app, "search_packages") as search:
             with patch.object(app, "manual_packages") as manual:
@@ -7299,9 +7317,7 @@ class BuilderTests(unittest.TestCase):
         # Esc inside an editing task means "back to the Software menu", not
         # "abandon the wizard step" — the ScreenBack must not escape.
         app = self.make_app()
-        selections = iter([["Search package names"], ["Continue to review"]])
-        stub = GumStub()
-        stub.choose = lambda _options, **_kwargs: next(selections)
+        stub = self.pick_from_menu(GumStub(), ["Search package names", "Continue to review"])
         app.gum = stub
         with patch.object(app, "search_packages", side_effect=ScreenBack()) as search:
             with redirect_stdout(io.StringIO()):
