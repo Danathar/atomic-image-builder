@@ -7800,8 +7800,7 @@ class BuilderTests(unittest.TestCase):
         # screen, so it must return before anything is validated or added.
         app = self.make_app()
         app.config.removed_packages = ["vim-enhanced"]
-        stub = GumStub()
-        stub.choose = lambda _options, **_kwargs: ["Add package names to remove"]
+        stub = self.pick_from_menu(GumStub(), ["Add package names to remove"])
         stub.write = lambda **_kwargs: "   \n  "
         app.gum = stub
         with patch.object(app, "add_removed_packages_to_config") as add_mock:
@@ -7817,8 +7816,7 @@ class BuilderTests(unittest.TestCase):
         # message must not claim a clean count, because the per-package
         # warnings the user just saw are the real result.
         app = self.make_app()
-        stub = GumStub()
-        stub.choose = lambda _options, **_kwargs: ["Add package names to remove"]
+        stub = self.pick_from_menu(GumStub(), ["Add package names to remove"])
         stub.write = lambda **_kwargs: "vim-enhanced nosuchpkg"
         app.gum = stub
 
@@ -7827,10 +7825,15 @@ class BuilderTests(unittest.TestCase):
             app.last_manual_removed_package_check_had_missing = True
             return True
 
-        with patch.object(app, "add_removed_packages_to_config", side_effect=fake_add):
+        with patch.object(app, "add_removed_packages_to_config", side_effect=fake_add) as add_mock:
             with redirect_stdout(io.StringIO()):
                 app.manage_removed_packages(return_to="package menu")
 
+        # The "manual entry" label is what gates
+        # filter_available_manual_removed_packages inside the adder. Any other
+        # label would let unresolved removals through, so the fake must not be
+        # allowed to stand in for a call that never passed it.
+        add_mock.assert_called_once_with(["vim-enhanced", "nosuchpkg"], source_label="manual entry")
         self.assertEqual(
             stub.prompts,
             ["Finished checking package removals. Press Enter to return to the package menu..."],
@@ -7838,14 +7841,14 @@ class BuilderTests(unittest.TestCase):
 
     def test_manage_removed_packages_reports_nothing_added(self) -> None:
         app = self.make_app()
-        stub = GumStub()
-        stub.choose = lambda _options, **_kwargs: ["Add package names to remove"]
+        stub = self.pick_from_menu(GumStub(), ["Add package names to remove"])
         stub.write = lambda **_kwargs: "nosuchpkg"
         app.gum = stub
-        with patch.object(app, "add_removed_packages_to_config", return_value=False):
+        with patch.object(app, "add_removed_packages_to_config", return_value=False) as add_mock:
             with redirect_stdout(io.StringIO()):
                 app.manage_removed_packages()
 
+        add_mock.assert_called_once_with(["nosuchpkg"], source_label="manual entry")
         self.assertEqual(app.config.removed_packages, [])
         self.assertEqual(
             stub.prompts,
@@ -7869,9 +7872,7 @@ class BuilderTests(unittest.TestCase):
         # Esc inside the add screen means "back to the COPR menu", not "leave
         # the COPR menu", so the loop has to redraw rather than unwind.
         app = self.make_app()
-        selections = iter([["Add a COPR repository"], ["Back"]])
-        stub = GumStub()
-        stub.choose = lambda _options, **_kwargs: next(selections)
+        stub = self.pick_from_menu(GumStub(), ["Add a COPR repository", "Back"])
         app.gum = stub
         with patch.object(app, "add_copr", side_effect=ScreenBack()) as add_mock:
             with redirect_stdout(io.StringIO()):
@@ -7955,8 +7956,7 @@ class BuilderTests(unittest.TestCase):
         # The same method is both a wizard step and a standalone menu. Only the
         # wizard call renders the "Step N of M" header.
         app = self.make_app()
-        stub = GumStub()
-        stub.choose = lambda _options, **_kwargs: ["Continue to review"]
+        stub = self.pick_from_menu(GumStub(), ["Continue to review"])
         app.gum = stub
         with redirect_stdout(io.StringIO()):
             app.select_packages(step=4, total_steps=6)
@@ -7965,8 +7965,7 @@ class BuilderTests(unittest.TestCase):
 
     def test_select_packages_omits_step_header_outside_the_wizard(self) -> None:
         app = self.make_app()
-        stub = GumStub()
-        stub.choose = lambda _options, **_kwargs: ["Continue to review"]
+        stub = self.pick_from_menu(GumStub(), ["Continue to review"])
         app.gum = stub
         with redirect_stdout(io.StringIO()):
             app.select_packages()
