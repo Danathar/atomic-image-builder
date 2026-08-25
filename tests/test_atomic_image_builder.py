@@ -7793,6 +7793,231 @@ class BuilderTests(unittest.TestCase):
         startup_mock.assert_not_called()
         menu_mock.assert_not_called()
 
+    # ── manage_removed_packages entry outcomes ─────────────────────────
+
+    def test_manage_removed_packages_empty_entry_returns(self) -> None:
+        # An empty write box is the documented way to back out of the add
+        # screen, so it must return before anything is validated or added.
+        app = self.make_app()
+        app.config.removed_packages = ["vim-enhanced"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Add package names to remove"]
+        stub.write = lambda **_kwargs: "   \n  "
+        app.gum = stub
+        with patch.object(app, "add_removed_packages_to_config") as add_mock:
+            with redirect_stdout(io.StringIO()):
+                app.manage_removed_packages()
+
+        add_mock.assert_not_called()
+        self.assertEqual(app.config.removed_packages, ["vim-enhanced"])
+        self.assertEqual(stub.prompts, [])
+
+    def test_manage_removed_packages_reports_partially_checked_entry(self) -> None:
+        # Some names added, others unresolvable on this host: the closing
+        # message must not claim a clean count, because the per-package
+        # warnings the user just saw are the real result.
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Add package names to remove"]
+        stub.write = lambda **_kwargs: "vim-enhanced nosuchpkg"
+        app.gum = stub
+
+        def fake_add(packages: list[str], *, source_label: str) -> bool:
+            app.config.removed_packages.append("vim-enhanced")
+            app.last_manual_removed_package_check_had_missing = True
+            return True
+
+        with patch.object(app, "add_removed_packages_to_config", side_effect=fake_add):
+            with redirect_stdout(io.StringIO()):
+                app.manage_removed_packages(return_to="package menu")
+
+        self.assertEqual(
+            stub.prompts,
+            ["Finished checking package removals. Press Enter to return to the package menu..."],
+        )
+
+    def test_manage_removed_packages_reports_nothing_added(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Add package names to remove"]
+        stub.write = lambda **_kwargs: "nosuchpkg"
+        app.gum = stub
+        with patch.object(app, "add_removed_packages_to_config", return_value=False):
+            with redirect_stdout(io.StringIO()):
+                app.manage_removed_packages()
+
+        self.assertEqual(app.config.removed_packages, [])
+        self.assertEqual(
+            stub.prompts,
+            ["No package removals were added. Press Enter to return to the update menu..."],
+        )
+
+    # ── manage_copr_repos escape handling ──────────────────────────────
+
+    def test_manage_copr_repos_escape_at_menu_returns(self) -> None:
+        app = self.make_app()
+        app.config.copr_repos = ["owner/project"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: (_ for _ in ()).throw(ScreenBack())
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.manage_copr_repos()  # must return, not raise
+
+        self.assertEqual(app.config.copr_repos, ["owner/project"])
+
+    def test_manage_copr_repos_inner_escape_returns_to_menu(self) -> None:
+        # Esc inside the add screen means "back to the COPR menu", not "leave
+        # the COPR menu", so the loop has to redraw rather than unwind.
+        app = self.make_app()
+        selections = iter([["Add a COPR repository"], ["Back"]])
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: next(selections)
+        app.gum = stub
+        with patch.object(app, "add_copr", side_effect=ScreenBack()) as add_mock:
+            with redirect_stdout(io.StringIO()):
+                app.manage_copr_repos()
+
+        add_mock.assert_called_once()
+
+    # ── empty-candidate guards on the config adders ────────────────────
+
+    def test_add_packages_to_config_rejects_empty_candidates(self) -> None:
+        # Both adders are reached from several entry points; an empty list has
+        # to be refused before validation, or a "Added 0 package(s)" success
+        # message would be reported for doing nothing.
+        app = self.make_app()
+        app.gum = GumStub()
+        self.assertFalse(app.add_packages_to_config([], source_label="manual entry"))
+        self.assertEqual(app.config.packages, [])
+
+    def test_add_removed_packages_to_config_rejects_empty_candidates(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        self.assertFalse(app.add_removed_packages_to_config([], source_label="manual entry"))
+        self.assertEqual(app.config.removed_packages, [])
+
+    # ── search_host_packages preconditions and failure reporting ───────
+
+    def test_search_host_packages_blank_term_returns_no_results(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists") as exists_mock:
+            results, truncated, message = app.search_host_packages("   ")
+
+        self.assertEqual((results, truncated, message), ([], False, None))
+        exists_mock.assert_not_called()
+
+    def test_search_host_packages_without_dnf5_reports_unavailable(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        with patch("atomic_image_builder.command_exists", return_value=False):
+            results, truncated, message = app.search_host_packages("tmux")
+
+        self.assertEqual(results, [])
+        self.assertFalse(truncated)
+        self.assertEqual(message, "dnf5 is not installed, so package search is unavailable on this system.")
+
+    def test_search_host_packages_reports_unrecognized_failure(self) -> None:
+        # A nonzero exit that matches neither the missing-cache nor the
+        # no-matches shape is a real failure, and must be reported as one
+        # rather than silently looking like an empty result set.
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, _command, *, cwd=None: subprocess.CompletedProcess(
+            ["dnf5", "repoquery"], 1, "", "Error: something else went wrong"
+        )
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "dnf5"):
+            results, truncated, message = app.search_host_packages("tmux")
+
+        self.assertEqual(results, [])
+        self.assertFalse(truncated)
+        self.assertEqual(message, "Package search is unavailable right now. Use exact-name entry instead.")
+
+    def test_search_host_packages_skips_blank_output_lines(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, _command, *, cwd=None: subprocess.CompletedProcess(
+            ["dnf5", "repoquery"], 0, "tmux\tMultiplexer\n\n   \nhtop\tViewer\n", ""
+        )
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "dnf5"):
+            results, truncated, message = app.search_host_packages("t")
+
+        self.assertIsNone(message)
+        self.assertFalse(truncated)
+        self.assertEqual(results, [("tmux", "Multiplexer"), ("htop", "Viewer")])
+
+    # ── select_packages as a numbered wizard step ──────────────────────
+
+    def test_select_packages_shows_step_header_inside_the_wizard(self) -> None:
+        # The same method is both a wizard step and a standalone menu. Only the
+        # wizard call renders the "Step N of M" header.
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Continue to review"]
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.select_packages(step=4, total_steps=6)
+
+        self.assertIn(("hint", "Step 4 of 6."), stub.messages)
+
+    def test_select_packages_omits_step_header_outside_the_wizard(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Continue to review"]
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.select_packages()
+
+        self.assertFalse(any(message.startswith("Step ") for _level, message in stub.messages))
+
+    # ── menu summary formatting helpers ────────────────────────────────
+
+    def test_truncate_label_collapses_whitespace_and_elides(self) -> None:
+        app = self.make_app()
+        self.assertEqual(app.truncate_label("  tmux   terminal  ", limit=36), "tmux terminal")
+        self.assertEqual(app.truncate_label("abcdefghij", limit=8), "abcde...")
+        self.assertEqual(len(app.truncate_label("abcdefghij", limit=8)), 8)
+
+    def test_preview_values_is_empty_for_no_values(self) -> None:
+        app = self.make_app()
+        self.assertEqual(app.preview_values([]), "")
+
+    def test_preview_values_counts_the_overflow(self) -> None:
+        app = self.make_app()
+        self.assertEqual(app.preview_values(["tmux", "htop", "fish", "vim"], limit=2), "tmux, htop, 2 more")
+
+    def test_summarize_selection_prefixes_a_count_past_the_limit(self) -> None:
+        app = self.make_app()
+        self.assertEqual(
+            app.summarize_selection(["tmux", "htop", "fish"], empty="No packages yet", verb="packages", limit=2),
+            "3 packages: tmux, htop, 1 more",
+        )
+        self.assertEqual(
+            app.summarize_selection(["tmux", "htop"], empty="No packages yet", verb="packages", limit=2),
+            "tmux, htop",
+        )
+        self.assertEqual(
+            app.summarize_selection([], empty="No packages yet", verb="packages"),
+            "No packages yet",
+        )
+
+    def test_software_status_counts_each_kind_of_change(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        app.config.packages = ["tmux", "htop"]
+        app.config.copr_repos = ["owner/project"]
+        app.config.services = ["sshd"]
+        app.config.removed_packages = ["nano"]
+        self.assertEqual(app.software_status(), "2 pkg, 1 COPR, 1 svc, 1 removed")
+
+    def test_software_status_reports_an_untouched_config(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        self.assertEqual(app.software_status(), "No software changes yet")
+
 
 if __name__ == "__main__":
     unittest.main()
