@@ -147,6 +147,15 @@ cd atomic-image-builder
 
 If the script is not already executable on your system, make it executable once with `chmod +x atomic_image_builder.py`.
 
+### Command-line options
+
+The tool is a guided menu, so there is almost nothing to pass it. The two options it does take work the same from a checkout, `podman run`, or distrobox:
+
+| Option | What it does |
+|---|---|
+| `-h`, `--help` | Print a short usage summary and exit. |
+| `-V`, `--version` | Print the tool version and exit. |
+
 ## Using the tool
 
 However you launch it, the guided menu is the same. What to expect:
