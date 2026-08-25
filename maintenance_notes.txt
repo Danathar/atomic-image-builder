@@ -109,16 +109,30 @@ Rechunk Step Naming (Chunkah)
 -----------------------------
 patch_container_rechunk_step() swaps the bundled workflow's rpm-ostree rechunk
 step for Chunkah by matching the exact step name "Rechunk with rpm-ostree" and
-the exact substring "command -v just) ostree-rechunk". Both are upstream's
-current literal text, not a stable API. If a future template refresh renames
-this step or changes how it invokes the Justfile's rechunk recipes, this
-patcher will silently no-op (by design, matching every other patcher in this
-file) and generated workflows will keep rechunking with rpm-ostree instead of
-Chunkah. test_patch_container_rechunk_step_is_idempotent and the assertions in
+the recipe invocation via RECHUNK_RECIPE_RE. Both are upstream's literal text,
+not a stable API. If a future template refresh renames this step or changes how
+it invokes the Justfile's rechunk recipes, this patcher will silently no-op (by
+design, matching every other patcher in this file) and generated workflows will
+keep rechunking with rpm-ostree instead of Chunkah.
+test_patch_container_rechunk_step_is_idempotent and the assertions in
 test_patch_container_workflow_matches_current_upstream_snapshot_shape catch
 this today only because they run against the real bundled snapshot — if that
 snapshot's step text ever drifts, re-check those tests still assert something
 meaningful rather than trivially passing on a no-op.
+
+This already happened once, and it is the reason RECHUNK_RECIPE_RE matches two
+shapes instead of one literal. Upstream revision b9783f6 made the whole CI
+pipeline rootless, rewriting every "sudo -E $(command -v just) X" invocation to
+a bare "just X". The old single-literal matcher would not have no-oped
+harmlessly: the step-name match still fired, so the step would have been
+renamed to "Rechunk with Chunkah" while its command still called
+ostree-rechunk. Existing managed repositories are patched in place on update
+rather than replaced from the snapshot, so they still carry the pre-rootless
+spelling and both must keep matching indefinitely. The same applies to the
+stale-comment strip, which is why STALE_CHUNKAH_COMMENT_BLOCKS carries both
+spellings of that block. Prefer assertions on the recipe name (rechunk /
+ostree-rechunk) over the full invocation when writing tests here, so they keep
+testing something real across a sudo-style change.
 
 The same function also strips upstream's trailing "if you are feeling
 adventurous, use the new distro agnostic rechunker" comment block once the
@@ -130,6 +144,25 @@ drift convention as everything else here. Found via live use: a real
 generated repo (not a test) showed the leftover block and it was genuinely
 confusing to read, even though the build itself was unaffected — the active
 step was already correct.
+
+Rootless CI and What Existing Repositories Inherit
+--------------------------------------------------
+Since the b9783f6 snapshot refresh, generated Containerfile-method repositories
+run their whole build pipeline rootless: no "sudo -E" wrapper on just or
+podman. Upstream made this change because rootfull podman had roughly doubled
+build times on GitHub runners (ublue-os/image-template#260). The Chunkah recipe
+we enable by default needs no privileges, and "just build" and "just rechunk"
+share one rootless container store, so the pipeline stays self-consistent.
+
+This reaches new repositories only. write_container_project_files() patches an
+existing repository's Justfile and build.yml in place and restores them from
+the bundled snapshot only when the file is missing, which is deliberate: it
+preserves user customizations. The consequence is that upstream Justfile
+improvements (the rootless invocations, the SOURCE_DATE_EPOCH removal) do not
+reach repositories created before the refresh. Carrying a specific upstream fix
+to existing repositories takes a targeted patcher, the way
+patch_container_rechunk_config_arg() did for the ARG_MAX fix. Decide that per
+fix rather than by wholesale-replacing files on update.
 
 Rechunk Recipe ARG_MAX Fix (CHUNKAH_CONFIG_STR)
 ------------------------------------------------
@@ -159,8 +192,12 @@ flag. This avoids both the ARG_MAX and SELinux permission failures.
 
 The refreshed bundled template now carries the upstream OCI-directory recipe:
 it uses a config temp file, a temporary `*_chunkah_*` output directory, an EXIT
-trap for both, `SOURCE_DATE_EPOCH=0`, and `--output oci:/run/out/chunked`, then
-pulls and retags the resulting OCI image. The upstream revision originally
+trap for both, and `--output oci:/run/out/chunked`, then pulls and retags the
+resulting OCI image. It no longer passes `SOURCE_DATE_EPOCH=0`: upstream
+dropped that in image-template 94e9423 because pinning it to the epoch clamps
+file mtimes but also discards the package stability data chunkah uses to plan
+layers, which costs users delta-update quality (coreos/chunkah#160). The noop
+test asserts it stays gone so a future refresh cannot quietly reintroduce it. The upstream revision originally
 derived that temporary directory from `${target_image}`. Registry-qualified
 image names contain slashes (for example `ghcr.io/acme/image`), which made
 `mktemp` interpret parts of the image name as nonexistent parent directories.
