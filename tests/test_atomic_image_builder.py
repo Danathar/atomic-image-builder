@@ -1710,6 +1710,94 @@ class BuilderTests(unittest.TestCase):
         startup_mock.assert_not_called()
         menu_mock.assert_not_called()
 
+    def test_run_main_renders_landing_flow_when_gum_is_present(self) -> None:
+        app = self.make_app()
+        calls: list[str] = []
+
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch.object(app, "clear", side_effect=lambda: calls.append("clear")) as clear_mock:
+                with patch.object(app, "banner", side_effect=lambda: calls.append("banner")) as banner_mock:
+                    with patch.object(
+                        app, "startup_requirements", side_effect=lambda: calls.append("startup_requirements")
+                    ) as startup_mock:
+                        with patch.object(
+                            app, "preflight", side_effect=lambda: calls.append("preflight")
+                        ) as preflight_mock:
+                            with patch.object(
+                                app, "main_menu", side_effect=lambda: calls.append("main_menu")
+                            ) as menu_mock:
+                                app.run_main()
+
+        clear_mock.assert_called_once_with()
+        banner_mock.assert_called_once_with()
+        startup_mock.assert_called_once_with()
+        preflight_mock.assert_called_once_with()
+        menu_mock.assert_called_once_with()
+        self.assertEqual(calls, ["clear", "banner", "startup_requirements", "preflight", "main_menu"])
+
+    def test_banner_prints_tool_name_and_version(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            app.banner()
+        output = buffer.getvalue()
+        self.assertIn(TOOL_NAME, output)
+        self.assertIn(VERSION, output)
+
+    def test_startup_requirements_shows_both_landing_cards_then_prompts(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        titles: list[str] = []
+        with patch.object(app, "landing_card", side_effect=lambda title, *a, **kw: titles.append(title)):
+            app.startup_requirements()
+        self.assertEqual(titles, ["Before You Start", "Important"])
+        self.assertIn("Press Enter to start the preflight checks...", app.gum.prompts)
+
+    def test_main_prints_version_and_exits_without_running_app(self) -> None:
+        buffer = io.StringIO()
+        with patch("sys.argv", ["atomic-image-builder", "--version"]):
+            with patch.object(atomic_image_builder, "App") as app_cls:
+                with redirect_stdout(buffer):
+                    with self.assertRaises(SystemExit) as raised:
+                        atomic_image_builder.main()
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn(f"{TOOL_SLUG} {VERSION}", buffer.getvalue())
+        app_cls.assert_not_called()
+
+    def test_main_runs_app_and_exits_zero_on_success(self) -> None:
+        with patch("sys.argv", ["atomic-image-builder"]):
+            with patch.object(atomic_image_builder, "App") as app_cls:
+                app_instance = app_cls.return_value
+                atomic_image_builder.main()
+        app_instance.run_main.assert_called_once_with()
+
+    def test_main_converts_screen_back_to_clean_exit(self) -> None:
+        with patch("sys.argv", ["atomic-image-builder"]):
+            with patch.object(atomic_image_builder, "App") as app_cls:
+                app_cls.return_value.run_main.side_effect = atomic_image_builder.ScreenBack()
+                with self.assertRaises(SystemExit) as raised:
+                    atomic_image_builder.main()
+        self.assertEqual(raised.exception.code, 0)
+
+    def test_main_converts_command_error_to_exit_one_and_reports_it(self) -> None:
+        with patch("sys.argv", ["atomic-image-builder"]):
+            with patch.object(atomic_image_builder, "App") as app_cls:
+                app_instance = app_cls.return_value
+                app_instance.run_main.side_effect = CommandError("boom")
+                with self.assertRaises(SystemExit) as raised:
+                    atomic_image_builder.main()
+        self.assertEqual(raised.exception.code, 1)
+        app_instance.gum.error.assert_called_once_with("boom")
+
+    def test_main_converts_keyboard_interrupt_to_exit_130(self) -> None:
+        with patch("sys.argv", ["atomic-image-builder"]):
+            with patch.object(atomic_image_builder, "App") as app_cls:
+                app_cls.return_value.run_main.side_effect = KeyboardInterrupt()
+                with self.assertRaises(SystemExit) as raised:
+                    atomic_image_builder.main()
+        self.assertEqual(raised.exception.code, 130)
+
     def test_add_packages_to_config_accepts_valid_tokens(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
