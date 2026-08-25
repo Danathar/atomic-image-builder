@@ -8,6 +8,10 @@
 source =
     atomic_image_builder
     maintenance_audit
+# Store paths relative to the checkout instead of absolute. Without this the
+# data file records the runner's workspace path, which makes the coverage
+# artifact useless anywhere but that runner -- see .coveragerc.e2e.
+relative_files = True
 
 [report]
 show_missing = True

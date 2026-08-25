@@ -12,6 +12,7 @@
 [run]
 source =
     atomic_image_builder
+relative_files = True
 
 [report]
 show_missing = True
@@ -21,6 +22,10 @@ precision = 0
 # data files name it by that path. This maps them back onto the checkout so
 # `coverage combine` can merge the e2e data with the unit data file and
 # report both against the same lines.
+#
+# That in-image path is the same on every machine, and relative_files above
+# keeps the unit data checkout-relative, so the two artifacts combine in any
+# clone -- not only in the workspace that produced them.
 [paths]
 source =
     .

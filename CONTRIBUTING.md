@@ -34,12 +34,15 @@ python3 -m coverage report --rcfile=.coveragerc.e2e
 
 End-to-end coverage is deliberately low and is **not** gated: the guided wizard needs a TTY, so the only end-to-end reachable paths are `--version`, `--help`, and the preflight failure. It exists so coverage gaps can be classified honestly rather than inferred from the unit run alone.
 
-Both measurements are uploaded by `.github/workflows/ci.yml` as workflow artifacts — `coverage-unit` and `coverage-e2e` — each containing `coverage.xml`, an HTML report, and the raw coverage data files. Because `.coveragerc.e2e` aligns the paths, the two raw data files can be merged after downloading both artifacts:
+Both measurements are uploaded by `.github/workflows/ci.yml` as workflow artifacts — `coverage-unit` and `coverage-e2e` — each containing `coverage.xml`, an HTML report, and the raw coverage data files (one per e2e scenario). Download both and merge them into a single report from any clone:
 
 ```bash
+gh run download <run-id>
 python3 -m coverage combine --rcfile=.coveragerc.e2e coverage-unit/data coverage-e2e/data
 python3 -m coverage report --rcfile=.coveragerc.e2e
 ```
+
+That works off the runner only because the raw data is path-portable, which took two things: `relative_files = True` in both configs, so the unit data names files relative to the checkout rather than by the runner's workspace path, and the `[paths]` mapping in `.coveragerc.e2e`, which rewrites the in-image `/opt/atomic-image-builder` onto the checkout. Removing either one makes the artifacts combinable only in the workspace that produced them.
 
 A commit that changes nothing the image is built from will not produce a `coverage-e2e` artifact, since the `container-build` job is path-scoped. Run the CI workflow manually (`workflow_dispatch`) to force one.
 
