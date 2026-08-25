@@ -1,0 +1,27 @@
+# Coverage settings for the end-to-end (container) coverage job in
+# .github/workflows/ci.yml. Separate from .coveragerc because the two runs
+# measure different things and must not be confused for one another:
+#
+#   .coveragerc      unit suite, source tree, both shipped modules
+#   .coveragerc.e2e  real runs of the packaged entrypoint inside the image
+#
+# maintenance_audit.py is deliberately absent here -- it is a maintainer
+# script and is not COPY'd into the image, so it can have no end-to-end
+# coverage to report.
+
+[run]
+source =
+    atomic_image_builder
+
+[report]
+show_missing = True
+precision = 0
+
+# Inside the image the tool lives at /opt/atomic-image-builder, so the raw
+# data files name it by that path. This maps them back onto the checkout so
+# `coverage combine` can merge the e2e data with the unit data file and
+# report both against the same lines.
+[paths]
+source =
+    .
+    /opt/atomic-image-builder

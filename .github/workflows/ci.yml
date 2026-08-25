@@ -4,6 +4,9 @@ name: CI
 on:
   push:
   pull_request:
+  # Manual runs exist so the coverage artifacts below can be produced on
+  # demand for a commit that did not itself touch the measured files.
+  workflow_dispatch:
 
 jobs:
   test:
@@ -40,6 +43,27 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           python3 -m coverage report --fail-under=90
 
+      # Uploaded even when the gate above fails: a run that dropped below the
+      # threshold is exactly when someone wants the line-level data. The raw
+      # data file ships alongside the XML so it can be combined with the
+      # end-to-end data file from the container-build job -- see
+      # .coveragerc.e2e for the path mapping that makes that work.
+      - name: Package unit coverage
+        if: always()
+        run: |
+          mkdir -p unit-coverage/data
+          python3 -m coverage xml -o unit-coverage/coverage.xml
+          cp .coverage unit-coverage/data/.coverage.unit
+
+      - name: Upload unit coverage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-unit
+          path: unit-coverage/
+          include-hidden-files: true
+          retention-days: 30
+
       - name: Run ruff
         run: ruff check
 
@@ -65,6 +89,10 @@ jobs:
       - name: Check for container-related changes
         id: changed
         run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "any_changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             base="${{ github.event.pull_request.base.sha }}"
           else
@@ -82,6 +110,101 @@ jobs:
         if: steps.changed.outputs.any_changed == 'true'
         run: podman build -t aib-ci-test -f Containerfile .
 
-      - name: Smoke test --version
+      # Every non-interactive path the packaged entrypoint has. The guided
+      # wizard needs a TTY, so the only other end-to-end reachable behaviour
+      # is the preflight failure, which is checked last.
+      - name: Smoke test the packaged entrypoint
         if: steps.changed.outputs.any_changed == 'true'
-        run: podman run --rm aib-ci-test --version
+        run: |
+          set -euo pipefail
+          podman run --rm aib-ci-test --version | grep -F "atomic-image-builder"
+          podman run --rm aib-ci-test -V | grep -F "atomic-image-builder"
+          podman run --rm aib-ci-test --help | grep -F -- "--version"
+
+          # With gum missing the tool must degrade to the plain-text preflight
+          # failure and exit 1, not block on a prompt. Masking the binary with
+          # a non-executable file is how that host is simulated: command_exists
+          # uses shutil.which, which requires the executable bit.
+          : > "$RUNNER_TEMP/no-gum"
+          status=0
+          output="$(podman run --rm -v "$RUNNER_TEMP/no-gum:/usr/bin/gum:ro" aib-ci-test)" || status=$?
+          test "$status" -eq 1
+          printf '%s\n' "$output" | grep -F "Preflight Failed"
+
+      - name: Set up Python
+        if: steps.changed.outputs.any_changed == 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.10"
+
+      - name: Install coverage tooling
+        if: steps.changed.outputs.any_changed == 'true'
+        run: pip install coverage
+
+      # The unit suite measures the source tree, which says nothing about what
+      # a real run of the built image executes. This runs the same entrypoint
+      # again through a coverage shim (container/Containerfile.coverage) so the
+      # packaged path is measured for real instead of inferred.
+      - name: Build coverage-instrumented image
+        if: steps.changed.outputs.any_changed == 'true'
+        run: podman build -t aib-ci-test-cov -f container/Containerfile.coverage --build-arg BASE_IMAGE=aib-ci-test .
+
+      - name: Collect end-to-end coverage
+        if: steps.changed.outputs.any_changed == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p e2e-coverage/data
+          : > "$RUNNER_TEMP/no-gum"
+
+          # Each scenario writes its own data file so the artifact shows which
+          # lines a given invocation reached, not just the union.
+          scenario() {
+            name="$1"
+            expected_status="$2"
+            shift 2
+            status=0
+            podman run --rm \
+              -e COVERAGE_FILE="/cov/.coverage.${name}" \
+              -v "$PWD/e2e-coverage/data:/cov:z" \
+              "$@" || status=$?
+            if [ "$status" -ne "$expected_status" ]; then
+              echo "e2e scenario '$name' exited $status, expected $expected_status" >&2
+              exit 1
+            fi
+          }
+
+          scenario version 0 aib-ci-test-cov --version
+          scenario version-short 0 aib-ci-test-cov -V
+          scenario help 0 aib-ci-test-cov --help
+          scenario preflight-no-gum 1 -v "$RUNNER_TEMP/no-gum:/usr/bin/gum:ro" aib-ci-test-cov
+
+      - name: Report end-to-end coverage
+        if: steps.changed.outputs.any_changed == 'true'
+        run: |
+          set -euo pipefail
+          # --keep leaves the per-scenario files in the artifact; the combined
+          # file is copied in beside them under a .coverage.* name so a later
+          # `coverage combine` can pick it up together with the unit data file.
+          python3 -m coverage combine --rcfile=.coveragerc.e2e --keep e2e-coverage/data
+          python3 -m coverage xml --rcfile=.coveragerc.e2e -o e2e-coverage/coverage.xml
+          python3 -m coverage html --rcfile=.coveragerc.e2e -d e2e-coverage/htmlcov
+          cp .coverage e2e-coverage/data/.coverage.e2e
+          {
+            echo "## End-to-end coverage"
+            echo
+            echo "Measured from real \`podman run\` invocations of the built image."
+            echo "This is deliberately low -- the wizard needs a TTY -- and is not gated."
+            echo
+            echo '```'
+            python3 -m coverage report --rcfile=.coveragerc.e2e
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload end-to-end coverage
+        if: steps.changed.outputs.any_changed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-e2e
+          path: e2e-coverage/
+          include-hidden-files: true
+          retention-days: 30
