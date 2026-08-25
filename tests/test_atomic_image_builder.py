@@ -630,10 +630,13 @@ class BuilderTests(unittest.TestCase):
 
         # Chunkah is enabled by default over the rpm-ostree rechunker, and the
         # now-stale commented-out Chunkah alternative block is stripped.
+        # Asserted on the recipe name rather than the full invocation so this
+        # keeps testing something real across upstream's sudo/rootless spelling
+        # changes: no ostree-rechunk call may survive anywhere in the output.
         self.assertIn("- name: Rechunk with Chunkah", result)
-        self.assertIn("command -v just) rechunk", result)
+        self.assertIn("just rechunk", result)
         self.assertNotIn("- name: Rechunk with rpm-ostree", result)
-        self.assertNotIn("command -v just) ostree-rechunk", result)
+        self.assertNotIn("ostree-rechunk", result)
         self.assertNotIn("#- name: Rechunk with Chunkah", result)
         self.assertNotIn("feeling adventurous", result)
 
@@ -701,6 +704,171 @@ class BuilderTests(unittest.TestCase):
         result = app.patch_container_rechunk_step(workflow)
         self.assertIn("- name: Rechunk with Chunkah", result)
         self.assertIn("A completely different trailing comment.", result)
+
+    def test_patch_container_rechunk_step_handles_legacy_sudo_invocation(self) -> None:
+        # Existing managed repositories still carry the pre-rootless upstream
+        # shape (ublue-os/image-template before b9783f6), and they get patched
+        # in place on update rather than replaced from the bundled snapshot.
+        # Both spellings must keep working, or an update would rename the step
+        # to Chunkah while leaving it running rpm-ostree.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build_push:
+                steps:
+                  - name: Rechunk with rpm-ostree
+                    id: rechunk
+                    run: |
+                      sudo -E $(command -v just) ostree-rechunk \\
+                        ${IMAGE_NAME} \\
+                        ${DEFAULT_TAG}
+
+                  - name: Generate Build Tags
+            """
+        )
+        result = app.patch_container_rechunk_step(workflow)
+        self.assertIn("- name: Rechunk with Chunkah", result)
+        self.assertIn("sudo -E $(command -v just) rechunk", result)
+        self.assertNotIn("ostree-rechunk", result)
+
+    def test_patch_container_rechunk_step_handles_rootless_invocation(self) -> None:
+        # Upstream's rootless shape (b9783f6 onward) drops the sudo wrapper.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build_push:
+                steps:
+                  - name: Rechunk with rpm-ostree
+                    id: rechunk
+                    run: |
+                      just ostree-rechunk \\
+                        ${IMAGE_NAME} \\
+                        ${DEFAULT_TAG}
+
+                  - name: Generate Build Tags
+            """
+        )
+        result = app.patch_container_rechunk_step(workflow)
+        self.assertIn("- name: Rechunk with Chunkah", result)
+        self.assertIn("just rechunk", result)
+        self.assertNotIn("ostree-rechunk", result)
+
+    def test_patch_container_rechunk_step_leaves_other_steps_alone(self) -> None:
+        # A managed repository may call ostree-rechunk from a step of its own.
+        # Existing repositories are patched in place on update rather than
+        # replaced from the snapshot, so rewriting a user's own step would
+        # silently change a build they wrote deliberately.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build_push:
+                steps:
+                  - name: Rechunk with rpm-ostree
+                    id: rechunk
+                    run: |
+                      just ostree-rechunk \\
+                        ${IMAGE_NAME} \\
+                        ${DEFAULT_TAG}
+
+                  - name: Compare against the classical rechunker
+                    run: |
+                      just ostree-rechunk \\
+                        ${IMAGE_NAME} \\
+                        ${DEFAULT_TAG}-classic
+            """
+        )
+        result = app.patch_container_rechunk_step(workflow)
+        self.assertIn("- name: Rechunk with Chunkah", result)
+        self.assertIn("just rechunk \\\n            ${IMAGE_NAME}", result)
+        # The user's own step keeps its recipe.
+        self.assertIn("just ostree-rechunk \\\n            ${IMAGE_NAME} \\\n            ${DEFAULT_TAG}-classic", result)
+        self.assertEqual(result.count("ostree-rechunk"), 1)
+
+    def test_patch_container_rechunk_step_ignores_ostree_rechunk_outside_any_step(self) -> None:
+        # No rechunk step at all means nothing in the file is ours to rewrite.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build_push:
+                steps:
+                  - name: Build Image
+                    run: |
+                      just build \\
+                        ${IMAGE_NAME}
+
+                  - name: Custom rechunk
+                    run: |
+                      just ostree-rechunk \\
+                        ${IMAGE_NAME}
+            """
+        )
+        result = app.patch_container_rechunk_step(workflow)
+        self.assertEqual(result, ensure_trailing_newline(workflow))
+
+    def test_patch_container_rechunk_step_repairs_half_switched_workflow(self) -> None:
+        # A workflow renamed to Chunkah but still calling ostree-rechunk is what
+        # a single-shape matcher would have produced. Updating must heal it.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build_push:
+                steps:
+                  - name: Rechunk with Chunkah
+                    id: rechunk
+                    run: |
+                      just ostree-rechunk \\
+                        ${IMAGE_NAME} \\
+                        ${DEFAULT_TAG}
+
+                  - name: Generate Build Tags
+            """
+        )
+        result = app.patch_container_rechunk_step(workflow)
+        self.assertIn("- name: Rechunk with Chunkah", result)
+        self.assertNotIn("ostree-rechunk", result)
+
+    def test_patch_container_rechunk_step_strips_legacy_stale_comment_block(self) -> None:
+        # The stale-comment strip is literal-matched, and upstream shipped the
+        # commented alternative with the sudo wrapper before b9783f6. A repo
+        # created from that template must still get the block removed.
+        app = self.make_app()
+        workflow = (
+            "jobs:\n"
+            "  build_push:\n"
+            "    steps:\n"
+            "      - name: Rechunk with rpm-ostree\n"
+            "        id: rechunk\n"
+            "        run: |\n"
+            "          sudo -E $(command -v just) ostree-rechunk \\\n"
+            "            ${IMAGE_NAME} \\\n"
+            "            ${DEFAULT_TAG}\n"
+            "\n"
+            "      # If you are feeling adventurous, use the new distro agnostic rechunker\n"
+            "      # https://github.com/coreos/chunkah\n"
+            "      # You can delete the Rechunk with rpm-ostree portion then if you use this\n"
+            "      #- name: Rechunk with Chunkah\n"
+            "      #  id: rechunk\n"
+            "      #  run: |\n"
+            "      #    sudo -E $(command -v just) rechunk \\\n"
+            "      #      ${IMAGE_NAME} \\\n"
+            "      #      ${DEFAULT_TAG}\n"
+            "\n"
+            "      - name: Generate Build Tags\n"
+        )
+        result = app.patch_container_rechunk_step(workflow)
+        self.assertNotIn("feeling adventurous", result)
+        self.assertNotIn("#- name: Rechunk with Chunkah", result)
+        self.assertIn(
+            "            ${DEFAULT_TAG}\n"
+            "\n"
+            "      - name: Generate Build Tags\n",
+            result,
+        )
 
     def test_patch_workflow_branch_filters_adds_missing_branches_blocks(self) -> None:
         app = self.make_app()
@@ -4189,7 +4357,10 @@ class BuilderTests(unittest.TestCase):
             'RPM_OSTREE_CHUNKER_IMAGE="localhost/${target_image}:${tag}"',
             justfile,
         )
-        self.assertIn("      --pull=never \\", justfile)
+        # Asserted on the flag rather than its exact line, since upstream
+        # reflows this podman invocation (b9783f6 collapsed the first three
+        # flags onto one line). The point is that no remote image is pulled.
+        self.assertIn("--pull=never", justfile)
         self.assertNotIn('RPM_OSTREE_CHUNKER_IMAGE="quay.io/fedora/fedora-bootc:latest"', justfile)
 
     def test_current_bluebuild_snapshot_defaults_to_latest_image_version(self) -> None:
@@ -6945,7 +7116,12 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn('mktemp -d ./"${target_image}"_chunkah_', result)
         self.assertIn('trap \'rm -f "${CHUNKAH_CONFIG_FILE}"; rm -rf "${CHUNKAH_OUTPUT_DIR}"\' EXIT', result)
         self.assertIn('src="${target_image}:${tag}"', result)
-        self.assertIn("-e SOURCE_DATE_EPOCH=0", result)
+        # Upstream removed SOURCE_DATE_EPOCH=0 in image-template 94e9423.
+        # Pinning it to the epoch clamps file mtimes but also wipes the package
+        # stability data chunkah uses to plan layers, which costs users delta
+        # update quality (coreos/chunkah#160). Assert it stays gone so a future
+        # refresh cannot quietly reintroduce it.
+        self.assertNotIn("SOURCE_DATE_EPOCH", result)
         self.assertIn("--output oci:/run/out/chunked", result)
         self.assertIn("podman pull \"oci:${CHUNKAH_OUTPUT_DIR}/chunked\"", result)
 

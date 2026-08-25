@@ -100,6 +100,38 @@ ACTION_REF_PINS: dict[str, tuple[str, str]] = {
     "sigstore/cosign-installer@v4.0.0": ("faadad0cce49287aee09b3a48701e75088a2c6ad", "v4.0.0"),
     "sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad": ("faadad0cce49287aee09b3a48701e75088a2c6ad", "v4.0.0"),
 }
+# The rechunk step's Justfile invocation, matched so Chunkah can be swapped in
+# for rpm-ostree. Upstream has shipped two spellings: the pre-rootless
+# `sudo -E $(command -v just) ostree-rechunk` and, since ublue-os/image-template
+# b9783f6, a bare `just ostree-rechunk`. Existing managed repositories still
+# carry the older one, so both must keep matching -- a single-shape matcher
+# would rename the step to Chunkah while leaving it running rpm-ostree.
+# Step names whose body the rechunk recipe swap may rewrite. Upstream ships the
+# first; the second is what we rename it to, kept in scope so a half-switched
+# workflow is repaired rather than left alone.
+RECHUNK_STEP_NAMES: frozenset[str] = frozenset(
+    {"- name: Rechunk with rpm-ostree", "- name: Rechunk with Chunkah"}
+)
+RECHUNK_RECIPE_RE = re.compile(r"(?<![\w./-])(just\)?)(\s+)ostree-rechunk\b")
+# Upstream's trailing "if you are feeling adventurous" comment block, in both
+# spellings, stripped once the active step above it is running Chunkah. Matched
+# on upstream's exact literal text, same no-op-on-drift convention as every
+# other patcher in this file.
+STALE_CHUNKAH_COMMENT_BLOCKS: tuple[str, ...] = tuple(
+    (
+        "      # If you are feeling adventurous, use the new distro agnostic rechunker\n"
+        "      # https://github.com/coreos/chunkah\n"
+        "      # You can delete the Rechunk with rpm-ostree portion then if you use this\n"
+        "      #- name: Rechunk with Chunkah\n"
+        "      #  id: rechunk\n"
+        "      #  run: |\n"
+        f"      #    {invocation} rechunk \\\n"
+        "      #      ${IMAGE_NAME} \\\n"
+        "      #      ${DEFAULT_TAG}\n"
+        "\n"
+    )
+    for invocation in ("just", "sudo -E $(command -v just)")
+)
 PRECHECK_REQUIRED_TOOLS: tuple[str, ...] = ("gum", "git", "gh", "cosign")
 BREW_INSTALLABLE_TOOLS: tuple[str, ...] = ("gum", "git", "gh", "cosign")
 HOST_REQUIRED_TOOLS: tuple[str, ...] = ("dnf5", "rpm-ostree")
@@ -3921,20 +3953,34 @@ class App:
         # default instead. Matching is scoped to non-comment lines so the
         # commented alternative block, and workflows where this step was
         # removed or never existed, are left untouched.
+        # The recipe swap is scoped to the rechunk step's own body. A managed
+        # repository may legitimately call `just ostree-rechunk` from a step of
+        # its own (a diagnostic or a hand-written variant), and since existing
+        # repositories are patched in place on update rather than replaced, a
+        # file-wide substitution would silently rewrite that user's step too.
+        # "Rechunk with Chunkah" counts as an in-scope step name so a workflow
+        # left half-switched by an older tool version heals on its next update.
         lines = workflow_text.splitlines()
         output: list[str] = []
+        in_rechunk_step = False
+        step_indent = 0
         for line in lines:
             stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
             if stripped.startswith("#"):
                 output.append(line)
                 continue
-            if stripped == "- name: Rechunk with rpm-ostree":
-                indent = line[: len(line) - len(line.lstrip())]
-                output.append(f"{indent}- name: Rechunk with Chunkah")
+            if stripped in RECHUNK_STEP_NAMES:
+                in_rechunk_step = True
+                step_indent = indent
+                output.append(f"{line[:indent]}- name: Rechunk with Chunkah")
                 continue
-            if "command -v just) ostree-rechunk" in line:
-                output.append(line.replace("command -v just) ostree-rechunk", "command -v just) rechunk"))
-                continue
+            if in_rechunk_step and stripped and indent <= step_indent:
+                # The next step item, or any dedent back out to the job body,
+                # ends this step.
+                in_rechunk_step = False
+            if in_rechunk_step:
+                line = RECHUNK_RECIPE_RE.sub(r"\1\2rechunk", line)
             output.append(line)
         patched = ensure_trailing_newline("\n".join(output))
 
@@ -3943,22 +3989,14 @@ class App:
         # stale: it still suggests switching to Chunkah, and still contains
         # a commented copy of the very step that's now active just above
         # it. Strip it so the generated workflow doesn't carry a confusing,
-        # self-contradictory leftover. Matched on upstream's exact current
-        # literal text, same as every other patcher in this file: silently
-        # no-ops if that text has drifted.
-        stale_comment_block = (
-            "      # If you are feeling adventurous, use the new distro agnostic rechunker\n"
-            "      # https://github.com/coreos/chunkah\n"
-            "      # You can delete the Rechunk with rpm-ostree portion then if you use this\n"
-            "      #- name: Rechunk with Chunkah\n"
-            "      #  id: rechunk\n"
-            "      #  run: |\n"
-            "      #    sudo -E $(command -v just) rechunk \\\n"
-            "      #      ${IMAGE_NAME} \\\n"
-            "      #      ${DEFAULT_TAG}\n"
-            "\n"
-        )
-        return patched.replace(stale_comment_block, "", 1)
+        # self-contradictory leftover. Matched on upstream's exact literal
+        # text in both of its shipped spellings (see
+        # STALE_CHUNKAH_COMMENT_BLOCKS), same as every other patcher in this
+        # file: silently no-ops if that text has drifted.
+        for stale_comment_block in STALE_CHUNKAH_COMMENT_BLOCKS:
+            if stale_comment_block in patched:
+                return patched.replace(stale_comment_block, "", 1)
+        return patched
 
     def patch_container_disk_workflow(self, existing_text: str, *, default_branch: str = "main") -> str:
         lines = [pin_action_uses_line(line) for line in existing_text.splitlines()]
