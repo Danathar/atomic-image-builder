@@ -2076,6 +2076,37 @@ class BuilderTests(unittest.TestCase):
         self.assertFalse(truncated)
         self.assertIn("dnf5 makecache", message or "")
 
+    def test_search_host_packages_treats_no_matches_as_empty_not_error(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, _command, *, cwd=None: subprocess.CompletedProcess(
+            ["dnf5", "repoquery"],
+            1,
+            "",
+            "Error: No matches found for the specified package name or provided globs.",
+        )
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "dnf5"):
+            results, truncated, message = app.search_host_packages("doesnotexist")
+
+        self.assertEqual(results, [])
+        self.assertFalse(truncated)
+        self.assertIsNone(message)
+
+    def test_search_host_packages_defaults_summary_when_no_tab_present(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, _command, *, cwd=None: subprocess.CompletedProcess(
+            ["dnf5", "repoquery"], 0, "tmux\n", ""
+        )
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "dnf5"):
+            results, truncated, message = app.search_host_packages("tmux")
+
+        self.assertIsNone(message)
+        self.assertFalse(truncated)
+        self.assertEqual(results, [("tmux", "")])
+
     def test_gum_spinner_result_treats_missing_status_file_contents_as_failure(self) -> None:
         gum = Gum()
         with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gum", "spin"], 0, "", "")):
