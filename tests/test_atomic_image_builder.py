@@ -1933,6 +1933,39 @@ class BuilderTests(unittest.TestCase):
         self.assertIn(f"{TOOL_SLUG} {VERSION}", buffer.getvalue())
         app_cls.assert_not_called()
 
+    def test_main_prints_version_for_short_flag(self) -> None:
+        buffer = io.StringIO()
+        with patch("sys.argv", ["atomic-image-builder", "-V"]):
+            with patch.object(atomic_image_builder, "App") as app_cls:
+                with redirect_stdout(buffer):
+                    with self.assertRaises(SystemExit) as raised:
+                        atomic_image_builder.main()
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn(f"{TOOL_SLUG} {VERSION}", buffer.getvalue())
+        app_cls.assert_not_called()
+
+    def test_usage_text_names_the_tool_and_both_flags(self) -> None:
+        usage = atomic_image_builder.usage_text()
+        self.assertIn(f"{TOOL_NAME} {VERSION}", usage)
+        self.assertIn(f"Usage: {TOOL_SLUG}", usage)
+        self.assertIn("--help", usage)
+        self.assertIn("--version", usage)
+        for tool in atomic_image_builder.PRECHECK_REQUIRED_TOOLS:
+            self.assertIn(tool, usage)
+
+    def test_main_prints_help_and_exits_without_running_app(self) -> None:
+        for flag in ("--help", "-h"):
+            with self.subTest(flag=flag):
+                buffer = io.StringIO()
+                with patch("sys.argv", ["atomic-image-builder", flag]):
+                    with patch.object(atomic_image_builder, "App") as app_cls:
+                        with redirect_stdout(buffer):
+                            with self.assertRaises(SystemExit) as raised:
+                                atomic_image_builder.main()
+                self.assertEqual(raised.exception.code, 0)
+                self.assertIn(atomic_image_builder.usage_text(), buffer.getvalue())
+                app_cls.assert_not_called()
+
     def test_main_runs_app_and_exits_zero_on_success(self) -> None:
         with patch("sys.argv", ["atomic-image-builder"]):
             with patch.object(atomic_image_builder, "App") as app_cls:

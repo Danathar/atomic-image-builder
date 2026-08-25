@@ -4729,9 +4729,34 @@ class App:
         self.main_menu()
 
 
+def usage_text() -> str:
+    # Kept deliberately short: the tool is a guided TUI, so this exists to
+    # answer "what is this and how do I start it" for someone who typed
+    # --help at a packaged container entrypoint, not to document the wizard.
+    return "\n".join(
+        [
+            f"{TOOL_NAME} {VERSION}",
+            "",
+            f"Usage: {TOOL_SLUG} [option]",
+            "",
+            "Run with no options to start the guided terminal interface.",
+            "",
+            "Options:",
+            "  -h, --help     Show this help and exit.",
+            "  -V, --version  Show the version and exit.",
+            "",
+            f"Requires {', '.join(PRECHECK_REQUIRED_TOOLS)} and a GitHub login (gh auth login).",
+        ]
+    )
+
+
 def main() -> None:
-    if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-V"):
+    first_argument = sys.argv[1] if len(sys.argv) > 1 else ""
+    if first_argument in ("--version", "-V"):
         print(f"{TOOL_SLUG} {VERSION}")
+        raise SystemExit(0)
+    if first_argument in ("--help", "-h"):
+        print(usage_text())
         raise SystemExit(0)
     app = App()
     try:
