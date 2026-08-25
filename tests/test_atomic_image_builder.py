@@ -630,10 +630,13 @@ class BuilderTests(unittest.TestCase):
 
         # Chunkah is enabled by default over the rpm-ostree rechunker, and the
         # now-stale commented-out Chunkah alternative block is stripped.
+        # Asserted on the recipe name rather than the full invocation so this
+        # keeps testing something real across upstream's sudo/rootless spelling
+        # changes: no ostree-rechunk call may survive anywhere in the output.
         self.assertIn("- name: Rechunk with Chunkah", result)
-        self.assertIn("command -v just) rechunk", result)
+        self.assertIn("just rechunk", result)
         self.assertNotIn("- name: Rechunk with rpm-ostree", result)
-        self.assertNotIn("command -v just) ostree-rechunk", result)
+        self.assertNotIn("ostree-rechunk", result)
         self.assertNotIn("#- name: Rechunk with Chunkah", result)
         self.assertNotIn("feeling adventurous", result)
 
@@ -4277,7 +4280,10 @@ class BuilderTests(unittest.TestCase):
             'RPM_OSTREE_CHUNKER_IMAGE="localhost/${target_image}:${tag}"',
             justfile,
         )
-        self.assertIn("      --pull=never \\", justfile)
+        # Asserted on the flag rather than its exact line, since upstream
+        # reflows this podman invocation (b9783f6 collapsed the first three
+        # flags onto one line). The point is that no remote image is pulled.
+        self.assertIn("--pull=never", justfile)
         self.assertNotIn('RPM_OSTREE_CHUNKER_IMAGE="quay.io/fedora/fedora-bootc:latest"', justfile)
 
     def test_current_bluebuild_snapshot_defaults_to_latest_image_version(self) -> None:
@@ -7033,7 +7039,12 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn('mktemp -d ./"${target_image}"_chunkah_', result)
         self.assertIn('trap \'rm -f "${CHUNKAH_CONFIG_FILE}"; rm -rf "${CHUNKAH_OUTPUT_DIR}"\' EXIT', result)
         self.assertIn('src="${target_image}:${tag}"', result)
-        self.assertIn("-e SOURCE_DATE_EPOCH=0", result)
+        # Upstream removed SOURCE_DATE_EPOCH=0 in image-template 94e9423.
+        # Pinning it to the epoch clamps file mtimes but also wipes the package
+        # stability data chunkah uses to plan layers, which costs users delta
+        # update quality (coreos/chunkah#160). Assert it stays gone so a future
+        # refresh cannot quietly reintroduce it.
+        self.assertNotIn("SOURCE_DATE_EPOCH", result)
         self.assertIn("--output oci:/run/out/chunked", result)
         self.assertIn("podman pull \"oci:${CHUNKAH_OUTPUT_DIR}/chunked\"", result)
 
