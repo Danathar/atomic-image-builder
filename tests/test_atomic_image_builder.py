@@ -755,6 +755,83 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("just rechunk", result)
         self.assertNotIn("ostree-rechunk", result)
 
+    def test_patch_container_rechunk_step_leaves_other_steps_alone(self) -> None:
+        # A managed repository may call ostree-rechunk from a step of its own.
+        # Existing repositories are patched in place on update rather than
+        # replaced from the snapshot, so rewriting a user's own step would
+        # silently change a build they wrote deliberately.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build_push:
+                steps:
+                  - name: Rechunk with rpm-ostree
+                    id: rechunk
+                    run: |
+                      just ostree-rechunk \\
+                        ${IMAGE_NAME} \\
+                        ${DEFAULT_TAG}
+
+                  - name: Compare against the classical rechunker
+                    run: |
+                      just ostree-rechunk \\
+                        ${IMAGE_NAME} \\
+                        ${DEFAULT_TAG}-classic
+            """
+        )
+        result = app.patch_container_rechunk_step(workflow)
+        self.assertIn("- name: Rechunk with Chunkah", result)
+        self.assertIn("just rechunk \\\n            ${IMAGE_NAME}", result)
+        # The user's own step keeps its recipe.
+        self.assertIn("just ostree-rechunk \\\n            ${IMAGE_NAME} \\\n            ${DEFAULT_TAG}-classic", result)
+        self.assertEqual(result.count("ostree-rechunk"), 1)
+
+    def test_patch_container_rechunk_step_ignores_ostree_rechunk_outside_any_step(self) -> None:
+        # No rechunk step at all means nothing in the file is ours to rewrite.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build_push:
+                steps:
+                  - name: Build Image
+                    run: |
+                      just build \\
+                        ${IMAGE_NAME}
+
+                  - name: Custom rechunk
+                    run: |
+                      just ostree-rechunk \\
+                        ${IMAGE_NAME}
+            """
+        )
+        result = app.patch_container_rechunk_step(workflow)
+        self.assertEqual(result, ensure_trailing_newline(workflow))
+
+    def test_patch_container_rechunk_step_repairs_half_switched_workflow(self) -> None:
+        # A workflow renamed to Chunkah but still calling ostree-rechunk is what
+        # a single-shape matcher would have produced. Updating must heal it.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build_push:
+                steps:
+                  - name: Rechunk with Chunkah
+                    id: rechunk
+                    run: |
+                      just ostree-rechunk \\
+                        ${IMAGE_NAME} \\
+                        ${DEFAULT_TAG}
+
+                  - name: Generate Build Tags
+            """
+        )
+        result = app.patch_container_rechunk_step(workflow)
+        self.assertIn("- name: Rechunk with Chunkah", result)
+        self.assertNotIn("ostree-rechunk", result)
+
     def test_patch_container_rechunk_step_strips_legacy_stale_comment_block(self) -> None:
         # The stale-comment strip is literal-matched, and upstream shipped the
         # commented alternative with the sudo wrapper before b9783f6. A repo

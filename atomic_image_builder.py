@@ -106,6 +106,12 @@ ACTION_REF_PINS: dict[str, tuple[str, str]] = {
 # b9783f6, a bare `just ostree-rechunk`. Existing managed repositories still
 # carry the older one, so both must keep matching -- a single-shape matcher
 # would rename the step to Chunkah while leaving it running rpm-ostree.
+# Step names whose body the rechunk recipe swap may rewrite. Upstream ships the
+# first; the second is what we rename it to, kept in scope so a half-switched
+# workflow is repaired rather than left alone.
+RECHUNK_STEP_NAMES: frozenset[str] = frozenset(
+    {"- name: Rechunk with rpm-ostree", "- name: Rechunk with Chunkah"}
+)
 RECHUNK_RECIPE_RE = re.compile(r"(?<![\w./-])(just\)?)(\s+)ostree-rechunk\b")
 # Upstream's trailing "if you are feeling adventurous" comment block, in both
 # spellings, stripped once the active step above it is running Chunkah. Matched
@@ -3947,19 +3953,35 @@ class App:
         # default instead. Matching is scoped to non-comment lines so the
         # commented alternative block, and workflows where this step was
         # removed or never existed, are left untouched.
+        # The recipe swap is scoped to the rechunk step's own body. A managed
+        # repository may legitimately call `just ostree-rechunk` from a step of
+        # its own (a diagnostic or a hand-written variant), and since existing
+        # repositories are patched in place on update rather than replaced, a
+        # file-wide substitution would silently rewrite that user's step too.
+        # "Rechunk with Chunkah" counts as an in-scope step name so a workflow
+        # left half-switched by an older tool version heals on its next update.
         lines = workflow_text.splitlines()
         output: list[str] = []
+        in_rechunk_step = False
+        step_indent = 0
         for line in lines:
             stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
             if stripped.startswith("#"):
                 output.append(line)
                 continue
-            if stripped == "- name: Rechunk with rpm-ostree":
-                indent = line[: len(line) - len(line.lstrip())]
-                output.append(f"{indent}- name: Rechunk with Chunkah")
+            if stripped in RECHUNK_STEP_NAMES:
+                in_rechunk_step = True
+                step_indent = indent
+                output.append(f"{line[:indent]}- name: Rechunk with Chunkah")
                 continue
-            swapped = RECHUNK_RECIPE_RE.sub(r"\1\2rechunk", line)
-            output.append(swapped)
+            if in_rechunk_step and stripped and indent <= step_indent:
+                # The next step item, or any dedent back out to the job body,
+                # ends this step.
+                in_rechunk_step = False
+            if in_rechunk_step:
+                line = RECHUNK_RECIPE_RE.sub(r"\1\2rechunk", line)
+            output.append(line)
         patched = ensure_trailing_newline("\n".join(output))
 
         # Once the step above is switched to Chunkah, upstream's own
