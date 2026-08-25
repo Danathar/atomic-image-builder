@@ -2132,6 +2132,27 @@ class BuilderTests(unittest.TestCase):
             with self.assertRaises(CommandError):
                 gum.spinner_capture("Working...", ["true"])
 
+    def test_gum_spinner_capture_returns_captured_output_on_success(self) -> None:
+        gum = Gum()
+        original_named_temporary_file = tempfile.NamedTemporaryFile
+        created_paths: list[str] = []
+
+        def fake_named_temporary_file(*args, **kwargs):
+            tmp = original_named_temporary_file(*args, **kwargs)
+            created_paths.append(tmp.name)
+            return tmp
+
+        def fake_run(_args, **_kwargs):
+            Path(created_paths[-1]).write_text("captured output\n")
+            return subprocess.CompletedProcess(["gum", "spin"], 0, "", "")
+
+        with patch("atomic_image_builder.tempfile.NamedTemporaryFile", side_effect=fake_named_temporary_file):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                output = gum.spinner_capture("Working...", ["true"])
+
+        self.assertEqual(output, "captured output\n")
+        self.assertFalse(Path(created_paths[-1]).exists())
+
     def test_gum_spinner_result_raises_keyboard_interrupt_when_gum_itself_is_interrupted(self) -> None:
         gum = Gum()
         with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gum", "spin"], 130, "", "")):
@@ -2275,6 +2296,30 @@ class BuilderTests(unittest.TestCase):
                     with self.assertRaisesRegex(CommandError, "signing failed"):
                         app.do_build()
         self.assertIn(["gh", "repo", "delete", "example/test-image", "--yes"], run_calls)
+
+    def test_do_build_hints_manual_delete_when_auto_cleanup_fails_for_unrelated_reason(self) -> None:
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        app.config.github_user = "example"
+        app.gum = GumStub()
+
+        def fake_run(args, **_kwargs):
+            if args[:3] == ["gh", "repo", "view"]:
+                return subprocess.CompletedProcess(list(args), 1, "", "")
+            if args[:3] == ["gh", "repo", "delete"]:
+                return subprocess.CompletedProcess(list(args), 1, "", "HTTP 500: something went wrong")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with patch.object(app, "ensure_signing_ready", side_effect=CommandError("signing failed")):
+                    with self.assertRaisesRegex(CommandError, "signing failed"):
+                        app.do_build()
+
+        hints = [message for level, message in app.gum.messages if level == "hint"]
+        self.assertIn("Delete the repo manually on GitHub before trying again.", hints)
+        self.assertFalse(any("delete_repo" in hint for hint in hints))
 
     def test_do_build_sets_local_git_identity_before_initial_commit(self) -> None:
         app = self.make_app()
@@ -2455,6 +2500,48 @@ class BuilderTests(unittest.TestCase):
 
         self.assertIn(["gh", "repo", "delete", "example/test-image", "--yes"], run_calls)
         self.assertTrue(any("Removing the empty repo" in message for level, message in app.gum.messages if level == "warn"))
+
+    def test_do_build_returns_false_without_completing_github_setup(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        with patch.object(app, "require_github", return_value=False):
+            with patch("atomic_image_builder.run") as run_mock:
+                self.assertFalse(app.do_build())
+        run_mock.assert_not_called()
+
+    def test_do_build_stops_and_hints_update_flow_when_repo_was_created_by_this_tool(self) -> None:
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        app.config.github_user = "example"
+        app.gum = GumStub()
+
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run") as run_mock:
+                run_mock.return_value = subprocess.CompletedProcess(["gh", "repo", "view"], 0, "", "")
+                with patch.object(app, "repo_has_state_file", return_value=True):
+                    self.assertFalse(app.do_build())
+
+        self.assertIn(("error", "example/test-image already exists on GitHub."), app.gum.messages)
+        self.assertTrue(any("Update Existing Image" in message for level, message in app.gum.messages if level == "hint"))
+        self.assertIn("Press Enter to go back to the review screen...", app.gum.prompts)
+        self.assertTrue(all(call.args[0][:3] != ["gh", "repo", "create"] for call in run_mock.call_args_list))
+
+    def test_do_build_stops_and_hints_manual_management_when_repo_is_foreign(self) -> None:
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        app.config.github_user = "example"
+        app.gum = GumStub()
+
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run") as run_mock:
+                run_mock.return_value = subprocess.CompletedProcess(["gh", "repo", "view"], 0, "", "")
+                with patch.object(app, "repo_has_state_file", return_value=False):
+                    self.assertFalse(app.do_build())
+
+        self.assertTrue(any("was not created by this tool" in message for level, message in app.gum.messages if level == "hint"))
+        self.assertTrue(any("only updates repos it created itself" in message for level, message in app.gum.messages if level == "hint"))
 
     def test_push_update_sets_local_git_identity_before_commit(self) -> None:
         app = self.make_app()
@@ -4218,6 +4305,33 @@ class BuilderTests(unittest.TestCase):
         )
         self.assertEqual(kwargs["capture"], False)
         self.assertEqual(kwargs["stdin"], "a\t1\nb\t2\n")
+
+    def test_gum_pager_pipes_text_to_gum_pager(self) -> None:
+        gum = Gum()
+        with patch("atomic_image_builder.run") as run_mock:
+            gum.pager("some long text\nmore lines")
+        run_mock.assert_called_once_with(["gum", "pager"], capture=False, stdin="some long text\nmore lines")
+
+    def test_gum_enter_to_continue_shows_instruction_then_waits_for_input(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "input"], 0, "", "")
+        with patch.object(Gum, "instruction") as instruction_mock:
+            with patch.object(Gum, "interactive_stdout", return_value=completed) as stdout_mock:
+                gum.enter_to_continue("Press Enter to continue...")
+
+        instruction_mock.assert_called_once_with("Press Enter to continue...")
+        args = stdout_mock.call_args[0][0]
+        self.assertEqual(args[:2], ["gum", "input"])
+        self.assertIn("--width", args)
+        self.assertEqual(args[args.index("--width") + 1], "3")
+
+    def test_gum_enter_to_continue_raises_keyboard_interrupt_on_ctrl_c(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "input"], 130, "", "")
+        with patch.object(Gum, "instruction"):
+            with patch.object(Gum, "interactive_stdout", return_value=completed):
+                with self.assertRaises(KeyboardInterrupt):
+                    gum.enter_to_continue()
 
     # ── gum flag-injection guards ───────────────────────────────────────
     # gum parses any leading-dash positional as a flag and exits 80. Captured
