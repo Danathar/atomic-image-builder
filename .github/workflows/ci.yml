@@ -19,11 +19,26 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Run tests
-        run: python3 -m unittest discover -s tests
+      - name: Install test tooling
+        run: pip install coverage ruff
 
-      - name: Install ruff
-        run: pip install ruff
+      - name: Run tests
+        run: python3 -m coverage run -m unittest discover -s tests
+
+      # Coverage settings (which modules, which lines are excluded) live in
+      # .coveragerc so a local run reports the same numbers CI does. The
+      # summary is written before the gate so a failing run still shows which
+      # lines are missing.
+      - name: Report coverage
+        run: |
+          {
+            echo "## Coverage"
+            echo
+            echo '```'
+            python3 -m coverage report
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 -m coverage report --fail-under=90
 
       - name: Run ruff
         run: ruff check
