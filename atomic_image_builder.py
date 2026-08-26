@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -10,6 +11,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
@@ -385,6 +389,47 @@ def format_daily_rebuild_note(
     if local_zone == "UTC":
         return f"Scheduled rebuilds also run daily at about {local_time} UTC."
     return f"Scheduled rebuilds also run daily at about {local_time} {local_zone} on this system ({utc_time} UTC)."
+
+
+GHCR_TOKEN_URL = "https://ghcr.io/token?service=ghcr.io&scope=repository:{path}:pull"
+GHCR_TAGS_URL = "https://ghcr.io/v2/{path}/tags/list"
+
+
+def ghcr_package_exists(owner: str, name: str, *, timeout: float = 6.0) -> bool:
+    # Deleting a GitHub repo does not delete its GHCR packages. The orphan keeps
+    # the Actions-access list of the repo that made it, so a new repo of the same
+    # name -- a different repo as far as GitHub is concerned -- cannot push to it.
+    # The generated workflow only discovers this at its final push step, after
+    # the image has already built, rechunked, and tagged.
+    #
+    # An anonymous pull is enough to answer this and needs no extra `gh` scope.
+    # It returns True only for a package it actually read: a private package is
+    # indistinguishable from a missing one this way, and every error collapses to
+    # False, because warning someone about a conflict in their own namespace that
+    # does not exist is worse than staying quiet.
+    path = f"{owner.lower()}/{name.lower()}"
+    try:
+        token_request = urllib.request.Request(
+            GHCR_TOKEN_URL.format(path=urllib.parse.quote(path)),
+            headers={"User-Agent": TOOL_SLUG},
+        )
+        with urllib.request.urlopen(token_request, timeout=timeout) as response:
+            payload = json.load(response)
+        token = payload.get("token") if isinstance(payload, dict) else None
+        if not isinstance(token, str) or not token:
+            return False
+        tags_request = urllib.request.Request(
+            GHCR_TAGS_URL.format(path=urllib.parse.quote(path)),
+            headers={"Authorization": f"Bearer {token}", "User-Agent": TOOL_SLUG},
+        )
+        with urllib.request.urlopen(tags_request, timeout=timeout) as response:
+            return response.status == 200
+    except (OSError, ValueError, http.client.HTTPException):
+        # http.client's exceptions -- IncompleteRead, BadStatusLine, LineTooLong,
+        # InvalidURL -- descend from HTTPException, not OSError or ValueError. A
+        # response truncated by GHCR or a proxy would otherwise escape an
+        # advisory check and stop the user creating a repo at all.
+        return False
 
 
 def command_exists(name: str) -> bool:
@@ -2977,6 +3022,27 @@ class App:
 
         return cached[:PACKAGE_SEARCH_LIMIT], len(cached) > PACKAGE_SEARCH_LIMIT, None
 
+    def confirm_ghcr_package_conflict(self, owner: str, repo: str) -> bool:
+        # True means "go ahead and create the repo".
+        if not ghcr_package_exists(owner, repo):
+            return True
+        package = repo.lower()
+        self.gum.warn(f"A container package already exists at ghcr.io/{owner.lower()}/{package}.")
+        self.gum.hint("Deleting a GitHub repo does not delete its packages, so this is usually left over from an earlier repo with the same name.")
+        self.gum.hint("A brand-new repo cannot push to that package until the package grants it write access.")
+        self.gum.hint("The build would run all the way through and then fail on its final push step.")
+        print()
+        self.menu_section(
+            "How to Fix It",
+            f"Package settings: https://github.com/users/{owner}/packages/container/{package}/settings",
+            "Delete the package there, then answer yes -- the first build recreates it.",
+            "Or answer yes now, then add this repo under 'Manage Actions access' with",
+            "the Write role before the build reaches its push step. That selector only",
+            "lists repos that already exist, so it cannot be done from here.",
+        )
+        print()
+        return self.gum.confirm(f"Create {owner}/{repo} anyway?", default=False)
+
     def do_build(self) -> bool:
         # "Build" in this app really means "create or update the GitHub repo that
         # will trigger the real build on GitHub Actions."
@@ -3001,6 +3067,9 @@ class App:
             raise CommandError(
                 "cosign is required to create a new repo because this tool must generate SIGNING_SECRET. Install it with: brew install cosign"
             )
+        if not self.confirm_ghcr_package_conflict(owner, repo):
+            self.gum.enter_to_continue("Press Enter to go back to the review screen...")
+            return False
         self.gum.spinner(
             f"Creating {owner}/{repo}...",
             ["gh", "repo", "create", repo, "--description", self.config.image_desc, "--public"],
