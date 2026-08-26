@@ -89,6 +89,9 @@ class GumStub:
     def confirm(self, _prompt: str, default: bool = False) -> bool:
         return default
 
+    def ensure_available(self) -> None:
+        pass
+
     def pager(self, _text: str) -> None:
         pass
 
@@ -1921,6 +1924,67 @@ class BuilderTests(unittest.TestCase):
             app.startup_requirements()
         self.assertEqual(titles, ["Before You Start", "Important"])
         self.assertIn("Press Enter to start the preflight checks...", app.gum.prompts)
+
+    def test_config_from_state_payload_rejects_a_non_object_payload(self) -> None:
+        # The state file is fetched from a remote repo, so it is the one place
+        # a malformed payload arrives from outside this process.
+        for payload in ([], "state", 7, None):
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ValueError, "must contain a JSON object"):
+                    atomic_image_builder.config_from_state_payload(payload)
+
+    def test_config_from_state_payload_validates_state_version(self) -> None:
+        with self.assertRaisesRegex(ValueError, "state_version must be an integer"):
+            atomic_image_builder.config_from_state_payload({"state_version": "1"})
+        with self.assertRaisesRegex(ValueError, "unsupported state_version: 2"):
+            atomic_image_builder.config_from_state_payload({"state_version": 2})
+        # Absent and in-range versions both load.
+        self.assertEqual(atomic_image_builder.config_from_state_payload({}).method, Config().method)
+        self.assertEqual(atomic_image_builder.config_from_state_payload({"state_version": 1}).method, Config().method)
+
+    def test_config_from_state_payload_rejects_a_non_string_string_field(self) -> None:
+        with self.assertRaisesRegex(ValueError, "repo_name must be a string"):
+            atomic_image_builder.config_from_state_payload({"repo_name": 42})
+
+    def test_preflight_reports_account_error_when_the_username_cannot_be_read(self) -> None:
+        # gh is installed and authenticated, but `gh api user` fails. The tool
+        # must not carry on with a blank owner: every downstream gh repo call
+        # would be built from it.
+        app = self.make_app()
+        app.gum = GumStub()
+        captured: dict[str, object] = {}
+
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gh"], 0, "", "")):
+                with patch.object(app, "github_login_name", side_effect=CommandError("gh api user failed")):
+                    with patch.object(app, "render_preflight_failure", side_effect=lambda **kw: captured.update(kw)):
+                        with self.assertRaises(SystemExit) as raised:
+                            app.preflight()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertFalse(app.github_available)
+        self.assertTrue(captured["github_account_error"])
+        self.assertFalse(captured["github_login_missing"])
+
+    def test_preflight_reports_account_error_when_login_succeeds_but_account_still_unreadable(self) -> None:
+        # The only-login-missing path runs the guided `gh auth login`, and the
+        # account read can still fail afterwards.
+        app = self.make_app()
+        app.gum = GumStub()
+        captured: dict[str, object] = {}
+
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gh"], 1, "", "")):
+                with patch.object(app, "github_setup_guide") as guide:
+                    with patch.object(app, "github_login_name", side_effect=CommandError("still no account")):
+                        with patch.object(app, "render_preflight_failure", side_effect=lambda **kw: captured.update(kw)):
+                            with self.assertRaises(SystemExit) as raised:
+                                app.preflight()
+
+        guide.assert_called_once_with()
+        self.assertEqual(raised.exception.code, 1)
+        self.assertFalse(app.github_available)
+        self.assertTrue(captured["github_account_error"])
 
     def test_main_prints_version_and_exits_without_running_app(self) -> None:
         buffer = io.StringIO()
