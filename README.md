@@ -249,7 +249,7 @@ https://github.com/Danathar/atomic-image-builder/issues
 
 ## Contributing
 
-Development workflows (tests, linting, maintainer audit) are documented in [CONTRIBUTING.md](CONTRIBUTING.md).
+Development workflows (tests, linting, maintainer audit) are documented in [CONTRIBUTING.md](CONTRIBUTING.md). Release and maintenance procedures are in [MAINTAINER.md](MAINTAINER.md).
 
 ## License
 
