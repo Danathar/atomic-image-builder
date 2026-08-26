@@ -2262,22 +2262,130 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(results[0], ("pkg0", "Summary 0"))
         self.assertTrue(any("%{name}\t%{summary}\n" in command for command in seen_commands))
 
-    def test_search_host_packages_reports_missing_cache(self) -> None:
+    def test_search_host_packages_reports_missing_cache_when_refresh_is_declined(self) -> None:
         app = self.make_app()
         stub = GumStub()
-        stub.spinner_result = lambda _title, _command, *, cwd=None: subprocess.CompletedProcess(
-            ["dnf5", "repoquery"],
-            1,
-            "",
-            'Cache-only enabled but no cache for repository "fedora"',
-        )
+        commands: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                ["dnf5", "repoquery"],
+                1,
+                "",
+                'Cache-only enabled but no cache for repository "fedora"',
+            )
+
+        stub.spinner_result = fake_spinner_result
+        stub.confirm = lambda _prompt, **_kwargs: False
         app.gum = stub
         with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "dnf5"):
             results, truncated, message = app.search_host_packages("tmux")
 
         self.assertEqual(results, [])
         self.assertFalse(truncated)
-        self.assertIn("dnf5 makecache", message or "")
+        self.assertEqual(message, atomic_image_builder.PACKAGE_SEARCH_NEEDS_METADATA)
+        # Declining must not download anything.
+        self.assertTrue(all("makecache" not in command for command in commands))
+
+    def test_search_host_packages_refreshes_metadata_then_retries_the_search(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        commands: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            commands.append(list(command))
+            if "makecache" in command:
+                return subprocess.CompletedProcess(list(command), 0, "Metadata cache created.", "")
+            if len([c for c in commands if "repoquery" in c]) == 1:
+                return subprocess.CompletedProcess(
+                    list(command),
+                    1,
+                    "",
+                    'Cache-only enabled but no cache for repository "fedora"',
+                )
+            return subprocess.CompletedProcess(list(command), 0, "tmux\tTerminal multiplexer\n", "")
+
+        stub.spinner_result = fake_spinner_result
+        stub.confirm = lambda _prompt, **_kwargs: True
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "dnf5"):
+            results, truncated, message = app.search_host_packages("tmux")
+
+        self.assertIsNone(message)
+        self.assertFalse(truncated)
+        self.assertEqual(results, [("tmux", "Terminal multiplexer")])
+        self.assertEqual([c for c in commands if "makecache" in c][0][-1], "makecache")
+        # The failed query, the refresh, then the query again.
+        self.assertEqual(len(commands), 3)
+        self.assertTrue(any(level == "success" for level, _message in stub.messages))
+
+    def test_search_host_packages_does_not_loop_when_refresh_leaves_cache_empty(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        commands: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            commands.append(list(command))
+            if "makecache" in command:
+                return subprocess.CompletedProcess(list(command), 0, "", "")
+            return subprocess.CompletedProcess(
+                list(command),
+                1,
+                "",
+                'Cache-only enabled but no cache for repository "fedora"',
+            )
+
+        stub.spinner_result = fake_spinner_result
+        stub.confirm = lambda _prompt, **_kwargs: True
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "dnf5"):
+            results, truncated, message = app.search_host_packages("tmux")
+
+        self.assertEqual(results, [])
+        self.assertFalse(truncated)
+        self.assertEqual(message, atomic_image_builder.PACKAGE_SEARCH_NEEDS_METADATA)
+        # Query, refresh, query -- and then it stops rather than offering again.
+        self.assertEqual(len(commands), 3)
+        self.assertEqual(len([c for c in commands if "makecache" in c]), 1)
+
+    def test_refresh_package_metadata_runs_makecache_with_scoped_state_dir(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        commands: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(list(command), 0, "", "")
+
+        stub.spinner_result = fake_spinner_result
+        stub.confirm = lambda _prompt, **_kwargs: True
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            self.assertTrue(app.refresh_package_metadata())
+
+        self.assertEqual(len(commands), 1)
+        command = commands[0]
+        self.assertEqual(command[0], "env")
+        self.assertTrue(command[1].startswith("XDG_STATE_HOME="))
+        self.assertEqual(command[2:], ["dnf5", "makecache"])
+        self.assertTrue(any(level == "success" for level, _message in stub.messages))
+
+    def test_refresh_package_metadata_reports_failure_detail(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.CompletedProcess(
+            list(command), 1, "", "first line\nCurl error: Could not resolve host"
+        )
+        stub.confirm = lambda _prompt, **_kwargs: True
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(app.refresh_package_metadata())
+
+        self.assertTrue(any(level == "error" for level, _message in stub.messages))
+        self.assertTrue(
+            any(level == "hint" and "Could not resolve host" in message for level, message in stub.messages)
+        )
 
     def test_search_host_packages_treats_no_matches_as_empty_not_error(self) -> None:
         app = self.make_app()
