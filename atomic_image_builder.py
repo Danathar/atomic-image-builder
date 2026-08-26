@@ -65,6 +65,11 @@ COPR_REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 SERVICE_TOKEN_RE = re.compile(r"^[A-Za-z0-9@._:+-]+$")
 FROM_LINE_RE = re.compile(r"^(\s*FROM(?:\s+--platform=\S+)?\s+)(\S+)(.*)$", flags=re.IGNORECASE)
 INSTALLER_SWITCH_RE = re.compile(r"^(\s*bootc switch --mutate-in-place --transport registry )(\S+)(.*)$")
+# dnf5 prints this when -C (cache-only) is used and no repository metadata has
+# been downloaded yet. Matched so package search can offer to fix it in place
+# instead of naming a command the user may have no shell to run.
+DNF5_NO_CACHE_MARKER = "cache-only enabled but no cache"
+PACKAGE_SEARCH_NEEDS_METADATA = "Package search needs local DNF metadata. Use exact-name entry instead."
 DNF5_MISSING_MARKERS = (
     "no matches found",
     "no package matched",
@@ -1885,7 +1890,7 @@ class App:
             self.menu_section(
                 "Search Tips",
                 "Search package names when you only know part of the RPM name.",
-                "Search uses local DNF metadata. If it is unavailable here, use exact-name entry instead.",
+                "Search uses local DNF metadata. If it is missing, this tool offers to download it.",
             )
             print()
             term = self.gum.input(
@@ -2800,6 +2805,42 @@ class App:
         # removals that are not installed in the chosen base image.
         return self._filter_manual_packages(packages, mode="removed")
 
+    def dnf5_state_dir(self) -> Path:
+        # dnf5 keeps its own state under XDG_STATE_HOME. Point that at a
+        # scratch directory so queries made on the user's behalf never disturb
+        # their real dnf5 state. The metadata *cache* is deliberately left
+        # alone: refreshing it should benefit the rest of the system, and be
+        # satisfied by it, rather than building a private copy.
+        state_dir = Path(tempfile.gettempdir()) / f"{TOOL_SLUG}-dnf5"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        return state_dir
+
+    def refresh_package_metadata(self) -> bool:
+        # Offered rather than run automatically: this is a real download over
+        # whatever connection the user happens to be on.
+        #
+        # Offered *here*, rather than printed as advice, because the container
+        # image runs this app as its entrypoint -- a `podman run` user has no
+        # shell in which to go run dnf5. That is the same reason preflight()
+        # walks people through `gh auth login` instead of telling them to.
+        self.gum.warn("Package search needs local DNF metadata, which is not available yet.")
+        self.gum.hint("Refreshing downloads the repository metadata dnf5 uses to match package names.")
+        print()
+        if not self.gum.confirm("Refresh package metadata now?"):
+            return False
+        proc = self.gum.spinner_result(
+            "Refreshing package metadata...",
+            ["env", f"XDG_STATE_HOME={self.dnf5_state_dir()}", "dnf5", "makecache"],
+        )
+        if proc.returncode != 0:
+            self.gum.error("Could not refresh package metadata.")
+            detail = (proc.stderr or proc.stdout).strip()
+            if detail:
+                self.gum.hint(detail.splitlines()[-1])
+            return False
+        self.gum.success("Package metadata refreshed.")
+        return True
+
     def lookup_host_packages(self, packages: Sequence[str]) -> dict[str, bool | None]:
         # Host-side dnf5 checks are a lightweight "spellcheck" for manual RPM
         # names. They are not a perfect model of the final image build, but they
@@ -2826,8 +2867,7 @@ class App:
                 self.package_lookup_cache[package] = None
                 results[package] = None
             return results
-        state_dir = Path(tempfile.gettempdir()) / f"{TOOL_SLUG}-dnf5"
-        state_dir.mkdir(parents=True, exist_ok=True)
+        state_dir = self.dnf5_state_dir()
         title = (
             f"Checking package name: {to_check[0]}"
             if len(to_check) == 1
@@ -2870,7 +2910,7 @@ class App:
     def lookup_host_package(self, package: str) -> bool | None:
         return self.lookup_host_packages([package])[package]
 
-    def search_host_packages(self, term: str) -> tuple[list[tuple[str, str]], bool, str | None]:
+    def search_host_packages(self, term: str, *, allow_metadata_refresh: bool = True) -> tuple[list[tuple[str, str]], bool, str | None]:
         normalized = " ".join(term.split())
         if not normalized:
             return [], False, None
@@ -2880,8 +2920,7 @@ class App:
         cache_key = normalized.lower()
         cached = self.package_search_cache.get(cache_key)
         if cached is None:
-            state_dir = Path(tempfile.gettempdir()) / f"{TOOL_SLUG}-dnf5"
-            state_dir.mkdir(parents=True, exist_ok=True)
+            state_dir = self.dnf5_state_dir()
             pattern = f"*{normalized.replace(' ', '*')}*"
             proc = self.gum.spinner_result(
                 f"Searching package names for: {normalized}",
@@ -2901,8 +2940,13 @@ class App:
             )
             detail = "\n".join(part for part in [proc.stdout, proc.stderr] if part).lower()
             if proc.returncode != 0:
-                if "cache-only enabled but no cache" in detail:
-                    return [], False, "Package search needs local DNF metadata. Run 'dnf5 makecache' first, or use exact-name entry."
+                if DNF5_NO_CACHE_MARKER in detail:
+                    # Offer the fix, then run the search again. The retry has
+                    # the offer disabled so a refresh that reports success
+                    # without producing usable metadata cannot loop.
+                    if allow_metadata_refresh and self.refresh_package_metadata():
+                        return self.search_host_packages(term, allow_metadata_refresh=False)
+                    return [], False, PACKAGE_SEARCH_NEEDS_METADATA
                 if any(marker in detail for marker in DNF5_MISSING_MARKERS):
                     return [], False, None
                 return [], False, "Package search is unavailable right now. Use exact-name entry instead."

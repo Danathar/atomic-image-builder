@@ -27,6 +27,14 @@
 #       in-container `gh auth login` (device-code flow) persists across runs
 #       without ever touching the host's own ~/.config/gh.
 #
+#   -v aib-dnf-cache:/var/cache/libdnf5
+#       Persists the DNF metadata the tool's package search reads. The image
+#       ships with no metadata (the Containerfile ends in `dnf5 clean all`),
+#       so the first search offers to download it; without this volume the
+#       container's `--rm` would throw that away and charge the user the same
+#       download on every run. Also a podman-managed named volume, so it
+#       never touches the host's own dnf caches.
+#
 #   -v <tmp file>:<path>:ro,Z  and  -e AIB_RPM_OSTREE_STATUS_FILE=<path>
 #       When the host has `rpm-ostree`, this script captures
 #       `rpm-ostree status --json` from the host (the container has no way
@@ -87,6 +95,10 @@ if command -v rpm-ostree >/dev/null 2>&1; then
         status_file=""
     fi
 fi
+
+# --- Package search metadata ---------------------------------------------
+# The container runs as root, so dnf5 caches metadata under /var/cache/libdnf5.
+podman_args+=(-v "aib-dnf-cache:/var/cache/libdnf5")
 
 # --- Nice-to-haves ---------------------------------------------------------
 if [ -e /etc/localtime ]; then

@@ -117,6 +117,7 @@ distrobox enter aib -- atomic-image-builder
 |---|---|
 | Create/update image repos, view build status, rotate signing key | Full fidelity |
 | Scan OS & Migrate Layered Packages | Works via the `aib` wrapper or distrobox; unavailable with a bare `podman run` (no host state) |
+| Package search | Works, but the image ships with no DNF metadata, so the first search offers to download it. The `aib` wrapper keeps that download in a named volume; with a bare `podman run --rm` it repeats every run |
 | Local Podman test build | Not available — the option reports this and does nothing; see below |
 
 The image includes `podman` only because `rpm-ostree` (a required dependency the tool checks for at startup) pulls it in transitively. A nested build inside the container is not supported, so the image tells the tool to make its "Test build locally (podman)" option show a clean "not available in this environment" message rather than attempt a build that would fail. Run the tool [from source](#run-from-source) if you need local test builds.
