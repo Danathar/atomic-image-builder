@@ -68,17 +68,26 @@ Run the full audit, including upstream HEAD drift checks against both bundled te
 python3 maintenance_audit.py
 ```
 
-Run the optional action-update audit when you want proactive pin-refresh signals for GitHub Actions used by generated repos:
+Add the action-pin checks to get pin-refresh signals for the GitHub Actions written into generated repos:
 
 ```bash
 python3 maintenance_audit.py --check-action-updates
 ```
 
-The full audit also runs weekly and on demand through the repository workflow at `.github/workflows/maintenance-audit.yml`.
+That flag runs two complementary checks, because a SHA pin can go stale in two different ways:
+
+- **Trailing tags** compares each pin's label against the newest upstream semver tag, at the label's own precision. Catches an exact label like `v4.4.0` when `v4.6.0` exists.
+- **Pin freshness** resolves the tag or branch a pin *names* and checks it still points at the pinned SHA. Catches what the first check cannot: a pin labelled `v7` stays "current" against `v7.0.1` by precision rules while its frozen SHA is `v7.0.0`, and a pin labelled `main` is skipped by the first check entirely.
+
+Both report as **advisories**: they print, but they do not fail the run. A pin that names a branch drifts on every upstream commit, so failing on it would leave the weekly audit permanently red. Genuine inconsistencies — a snapshot pin missing from the tables, a SHA that disagrees with them, upstream template drift — still fail.
+
+This matters more than it looks. Generated repos ship `.github/dependabot.yml`, so a stale pin here becomes a Dependabot PR in someone's brand-new repo within a minute of creating it.
+
+The audit runs weekly and on demand through `.github/workflows/maintenance-audit.yml`, with `--check-action-updates` enabled and the output written to the run summary.
 
 ## Container Image
 
-The tool is also published as a container image (see README.md's "Run with Podman" section for end-user usage). `Containerfile` at the repo root defines the image, built from `atomic_image_builder.py` and the bundled `template_snapshots/`. `.github/workflows/publish-image.yml` builds and pushes it to `ghcr.io/danathar/atomic-image-builder` — tagged `latest`, the tool's `VERSION`, and the short commit SHA — only when a GitHub release is published or the workflow is dispatched manually, never on every push. `.github/workflows/ci.yml`'s `container-build` job builds (but does not push) the Containerfile on any push or PR that touches `Containerfile`, `container/`, `atomic_image_builder.py`, or `template_snapshots/`. It then smoke tests every non-interactive path the packaged entrypoint has and collects end-to-end coverage from them (see [Coverage](#coverage)). `contrib/aib` is the host-side wrapper and is not baked into the image, so it is deliberately not a trigger. To build and test the image locally:
+The tool is also published as a container image (see README.md's "Run with Podman" section for end-user usage). `Containerfile` at the repo root defines the image, built from `atomic_image_builder.py` and the bundled `template_snapshots/`. `.github/workflows/publish-image.yml` builds and pushes it to `ghcr.io/danathar/atomic-image-builder` — tagged `latest`, the tool's `VERSION`, and the short commit SHA — on every merge to `main`, when a GitHub release is published, or on manual dispatch. Publishing on merge is deliberate: it previously required a release or a manual dispatch, no releases were ever cut, and `latest` sat seven weeks behind `main`. Everything the tool bakes in — the script, its `ACTION_PINS` table, and the bundled template snapshots — reaches users only through this image, so a stale image silently strands every fix made to any of them. `.github/workflows/ci.yml`'s `container-build` job builds (but does not push) the Containerfile on any push or PR that touches `Containerfile`, `container/`, `atomic_image_builder.py`, or `template_snapshots/`. It then smoke tests every non-interactive path the packaged entrypoint has and collects end-to-end coverage from them (see [Coverage](#coverage)). `contrib/aib` is the host-side wrapper and is not baked into the image, so it is deliberately not a trigger. To build and test the image locally:
 
 ```bash
 podman build -t aib-local -f Containerfile .

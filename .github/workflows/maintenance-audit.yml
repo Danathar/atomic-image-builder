@@ -15,7 +15,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      # --check-action-updates was opt-in and nothing opted in, so pin drift
+      # was only ever found by hand. It runs here now. Its output is advisory
+      # and does not fail the job -- a pin that names a branch drifts on every
+      # upstream commit, and a permanently red weekly audit teaches everyone
+      # to ignore it. Real inconsistencies still fail.
       - name: Run maintenance audit
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 maintenance_audit.py
+        run: |
+          set -o pipefail
+          python3 maintenance_audit.py --check-action-updates | tee audit.log
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## Maintenance audit"
+            echo
+            echo '```'
+            cat audit.log 2>/dev/null || echo "(the audit produced no output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

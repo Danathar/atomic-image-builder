@@ -10,14 +10,17 @@ from unittest.mock import patch
 
 from maintenance_audit import (
     TemplateSource,
+    audit_action_pin_freshness,
     audit_action_update_availability,
     audit_local_snapshot,
     audit_upstream_drift,
     github_api_json,
     is_newer_version_available,
+    iter_pinned_refs,
     load_template_source,
     main,
     parse_version_tag,
+    query_github_ref_sha,
     query_latest_github_semver_tag,
     query_remote_head,
     run_audit,
@@ -266,17 +269,18 @@ class MaintenanceAuditTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         with patch("maintenance_audit.audit_upstream_drift") as drift:
             with patch("maintenance_audit.audit_action_update_availability") as updates:
-                findings = run_audit(repo_root, skip_upstream=True)
+                findings, advisories = run_audit(repo_root, skip_upstream=True)
         drift.assert_not_called()
         updates.assert_not_called()
         self.assertEqual(findings, [])
+        self.assertEqual(advisories, [])
 
     def test_run_audit_queries_drift_per_template_source(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         with patch(
             "maintenance_audit.audit_upstream_drift", return_value=["drift finding"]
         ) as drift:
-            findings = run_audit(repo_root, skip_upstream=False)
+            findings, _advisories = run_audit(repo_root, skip_upstream=False)
         self.assertEqual(drift.call_count, 2)
         self.assertEqual(findings, ["drift finding", "drift finding"])
 
@@ -286,21 +290,92 @@ class MaintenanceAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
             with patch("maintenance_audit.audit_upstream_drift") as drift:
-                findings = run_audit(repo_root, skip_upstream=False)
+                findings, _advisories = run_audit(repo_root, skip_upstream=False)
         drift.assert_not_called()
         self.assertTrue(any("Missing template metadata file" in f for f in findings))
 
-    def test_run_audit_appends_action_update_findings_when_asked(self) -> None:
+    def test_run_audit_returns_action_updates_as_advisories_not_failures(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         with patch(
             "maintenance_audit.audit_action_update_availability", return_value=["stale pin"]
         ):
-            findings = run_audit(repo_root, skip_upstream=True, check_action_updates=True)
-        self.assertEqual(findings, ["stale pin"])
+            with patch(
+                "maintenance_audit.audit_action_pin_freshness", return_value=["moved pin"]
+            ):
+                findings, advisories = run_audit(
+                    repo_root, skip_upstream=True, check_action_updates=True
+                )
+        # Pin drift must not fail the run -- a branch pin drifts constantly.
+        self.assertEqual(findings, [])
+        self.assertEqual(advisories, ["stale pin", "moved pin"])
+
+    def test_audit_action_pin_freshness_flags_a_moving_tag_that_left_the_pin_behind(self) -> None:
+        # The exact case that shipped actions/checkout v7.0.0 in generated
+        # repos: the pin says v7, but upstream's v7 tag has moved on.
+        pinned = [("actions/checkout", "v7", "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0")]
+        with patch("maintenance_audit.query_github_ref_sha", return_value="3d3c42e5aac5ba805825da76410c181273ba90b1"):
+            findings = audit_action_pin_freshness(pinned)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("actions/checkout", findings[0])
+        self.assertIn("the tag it names", findings[0])
+        self.assertIn("9c091bb21b7c", findings[0])
+        self.assertIn("3d3c42e5aac5", findings[0])
+
+    def test_audit_action_pin_freshness_flags_a_branch_pin_and_names_it_a_branch(self) -> None:
+        pinned = [("osbuild/bootc-image-builder-action", "main", "8661cd3832544ad68c12dcde8681b13ab0f56a8d")]
+        with patch("maintenance_audit.query_github_ref_sha", return_value="56d652d0afb02eb3e4b8fd35e7ca0391dbebab2a"):
+            findings = audit_action_pin_freshness(pinned)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("the branch it names", findings[0])
+
+    def test_audit_action_pin_freshness_quiet_when_the_ref_still_matches(self) -> None:
+        sha = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+        with patch("maintenance_audit.query_github_ref_sha", return_value=sha):
+            self.assertEqual(audit_action_pin_freshness([("actions/checkout", "v7", sha)]), [])
+        # An unresolvable ref is not evidence of drift either.
+        with patch("maintenance_audit.query_github_ref_sha", return_value=None):
+            self.assertEqual(audit_action_pin_freshness([("actions/checkout", "v7", sha)]), [])
+
+    def test_audit_action_pin_freshness_reports_query_failures(self) -> None:
+        with patch("maintenance_audit.query_github_ref_sha", side_effect=RuntimeError("rate limited")):
+            findings = audit_action_pin_freshness([("actions/checkout", "v7", "abc123")])
+        self.assertEqual(len(findings), 1)
+        self.assertIn("Unable to resolve actions/checkout@v7", findings[0])
+        self.assertIn("rate limited", findings[0])
+
+    def test_query_github_ref_sha_extracts_sha_and_rejects_bad_payloads(self) -> None:
+        with patch("maintenance_audit.github_api_json", return_value={"sha": "abc"}):
+            self.assertEqual(query_github_ref_sha("owner/repo", "main"), "abc")
+        with patch("maintenance_audit.github_api_json", return_value={"nope": 1}):
+            self.assertIsNone(query_github_ref_sha("owner/repo", "main"))
+        with patch("maintenance_audit.github_api_json", return_value=["not a dict"]):
+            with self.assertRaises(RuntimeError):
+                query_github_ref_sha("owner/repo", "main")
+
+    def test_iter_pinned_refs_dedupes_the_many_spellings_of_one_ref_pin(self) -> None:
+        actions = {"owner/act": ("sha1", "v1")}
+        ref_pins = {
+            "owner/act@v1": ("sha1", "v1"),
+            "other/act@main": ("sha2", "main"),
+            "other/act@sha2": ("sha2", "main"),
+        }
+        pinned = iter_pinned_refs(actions, ref_pins)
+        self.assertEqual(sorted(pinned), [("other/act", "main", "sha2"), ("owner/act", "v1", "sha1")])
+
+    def test_main_prints_advisories_without_failing(self) -> None:
+        stdout = io.StringIO()
+        with patch("maintenance_audit.run_audit", return_value=([], ["pin moved"])):
+            with contextlib.redirect_stdout(stdout):
+                code = main(["--skip-upstream", "--check-action-updates"])
+        output = stdout.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("Action pin advisories (not failures):", output)
+        self.assertIn("- pin moved", output)
+        self.assertIn("Maintenance audit passed.", output)
 
     def test_main_passing_audit_prints_success_and_returns_zero(self) -> None:
         stdout = io.StringIO()
-        with patch("maintenance_audit.run_audit", return_value=[]) as run:
+        with patch("maintenance_audit.run_audit", return_value=([], [])) as run:
             with contextlib.redirect_stdout(stdout):
                 code = main(["--skip-upstream"])
         self.assertEqual(code, 0)
@@ -310,7 +385,7 @@ class MaintenanceAuditTests(unittest.TestCase):
 
     def test_main_failing_audit_lists_findings_and_returns_one(self) -> None:
         stdout = io.StringIO()
-        with patch("maintenance_audit.run_audit", return_value=["first", "second"]):
+        with patch("maintenance_audit.run_audit", return_value=(["first", "second"], [])):
             with contextlib.redirect_stdout(stdout):
                 code = main([])
         self.assertEqual(code, 1)
@@ -321,7 +396,7 @@ class MaintenanceAuditTests(unittest.TestCase):
 
     def test_main_forwards_repo_root_and_update_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("maintenance_audit.run_audit", return_value=[]) as run:
+            with patch("maintenance_audit.run_audit", return_value=([], [])) as run:
                 with contextlib.redirect_stdout(io.StringIO()):
                     code = main(["--repo-root", tmp, "--skip-upstream", "--check-action-updates"])
         self.assertEqual(code, 0)

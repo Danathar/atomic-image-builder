@@ -8,7 +8,7 @@ import re
 import subprocess
 import urllib.error
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -206,6 +206,69 @@ def query_latest_github_semver_tag(action: str) -> str | None:
     return latest_tag
 
 
+def query_github_ref_sha(action: str, ref: str) -> str | None:
+    payload = github_api_json(f"https://api.github.com/repos/{action}/commits/{ref}")
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Unexpected commit payload for {action}@{ref}")
+    sha = payload.get("sha")
+    return sha if isinstance(sha, str) else None
+
+
+def iter_pinned_refs(
+    actions: Mapping[str, tuple[str, str]] = ACTION_PINS,
+    ref_pins: Mapping[str, tuple[str, str]] = ACTION_REF_PINS,
+) -> list[tuple[str, str, str]]:
+    # Both pin tables describe the same thing -- "this action, at this label,
+    # is this SHA" -- so freshness can be checked over them together. The
+    # ref-pin table is keyed by "action@ref" and holds several keys per pin
+    # (the tag and the SHA spellings), so dedupe on (action, label).
+    seen: set[tuple[str, str]] = set()
+    pinned: list[tuple[str, str, str]] = []
+    for action, (sha, label) in actions.items():
+        if (action, label) not in seen:
+            seen.add((action, label))
+            pinned.append((action, label, sha))
+    for key, (sha, label) in ref_pins.items():
+        action = key.split("@", 1)[0]
+        if (action, label) not in seen:
+            seen.add((action, label))
+            pinned.append((action, label, sha))
+    return pinned
+
+
+def audit_action_pin_freshness(
+    pinned: Sequence[tuple[str, str, str]] | None = None,
+) -> list[str]:
+    # A SHA pin carries a human label -- "v7", "main" -- and that label is a
+    # claim about what the SHA is. This checks the claim: resolve the label
+    # upstream and see whether it still points at the pinned commit.
+    #
+    # This catches what audit_action_update_availability() cannot. A pin
+    # labelled v7 stays "current" against a v7.0.1 release by that function's
+    # rules, because the label's precision says only a major bump counts --
+    # but the pinned SHA is frozen at v7.0.0, so every repo generated from it
+    # ships the older action and gets a Dependabot PR on day one. Same for a
+    # branch label like "main", which that function skips entirely.
+    #
+    # Immutable exact tags (v4.6.0) resolve to themselves forever, so they
+    # stay quiet here. Moving tags and branches are the ones that drift.
+    findings: list[str] = []
+    for action, label, sha in iter_pinned_refs() if pinned is None else pinned:
+        try:
+            head = query_github_ref_sha(action, label)
+        except RuntimeError as exc:
+            findings.append(f"Unable to resolve {action}@{label} upstream: {exc}")
+            continue
+        if head is None or head == sha:
+            continue
+        kind = "tag" if parse_version_tag(label) is not None else "branch"
+        findings.append(
+            f"Action pin {action} no longer matches the {kind} it names: pinned {sha[:12]}, "
+            f"{label} is now {head[:12]}. Repos generated from this pin ship the older action."
+        )
+    return findings
+
+
 def audit_action_update_availability(
     actions: Mapping[str, tuple[str, str]] = ACTION_PINS,
 ) -> list[str]:
@@ -228,7 +291,19 @@ def audit_action_update_availability(
     return findings
 
 
-def run_audit(repo_root: Path, *, skip_upstream: bool, check_action_updates: bool = False) -> list[str]:
+def run_audit(
+    repo_root: Path, *, skip_upstream: bool, check_action_updates: bool = False
+) -> tuple[list[str], list[str]]:
+    """Return (failures, advisories).
+
+    Failures mean the repository is internally inconsistent or has drifted
+    from its recorded upstream, and the audit exits non-zero for them.
+
+    Advisories mean an upstream action has moved on. They are reported but do
+    not fail the run: a pin that names a branch drifts every time upstream
+    commits, so failing on it would leave the weekly audit permanently red
+    and train everyone to ignore it.
+    """
     findings = audit_local_snapshot(repo_root)
     if not skip_upstream:
         for source_rel, _workflow_rel in TEMPLATE_SOURCES:
@@ -239,9 +314,11 @@ def run_audit(repo_root: Path, *, skip_upstream: bool, check_action_updates: boo
                 source = None
             if source is not None:
                 findings.extend(audit_upstream_drift(source))
+    advisories: list[str] = []
     if check_action_updates:
-        findings.extend(audit_action_update_availability())
-    return findings
+        advisories.extend(audit_action_update_availability())
+        advisories.extend(audit_action_pin_freshness())
+    return findings, advisories
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -260,15 +337,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check-action-updates",
         action="store_true",
-        help="Also query upstream action tags and report when ACTION_PINS trail newer semver tags.",
+        help=(
+            "Also query upstream and report action pins that trail newer semver tags or no "
+            "longer match the tag or branch they name. Reported as advisories, not failures."
+        ),
     )
     args = parser.parse_args(argv)
 
-    findings = run_audit(
+    findings, advisories = run_audit(
         args.repo_root.resolve(),
         skip_upstream=args.skip_upstream,
         check_action_updates=args.check_action_updates,
     )
+    if advisories:
+        print("Action pin advisories (not failures):")
+        for advisory in advisories:
+            print(f"- {advisory}")
+        print()
+
     if not findings:
         print("Maintenance audit passed.")
         return 0

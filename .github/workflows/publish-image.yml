@@ -2,9 +2,25 @@
 name: Publish Image
 
 on:
+  # Every merge to main republishes. This is deliberately not path-scoped and
+  # has no skip condition: the image previously moved only on a release or a
+  # manual dispatch, there were no releases, and it sat seven weeks behind
+  # main -- long enough that every repo generated from `latest` shipped stale
+  # action pins and collected Dependabot PRs on creation. A few minutes of
+  # build time per merge is cheaper than that going unnoticed again.
+  push:
+    branches: [main]
   release:
     types: [published]
   workflow_dispatch:
+
+# Two merges in quick succession must not race to push `latest`. Newest wins:
+# an in-flight publish for an older commit is cancelled rather than allowed to
+# overwrite a newer one. Keyed by ref so a release publish is never cancelled
+# by a push to main.
+concurrency:
+  group: publish-image-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   publish:
