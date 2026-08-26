@@ -5107,13 +5107,16 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("--pull=newer", wrapper)
         self.assertIn("podman_args=(--rm -it --pull=newer)", wrapper)
 
-    def test_readme_documents_pulling_a_newer_image_for_container_runs(self) -> None:
-        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
-        self.assertIn("podman run --rm -it --pull=newer", readme)
+    def test_docs_document_pulling_a_newer_image_for_container_runs(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        installing = (root / "docs/installing.md").read_text()
+        self.assertIn("podman run --rm -it --pull=newer", installing)
         # distrobox enter never re-pulls, so --pull=newer cannot cover it and
         # the recreate step has to be written down instead.
-        self.assertIn("distrobox create --name aib --pull --image", readme)
-        self.assertIn("distrobox rm aib", readme)
+        self.assertIn("distrobox create --name aib --pull --image", installing)
+        self.assertIn("distrobox rm aib", installing)
+        # The README is deliberately short, but it must still lead somewhere.
+        self.assertIn("docs/installing.md", (root / "README.md").read_text())
 
     def test_show_summary_uses_pager_for_read_only_view(self) -> None:
         app = self.make_app()
