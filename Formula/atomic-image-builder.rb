@@ -3,8 +3,8 @@ class AtomicImageBuilder < Formula
 
   desc "Beginner-focused terminal tool for GitHub-backed bootc image repos"
   homepage "https://github.com/Danathar/atomic-image-builder"
-  url "https://github.com/Danathar/atomic-image-builder/archive/refs/tags/v0.9.0.tar.gz"
-  sha256 "10a7c22b0b66fdb53521e7f1a5fec9184dbdc71b3dc980119b9788a8f5bd82eb"
+  url "https://github.com/Danathar/atomic-image-builder/archive/refs/tags/v0.9.1.tar.gz"
+  sha256 "1a45408f4ff9e5c62780d68610991cbec0cdf9c7eb14a0d33c40f3ade4899981"
   license "GPL-3.0-only"
 
   # The tool shells out to all four of these and refuses to start without them,
