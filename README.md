@@ -14,7 +14,7 @@ A guided terminal tool for creating and updating GitHub-backed bootc image repos
 
 ## Quick start
 
-**Have Homebrew?** (Bazzite, Bluefin, and Aurora ship with it.)
+**Have Homebrew?** ([Bazzite](https://bazzite.gg), [Bluefin](https://projectbluefin.io), and [Aurora](https://getaurora.dev) ship with it.)
 
 ```bash
 brew tap danathar/aib https://github.com/Danathar/atomic-image-builder
@@ -44,7 +44,7 @@ Creates and maintains a **separate GitHub repository** that builds a custom boot
 - Update repos it created, view build status, and rotate the cosign signing key.
 - Test-build a Containerfile image locally with Podman before pushing.
 
-Supported bases: **Universal Blue** (Bazzite, Bazzite GNOME, Bazzite DX, Bazzite DX GNOME, Aurora, Aurora DX, Bluefin, Bluefin DX) and **Fedora Atomic** (Silverblue, Kinoite, Sway, Budgie, COSMIC).
+Supported bases: **[Universal Blue](https://universal-blue.org)** — [Bazzite](https://bazzite.gg) (also GNOME, DX, DX GNOME), [Aurora](https://getaurora.dev) (also DX), [Bluefin](https://projectbluefin.io) (also DX) — and **Fedora Atomic**: Silverblue, Kinoite, Sway, Budgie, COSMIC.
 
 ### What it does not do
 

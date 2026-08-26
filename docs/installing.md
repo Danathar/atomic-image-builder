@@ -17,7 +17,8 @@ Fedora Atomic and Universal Blue desktops, where both are already present.
 ## Homebrew
 
 If you already have [Homebrew](https://brew.sh/) — Universal Blue images such as
-Bazzite, Bluefin, and Aurora ship with it — this is the shortest path. It
+[Bazzite](https://bazzite.gg), [Bluefin](https://projectbluefin.io), and [Aurora](https://getaurora.dev) ship with it —
+this is the shortest path. It
 installs the tool as an ordinary command and brings `gum`, `git`, `gh`, and
 `cosign` along with it, none of which are in Fedora's own repositories:
 
