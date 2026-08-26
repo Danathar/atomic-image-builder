@@ -93,17 +93,20 @@ The formula records a release tarball and its sha256, and neither can be known u
 
 The formula installs the command as `aib-tool`, which is `TOOL_COMMAND` in `atomic_image_builder.py`. That constant is deliberately separate from `TOOL_SLUG`: `TOOL_SLUG` feeds `STATE_FILE` (`.atomic-image-builder.json`), which is written into every managed repo and is how the tool recognises repos it created, so renaming it would orphan all of them. `TOOL_COMMAND` only has to match what the installers put on PATH, and is `aib-tool` rather than `aib` because `contrib/aib` already claims `aib`.
 
-1. Bump `VERSION` in `atomic_image_builder.py`. It is the single source for the tool's `--version`, the published image's version tag, and the release tag, so they should all agree.
+1. Bump `VERSION` in `atomic_image_builder.py`. It is the single source for the tool's `--version`, the published image's version tag, and the release tag, so they should all agree. Merge it.
 2. Tag and publish the release on GitHub.
-3. Point the formula at it:
 
-   ```bash
-   python3 homebrew_formula.py --update v0.9.0
-   ```
+That is the whole manual process. `.github/workflows/update-homebrew-formula.yml` takes it from there on `release: published` — it checks out `main` (the release event checks out the tag, and the formula lives on `main`), runs `--update` for the released tag, verifies the result with `--check`, and pushes the one-line change. Users get it on their next `brew update && brew upgrade`.
 
-4. Commit the updated formula.
+It pushes directly rather than opening a pull request because Actions is not permitted to create pull requests in this repository. The change is a single machine-generated sha256 that the job verifies before pushing.
 
-Step 3 is the one that gets forgotten, and a formula left pointing at the previous release installs the wrong version silently. So the weekly maintenance audit runs:
+To fix it up by hand — for a release published before that workflow existed, or after a failed run — either dispatch the workflow with the tag, or do it locally:
+
+```bash
+python3 homebrew_formula.py --update v0.9.0
+```
+
+Because the formula can only be updated after a release exists, a failure there leaves it pointing at the previous one, which installs the wrong version silently. So the weekly maintenance audit independently runs:
 
 ```bash
 python3 homebrew_formula.py --check

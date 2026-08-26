@@ -1,0 +1,107 @@
+---
+name: Update Homebrew Formula
+
+# The formula pins a release tarball and its sha256, and neither exists until
+# the tag is published -- so the formula is always updated after a release.
+# That made it the one step in the process with nothing forcing it to happen,
+# while a formula left behind keeps installing the previous version. This runs
+# it automatically instead.
+#
+# It pushes straight to main rather than opening a pull request: Actions is not
+# permitted to create pull requests in this repository. The change is a single
+# machine-generated sha256 that the job verifies before pushing, and the weekly
+# maintenance audit re-checks it independently afterwards.
+on:
+  release:
+    types: [published]
+  # For re-running against a release that was published before this workflow
+  # existed, or after a failed run.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to point the formula at (e.g. v0.9.1)"
+        required: true
+
+permissions:
+  contents: write
+
+# Serialized: two releases in quick succession must not race to rewrite the
+# same file. Not cancel-in-progress -- an interrupted run could leave the
+# formula updated locally but unpushed, which looks like success and is not.
+concurrency:
+  group: update-homebrew-formula
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Point the formula at the release
+    runs-on: ubuntu-24.04
+    steps:
+      # The release event checks out the tag; the formula lives on main.
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.10"
+
+      - name: Point the formula at the release
+        id: update
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 homebrew_formula.py --update "$TAG"
+          # Verified independently of the code that just wrote it. This also
+          # fails when a release was tagged without bumping VERSION first,
+          # because --check compares the formula's tag against VERSION -- and
+          # that release would ship a formula whose own test block cannot pass.
+          python3 homebrew_formula.py --check
+          if git diff --quiet -- Formula/; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit and push
+        if: steps.update.outputs.changed == 'true'
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Point the Homebrew formula at ${TAG}"
+          # main may have moved while the release was being published.
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
+
+      - name: Summarize
+        if: always()
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          {
+            echo "## Homebrew formula"
+            echo
+            if [ "${{ steps.update.outputs.changed }}" = "true" ]; then
+              echo "Pointed at \`${TAG}\` and pushed to \`main\`. Users get it on their next \`brew update && brew upgrade\`."
+            elif [ "${{ steps.update.outputs.changed }}" = "false" ]; then
+              echo "Already pointed at \`${TAG}\`; nothing to do."
+            else
+              echo "Did not update the formula for \`${TAG}\`. Run this locally to see why:"
+              echo
+              echo '```'
+              echo "python3 homebrew_formula.py --update ${TAG}"
+              echo "python3 homebrew_formula.py --check"
+              echo '```'
+            fi
+            echo
+            echo '```'
+            grep -E '^\s+(url|sha256)' Formula/atomic-image-builder.rb || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
