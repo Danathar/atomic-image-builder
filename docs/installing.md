@@ -4,13 +4,20 @@ Three ways to run Atomic Image Builder. Pick one; they are the same tool.
 
 | Path | Command | Tracks | Needs |
 |---|---|---|---|
-| [Homebrew](#homebrew) | `aib-tool` | Tagged releases | `brew` |
+| [Homebrew](#homebrew) | `aib-tool` | Tagged releases | `brew`, plus host `dnf5` and `rpm-ostree` |
 | [Podman](#podman) | `aib` | `main`, rebuilt every merge | `podman` |
-| [Source](#from-source) | `./atomic_image_builder.py` | Your checkout | Python 3.10+ and the tools below |
+| [Source](#from-source) | `./atomic_image_builder.py` | Your checkout | Python 3.10+, plus the tools below |
 
-Whichever you choose, `dnf5` and `rpm-ostree` come from the host. The tool reads
-the host's package metadata and talks to the host's `rpm-ostreed`, so it targets
-Fedora Atomic and Universal Blue desktops, where both are already present.
+The tool needs `dnf5` and `rpm-ostree`. Where they come from depends on how you
+run it. With Homebrew or a source checkout they come from the host — which is
+why those paths target Fedora Atomic and Universal Blue desktops, where both are
+already present. The container image bundles its own, so Podman really is the
+only prerequisite there.
+
+What the container cannot bundle is your host's rpm-ostree *state*: it has no
+access to the host's system D-Bus, so the Scan OS menu depends on the `aib`
+wrapper handing that state in. See
+[Limitations of running in a container](#limitations-of-running-in-a-container).
 
 ---
 
