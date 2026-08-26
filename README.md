@@ -30,7 +30,7 @@ chmod +x ~/.local/bin/aib
 aib
 ```
 
-Either one launches the guided menu. You will need a GitHub account; if you are not logged in, the tool walks you through `gh auth login` on first run.
+Either one launches the guided menu. **YOU WILL NEED A GITHUB ACCOUNT** — if you are not already logged in, the tool walks you through `gh auth login` on first run.
 
 Other options — plain `podman run`, distrobox, running from source — are in [Installing](docs/installing.md).
 
