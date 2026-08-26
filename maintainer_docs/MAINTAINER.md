@@ -52,12 +52,28 @@ Tagging without bumping first is caught, not silently shipped: the workflow's
 `--check` compares the formula's tag against `VERSION` and fails. Bump, merge,
 then re-dispatch.
 
-### The trap worth remembering
+### How Homebrew users actually get the new version
 
-**Cutting a release does nothing for Homebrew users on its own.** They see a
-new version only when `Formula/atomic-image-builder.rb` on `main` points at
-it. The tag is just an artifact the formula references. That is the whole
-reason the automation and the weekly formula check exist.
+In the normal case they just run `brew update && brew upgrade` and it works,
+because the automation has already updated the formula. Nothing else is needed.
+
+What is worth understanding is *why*, because it explains the one failure mode.
+**Homebrew only ever reads the formula file. It has no knowledge of your
+releases at all.** `brew update` git-pulls the tap; `brew upgrade` compares
+what is installed against the version parsed out of the formula's `url`:
+
+```
+url              .../archive/refs/tags/v0.9.0.tar.gz
+formula version  0.9.0
+installed        0.9.0
+outdated         False
+```
+
+Nothing in that chain polls GitHub for releases. So if a release is tagged and
+the formula is never updated, brew reports `outdated: False` **indefinitely** —
+users do not catch up later, because there is nothing to catch up to. That is
+why the formula update is automated, and why the weekly audit re-checks it
+independently rather than trusting the automation ran.
 
 ---
 
@@ -121,7 +137,9 @@ Read the **direction** before acting. The message states it:
 ### Advisory: the formula pin
 
 `Formula points at v0.9.0 but the tool's VERSION is 0.9.1` means a release was
-cut and the formula never followed. Fix with:
+cut and the formula never followed — so the automation did not run, or ran and
+failed. Homebrew users are stuck on the older version until this is fixed; they
+will not pick it up on their own. Fix with:
 
 ```bash
 gh workflow run update-homebrew-formula.yml -f tag=v0.9.1
