@@ -97,19 +97,30 @@ The wrapper forwards your host's `gh` login when there is one (otherwise it pers
 If you would rather not use the wrapper script:
 
 ```bash
-podman run --rm -it \
+podman run --rm -it --pull=newer \
   -e GH_TOKEN="$(gh auth token)" \
   ghcr.io/danathar/atomic-image-builder:latest
 ```
+
+`--pull=newer` matters more than it looks. Podman's default is `--pull=missing`, which pulls only when the image is absent locally — so once you have pulled `latest` you would keep running that copy indefinitely, however far the published image moves on. The tool bakes in its own action pins and template snapshots, so an old image quietly generates repos from old pins. `--pull=newer` fetches only when the registry digest differs, and podman suppresses pull errors when a local image exists, so it still works offline.
 
 ### Distrobox
 
 [Distrobox](https://distrobox.it/) integrates the container with your host: it shares your home directory, so your host `gh` login is reused directly, and host system access, so the Scan OS menu can read the host's `rpm-ostree` state — no wrapper or manual mounts needed:
 
 ```bash
-distrobox create --name aib --image ghcr.io/danathar/atomic-image-builder:latest
+distrobox create --name aib --pull --image ghcr.io/danathar/atomic-image-builder:latest
 distrobox enter aib -- atomic-image-builder
 ```
+
+`distrobox create --pull` fetches the image at creation time, but `distrobox enter` never re-pulls afterwards — unlike `podman run --pull=newer`, there is no per-run freshness check. To pick up a newer image you have to recreate the box:
+
+```bash
+distrobox rm aib
+distrobox create --name aib --pull --image ghcr.io/danathar/atomic-image-builder:latest
+```
+
+Distrobox shares your host home directory, so recreating discards only whatever you installed inside the box, not your own files or your `gh` login.
 
 ### Limitations of running in a container
 

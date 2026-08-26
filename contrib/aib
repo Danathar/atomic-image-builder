@@ -15,6 +15,11 @@
 #
 # What this script mounts or passes into the container, and why:
 #
+#   --pull=newer
+#       Checks the registry for a newer image on every run and pulls only when
+#       the digest differs. See the note by podman_args below for why this is
+#       not left at podman's default.
+#
 #   -e GH_TOKEN
 #       When the host has `gh` logged in, forwards a token so the container
 #       does not need its own login. The value is exported in this wrapper's
@@ -62,7 +67,13 @@ if ! command -v podman >/dev/null 2>&1; then
     exit 1
 fi
 
-podman_args=(--rm -it)
+# --pull=newer, because the wrapper is the path where nobody thinks about
+# pulling. Podman's default (--pull=missing) would run whatever copy was first
+# fetched, forever; the tool bakes in its own action pins and template
+# snapshots, so a stale image quietly generates repos from stale pins. This
+# fetches only when the registry digest differs, and podman suppresses pull
+# errors when a local image exists, so an offline run still works.
+podman_args=(--rm -it --pull=newer)
 
 # --- GitHub auth -------------------------------------------------------
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
