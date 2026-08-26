@@ -4,7 +4,7 @@
 
 # Atomic Image Builder
 
-A guided terminal tool for creating and updating GitHub-backed bootc image repositories — for people who want a custom image without learning the full template and workflow setup first. Works with Universal Blue and Fedora Atomic desktops.
+A guided terminal tool for creating and updating GitHub-backed bootc image repositories — for people who want a custom image without learning the full template and workflow setup first. (The author RECOMMENDS YOU LEARN anyway!) Works with Universal Blue and Fedora Atomic desktops.
 
 > [!TIP]
 > **Safe to explore — it won't touch the system you're running on.** Everything happens on GitHub: it creates a new repo and lets GitHub Actions build your image. It never modifies, rebases, or removes packages from your current install. Switching your machine to the built image is a separate, deliberate step you take later.
