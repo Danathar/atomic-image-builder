@@ -76,11 +76,15 @@ gh run watch "$(gh run list --workflow update-homebrew-formula.yml --limit 1 \
 ```
 
 It checks out `main`, points the formula at the release, verifies the digest,
-and pushes. Confirm afterwards if you like:
+and pushes. To confirm afterwards, switch back to `main` first — the bot's
+commit landed there, not on your release branch:
 
 ```bash
-git pull && python3 homebrew_formula.py --check   # → "pin is current."
+git switch main && git pull
+python3 homebrew_formula.py --check
 ```
+
+It should print `Homebrew formula pin is current.`
 
 ### Order matters
 
