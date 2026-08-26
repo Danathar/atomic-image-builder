@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -423,7 +424,11 @@ def ghcr_package_exists(owner: str, name: str, *, timeout: float = 6.0) -> bool:
         )
         with urllib.request.urlopen(tags_request, timeout=timeout) as response:
             return response.status == 200
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):
+        # http.client's exceptions -- IncompleteRead, BadStatusLine, LineTooLong,
+        # InvalidURL -- descend from HTTPException, not OSError or ValueError. A
+        # response truncated by GHCR or a proxy would otherwise escape an
+        # advisory check and stop the user creating a repo at all.
         return False
 
 
@@ -3029,9 +3034,11 @@ class App:
         print()
         self.menu_section(
             "How to Fix It",
-            f"Open https://github.com/users/{owner}/packages/container/{package}/settings",
-            "Under 'Manage Actions access', add this repo with the Write role,",
-            "or delete the package and let the first build recreate it.",
+            f"Package settings: https://github.com/users/{owner}/packages/container/{package}/settings",
+            "Delete the package there, then answer yes -- the first build recreates it.",
+            "Or answer yes now, then add this repo under 'Manage Actions access' with",
+            "the Write role before the build reaches its push step. That selector only",
+            "lists repos that already exist, so it cannot be done from here.",
         )
         print()
         return self.gum.confirm(f"Create {owner}/{repo} anyway?", default=False)

@@ -1,3 +1,4 @@
+import http.client
 import io
 import json
 import os
@@ -7,6 +8,7 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+import urllib.error
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2915,10 +2917,23 @@ class BuilderTests(unittest.TestCase):
             self.assertTrue(REAL_GHCR_PACKAGE_EXISTS("Danathar", "Bazzite-DX-Test"))
 
         # A package the anonymous pull cannot read is reported as absent: a
-        # private one is indistinguishable from a missing one this way.
-        responses = [FakeResponse(200, '{"token": "t"}'), FakeResponse(403, "{}")]
-        with patch("urllib.request.urlopen", side_effect=responses):
+        # private one is indistinguishable from a missing one this way. urlopen
+        # raises for a non-2xx status rather than returning one, so the denial
+        # has to arrive as HTTPError to exercise the real path.
+        denied = urllib.error.HTTPError("https://ghcr.io/v2/owner/name/tags/list", 403, "denied", {}, None)
+        with patch("urllib.request.urlopen", side_effect=[FakeResponse(200, '{"token": "t"}'), denied]):
             self.assertFalse(REAL_GHCR_PACKAGE_EXISTS("owner", "name"))
+
+        # http.client's exceptions descend from HTTPException, not OSError or
+        # ValueError. An advisory probe must not let one stop a repo build.
+        for failure in (
+            http.client.IncompleteRead(b"partial"),
+            http.client.BadStatusLine("garbage"),
+            http.client.LineTooLong("header line"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                with patch("urllib.request.urlopen", side_effect=[FakeResponse(200, '{"token": "t"}'), failure]):
+                    self.assertFalse(REAL_GHCR_PACKAGE_EXISTS("owner", "name"))
 
         # No usable token, and any transport failure, both mean "do not warn".
         with patch("urllib.request.urlopen", return_value=FakeResponse(200, "{}")):
@@ -2969,6 +2984,10 @@ class BuilderTests(unittest.TestCase):
         hints = " ".join(message for level, message in app.gum.messages if level == "hint")
         self.assertIn("does not delete its packages", hints)
         self.assertIn("packages/container/test-image/settings", hints)
+        # The link-the-repo remedy is impossible until the repo exists, so the
+        # hint must say so rather than sending the user to a dead end.
+        self.assertIn("only", hints)
+        self.assertIn("lists repos that already exist", hints)
 
     def test_do_build_does_not_create_the_repo_when_the_package_conflict_is_declined(self) -> None:
         app = self.make_app()
