@@ -1,8 +1,8 @@
 # Maintainer Guide
 
 What to do, and what to watch out for, when maintaining Atomic Image Builder.
-End-user docs are in [README.md](README.md); development workflows are in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+End-user docs are in [README.md](../README.md); development workflows are in
+[CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ---
 

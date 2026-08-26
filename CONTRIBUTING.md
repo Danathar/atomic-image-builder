@@ -1,6 +1,6 @@
 # Contributing
 
-This document covers the development and maintenance workflows for working on Atomic Image Builder itself. End-user installation and usage live in [README.md](README.md). Release procedure, what the automation does, and the traps worth knowing are in [MAINTAINER.md](MAINTAINER.md).
+This document covers the development and maintenance workflows for working on Atomic Image Builder itself. End-user installation and usage live in [README.md](README.md). Release procedure, what the automation does, and the traps worth knowing are in [MAINTAINER.md](maintainer_docs/MAINTAINER.md).
 
 ## Tests
 
