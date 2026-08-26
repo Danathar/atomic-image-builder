@@ -55,11 +55,8 @@ Supported bases: **[Universal Blue](https://universal-blue.org)** — [Bazzite](
 
 ## Documentation
 
-| | |
-|---|---|
-| [Installing](docs/installing.md) | Every install path, container limitations, command-line options |
-| [Using the tool](docs/using.md) | The guided menu, migrating layered packages, Homebrew in your built image |
-| [Contributing](CONTRIBUTING.md) | Tests, linting, the maintenance audit |
+- [Installing](docs/installing.md) — every install path, container limitations, command-line options
+- [Using the tool](docs/using.md) — the guided menu, migrating layered packages, Homebrew in your built image
 
 ## Who it's for
 
