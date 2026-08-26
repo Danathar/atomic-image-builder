@@ -44,6 +44,7 @@ from atomic_image_builder import (
     determine_fedora_atomic_default_tag,
     ensure_trailing_newline,
     format_daily_rebuild_note,
+    is_valid_repo_name,
     normalize_container_image_reference,
     patch_cosign_compatibility,
     patch_workflow_steps,
@@ -185,6 +186,42 @@ class BuilderTests(unittest.TestCase):
             local_tz=timezone.utc,
         )
         self.assertEqual(note, "Scheduled rebuilds also run daily at about 10:05 AM UTC.")
+
+    def test_format_daily_rebuild_note_falls_back_for_non_standard_field_count(self) -> None:
+        note = format_daily_rebuild_note("05 10 * *")
+        self.assertEqual(note, "Scheduled rebuilds also run automatically on GitHub.")
+
+    def test_format_daily_rebuild_note_falls_back_for_non_daily_schedule(self) -> None:
+        note = format_daily_rebuild_note("05 10 1 * *")
+        self.assertEqual(
+            note,
+            "Scheduled rebuilds also run automatically on GitHub using the configured schedule (05 10 1 * * UTC).",
+        )
+
+    def test_format_daily_rebuild_note_falls_back_for_out_of_range_time(self) -> None:
+        note = format_daily_rebuild_note("99 10 * * *")
+        self.assertEqual(
+            note,
+            "Scheduled rebuilds also run automatically on GitHub using the configured schedule (99 10 * * * UTC).",
+        )
+
+    def test_is_valid_repo_name_accepts_a_normal_slug(self) -> None:
+        self.assertTrue(is_valid_repo_name("my-custom-image"))
+
+    def test_is_valid_repo_name_rejects_empty_and_overlong_values(self) -> None:
+        self.assertFalse(is_valid_repo_name(""))
+        self.assertFalse(is_valid_repo_name("a" * 101))
+
+    def test_is_valid_repo_name_rejects_dot_git_suffix(self) -> None:
+        self.assertFalse(is_valid_repo_name("my-image.git"))
+
+    def test_is_valid_repo_name_rejects_disallowed_characters(self) -> None:
+        self.assertFalse(is_valid_repo_name("My Image!"))
+
+    def test_repository_status_omits_description_separator_when_unset(self) -> None:
+        app = self.make_app()
+        app.config.image_desc = ""
+        self.assertEqual(app.repository_status(), "test-image")
 
     def test_normalize_container_image_reference_handles_remote_registry_prefix(self) -> None:
         self.assertEqual(
@@ -5026,6 +5063,38 @@ class BuilderTests(unittest.TestCase):
         text = app.pager_text_with_hint("diff --git a/file b/file\n+new line\n")
         self.assertTrue(text.startswith("Press q to close this diff and return to the previous screen."))
         self.assertIn("diff --git a/file b/file", text)
+
+    def test_pager_text_with_hint_handles_empty_body(self) -> None:
+        app = self.make_app()
+        text = app.pager_text_with_hint("")
+        self.assertEqual(text, "Press q to close this diff and return to the previous screen.\n")
+
+    def test_read_only_pager_text_includes_title_hint_and_lines(self) -> None:
+        app = self.make_app()
+        text = app.read_only_pager_text("Build Status", ["run-1: success", "run-2: failure"])
+        self.assertEqual(
+            text,
+            "Build Status\n\n"
+            "Press q to close this screen and return to the previous menu.\n\n"
+            "run-1: success\nrun-2: failure\n",
+        )
+
+    def test_read_only_pager_text_handles_no_lines(self) -> None:
+        app = self.make_app()
+        text = app.read_only_pager_text("Build Status", [])
+        self.assertEqual(
+            text,
+            "Build Status\n\nPress q to close this screen and return to the previous menu.\n",
+        )
+
+    def test_format_key_value_rows_aligns_labels(self) -> None:
+        app = self.make_app()
+        rows = app.format_key_value_rows([("Repo", "example/test-image"), ("Method", "containerfile")])
+        self.assertEqual(rows, ["Repo    example/test-image", "Method  containerfile"])
+
+    def test_format_key_value_rows_handles_no_rows(self) -> None:
+        app = self.make_app()
+        self.assertEqual(app.format_key_value_rows([]), [])
 
     def test_repo_full_diff_includes_untracked_files(self) -> None:
         app = self.make_app()
