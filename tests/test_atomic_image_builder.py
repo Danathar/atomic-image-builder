@@ -105,6 +105,12 @@ class GumStub:
         pass
 
 
+# Captured before setUp() patches the module attribute, so the tests that
+# exercise the probe itself run the real implementation rather than the
+# no-conflict stand-in every other test gets.
+REAL_GHCR_PACKAGE_EXISTS = atomic_image_builder.ghcr_package_exists
+
+
 class BuilderTests(unittest.TestCase):
     def setUp(self) -> None:
         # The tool consults a couple of env vars the container distribution
@@ -117,6 +123,13 @@ class BuilderTests(unittest.TestCase):
         os.environ.pop("AIB_RPM_OSTREE_STATUS_FILE", None)
         os.environ.pop("AIB_DISABLE_LOCAL_BUILD", None)
         self.addCleanup(patcher.stop)
+
+        # do_build() probes GHCR before creating a repo. No unit test may reach
+        # the network, so default the probe to "no conflict" for everyone; the
+        # tests that care about the conflict patch it themselves.
+        ghcr_patcher = patch("atomic_image_builder.ghcr_package_exists", return_value=False)
+        ghcr_patcher.start()
+        self.addCleanup(ghcr_patcher.stop)
 
     def make_app(self) -> App:
         app = App()
@@ -2881,6 +2894,98 @@ class BuilderTests(unittest.TestCase):
             with patch("atomic_image_builder.run") as run_mock:
                 self.assertFalse(app.do_build())
         run_mock.assert_not_called()
+
+    def test_ghcr_package_exists_true_only_for_a_package_it_could_read(self) -> None:
+        class FakeResponse:
+            def __init__(self, status: int, payload: str = "") -> None:
+                self.status = status
+                self._payload = payload
+
+            def read(self) -> bytes:
+                return self._payload.encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc) -> bool:
+                return False
+
+        responses = [FakeResponse(200, '{"token": "t"}'), FakeResponse(200, "{}")]
+        with patch("urllib.request.urlopen", side_effect=responses):
+            self.assertTrue(REAL_GHCR_PACKAGE_EXISTS("Danathar", "Bazzite-DX-Test"))
+
+        # A package the anonymous pull cannot read is reported as absent: a
+        # private one is indistinguishable from a missing one this way.
+        responses = [FakeResponse(200, '{"token": "t"}'), FakeResponse(403, "{}")]
+        with patch("urllib.request.urlopen", side_effect=responses):
+            self.assertFalse(REAL_GHCR_PACKAGE_EXISTS("owner", "name"))
+
+        # No usable token, and any transport failure, both mean "do not warn".
+        with patch("urllib.request.urlopen", return_value=FakeResponse(200, "{}")):
+            self.assertFalse(REAL_GHCR_PACKAGE_EXISTS("owner", "name"))
+        with patch("urllib.request.urlopen", side_effect=OSError("no route to host")):
+            self.assertFalse(REAL_GHCR_PACKAGE_EXISTS("owner", "name"))
+
+    def test_ghcr_package_exists_lowercases_the_path_for_the_registry(self) -> None:
+        seen: list[str] = []
+
+        def fake_urlopen(request, timeout=None):
+            seen.append(request.full_url)
+            raise OSError("stop after the first call")
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            REAL_GHCR_PACKAGE_EXISTS("Danathar", "Bazzite-DX-Test")
+        self.assertEqual(len(seen), 1)
+        self.assertIn("danathar/bazzite-dx-test", seen[0])
+        self.assertNotIn("Danathar", seen[0])
+
+    def test_confirm_ghcr_package_conflict_is_silent_when_nothing_conflicts(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        with patch("atomic_image_builder.ghcr_package_exists", return_value=False):
+            self.assertTrue(app.confirm_ghcr_package_conflict("example", "test-image"))
+        self.assertEqual(app.gum.messages, [])
+
+    def test_confirm_ghcr_package_conflict_explains_the_fix_and_defaults_to_no(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        prompts: list[tuple[str, bool]] = []
+
+        def fake_confirm(prompt, *, default=True):
+            prompts.append((prompt, default))
+            return default
+
+        app.gum.confirm = fake_confirm
+        with patch("atomic_image_builder.ghcr_package_exists", return_value=True):
+            with redirect_stdout(io.StringIO()):
+                proceed = app.confirm_ghcr_package_conflict("Example", "Test-Image")
+
+        # GumStub.confirm returns the default, so the default must be "no".
+        self.assertFalse(proceed)
+        self.assertEqual(prompts[0][1], False)
+        self.assertIn("Create Example/Test-Image anyway?", prompts[0][0])
+        warnings = [message for level, message in app.gum.messages if level == "warn"]
+        self.assertTrue(any("ghcr.io/example/test-image" in message for message in warnings))
+        hints = " ".join(message for level, message in app.gum.messages if level == "hint")
+        self.assertIn("does not delete its packages", hints)
+        self.assertIn("packages/container/test-image/settings", hints)
+
+    def test_do_build_does_not_create_the_repo_when_the_package_conflict_is_declined(self) -> None:
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        app.config.github_user = "example"
+        app.gum = GumStub()
+
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run") as run_mock:
+                run_mock.return_value = subprocess.CompletedProcess(["gh", "repo", "view"], 1, "", "")
+                with patch.object(app, "confirm_ghcr_package_conflict", return_value=False) as conflict:
+                    self.assertFalse(app.do_build())
+
+        conflict.assert_called_once_with("example", "test-image")
+        self.assertTrue(all(call.args[0][:3] != ["gh", "repo", "create"] for call in run_mock.call_args_list))
+        self.assertIn("Press Enter to go back to the review screen...", app.gum.prompts)
 
     def test_do_build_stops_and_hints_update_flow_when_repo_was_created_by_this_tool(self) -> None:
         app = self.make_app()

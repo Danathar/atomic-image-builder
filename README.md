@@ -157,6 +157,12 @@ The tool is a guided menu, so there is almost nothing to pass it. The two option
 | `-h`, `--help` | Print a short usage summary and exit. |
 | `-V`, `--version` | Print the tool version and exit. |
 
+### If a container package with that name already exists
+
+GitHub does not delete a repo's container packages when you delete the repo. The leftover package keeps the Actions permissions of the repo that created it, so a **new** repo with the same name cannot push to it — GitHub treats it as a different repo regardless of the matching name. The build succeeds all the way through and then fails at its final push with `denied: permission_denied: write_package`.
+
+The tool checks for this before creating the repo and asks whether to continue. To clear it, open `https://github.com/users/<you>/packages/container/<name>/settings` and either add the new repo under *Manage Actions access* with the **Write** role, or delete the package and let the first build recreate it.
+
 ## Using the tool
 
 However you launch it, the guided menu is the same. What to expect:
