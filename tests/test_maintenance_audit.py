@@ -14,12 +14,14 @@ from maintenance_audit import (
     audit_action_update_availability,
     audit_local_snapshot,
     audit_upstream_drift,
+    describe_pin_drift,
     github_api_json,
     is_newer_version_available,
     iter_pinned_refs,
     load_template_source,
     main,
     parse_version_tag,
+    query_github_comparison,
     query_github_ref_sha,
     query_latest_github_semver_tag,
     query_remote_head,
@@ -314,7 +316,8 @@ class MaintenanceAuditTests(unittest.TestCase):
         # repos: the pin says v7, but upstream's v7 tag has moved on.
         pinned = [("actions/checkout", "v7", "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0")]
         with patch("maintenance_audit.query_github_ref_sha", return_value="3d3c42e5aac5ba805825da76410c181273ba90b1"):
-            findings = audit_action_pin_freshness(pinned)
+            with patch("maintenance_audit.query_github_comparison", return_value=("ahead", 1, 0)):
+                findings = audit_action_pin_freshness(pinned)
         self.assertEqual(len(findings), 1)
         self.assertIn("actions/checkout", findings[0])
         self.assertIn("the tag it names", findings[0])
@@ -324,9 +327,74 @@ class MaintenanceAuditTests(unittest.TestCase):
     def test_audit_action_pin_freshness_flags_a_branch_pin_and_names_it_a_branch(self) -> None:
         pinned = [("osbuild/bootc-image-builder-action", "main", "8661cd3832544ad68c12dcde8681b13ab0f56a8d")]
         with patch("maintenance_audit.query_github_ref_sha", return_value="56d652d0afb02eb3e4b8fd35e7ca0391dbebab2a"):
-            findings = audit_action_pin_freshness(pinned)
+            with patch("maintenance_audit.query_github_comparison", return_value=("ahead", 1, 0)):
+                findings = audit_action_pin_freshness(pinned)
         self.assertEqual(len(findings), 1)
         self.assertIn("the branch it names", findings[0])
+
+    def test_describe_pin_drift_says_refresh_when_the_ref_is_newer(self) -> None:
+        with patch("maintenance_audit.query_github_comparison", return_value=("ahead", 3, 0)):
+            message = describe_pin_drift("osbuild/act", "main", "8661cd3832544ad68c12dcde8681b13ab0f56a8d", "56d652d0afb02eb3e4b8fd35e7ca0391dbebab2a")
+        self.assertIn("3 commit(s) newer", message)
+        self.assertIn("refresh it", message)
+        self.assertIn("the branch it names", message)
+
+    def test_describe_pin_drift_warns_against_refreshing_onto_an_older_ref(self) -> None:
+        # ublue-os/remove-unwanted-software really is pinned 26 commits ahead of
+        # what its v8 tag points at. "Refresh this pin" would be a downgrade.
+        with patch("maintenance_audit.query_github_comparison", return_value=("behind", 0, 26)):
+            message = describe_pin_drift("ublue-os/remove-unwanted-software", "v8", "695eb75bc387dbcd9685a8e72d23439d8686cba6", "5a8b0374222a6fffddb1be9516b5fece9483bed0")
+        self.assertIn("26 commit(s) OLDER than the pin", message)
+        self.assertIn("would downgrade the action", message)
+        self.assertNotIn("ship the older action", message)
+
+    def test_describe_pin_drift_stays_neutral_when_direction_is_unknown(self) -> None:
+        with patch("maintenance_audit.query_github_comparison", return_value=("diverged", 2, 2)):
+            self.assertIn("diverged history", describe_pin_drift("o/a", "main", "a" * 40, "b" * 40))
+        with patch("maintenance_audit.query_github_comparison", return_value=None):
+            self.assertIn("direction of the difference is unknown", describe_pin_drift("o/a", "main", "a" * 40, "b" * 40))
+        # A failed compare must not turn into a failed audit.
+        with patch("maintenance_audit.query_github_comparison", side_effect=RuntimeError("rate limited")):
+            self.assertIn("direction of the difference is unknown", describe_pin_drift("o/a", "main", "a" * 40, "b" * 40))
+
+    def test_query_github_comparison_extracts_status_and_counts(self) -> None:
+        with patch("maintenance_audit.github_api_json", return_value={"status": "ahead", "ahead_by": 3, "behind_by": 0}):
+            self.assertEqual(query_github_comparison("o/a", "base", "head"), ("ahead", 3, 0))
+        # Missing or wrongly typed fields mean "cannot tell", not a crash.
+        with patch("maintenance_audit.github_api_json", return_value={"status": "ahead"}):
+            self.assertIsNone(query_github_comparison("o/a", "base", "head"))
+        with patch("maintenance_audit.github_api_json", return_value=["nope"]):
+            with self.assertRaises(RuntimeError):
+                query_github_comparison("o/a", "base", "head")
+
+    def test_audit_local_snapshot_reports_an_unreadable_workflow_and_keeps_going(self) -> None:
+        # The read failure must be reported and the remaining workflows still
+        # audited, rather than aborting the whole local pass.
+        repo_root = Path(__file__).resolve().parents[1]
+        real_read_text = Path.read_text
+        target = repo_root / ".github" / "workflows" / "ci.yml"
+
+        def fake_read_text(self, *args, **kwargs):
+            if self == target:
+                raise OSError("Permission denied")
+            return real_read_text(self, *args, **kwargs)
+
+        with patch.object(Path, "read_text", fake_read_text):
+            findings = audit_local_snapshot(repo_root)
+
+        self.assertTrue(any(f"Unable to read {target}" in f for f in findings))
+        self.assertTrue(all("is not covered by ACTION_PINS" not in f for f in findings))
+
+    def test_audit_local_snapshot_reports_an_invalid_template_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            source = repo_root / "template_snapshots" / "containerfile" / ".template-source"
+            source.parent.mkdir(parents=True)
+            source.write_text("repo=ublue-os/image-template\nrevision=not-a-sha\n")
+            findings = audit_local_snapshot(repo_root)
+        # The invalid revision is surfaced by load_template_source, not swallowed.
+        self.assertTrue(any("invalid revision" in f for f in findings))
+        self.assertTrue(any("Missing template workflow file" in f for f in findings))
 
     def test_audit_action_pin_freshness_quiet_when_the_ref_still_matches(self) -> None:
         sha = "3d3c42e5aac5ba805825da76410c181273ba90b1"

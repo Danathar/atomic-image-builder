@@ -236,6 +236,43 @@ def iter_pinned_refs(
     return pinned
 
 
+def query_github_comparison(action: str, base: str, head: str) -> tuple[str, int, int] | None:
+    payload = github_api_json(f"https://api.github.com/repos/{action}/compare/{base}...{head}")
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Unexpected compare payload for {action}")
+    status = payload.get("status")
+    ahead = payload.get("ahead_by")
+    behind = payload.get("behind_by")
+    if not isinstance(status, str) or not isinstance(ahead, int) or not isinstance(behind, int):
+        return None
+    return status, ahead, behind
+
+
+def describe_pin_drift(action: str, label: str, sha: str, head: str) -> str:
+    # Direction matters more than the mismatch. ublue-os/remove-unwanted-software
+    # is pinned 26 commits AHEAD of what its v8 tag now points at -- upstream
+    # moved the tag backwards onto an older commit -- so "refresh this pin"
+    # would have been a downgrade. Saying only "these differ" invites exactly
+    # that mistake, so ask which way before wording the advisory.
+    kind = "tag" if parse_version_tag(label) is not None else "branch"
+    prefix = f"Action pin {action} no longer matches the {kind} it names: pinned {sha[:12]}, {label} is now {head[:12]}"
+    try:
+        comparison = query_github_comparison(action, sha, head)
+    except RuntimeError:
+        comparison = None
+    if comparison is None:
+        return f"{prefix}. Compare them before refreshing; the direction of the difference is unknown."
+    status, ahead, behind = comparison
+    if status == "ahead":
+        return f"{prefix}, {ahead} commit(s) newer. Repos generated from this pin ship the older action; refresh it."
+    if status == "behind":
+        return (
+            f"{prefix}, which is {behind} commit(s) OLDER than the pin. Upstream moved the {kind} backwards -- "
+            "refreshing to it would downgrade the action. Leave the pin alone unless that is what you want."
+        )
+    return f"{prefix}, on a diverged history. Review both before refreshing."
+
+
 def audit_action_pin_freshness(
     pinned: Sequence[tuple[str, str, str]] | None = None,
 ) -> list[str]:
@@ -251,7 +288,9 @@ def audit_action_pin_freshness(
     # branch label like "main", which that function skips entirely.
     #
     # Immutable exact tags (v4.6.0) resolve to themselves forever, so they
-    # stay quiet here. Moving tags and branches are the ones that drift.
+    # stay quiet here. Moving tags and branches are the ones that drift -- in
+    # either direction, which is why describe_pin_drift() asks which way before
+    # telling anyone to refresh.
     findings: list[str] = []
     for action, label, sha in iter_pinned_refs() if pinned is None else pinned:
         try:
@@ -261,11 +300,7 @@ def audit_action_pin_freshness(
             continue
         if head is None or head == sha:
             continue
-        kind = "tag" if parse_version_tag(label) is not None else "branch"
-        findings.append(
-            f"Action pin {action} no longer matches the {kind} it names: pinned {sha[:12]}, "
-            f"{label} is now {head[:12]}. Repos generated from this pin ship the older action."
-        )
+        findings.append(describe_pin_drift(action, label, sha, head))
     return findings
 
 
