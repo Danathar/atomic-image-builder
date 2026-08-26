@@ -60,7 +60,6 @@ Supported bases: **[Universal Blue](https://universal-blue.org)** — [Bazzite](
 | [Installing](docs/installing.md) | Every install path, container limitations, command-line options |
 | [Using the tool](docs/using.md) | The guided menu, migrating layered packages, Homebrew in your built image |
 | [Contributing](CONTRIBUTING.md) | Tests, linting, the maintenance audit |
-| [Maintaining](maintainer_docs/MAINTAINER.md) | Cutting a release, reading audit advisories, traps |
 
 ## Who it's for
 
