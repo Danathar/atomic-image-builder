@@ -13,12 +13,17 @@ Four steps, all of them yours. Everything after the tag is automated.
 **1. Branch from a current `main`.**
 
 ```bash
-git switch main && git pull
-git switch -c release/v0.9.1
+git fetch origin
+git switch -c release/v0.9.1 --no-track origin/main
 ```
 
-The pull is not ceremony. Merging on GitHub leaves your local `main` behind,
-and branching from a stale one puts unrelated reversions in the pull request.
+Naming `origin/main` as the base means it does not matter what you had checked
+out or how far behind your local `main` was. That matters here: merging on
+GitHub leaves the local copy behind, and branching from a stale one puts
+unrelated reversions in the pull request.
+
+`--no-track` stops the release branch adopting `main` as its upstream, which
+would make a stray `git pull` merge `main` into it.
 
 **2. Bump the version.** One line, in `atomic_image_builder.py` (line 37):
 
