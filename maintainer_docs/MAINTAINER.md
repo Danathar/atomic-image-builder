@@ -8,9 +8,19 @@ End-user docs are in [README.md](../README.md); development workflows are in
 
 ## Cutting a release
 
-Three steps, all of them yours. Everything after the tag is automated.
+Four steps, all of them yours. Everything after the tag is automated.
 
-**1. Bump the version.** One line, in `atomic_image_builder.py` (line 37):
+**1. Branch from a current `main`.**
+
+```bash
+git switch main && git pull
+git switch -c release/v0.9.1
+```
+
+The pull is not ceremony. Merging on GitHub leaves your local `main` behind,
+and branching from a stale one puts unrelated reversions in the pull request.
+
+**2. Bump the version.** One line, in `atomic_image_builder.py` (line 37):
 
 ```python
 VERSION = "0.9.1"
@@ -25,16 +35,15 @@ That is the only file to edit. Everything else derives from it:
 | Homebrew formula | `homebrew_formula.py` imports `VERSION` and compares it to the formula's tag |
 | `tool_version` in each managed repo's state file | written on create and update |
 
-**2. Commit, push, and merge it.**
+**3. Commit, push, and merge it.**
 
 ```bash
-git switch -c release/v0.9.1
 git commit -am "Bump VERSION to 0.9.1"
 git push -u origin release/v0.9.1
 gh pr create --fill
 ```
 
-Merge once CI is green, then bring your local `main` up to date:
+Merge once CI is green, then bring your local `main` up to date again:
 
 ```bash
 git switch main && git pull
@@ -44,7 +53,7 @@ git switch main && git pull
 goes through a pull request, and CI on the branch is the only thing that checks
 the bump did not break anything.
 
-**3. Tag and publish.**
+**4. Tag and publish.**
 
 ```bash
 gh release create v0.9.1 --target main --title v0.9.1 --notes "..."
