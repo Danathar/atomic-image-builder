@@ -5087,6 +5087,22 @@ class BuilderTests(unittest.TestCase):
         self.assertIn('GH_TOKEN="$(gh auth token)"', wrapper)
         self.assertNotIn('GH_TOKEN=$(gh auth token)', wrapper)
 
+    def test_contrib_wrapper_checks_for_a_newer_image_on_every_run(self) -> None:
+        # Podman's default (--pull=missing) would pin wrapper users to whatever
+        # copy they first fetched. The tool bakes in its own action pins and
+        # template snapshots, so a stale image generates repos from stale pins.
+        wrapper = (Path(__file__).resolve().parents[1] / "contrib/aib").read_text()
+        self.assertIn("--pull=newer", wrapper)
+        self.assertIn("podman_args=(--rm -it --pull=newer)", wrapper)
+
+    def test_readme_documents_pulling_a_newer_image_for_container_runs(self) -> None:
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+        self.assertIn("podman run --rm -it --pull=newer", readme)
+        # distrobox enter never re-pulls, so --pull=newer cannot cover it and
+        # the recreate step has to be written down instead.
+        self.assertIn("distrobox create --name aib --pull --image", readme)
+        self.assertIn("distrobox rm aib", readme)
+
     def test_show_summary_uses_pager_for_read_only_view(self) -> None:
         app = self.make_app()
         app.github_user = "example"
