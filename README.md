@@ -42,7 +42,7 @@ aib
 
 This launches the guided menu, where you create a GitHub repo that builds your custom image. You will need a GitHub account; if you are not already logged in on the host, the tool walks you through `gh auth login` on first run.
 
-Prefer to run from a source checkout instead? See [Run from source](#run-from-source). For the full set of container options (plain `podman run`, distrobox, and their limitations), see [Run with Podman](#run-with-podman-containerized).
+Already have Homebrew? [Install with Homebrew](#install-with-homebrew) is shorter still. Prefer to run from a source checkout instead? See [Run from source](#run-from-source). For the full set of container options (plain `podman run`, distrobox, and their limitations), see [Run with Podman](#run-with-podman-containerized).
 
 ## What it does
 
@@ -77,6 +77,29 @@ Supported base images:
 Beginner and intermediate atomic-desktop users — on Universal Blue (Bazzite, Aurora, Bluefin) or Fedora Atomic (Silverblue, Kinoite, Sway, Budgie, COSMIC) — who want a guided path to a custom image repo that GitHub Actions builds automatically.
 
 Bootc-based desktop images are powerful, but the normal setup path assumes you are comfortable with image templates, GitHub Actions, signing, and image maintenance. This tool trades that setup cost for a guided workflow with stricter defaults and guardrails. It is intentionally **not** aimed at exposing every advanced image workflow in the beginner UI.
+
+## Install with Homebrew
+
+If you already have [Homebrew](https://brew.sh/) — Universal Blue images such as Bazzite, Bluefin, and Aurora ship with it — this is the shortest path. It installs the tool as an ordinary command and brings `gum`, `git`, `gh`, and `cosign` along with it, none of which are in Fedora's own repositories:
+
+```bash
+brew tap danathar/aib https://github.com/Danathar/atomic-image-builder
+brew install danathar/aib/atomic-image-builder
+atomic-image-builder
+```
+
+Update it the way you update everything else:
+
+```bash
+brew upgrade atomic-image-builder
+```
+
+`dnf5` and `rpm-ostree` do **not** come from Homebrew. The tool reads the host's package metadata and talks to the host's `rpm-ostreed`, so those have to come from the system you are running on — which they do on Fedora Atomic and Universal Blue desktops.
+
+Homebrew tracks tagged releases, while the container image tracks `main` and republishes on every merge. If you want the newest changes the moment they land, use the container; if you want stable versions, use Homebrew.
+
+> [!NOTE]
+> Not to be confused with [Homebrew on Fedora Atomic Images](#homebrew-on-fedora-atomic-images) below, which is about adding Homebrew to the image you **build**, not to the machine you build it from.
 
 ## Run with Podman (containerized)
 

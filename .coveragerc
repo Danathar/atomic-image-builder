@@ -7,6 +7,7 @@
 [run]
 source =
     atomic_image_builder
+    homebrew_formula
     maintenance_audit
 # Store paths relative to the checkout instead of absolute. Without this the
 # data file records the runner's workspace path, which makes the coverage

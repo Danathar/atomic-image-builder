@@ -85,6 +85,30 @@ This matters more than it looks. Generated repos ship `.github/dependabot.yml`, 
 
 The audit runs weekly and on demand through `.github/workflows/maintenance-audit.yml`, with `--check-action-updates` enabled and the output written to the run summary.
 
+## Releases and the Homebrew Formula
+
+`Formula/atomic-image-builder.rb` is a tap-ready Homebrew formula living in this repo, so no separate `homebrew-*` repository is needed — `brew tap user/name <url>` accepts any git URL.
+
+The formula records a release tarball and its sha256, and neither can be known until the tag exists. So the order is fixed:
+
+1. Bump `VERSION` in `atomic_image_builder.py`. It is the single source for the tool's `--version`, the published image's version tag, and the release tag, so they should all agree.
+2. Tag and publish the release on GitHub.
+3. Point the formula at it:
+
+   ```bash
+   python3 homebrew_formula.py --update v0.9.0
+   ```
+
+4. Commit the updated formula.
+
+Step 3 is the one that gets forgotten, and a formula left pointing at the previous release installs the wrong version silently. So the weekly maintenance audit runs:
+
+```bash
+python3 homebrew_formula.py --check
+```
+
+which re-downloads the recorded URL and confirms the recorded sha256 still matches it, reporting as an advisory rather than a failure. It also catches the placeholder digest that ships in the formula before a release has ever been cut.
+
 ## Container Image
 
 The tool is also published as a container image (see README.md's "Run with Podman" section for end-user usage). `Containerfile` at the repo root defines the image, built from `atomic_image_builder.py` and the bundled `template_snapshots/`. `.github/workflows/publish-image.yml` builds and pushes it to `ghcr.io/danathar/atomic-image-builder` — tagged `latest`, the tool's `VERSION`, and the short commit SHA — on every merge to `main`, when a GitHub release is published, or on manual dispatch. Only a build of `main` tags the image `latest` — a release is published from a tag ref, and one cut from an older commit must not drag `latest` backwards; it still gets the version and SHA tags. All three events share one concurrency group, since they write the same repository tags and must not race. Publishing on merge is deliberate: it previously required a release or a manual dispatch, no releases were ever cut, and `latest` sat seven weeks behind `main`. Everything the tool bakes in — the script, its `ACTION_PINS` table, and the bundled template snapshots — reaches users only through this image, so a stale image silently strands every fix made to any of them. `.github/workflows/ci.yml`'s `container-build` job builds (but does not push) the Containerfile on any push or PR that touches `Containerfile`, `container/`, `atomic_image_builder.py`, or `template_snapshots/`. It then smoke tests every non-interactive path the packaged entrypoint has and collects end-to-end coverage from them (see [Coverage](#coverage)). `contrib/aib` is the host-side wrapper and is not baked into the image, so it is deliberately not a trigger. To build and test the image locally:

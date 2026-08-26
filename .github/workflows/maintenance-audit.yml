@@ -27,6 +27,14 @@ jobs:
           set -o pipefail
           python3 maintenance_audit.py --check-action-updates | tee audit.log
 
+      # A release tag has to exist before its tarball can be hashed, so the
+      # formula is always updated after the release rather than with it -- which
+      # makes it exactly the kind of step that gets skipped and then silently
+      # serves the wrong version. Advisory, like the pin checks above.
+      - name: Check the Homebrew formula pin
+        if: always()
+        run: python3 homebrew_formula.py --check | tee -a audit.log || true
+
       - name: Summarize
         if: always()
         run: |
