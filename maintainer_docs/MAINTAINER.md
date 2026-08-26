@@ -8,25 +8,65 @@ End-user docs are in [README.md](../README.md); development workflows are in
 
 ## Cutting a release
 
-Two steps. Everything else is automated.
+Four steps, all of them yours. Everything after the tag is automated.
 
-**1. Bump the version and merge it.**
+**1. Branch from a current `main`.**
+
+```bash
+git fetch origin
+git switch -c release/v0.9.1 --no-track origin/main
+```
+
+Naming `origin/main` as the base means it does not matter what you had checked
+out or how far behind your local `main` was. That matters here: merging on
+GitHub leaves the local copy behind, and branching from a stale one puts
+unrelated reversions in the pull request.
+
+`--no-track` stops the release branch adopting `main` as its upstream, which
+would make a stray `git pull` merge `main` into it.
+
+**2. Bump the version.** One line, in `atomic_image_builder.py` (line 37):
 
 ```python
-# atomic_image_builder.py
 VERSION = "0.9.1"
 ```
 
-`VERSION` is the single source for the tool's `--version`, the published
-image's version tag, and the release tag. Nothing else needs editing.
+That is the only file to edit. Everything else derives from it:
 
-**2. Tag and publish.**
+| Consumer | How |
+|---|---|
+| `aib-tool --version` and the TUI banner | reads the constant |
+| Published image's version tag | `publish-image.yml` runs `--version` and takes field 2 |
+| Homebrew formula | `homebrew_formula.py` imports `VERSION` and compares it to the formula's tag |
+| `tool_version` in each managed repo's state file | written on create and update |
+
+**3. Commit, push, and merge it.**
+
+```bash
+git commit -am "Bump VERSION to 0.9.1"
+git push -u origin release/v0.9.1
+gh pr create --fill
+```
+
+Merge once CI is green, then bring your local `main` up to date again:
+
+```bash
+git switch main && git pull
+```
+
+`main` is not protected, so a direct push works too — but everything else here
+goes through a pull request, and CI on the branch is the only thing that checks
+the bump did not break anything.
+
+**4. Tag and publish.**
 
 ```bash
 gh release create v0.9.1 --target main --title v0.9.1 --notes "..."
 ```
 
-The tag carries a `v`; `VERSION` does not.
+The tag carries a `v`; `VERSION` does not. `--target main` matters: the tag has
+to point at a commit that already carries the new `VERSION`, which is why the
+merge comes first.
 
 **Then watch the automation.**
 
@@ -45,8 +85,9 @@ git pull && python3 homebrew_formula.py --check   # → "pin is current."
 ### Order matters
 
 The formula records a release tarball **and its sha256**, and a sha256 is a
-fact about a published tag. It cannot be recorded before the tag exists, and
-the tag has to carry the new `VERSION`. That is why the bump merges first.
+fact about a published tag — it cannot be recorded before the tag exists. That
+is why the formula update comes last, after the release, rather than riding
+along with the version bump.
 
 Tagging without bumping first is caught, not silently shipped: the workflow's
 `--check` compares the formula's tag against `VERSION` and fails. Bump, merge,
