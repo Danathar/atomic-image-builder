@@ -4,7 +4,7 @@
 
 # Atomic Image Builder
 
-A guided terminal tool for creating and updating GitHub-backed bootc image repositories — for people who want a custom image without learning the full template and workflow setup first. (The author RECOMMENDS YOU LEARN anyway!) Works with Universal Blue and Fedora Atomic desktops.
+A guided terminal tool for creating and updating GitHub-backed bootc image repositories — for people who want a custom image without learning the full template and workflow setup first. (The author RECOMMENDS YOU LEARN anyway!) Works with [Universal Blue](https://universal-blue.org) and [Fedora Atomic desktops](https://fedoraproject.org/atomic-desktops/).
 
 > [!TIP]
 > **Safe to explore — it won't touch the system you're running on.** Everything happens on GitHub: it creates a new repo and lets GitHub Actions build your image. It never modifies, rebases, or removes packages from your current install. Switching your machine to the built image is a separate, deliberate step you take later.
@@ -44,7 +44,7 @@ Creates and maintains a **separate GitHub repository** that builds a custom boot
 - Update repos it created, view build status, and rotate the cosign signing key.
 - Test-build a Containerfile image locally with Podman before pushing.
 
-Supported bases: **[Universal Blue](https://universal-blue.org)** — [Bazzite](https://bazzite.gg) (also GNOME, DX, DX GNOME), [Aurora](https://getaurora.dev) (also DX), [Bluefin](https://projectbluefin.io) (also DX) — and **Fedora Atomic**: Silverblue, Kinoite, Sway, Budgie, COSMIC.
+Supported bases: **[Universal Blue](https://universal-blue.org)** — [Bazzite](https://bazzite.gg) (also GNOME, DX, DX GNOME), [Aurora](https://getaurora.dev) (also DX), [Bluefin](https://projectbluefin.io) (also DX) — and **[Fedora Atomic](https://fedoraproject.org/atomic-desktops/)**: Silverblue, Kinoite, Sway, Budgie, COSMIC.
 
 ### What it does not do
 
