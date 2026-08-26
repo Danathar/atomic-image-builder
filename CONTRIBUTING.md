@@ -91,6 +91,8 @@ The audit runs weekly and on demand through `.github/workflows/maintenance-audit
 
 The formula records a release tarball and its sha256, and neither can be known until the tag exists. So the order is fixed:
 
+The formula installs the command as `aib-tool`, which is `TOOL_COMMAND` in `atomic_image_builder.py`. That constant is deliberately separate from `TOOL_SLUG`: `TOOL_SLUG` feeds `STATE_FILE` (`.atomic-image-builder.json`), which is written into every managed repo and is how the tool recognises repos it created, so renaming it would orphan all of them. `TOOL_COMMAND` only has to match what the installers put on PATH, and is `aib-tool` rather than `aib` because `contrib/aib` already claims `aib`.
+
 1. Bump `VERSION` in `atomic_image_builder.py`. It is the single source for the tool's `--version`, the published image's version tag, and the release tag, so they should all agree.
 2. Tag and publish the release on GitHub.
 3. Point the formula at it:

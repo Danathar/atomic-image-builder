@@ -2009,7 +2009,7 @@ class BuilderTests(unittest.TestCase):
                     with self.assertRaises(SystemExit) as raised:
                         atomic_image_builder.main()
         self.assertEqual(raised.exception.code, 0)
-        self.assertIn(f"{TOOL_SLUG} {VERSION}", buffer.getvalue())
+        self.assertIn(f"{atomic_image_builder.TOOL_COMMAND} {VERSION}", buffer.getvalue())
         app_cls.assert_not_called()
 
     def test_main_prints_version_for_short_flag(self) -> None:
@@ -2020,13 +2020,25 @@ class BuilderTests(unittest.TestCase):
                     with self.assertRaises(SystemExit) as raised:
                         atomic_image_builder.main()
         self.assertEqual(raised.exception.code, 0)
-        self.assertIn(f"{TOOL_SLUG} {VERSION}", buffer.getvalue())
+        self.assertIn(f"{atomic_image_builder.TOOL_COMMAND} {VERSION}", buffer.getvalue())
         app_cls.assert_not_called()
+
+    def test_state_file_name_is_not_tied_to_the_command_name(self) -> None:
+        # STATE_FILE lands in every managed repo and is how the tool recognises
+        # repos it created. Renaming the command must never move it.
+        self.assertEqual(atomic_image_builder.STATE_FILE, ".atomic-image-builder.json")
+        self.assertNotIn(atomic_image_builder.TOOL_COMMAND, atomic_image_builder.STATE_FILE)
+
+    def test_command_name_does_not_collide_with_the_container_wrapper(self) -> None:
+        # contrib/aib installs `aib` to ~/.local/bin, which normally precedes
+        # Homebrew's bin on PATH; sharing the name would shadow one silently.
+        self.assertEqual(atomic_image_builder.TOOL_COMMAND, "aib-tool")
+        self.assertNotEqual(atomic_image_builder.TOOL_COMMAND, "aib")
 
     def test_usage_text_names_the_tool_and_both_flags(self) -> None:
         usage = atomic_image_builder.usage_text()
         self.assertIn(f"{TOOL_NAME} {VERSION}", usage)
-        self.assertIn(f"Usage: {TOOL_SLUG}", usage)
+        self.assertIn(f"Usage: {atomic_image_builder.TOOL_COMMAND}", usage)
         self.assertIn("--help", usage)
         self.assertIn("--version", usage)
         # preflight() exits when either tuple has a missing tool, so the help

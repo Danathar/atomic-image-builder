@@ -85,8 +85,10 @@ If you already have [Homebrew](https://brew.sh/) — Universal Blue images such 
 ```bash
 brew tap danathar/aib https://github.com/Danathar/atomic-image-builder
 brew install danathar/aib/atomic-image-builder
-atomic-image-builder
+aib-tool
 ```
+
+The installed command is **`aib-tool`**, not `aib`. The container wrapper above already installs `aib` into `~/.local/bin`, which on a normal PATH comes before Homebrew's `bin` — if both used the same name, whichever came first would silently win and you would have no way to tell which one you were running. Distinct names mean you can have both installed and choose deliberately.
 
 Update it the way you update everything else:
 
@@ -133,7 +135,7 @@ podman run --rm -it --pull=newer \
 
 ```bash
 distrobox create --name aib --pull --image ghcr.io/danathar/atomic-image-builder:latest
-distrobox enter aib -- atomic-image-builder
+distrobox enter aib -- aib-tool
 ```
 
 `distrobox create --pull` fetches the image at creation time, but `distrobox enter` never re-pulls afterwards — unlike `podman run --pull=newer`, there is no per-run freshness check. To pick up a newer image you have to recreate the box:
@@ -190,6 +192,8 @@ The tool is a guided menu, so there is almost nothing to pass it. The two option
 |---|---|
 | `-h`, `--help` | Print a short usage summary and exit. |
 | `-V`, `--version` | Print the tool version and exit. |
+
+The command name depends on how you installed it: `aib` for the container wrapper, `aib-tool` for the Homebrew install and inside the container image, or `./atomic_image_builder.py` from a source checkout. The tool itself is the same either way.
 
 ### If a container package with that name already exists
 

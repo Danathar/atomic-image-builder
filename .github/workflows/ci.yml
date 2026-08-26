@@ -118,9 +118,11 @@ jobs:
         if: steps.changed.outputs.any_changed == 'true'
         run: |
           set -euo pipefail
-          podman run --rm aib-ci-test --version | grep -F "atomic-image-builder"
-          podman run --rm aib-ci-test -V | grep -F "atomic-image-builder"
+          podman run --rm aib-ci-test --version | grep -F "aib-tool"
+          podman run --rm aib-ci-test -V | grep -F "aib-tool"
           podman run --rm aib-ci-test --help | grep -F -- "--version"
+          # The image exposes the same command name the Homebrew formula does.
+          podman run --rm --entrypoint aib-tool aib-ci-test --version | grep -F "aib-tool"
 
           # With gum missing the tool must degrade to the plain-text preflight
           # failure and exit 1, not block on a prompt. Masking the binary with

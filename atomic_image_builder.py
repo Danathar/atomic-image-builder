@@ -37,6 +37,16 @@ if sys.version_info < (3, 10):  # noqa: UP036
 VERSION = "0.9.0"
 TOOL_NAME = "Atomic Image Builder"
 TOOL_SLUG = "atomic-image-builder"
+# The command users type. Deliberately separate from TOOL_SLUG: that one names
+# the product and, through STATE_FILE, is written into every managed repo, so
+# renaming it would orphan every repo this tool has ever created. This one only
+# has to match whatever the installers put on PATH.
+#
+# Not plain "aib" -- contrib/aib already installs a host wrapper by that name to
+# ~/.local/bin, which on a normal PATH sits ahead of Homebrew's bin. Sharing the
+# name would mean whichever came first silently won, with no way for a user to
+# tell which one they were running.
+TOOL_COMMAND = "aib-tool"
 STATE_FILE = f".{TOOL_SLUG}.json"
 DEFAULT_REPO_NAME = "my-atomic-image"
 DEFAULT_GITHUB_BUILD_CRON = "05 10 * * *"
@@ -4851,7 +4861,7 @@ def usage_text() -> str:
         [
             f"{TOOL_NAME} {VERSION}",
             "",
-            f"Usage: {TOOL_SLUG} [option]",
+            f"Usage: {TOOL_COMMAND} [option]",
             "",
             "Run with no options to start the guided terminal interface.",
             "",
@@ -4868,7 +4878,7 @@ def usage_text() -> str:
 def main() -> None:
     first_argument = sys.argv[1] if len(sys.argv) > 1 else ""
     if first_argument in ("--version", "-V"):
-        print(f"{TOOL_SLUG} {VERSION}")
+        print(f"{TOOL_COMMAND} {VERSION}")
         raise SystemExit(0)
     if first_argument in ("--help", "-h"):
         print(usage_text())

@@ -25,7 +25,10 @@ class AtomicImageBuilder < Formula
     libexec.install "atomic_image_builder.py", "template_snapshots"
     rewrite_shebang detected_python_shebang, libexec/"atomic_image_builder.py"
     chmod 0755, libexec/"atomic_image_builder.py"
-    bin.install_symlink libexec/"atomic_image_builder.py" => "atomic-image-builder"
+    # The command is `aib-tool`, not `aib`: contrib/aib already installs a host
+    # wrapper called `aib` into ~/.local/bin, which normally precedes Homebrew's
+    # bin on PATH, so sharing the name would silently shadow one with the other.
+    bin.install_symlink libexec/"atomic_image_builder.py" => "aib-tool"
   end
 
   def caveats
@@ -35,13 +38,17 @@ class AtomicImageBuilder < Formula
       the host's rpm-ostreed. The tool targets Fedora Atomic and Universal Blue
       desktops, where both are already present.
 
+      The installed command is `aib-tool`. If you also use the container
+      wrapper from contrib/aib, that one stays `aib`; the names are kept
+      distinct so neither shadows the other on PATH.
+
       Log in to GitHub before first use:
         gh auth login
     EOS
   end
 
   test do
-    assert_match "atomic-image-builder #{version}", shell_output("#{bin}/atomic-image-builder --version")
-    assert_match "Usage: atomic-image-builder", shell_output("#{bin}/atomic-image-builder --help")
+    assert_match "aib-tool #{version}", shell_output("#{bin}/aib-tool --version")
+    assert_match "Usage: aib-tool", shell_output("#{bin}/aib-tool --help")
   end
 end
