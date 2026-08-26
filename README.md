@@ -88,6 +88,9 @@ brew install danathar/aib/atomic-image-builder
 aib-tool
 ```
 
+> [!NOTE]
+> Requires the `v0.9.0` release or later. The formula installs a published release archive and verifies its checksum, so if no matching release exists yet, `brew install` stops with a checksum mismatch rather than installing anything. Use the container or a [source checkout](#run-from-source) until then.
+
 The installed command is **`aib-tool`**, not `aib`. The container wrapper above already installs `aib` into `~/.local/bin`, which on a normal PATH comes before Homebrew's `bin` — if both used the same name, whichever came first would silently win and you would have no way to tell which one you were running. Distinct names mean you can have both installed and choose deliberately.
 
 Update it the way you update everything else:

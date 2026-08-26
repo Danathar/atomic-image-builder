@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import homebrew_formula
+from atomic_image_builder import VERSION
 from homebrew_formula import (
     PLACEHOLDER_SHA,
     check,
@@ -70,21 +71,46 @@ class HomebrewFormulaTests(unittest.TestCase):
 
     def test_check_flags_the_unreplaced_placeholder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            findings = check(self.formula_copy(tmp))
+            findings = check(self.formula_copy(tmp), expected_version="0.9.0")
         self.assertEqual(len(findings), 1)
         self.assertIn("still the placeholder", findings[0])
+
+    def test_check_catches_a_release_the_formula_was_never_updated_for(self) -> None:
+        # The digest still matches the OLD tarball perfectly, so a digest-only
+        # check reports "current" while every install serves the old version.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.formula_copy(tmp, sha=SHA_A)
+            with patch("homebrew_formula.fetch_sha256", return_value=SHA_A):
+                findings = check(path, expected_version="0.9.1")
+        self.assertEqual(len(findings), 1)
+        self.assertIn("points at v0.9.0", findings[0])
+        self.assertIn("VERSION is 0.9.1", findings[0])
+        self.assertIn("--update v0.9.1", findings[0])
+
+    def test_check_flags_a_url_that_is_not_a_tag_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "f.rb"
+            path.write_text(render_formula(REAL_FORMULA.read_text(), url="https://example.com/x.tar.gz", sha256=SHA_A))
+            with patch("homebrew_formula.fetch_sha256", return_value=SHA_A):
+                findings = check(path, expected_version="0.9.0")
+        self.assertEqual(len(findings), 1)
+        self.assertIn("not a tag archive", findings[0])
+
+    def test_formula_tag_extracts_the_tag_or_none(self) -> None:
+        self.assertEqual(homebrew_formula.formula_tag(tarball_url("v1.2.3")), "v1.2.3")
+        self.assertIsNone(homebrew_formula.formula_tag("https://example.com/tarball.tar.gz"))
 
     def test_check_is_quiet_when_the_digest_matches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = self.formula_copy(tmp, sha=SHA_A)
             with patch("homebrew_formula.fetch_sha256", return_value=SHA_A):
-                self.assertEqual(check(path), [])
+                self.assertEqual(check(path, expected_version="0.9.0"), [])
 
     def test_check_reports_a_mismatched_digest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = self.formula_copy(tmp, sha=SHA_A)
             with patch("homebrew_formula.fetch_sha256", return_value=SHA_B):
-                findings = check(path)
+                findings = check(path, expected_version="0.9.0")
         self.assertEqual(len(findings), 1)
         self.assertIn(f"recorded {SHA_A}", findings[0])
         self.assertIn(f"actual {SHA_B}", findings[0])
@@ -93,7 +119,7 @@ class HomebrewFormulaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = self.formula_copy(tmp, sha=SHA_A)
             with patch("homebrew_formula.fetch_sha256", side_effect=OSError("no route to host")):
-                findings = check(path)
+                findings = check(path, expected_version="0.9.0")
         self.assertEqual(len(findings), 1)
         self.assertIn("Unable to fetch", findings[0])
         self.assertNotIn("does not match", findings[0])
@@ -120,10 +146,12 @@ class HomebrewFormulaTests(unittest.TestCase):
     def test_main_update_and_check_exit_codes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = self.formula_copy(tmp)
+            # Update to the tag matching the tool's VERSION; --check compares
+            # the two, so an arbitrary tag would (correctly) fail the check below.
             out = io.StringIO()
             with patch("homebrew_formula.fetch_sha256", return_value=SHA_B):
                 with contextlib.redirect_stdout(out):
-                    self.assertEqual(main(["--formula", str(path), "--update", "v9.9.9"]), 0)
+                    self.assertEqual(main(["--formula", str(path), "--update", f"v{VERSION}"]), 0)
             self.assertIn(SHA_B, out.getvalue())
 
             out = io.StringIO()

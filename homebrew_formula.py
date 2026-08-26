@@ -23,10 +23,13 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from atomic_image_builder import VERSION
+
 REPO = "Danathar/atomic-image-builder"
 FORMULA_PATH = Path("Formula/atomic-image-builder.rb")
 URL_RE = re.compile(r'^(\s*url\s+)"([^"]*)"', re.MULTILINE)
 SHA_RE = re.compile(r'^(\s*sha256\s+)"([0-9a-f]{64})"', re.MULTILINE)
+TAG_RE = re.compile(r"/archive/refs/tags/(.+)\.tar\.gz$")
 PLACEHOLDER_SHA = "0" * 64
 
 
@@ -52,6 +55,11 @@ def render_formula(text: str, *, url: str, sha256: str) -> str:
     return SHA_RE.sub(lambda m: f'{m.group(1)}"{sha256}"', text, count=1)
 
 
+def formula_tag(url: str) -> str | None:
+    match = TAG_RE.search(url)
+    return match.group(1) if match else None
+
+
 def fetch_sha256(url: str, *, timeout: float = 60.0) -> str:
     digest = hashlib.sha256()
     request = urllib.request.Request(url, headers={"User-Agent": "atomic-image-builder-formula"})
@@ -68,18 +76,39 @@ def update(tag: str, formula_path: Path) -> str:
     return sha256
 
 
-def check(formula_path: Path) -> list[str]:
+def check(formula_path: Path, *, expected_version: str = VERSION) -> list[str]:
+    findings: list[str] = []
     text = formula_path.read_text()
     url, recorded = parse_formula(text)
+
+    # Digest agreement alone cannot catch a forgotten release: after VERSION is
+    # bumped and tagged, the formula still points at the PREVIOUS tarball, whose
+    # digest still matches it perfectly. The check would report "current" while
+    # every brew install served the old version -- the exact failure this is here
+    # to prevent. So compare the tag the formula names against the tool's own
+    # VERSION first. That needs no network and fires the moment they diverge.
+    expected_tag = f"v{expected_version}"
+    tag = formula_tag(url)
+    if tag is None:
+        findings.append(f"Formula url is not a tag archive, so its version cannot be checked: {url}")
+    elif tag != expected_tag:
+        findings.append(
+            f"Formula points at {tag} but the tool's VERSION is {expected_version}. "
+            f"Run: python3 {Path(__file__).name} --update {expected_tag}"
+        )
+
     if recorded == PLACEHOLDER_SHA:
-        return [f"Formula sha256 is still the placeholder. Run: python3 {Path(__file__).name} --update <tag>"]
+        findings.append(f"Formula sha256 is still the placeholder. Run: python3 {Path(__file__).name} --update {expected_tag}")
+        return findings
+
     try:
         actual = fetch_sha256(url)
     except (OSError, ValueError) as exc:
-        return [f"Unable to fetch {url}: {exc}"]
+        findings.append(f"Unable to fetch {url}: {exc}")
+        return findings
     if actual != recorded:
-        return [f"Formula sha256 does not match {url}: recorded {recorded}, actual {actual}"]
-    return []
+        findings.append(f"Formula sha256 does not match {url}: recorded {recorded}, actual {actual}")
+    return findings
 
 
 def main(argv: list[str] | None = None) -> int:
