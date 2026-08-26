@@ -14,13 +14,19 @@ on:
     types: [published]
   workflow_dispatch:
 
-# Two merges in quick succession must not race to push `latest`. Newest wins:
-# an in-flight publish for an older commit is cancelled rather than allowed to
-# overwrite a newer one. Keyed by ref so a release publish is never cancelled
-# by a push to main.
+# Every event above writes the same repository tags, so all of them share one
+# group and run one at a time. Not keyed by github.ref: a release event's ref
+# is refs/tags/<tag> while a push is refs/heads/main, so a per-ref key puts
+# them in different groups and lets both push `latest` concurrently -- and if
+# the release built an older commit and finished last, it would win.
+#
+# cancel-in-progress is false so a release publish is never cancelled by a
+# merge landing behind it. Queued runs supersede each other, so a burst of
+# merges still settles on the newest commit; it just costs a build to get
+# there rather than cancelling one mid-flight.
 concurrency:
-  group: publish-image-${{ github.ref }}
-  cancel-in-progress: true
+  group: publish-image
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -42,10 +48,20 @@ jobs:
           # GHCR image references must be lowercase; the owner login may not be
           # (e.g. "Danathar"). Lowercase it before building the registry path.
           OWNER_LC="${GITHUB_REPOSITORY_OWNER,,}"
+          # `latest` means the tip of main, so only a main build may claim it.
+          # A release is published from a tag ref, and one cut from an older
+          # commit must not drag `latest` backwards; it still gets the version
+          # and SHA tags, which is what identifies a release anyway.
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            TAGS="latest ${VERSION} ${SHORT_SHA}"
+          else
+            TAGS="${VERSION} ${SHORT_SHA}"
+          fi
           {
             echo "version=${VERSION}"
             echo "short_sha=${SHORT_SHA}"
             echo "owner_lc=${OWNER_LC}"
+            echo "tags=${TAGS}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Build image
@@ -53,7 +69,7 @@ jobs:
         uses: redhat-actions/buildah-build@719e3c40d8af9790c23eca13f7daa339f2867034 # v3.1.0
         with:
           image: atomic-image-builder
-          tags: latest ${{ steps.meta.outputs.version }} ${{ steps.meta.outputs.short_sha }}
+          tags: ${{ steps.meta.outputs.tags }}
           containerfiles: |
             ./Containerfile
           platforms: linux/amd64
