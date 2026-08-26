@@ -42,7 +42,7 @@ aib
 
 This launches the guided menu, where you create a GitHub repo that builds your custom image. You will need a GitHub account; if you are not already logged in on the host, the tool walks you through `gh auth login` on first run.
 
-Prefer to run from a source checkout instead? See [Run from source](#run-from-source). For the full set of container options (plain `podman run`, distrobox, and their limitations), see [Run with Podman](#run-with-podman-containerized).
+Already have Homebrew? [Install with Homebrew](#install-with-homebrew) is shorter still. Prefer to run from a source checkout instead? See [Run from source](#run-from-source). For the full set of container options (plain `podman run`, distrobox, and their limitations), see [Run with Podman](#run-with-podman-containerized).
 
 ## What it does
 
@@ -78,6 +78,34 @@ Beginner and intermediate atomic-desktop users — on Universal Blue (Bazzite, A
 
 Bootc-based desktop images are powerful, but the normal setup path assumes you are comfortable with image templates, GitHub Actions, signing, and image maintenance. This tool trades that setup cost for a guided workflow with stricter defaults and guardrails. It is intentionally **not** aimed at exposing every advanced image workflow in the beginner UI.
 
+## Install with Homebrew
+
+If you already have [Homebrew](https://brew.sh/) — Universal Blue images such as Bazzite, Bluefin, and Aurora ship with it — this is the shortest path. It installs the tool as an ordinary command and brings `gum`, `git`, `gh`, and `cosign` along with it, none of which are in Fedora's own repositories:
+
+```bash
+brew tap danathar/aib https://github.com/Danathar/atomic-image-builder
+brew install danathar/aib/atomic-image-builder
+aib-tool
+```
+
+> [!NOTE]
+> Requires the `v0.9.0` release or later. The formula installs a published release archive and verifies its checksum, so if no matching release exists yet, `brew install` stops with a checksum mismatch rather than installing anything. Use the container or a [source checkout](#run-from-source) until then.
+
+The installed command is **`aib-tool`**, not `aib`. The container wrapper above already installs `aib` into `~/.local/bin`, which on a normal PATH comes before Homebrew's `bin` — if both used the same name, whichever came first would silently win and you would have no way to tell which one you were running. Distinct names mean you can have both installed and choose deliberately.
+
+Update it the way you update everything else:
+
+```bash
+brew upgrade atomic-image-builder
+```
+
+`dnf5` and `rpm-ostree` do **not** come from Homebrew. The tool reads the host's package metadata and talks to the host's `rpm-ostreed`, so those have to come from the system you are running on — which they do on Fedora Atomic and Universal Blue desktops.
+
+Homebrew tracks tagged releases, while the container image tracks `main` and republishes on every merge. If you want the newest changes the moment they land, use the container; if you want stable versions, use Homebrew.
+
+> [!NOTE]
+> Not to be confused with [Homebrew on Fedora Atomic Images](#homebrew-on-fedora-atomic-images) below, which is about adding Homebrew to the image you **build**, not to the machine you build it from.
+
 ## Run with Podman (containerized)
 
 You can run the tool as a container — no local clone or dependency install needed, with `gum`, `git`, `gh`, `cosign`, and the `rpm-ostree` client all bundled in. Podman is the only prerequisite. To run from a source checkout instead, see [Run from source](#run-from-source).
@@ -110,7 +138,7 @@ podman run --rm -it --pull=newer \
 
 ```bash
 distrobox create --name aib --pull --image ghcr.io/danathar/atomic-image-builder:latest
-distrobox enter aib -- atomic-image-builder
+distrobox enter aib -- aib-tool
 ```
 
 `distrobox create --pull` fetches the image at creation time, but `distrobox enter` never re-pulls afterwards — unlike `podman run --pull=newer`, there is no per-run freshness check. To pick up a newer image you have to recreate the box:
@@ -167,6 +195,8 @@ The tool is a guided menu, so there is almost nothing to pass it. The two option
 |---|---|
 | `-h`, `--help` | Print a short usage summary and exit. |
 | `-V`, `--version` | Print the tool version and exit. |
+
+The command name depends on how you installed it: `aib` for the container wrapper, `aib-tool` for the Homebrew install and inside the container image, or `./atomic_image_builder.py` from a source checkout. The tool itself is the same either way.
 
 ### If a container package with that name already exists
 

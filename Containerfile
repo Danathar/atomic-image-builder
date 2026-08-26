@@ -47,7 +47,8 @@ RUN curl -fsSL -o /tmp/cosign.rpm \
 COPY atomic_image_builder.py /opt/atomic-image-builder/atomic_image_builder.py
 COPY template_snapshots/ /opt/atomic-image-builder/template_snapshots/
 RUN chmod +x /opt/atomic-image-builder/atomic_image_builder.py && \
-    ln -s /opt/atomic-image-builder/atomic_image_builder.py /usr/local/bin/atomic-image-builder
+    ln -s /opt/atomic-image-builder/atomic_image_builder.py /usr/local/bin/atomic-image-builder && \
+    ln -s /usr/local/bin/atomic-image-builder /usr/local/bin/aib-tool
 
 COPY container/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
