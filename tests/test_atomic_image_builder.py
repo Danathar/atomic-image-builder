@@ -3529,6 +3529,90 @@ class BuilderTests(unittest.TestCase):
                                 app.create_new_image()
         build_mock.assert_called_once()
 
+    def test_scanned_wizard_never_asks_for_a_base_image(self) -> None:
+        # The scan read the base off the running system. Universal Blue images
+        # are not rebase-compatible, so offering a different one would build an
+        # image the user cannot switch to.
+        app = self.make_app()
+        app.gum = GumStub()
+        app.config.base_image_uri = "ghcr.io/ublue-os/bazzite:stable"
+        app.config.base_image_name = "Bazzite (KDE)"
+
+        with patch.object(app, "choose_method"):
+            with patch.object(app, "choose_base_image") as base_mock:
+                with patch.object(app, "configure_repo"):
+                    with patch.object(app, "select_packages"):
+                        with patch.object(app, "review_new_image", side_effect=iter(["cancel"])) as review:
+                            app.create_new_image(scanned=True)
+
+        base_mock.assert_not_called()
+        self.assertFalse(review.call_args.kwargs["allow_base_edit"])
+
+    def test_unscanned_wizard_still_asks_for_a_base_image(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        with patch.object(app, "choose_method"):
+            with patch.object(app, "choose_base_image") as base_mock:
+                with patch.object(app, "configure_repo"):
+                    with patch.object(app, "select_packages"):
+                        with patch.object(app, "review_new_image", side_effect=iter(["cancel"])) as review:
+                            app.create_new_image()
+
+        base_mock.assert_called_once()
+        self.assertTrue(review.call_args.kwargs["allow_base_edit"])
+
+    def test_scanned_wizard_numbers_its_steps_without_the_skipped_one(self) -> None:
+        # "Step 3 of 5" when there are only four screens is a bug the user sees.
+        app = self.make_app()
+        app.gum = GumStub()
+        seen: list[tuple[int, int]] = []
+
+        def record(**kwargs):
+            seen.append((kwargs["step"], kwargs["total_steps"]))
+
+        with patch.object(app, "choose_method", side_effect=record):
+            with patch.object(app, "configure_repo", side_effect=record):
+                with patch.object(app, "select_packages", side_effect=record):
+                    with patch.object(app, "review_new_image", side_effect=lambda **kw: (record(**kw), "cancel")[1]):
+                        app.create_new_image(scanned=True)
+
+        self.assertEqual(seen, [(1, 4), (2, 4), (3, 4), (4, 4)])
+
+    def test_scanned_wizard_back_navigation_skips_the_base_step(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        calls: list[str] = []
+        repo_attempts = iter([ScreenBack(), None])
+
+        def repo(**_kwargs):
+            calls.append("repo")
+            outcome = next(repo_attempts)
+            if outcome is not None:
+                raise outcome
+
+        with patch.object(app, "choose_method", side_effect=lambda **_k: calls.append("method")):
+            with patch.object(app, "choose_base_image", side_effect=lambda **_k: calls.append("base")):
+                with patch.object(app, "configure_repo", side_effect=repo):
+                    with patch.object(app, "select_packages", side_effect=lambda **_k: calls.append("software")):
+                        with patch.object(app, "review_new_image", side_effect=iter(["cancel"])):
+                            app.create_new_image(scanned=True)
+
+        # Backing out of repo returns to method, not to a base step that is
+        # not part of this flow.
+        self.assertEqual(calls, ["method", "repo", "method", "repo", "software"])
+
+    def test_review_screen_shows_the_detected_base_when_it_cannot_be_edited(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda options, **_kw: [options[-1]]
+        app.gum = stub
+        app.config.base_image_name = "Bazzite (KDE)"
+        with redirect_stdout(io.StringIO()):
+            app.review_new_image(step=4, total_steps=4, allow_base_edit=False)
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertIn("Bazzite (KDE)", hints)
+        self.assertIn("detected from your running system", hints)
+
     def test_create_new_image_review_actions_route_to_matching_step(self) -> None:
         # Each review action must jump back to its own wizard step; a wrong
         # mapping would re-run the wrong screen after a partial edit.
@@ -3566,7 +3650,7 @@ class BuilderTests(unittest.TestCase):
         # return to the main menu instead of propagating out of the app.
         app = self.make_app()
         stub = GumStub()
-        choices = ["Create New Image", "Quit"]
+        choices = ["Create Image From Scratch", "Quit"]
         stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
         app.gum = stub
         with patch.object(app, "create_new_image", side_effect=CommandError("menu boom")):
@@ -3599,7 +3683,7 @@ class BuilderTests(unittest.TestCase):
         # which is what preserves the detected host state.
         app = self.make_app()
         stub = GumStub()
-        choices = ["Scan OS & Migrate Layered Packages", "Quit"]
+        choices = ["Create Image From This System", "Quit"]
         stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
         app.gum = stub
         with patch.object(app, "scan_os", return_value=True):
@@ -3611,7 +3695,7 @@ class BuilderTests(unittest.TestCase):
     def test_main_menu_scan_os_failure_does_not_start_wizard(self) -> None:
         app = self.make_app()
         stub = GumStub()
-        choices = ["Scan OS & Migrate Layered Packages", "Quit"]
+        choices = ["Create Image From This System", "Quit"]
         stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
         app.gum = stub
         with patch.object(app, "scan_os", return_value=False):

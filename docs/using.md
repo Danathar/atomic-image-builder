@@ -1,6 +1,26 @@
 # Using the tool
 
-However you launch it, the guided menu is the same. What to expect:
+However you launch it, the guided menu is the same.
+
+## Which entry to pick
+
+**Create Image From This System** is the normal one. It reads your running
+system's image reference and layered packages, so it already knows which base
+image you are on — it never asks you to choose one. That matters: Universal Blue
+images are not rebase-compatible with each other, so an image built on the wrong
+base is one you cannot switch to.
+
+It works whether or not you have layered anything. With no layered packages it
+simply starts you from your current base, and you add what you want from there —
+packages, COPR repositories, systemd services, base-package removals.
+
+**Create Image From Scratch** is for the case where there is no system to read:
+you have not installed an atomic desktop yet, or you are building an image for a
+different machine. This is the one place you pick a base image from a list. The
+generated repo also builds installable media, so you can install directly from
+your own image.
+
+## What else to expect
 
 - The tool creates a public GitHub repo under your account, and GitHub Actions
   builds the image after creation. Scheduled rebuilds also run daily on GitHub.
@@ -9,8 +29,6 @@ However you launch it, the guided menu is the same. What to expect:
   from a source checkout (see
   [container limitations](installing.md#limitations-of-running-in-a-container)).
 - The update menu can rotate the repo's cosign signing key and update `cosign.pub`.
-- The scan option reads your current rpm-ostree / bootc state and can carry
-  layered packages into the new repo.
 
 ## Migrating layered packages from your current system
 

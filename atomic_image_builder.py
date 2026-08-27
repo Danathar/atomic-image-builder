@@ -1632,8 +1632,12 @@ class App:
             try:
                 action = self.gum.choose(
                     [
-                        "Create New Image",
-                        "Scan OS & Migrate Layered Packages",
+                        # Scanning first is the normal path: it reads the base
+                        # image off the running system, so the user is never
+                        # asked to pick one. The from-scratch entry is for the
+                        # case where there is no system to read yet.
+                        "Create Image From This System",
+                        "Create Image From Scratch",
                         "Update Existing Image",
                         "View Build Status",
                         "Quit",
@@ -1646,11 +1650,11 @@ class App:
             if selected == "Quit":
                 raise SystemExit(0)
             try:
-                if selected == "Create New Image":
-                    self.create_new_image()
-                elif selected == "Scan OS & Migrate Layered Packages":
+                if selected == "Create Image From This System":
                     if self.scan_os():
                         self.create_new_image(scanned=True)
+                elif selected == "Create Image From Scratch":
+                    self.create_new_image()
                 elif selected == "Update Existing Image":
                     self.update_existing_image()
                 elif selected == "View Build Status":
@@ -1664,37 +1668,48 @@ class App:
                 self.gum.enter_to_continue("Press Enter to return to the main menu...")
 
     def create_new_image(self, *, scanned: bool = False) -> None:
-        # This is a simple step-by-step wizard. "step" is an integer instead of
-        # a stack because the beginner flow is intentionally linear.
+        # This is a simple step-by-step wizard. The steps are held in a list
+        # rather than as fixed numbers because a scanned run has one fewer of
+        # them, and the screens display "Step N of M".
         if scanned:
             self.config.github_user = self.github_user
         else:
             self.config = self.fresh_config()
-        total_steps = 5
-        step = 1
+
+        # A scan reads the base image out of the running system's
+        # container-image-reference, so after one the base is a fact about this
+        # machine rather than a choice. Offering it anyway would let someone
+        # build, say, a Bluefin image on a Bazzite install -- and Universal Blue
+        # images are not rebase-compatible with each other, so the result is an
+        # image they cannot switch to. The base list stays for the
+        # nothing-installed-yet path, where there is no system to read.
+        steps = ["method"] if scanned else ["method", "base"]
+        steps += ["repo", "software"]
+        review_step = len(steps) + 1
+        total_steps = review_step
+        index = 0
         while True:
             try:
-                if step == 1:
-                    self.choose_method(step=step, total_steps=total_steps)
-                    step = 2
+                if index < len(steps):
+                    name = steps[index]
+                    number = index + 1
+                    if name == "method":
+                        self.choose_method(step=number, total_steps=total_steps)
+                    elif name == "base":
+                        self.choose_base_image(step=number, total_steps=total_steps)
+                    elif name == "repo":
+                        self.configure_repo(step=number, total_steps=total_steps)
+                    else:
+                        self.select_packages(step=number, total_steps=total_steps)
+                    index += 1
                     continue
-                if step == 2:
-                    self.choose_base_image(step=step, total_steps=total_steps)
-                    step = 3
-                    continue
-                if step == 3:
-                    self.configure_repo(step=step, total_steps=total_steps)
-                    step = 4
-                    continue
-                if step == 4:
-                    self.select_packages(step=step, total_steps=total_steps)
-                    step = 5
-                    continue
-                action = self.review_new_image(step=step, total_steps=total_steps)
+                action = self.review_new_image(
+                    step=review_step, total_steps=total_steps, allow_base_edit="base" in steps
+                )
             except ScreenBack:
-                if step == 1:
+                if index == 0:
                     return
-                step -= 1
+                index -= 1
                 continue
             if action == "build":
                 try:
@@ -1706,14 +1721,8 @@ class App:
                     self.gum.error(str(exc))
                     self.gum.enter_to_continue("Press Enter to return to the review screen...")
                 continue
-            if action == "method":
-                step = 1
-            elif action == "base":
-                step = 2
-            elif action == "repo":
-                step = 3
-            elif action == "software":
-                step = 4
+            if action in steps:
+                index = steps.index(action)
             else:
                 return
 
@@ -2206,10 +2215,15 @@ class App:
             self.gum.error(str(exc))
             self.gum.enter_to_continue(return_hint)
 
-    def review_new_image(self, *, step: int, total_steps: int) -> str:
+    def review_new_image(self, *, step: int, total_steps: int, allow_base_edit: bool = True) -> str:
         while True:
             self.show_step_header("Review and Create Image", step=step, total_steps=total_steps)
             self.gum.hint("Choose a section to review or change, or start the GitHub build.")
+            if not allow_base_edit:
+                self.menu_section(
+                    "Base Image",
+                    f"{self.config.base_image_name or self.config.base_image_uri} (detected from your running system)",
+                )
             print()
             method_label = self.format_task_choice("Build method", METHOD_DISPLAY.get(self.config.method, "(not set)"))
             software_label = self.format_task_choice("Software", self.software_status())
@@ -2219,7 +2233,12 @@ class App:
             local_build_label = "Test build locally (podman)"
             build_label = "Start GitHub build"
             cancel_label = "Cancel and return to the main menu"
-            options = [method_label, software_label, repo_label, base_label, full_label]
+            options = [method_label, software_label, repo_label]
+            # After a scan the base came from the running system and cannot be
+            # changed, so it is shown as a fact rather than offered as an edit.
+            if allow_base_edit:
+                options.append(base_label)
+            options.append(full_label)
             if self.config.method == "containerfile":
                 options.append(local_build_label)
             options.extend([build_label, cancel_label])
@@ -2239,7 +2258,7 @@ class App:
                 return "software"
             if selected == repo_label:
                 return "repo"
-            if selected == base_label:
+            if allow_base_edit and selected == base_label:
                 return "base"
             if selected == full_label:
                 self.show_summary(step=step, total_steps=total_steps, next_hint="This is the full build summary.")
