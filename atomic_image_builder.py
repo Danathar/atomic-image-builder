@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import base64
 import http.client
 import json
 import os
@@ -2482,6 +2483,22 @@ class App:
         proc = run(["gh", "api", f"/repos/{owner}/{repo}/contents/{path}"], check=False)
         return proc.returncode == 0
 
+    def repo_carried_scan_customizations(self, owner: str, repo: str) -> bool:
+        # Reads the flag out of a managed repo's state file without cloning it.
+        # Any failure means "do not know", and the caller stays quiet rather
+        # than guessing -- a wrong migration reminder is worse than none.
+        try:
+            proc = run(
+                ["gh", "api", f"repos/{owner}/{repo}/contents/{STATE_FILE}", "--jq", ".content"],
+                check=False,
+            )
+            if proc.returncode != 0 or not proc.stdout.strip():
+                return False
+            payload = json.loads(base64.b64decode(proc.stdout.strip()).decode("utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
+        return isinstance(payload, dict) and payload.get("scan_customizations_carried") is True
+
     def repo_has_state_file(self, owner: str, repo: str) -> bool:
         return self.repo_file_exists(owner, repo, STATE_FILE)
 
@@ -3431,6 +3448,27 @@ class App:
                 except (ValueError, TypeError, OverflowError):
                     when = "unknown"
             self.gum.hint(f"{icon:<7} {workflow:<22} {title:<38} {when:<12} {item.get('url') or ''}")
+
+        # The riskiest step in the whole workflow is unassisted: after a build
+        # that carried scanned packages, the user has to remember to reset and
+        # switch in one session, without rebooting in between -- and by now the
+        # build has taken the better part of an hour. This is the moment they
+        # are standing there ready to do it, so say it again here.
+        latest_succeeded = any(
+            isinstance(item, dict) and item.get("conclusion") == "success" for item in runs
+        )
+        if latest_succeeded and self.repo_carried_scan_customizations(owner, repo):
+            print()
+            self.menu_section(
+                "Switching This Machine",
+                "This image carries package changes scanned from your system.",
+                "Run both in the same session, and do not reboot in between:",
+                "  sudo rpm-ostree reset",
+                # Built from the arguments, not from self.config: this screen is
+                # reachable via the repo picker, which does not load the config.
+                f"  sudo bootc switch ghcr.io/{owner.lower()}/{repo}:latest",
+                "  systemctl reboot",
+            )
         self.gum.enter_to_continue("Press Enter to return to the main menu...")
 
     def load_repo_config(self, repo_dir: Path) -> None:

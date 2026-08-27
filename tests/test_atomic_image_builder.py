@@ -3760,6 +3760,63 @@ class BuilderTests(unittest.TestCase):
         status_mock.assert_called_once()
         update_mock.assert_not_called()
 
+    def test_build_status_reminds_how_to_switch_after_a_scanned_build_succeeds(self) -> None:
+        # The reset-then-switch pair is the riskiest step and happens an hour
+        # after the tool printed it. This screen is where the user comes back.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        runs = json.dumps([{"conclusion": "success", "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+            with patch.object(app, "repo_carried_scan_customizations", return_value=True):
+                with redirect_stdout(io.StringIO()):
+                    app.render_build_status("Example", "my-image")
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertIn("sudo rpm-ostree reset", hints)
+        # Built from the arguments, since the picker does not load the config.
+        self.assertIn("ghcr.io/example/my-image:latest", hints)
+        self.assertIn("do not reboot in between", hints.lower())
+
+    def test_build_status_stays_quiet_when_nothing_was_scanned(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        runs = json.dumps([{"conclusion": "success", "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+            with patch.object(app, "repo_carried_scan_customizations", return_value=False):
+                with redirect_stdout(io.StringIO()):
+                    app.render_build_status("Example", "my-image")
+        self.assertNotIn("rpm-ostree reset", " ".join(m for _l, m in stub.messages))
+
+    def test_build_status_stays_quiet_until_a_build_has_succeeded(self) -> None:
+        # Switching to an image that has not been built yet is the mistake this
+        # reminder must not encourage.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        runs = json.dumps([{"conclusion": None, "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+            with patch.object(app, "repo_carried_scan_customizations", return_value=True) as carried:
+                with redirect_stdout(io.StringIO()):
+                    app.render_build_status("Example", "my-image")
+        self.assertNotIn("rpm-ostree reset", " ".join(m for _l, m in stub.messages))
+        carried.assert_not_called()
+
+    def test_repo_carried_scan_customizations_reads_the_remote_state_file(self) -> None:
+        import base64
+        payload = base64.b64encode(json.dumps({"scan_customizations_carried": True}).encode()).decode()
+        app = self.make_app()
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, payload, "")):
+            self.assertTrue(app.repo_carried_scan_customizations("owner", "repo"))
+        # Anything unreadable means "do not know", and the caller stays quiet.
+        for proc in (
+            subprocess.CompletedProcess([], 1, "", "boom"),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "not-base64!!", ""),
+        ):
+            with patch("atomic_image_builder.run", return_value=proc):
+                self.assertFalse(app.repo_carried_scan_customizations("owner", "repo"))
+
     def test_scan_os_resets_stale_config_before_loading_host_state(self) -> None:
         app = self.make_app()
         app.github_user = "example"
