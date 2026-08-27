@@ -1,6 +1,28 @@
 # Using the tool
 
-However you launch it, the guided menu is the same. What to expect:
+However you launch it, the guided menu is the same.
+
+## Creating an image
+
+**Create Image** scans your running system first. It reads the image you are on
+and any packages you have layered, so it already knows the base — it never asks
+you to choose one. That matters: Universal Blue images are not rebase-compatible
+with each other, so an image built on the wrong base is one you cannot switch to.
+
+It works whether or not you have layered anything. With nothing layered it
+simply starts from your current base, and you add what you want from there —
+packages, COPR repositories, systemd services, base-package removals.
+
+The main menu lists every base image the tool supports, so you can see up front
+whether your system is one of them.
+
+**If the scan cannot run**, the tool says so and offers to let you pick a base
+image by hand instead. That happens with a bare `podman run`, which has no
+access to your host's state — the `aib` wrapper and distrobox both hand it in,
+so neither hits this. See
+[container limitations](installing.md#limitations-of-running-in-a-container).
+
+## What else to expect
 
 - The tool creates a public GitHub repo under your account, and GitHub Actions
   builds the image after creation. Scheduled rebuilds also run daily on GitHub.
@@ -9,8 +31,6 @@ However you launch it, the guided menu is the same. What to expect:
   from a source checkout (see
   [container limitations](installing.md#limitations-of-running-in-a-container)).
 - The update menu can rotate the repo's cosign signing key and update `cosign.pub`.
-- The scan option reads your current rpm-ostree / bootc state and can carry
-  layered packages into the new repo.
 
 ## Migrating layered packages from your current system
 

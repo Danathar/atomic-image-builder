@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import base64
 import http.client
 import json
 import os
@@ -53,8 +54,20 @@ DEFAULT_GITHUB_BUILD_CRON = "05 10 * * *"
 FEDORA_ATOMIC_FALLBACK_TAG = "44"
 UNIVERSAL_BLUE_BREW_IMAGE = "ghcr.io/ublue-os/brew:latest"
 MAX_UI_WIDTH = 120
-ACCENT_COLOR = 117
-CONTROLS_COLOR = 10
+# Every colour here is a 256-palette index chosen to stay legible on BOTH a
+# light and a dark terminal. The originals were picked on a dark background and
+# were near-invisible on a light one -- 252 is almost white, and 117 is a pale
+# blue that gum was also given for `choose --selected.foreground`, so on a light
+# terminal an all-selected list rendered as an empty screen.
+#
+# The rule for anything added here: mid-range indices only. Nothing above ~230
+# (washes out on white) and nothing below ~20 (disappears on black).
+ACCENT_COLOR = 33      # blue, for headers, cursors and selections
+MUTED_COLOR = 244      # grey, for secondary text and placeholders
+SUCCESS_COLOR = 28     # green, for the "created" panel
+WARNING_COLOR = 178    # gold, for the attention panel
+NOTICE_COLOR = 214     # orange, already legible on both
+CONTROLS_COLOR = SUCCESS_COLOR
 PACKAGE_SEARCH_LIMIT = 40
 MANAGED_REPO_WARNING = "If you hand-edit a repo after this tool creates or manages it, stop using this tool for that repo."
 MANAGED_REPO_HINT_CONTAINERFILE = (
@@ -247,6 +260,23 @@ BASE_IMAGES: tuple[BaseImage, ...] = (
 
 def supported_base_image_names() -> str:
     return ", ".join(image.name for image in BASE_IMAGES)
+
+
+def supported_base_image_lines() -> list[str]:
+    # Grouped by provider so the main menu can say what this tool supports
+    # without printing thirteen names on one line.
+    grouped: dict[str, list[str]] = {}
+    for image in BASE_IMAGES:
+        grouped.setdefault(image.provider, []).append(image.name)
+    return [f"{provider}: {', '.join(names)}" for provider, names in grouped.items()]
+
+
+# scan_os() has three outcomes, and the caller has to tell them apart: a scan
+# that could not run at all falls back to picking a base by hand, while a user
+# who backed out should simply return to the menu.
+SCAN_OK = "ok"
+SCAN_UNAVAILABLE = "unavailable"
+SCAN_CANCELLED = "cancelled"
 
 COMMON_SERVICES: tuple[tuple[str, str], ...] = (
     ("SSH remote access", "sshd.service"),
@@ -441,6 +471,29 @@ def ghcr_package_exists(owner: str, name: str, *, timeout: float = 6.0) -> bool:
         # response truncated by GHCR or a proxy would otherwise escape an
         # advisory check and stop the user creating a repo at all.
         return False
+
+
+def open_url_in_browser(url: str) -> bool:
+    # Fire and forget, with the browser's output thrown away. A GUI browser is
+    # chatty on stderr -- Mesa, EGL and sandbox warnings -- and inheriting this
+    # terminal writes all of it over the running TUI. It is also detached and
+    # not waited on, so a browser that takes its time starting cannot stall the
+    # prompt that follows.
+    for opener in ("xdg-open", "open"):
+        if not command_exists(opener):
+            continue
+        try:
+            subprocess.Popen(
+                [opener, url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            return False
+        return True
+    return False
 
 
 def command_exists(name: str) -> bool:
@@ -957,7 +1010,7 @@ class Gum:
             args.extend(["--value", value])
         if placeholder is not None:
             args.extend(["--placeholder", placeholder])
-            args.extend(["--placeholder.foreground", "248"])
+            args.extend(["--placeholder.foreground", str(MUTED_COLOR)])
         if width is not None:
             args.extend(["--width", str(width)])
         return self.require_interactive_success(self.interactive_stdout(args)).stdout.rstrip("\n")
@@ -972,7 +1025,7 @@ class Gum:
                     "--placeholder",
                     placeholder,
                     "--placeholder.foreground",
-                    "248",
+                    str(MUTED_COLOR),
                     "--cursor.foreground",
                     str(ACCENT_COLOR),
                     "--height",
@@ -1045,7 +1098,7 @@ class Gum:
                     "--match.foreground",
                     str(ACCENT_COLOR),
                     "--placeholder.foreground",
-                    "248",
+                    str(MUTED_COLOR),
                 ],
                 stdin="\n".join(options) + "\n",
             )
@@ -1056,8 +1109,18 @@ class Gum:
         run(["gum", "pager"], capture=False, stdin=text)
 
     def table(self, rows: Sequence[Sequence[str]], *, columns: str, widths: str) -> None:
+        # --print is what makes this a display widget. Without it `gum table` is
+        # an interactive row picker: it draws the rows, highlights one, shows a
+        # "1/4 navigate / enter select" footer and blocks. Every screen that
+        # showed a table therefore stopped there, and everything meant to follow
+        # it -- hints, controls, the package chooser -- never ran, so the screen
+        # looked like a table floating above an empty page.
         text = "\n".join("\t".join(row) for row in rows) + "\n"
-        run(["gum", "table", "--separator", "\t", "--columns", columns, "--widths", widths], capture=False, stdin=text)
+        run(
+            ["gum", "table", "--print", "--separator", "\t", "--columns", columns, "--widths", widths],
+            capture=False,
+            stdin=text,
+        )
 
     def require_spinner_success(
         self, proc: subprocess.CompletedProcess[str], args: Sequence[str]
@@ -1196,9 +1259,9 @@ class App:
     def banner(self) -> None:
         panel_width = self.landing_panel_width()
         print()
-        print(self.gum.style(f"{TOOL_NAME}  v{VERSION}", align="center", width=panel_width, foreground=117, bold=True))
-        print(self.gum.style("GitHub-backed bootc image repo builder", align="center", width=panel_width, foreground=252))
-        print(self.gum.style("for Universal Blue and Fedora Atomic desktops", align="center", width=panel_width, foreground=252))
+        print(self.gum.style(f"{TOOL_NAME}  v{VERSION}", align="center", width=panel_width, foreground=ACCENT_COLOR, bold=True))
+        print(self.gum.style("GitHub-backed bootc image repo builder", align="center", width=panel_width, foreground=MUTED_COLOR))
+        print(self.gum.style("for Universal Blue and Fedora Atomic desktops", align="center", width=panel_width, foreground=MUTED_COLOR))
         print()
 
     def startup_requirements(self) -> None:
@@ -1221,7 +1284,7 @@ class App:
                 "supported images and change infrequently.",
             ],
             width=info_width,
-            border_foreground=117,
+            border_foreground=ACCENT_COLOR,
         )
         print()
         self.landing_card(
@@ -1238,7 +1301,7 @@ class App:
                 "and system changes are your risk.",
             ],
             width=info_width,
-            border_foreground=214,
+            border_foreground=NOTICE_COLOR,
         )
         print()
         self.gum.enter_to_continue("Press Enter to start the preflight checks...")
@@ -1552,8 +1615,8 @@ class App:
                 width=self.gum.content_width(max_width=100, reserve=8),
                 margin="0 2",
                 padding="1 2",
-                foreground=117,
-                border_foreground=117,
+                foreground=ACCENT_COLOR,
+                border_foreground=ACCENT_COLOR,
                 border="rounded",
             )
         )
@@ -1582,17 +1645,15 @@ class App:
                     width=self.gum.content_width(max_width=100, reserve=8),
                     margin="0 2",
                     padding="1 2",
-                    foreground=11,
-                    border_foreground=11,
+                    foreground=WARNING_COLOR,
+                    border_foreground=WARNING_COLOR,
                     border="rounded",
                 )
             )
             print()
             if self.gum.confirm("Open github.com/signup now?", default=True):
-                if command_exists("xdg-open"):
-                    run(["xdg-open", "https://github.com/signup"], check=False, capture=False)
-                elif command_exists("open"):
-                    run(["open", "https://github.com/signup"], check=False, capture=False)
+                if not open_url_in_browser("https://github.com/signup"):
+                    self.gum.hint("Could not open a browser here. Go to https://github.com/signup manually.")
             self.gum.enter_to_continue("Press Enter after you've created the account...")
 
         print(
@@ -1605,8 +1666,8 @@ class App:
                 width=self.gum.content_width(max_width=100, reserve=8),
                 margin="0 2",
                 padding="1 2",
-                foreground=117,
-                border_foreground=117,
+                foreground=ACCENT_COLOR,
+                border_foreground=ACCENT_COLOR,
                 border="rounded",
             )
         )
@@ -1629,11 +1690,12 @@ class App:
         while True:
             self.gum.header("Main Menu")
             self.gum.controls("Up/Down move", "Enter choose", "Esc quit", "Ctrl+C quit")
+            self.menu_section("Supported Base Images", *supported_base_image_lines())
+            print()
             try:
                 action = self.gum.choose(
                     [
-                        "Create New Image",
-                        "Scan OS & Migrate Layered Packages",
+                        "Create Image",
                         "Update Existing Image",
                         "View Build Status",
                         "Quit",
@@ -1646,11 +1708,8 @@ class App:
             if selected == "Quit":
                 raise SystemExit(0)
             try:
-                if selected == "Create New Image":
-                    self.create_new_image()
-                elif selected == "Scan OS & Migrate Layered Packages":
-                    if self.scan_os():
-                        self.create_new_image(scanned=True)
+                if selected == "Create Image":
+                    self.create_image()
                 elif selected == "Update Existing Image":
                     self.update_existing_image()
                 elif selected == "View Build Status":
@@ -1663,38 +1722,67 @@ class App:
                 self.gum.error(str(exc))
                 self.gum.enter_to_continue("Press Enter to return to the main menu...")
 
+    def create_image(self) -> None:
+        # One door. The scan decides which flow you get: it reads the base off
+        # the running system, so nobody is asked to pick one unless there is no
+        # system to read -- a bare `podman run` has no host state, and that is
+        # the only case where the base is genuinely a choice.
+        outcome = self.scan_os()
+        if outcome == SCAN_OK:
+            self.create_new_image(scanned=True)
+            return
+        if outcome == SCAN_CANCELLED:
+            return
+        print()
+        self.gum.hint("Without your system's details, the base image has to be chosen by hand.")
+        self.gum.hint("Running through the aib wrapper or distrobox lets the tool read it for you.")
+        print()
+        if self.gum.confirm("Choose a base image and continue?", default=True):
+            self.create_new_image()
+
     def create_new_image(self, *, scanned: bool = False) -> None:
-        # This is a simple step-by-step wizard. "step" is an integer instead of
-        # a stack because the beginner flow is intentionally linear.
+        # This is a simple step-by-step wizard. The steps are held in a list
+        # rather than as fixed numbers because a scanned run has one fewer of
+        # them, and the screens display "Step N of M".
         if scanned:
             self.config.github_user = self.github_user
         else:
             self.config = self.fresh_config()
-        total_steps = 5
-        step = 1
+
+        # A scan reads the base image out of the running system's
+        # container-image-reference, so after one the base is a fact about this
+        # machine rather than a choice. Offering it anyway would let someone
+        # build, say, a Bluefin image on a Bazzite install -- and Universal Blue
+        # images are not rebase-compatible with each other, so the result is an
+        # image they cannot switch to. The base list stays for the
+        # nothing-installed-yet path, where there is no system to read.
+        steps = ["method"] if scanned else ["method", "base"]
+        steps += ["repo", "software"]
+        review_step = len(steps) + 1
+        total_steps = review_step
+        index = 0
         while True:
             try:
-                if step == 1:
-                    self.choose_method(step=step, total_steps=total_steps)
-                    step = 2
+                if index < len(steps):
+                    name = steps[index]
+                    number = index + 1
+                    if name == "method":
+                        self.choose_method(step=number, total_steps=total_steps)
+                    elif name == "base":
+                        self.choose_base_image(step=number, total_steps=total_steps)
+                    elif name == "repo":
+                        self.configure_repo(step=number, total_steps=total_steps)
+                    else:
+                        self.select_packages(step=number, total_steps=total_steps)
+                    index += 1
                     continue
-                if step == 2:
-                    self.choose_base_image(step=step, total_steps=total_steps)
-                    step = 3
-                    continue
-                if step == 3:
-                    self.configure_repo(step=step, total_steps=total_steps)
-                    step = 4
-                    continue
-                if step == 4:
-                    self.select_packages(step=step, total_steps=total_steps)
-                    step = 5
-                    continue
-                action = self.review_new_image(step=step, total_steps=total_steps)
+                action = self.review_new_image(
+                    step=review_step, total_steps=total_steps, allow_base_edit="base" in steps
+                )
             except ScreenBack:
-                if step == 1:
+                if index == 0:
                     return
-                step -= 1
+                index -= 1
                 continue
             if action == "build":
                 try:
@@ -1706,14 +1794,8 @@ class App:
                     self.gum.error(str(exc))
                     self.gum.enter_to_continue("Press Enter to return to the review screen...")
                 continue
-            if action == "method":
-                step = 1
-            elif action == "base":
-                step = 2
-            elif action == "repo":
-                step = 3
-            elif action == "software":
-                step = 4
+            if action in steps:
+                index = steps.index(action)
             else:
                 return
 
@@ -1759,7 +1841,7 @@ class App:
             matched = self.match_base_image(self.config.base_image_uri)
             if matched:
                 print(f"  Detected base image: {self.gum.style(self.config.base_image_name or self.config.base_image_uri, bold=True)}")
-                print(f"  Image: {self.gum.style(self.config.base_image_uri, foreground=117)}")
+                print(f"  Image: {self.gum.style(self.config.base_image_uri, foreground=ACCENT_COLOR)}")
                 print()
                 if self.gum.confirm("Use this base image?", default=True):
                     self.offer_brew_if_applicable()
@@ -2206,10 +2288,15 @@ class App:
             self.gum.error(str(exc))
             self.gum.enter_to_continue(return_hint)
 
-    def review_new_image(self, *, step: int, total_steps: int) -> str:
+    def review_new_image(self, *, step: int, total_steps: int, allow_base_edit: bool = True) -> str:
         while True:
             self.show_step_header("Review and Create Image", step=step, total_steps=total_steps)
             self.gum.hint("Choose a section to review or change, or start the GitHub build.")
+            if not allow_base_edit:
+                self.menu_section(
+                    "Base Image",
+                    f"{self.config.base_image_name or self.config.base_image_uri} (detected from your running system)",
+                )
             print()
             method_label = self.format_task_choice("Build method", METHOD_DISPLAY.get(self.config.method, "(not set)"))
             software_label = self.format_task_choice("Software", self.software_status())
@@ -2219,7 +2306,12 @@ class App:
             local_build_label = "Test build locally (podman)"
             build_label = "Start GitHub build"
             cancel_label = "Cancel and return to the main menu"
-            options = [method_label, software_label, repo_label, base_label, full_label]
+            options = [method_label, software_label, repo_label]
+            # After a scan the base came from the running system and cannot be
+            # changed, so it is shown as a fact rather than offered as an edit.
+            if allow_base_edit:
+                options.append(base_label)
+            options.append(full_label)
             if self.config.method == "containerfile":
                 options.append(local_build_label)
             options.extend([build_label, cancel_label])
@@ -2239,14 +2331,14 @@ class App:
                 return "software"
             if selected == repo_label:
                 return "repo"
-            if selected == base_label:
+            if allow_base_edit and selected == base_label:
                 return "base"
             if selected == full_label:
                 self.show_summary(step=step, total_steps=total_steps, next_hint="This is the full build summary.")
                 continue
             return "cancel"
 
-    def scan_os(self) -> bool:
+    def scan_os(self) -> str:
         # This is the one place where the beginner tool looks at the running
         # host. It only reads rpm-ostree state so it can carry layered packages
         # and base-package removals into a new GitHub-backed image repo.
@@ -2264,37 +2356,37 @@ class App:
                 # UnicodeDecodeError: a non-text (e.g. binary) file. Both are
                 # "unreadable" and must hit the friendly error, not a traceback.
                 self.gum.error("Failed to read rpm-ostree status.")
-                return False
+                return SCAN_UNAVAILABLE
         else:
             if not command_exists("rpm-ostree"):
                 self.gum.error("rpm-ostree not found. OS scanning is unavailable.")
-                return False
+                return SCAN_UNAVAILABLE
 
             proc = run(["rpm-ostree", "status", "--json", "--booted"], check=False)
             if proc.returncode != 0 or not proc.stdout.strip():
                 proc = run(["rpm-ostree", "status", "--json"], check=False)
             if proc.returncode != 0 or not proc.stdout.strip():
                 self.gum.error("Failed to read rpm-ostree status.")
-                return False
+                return SCAN_UNAVAILABLE
             status_text = proc.stdout
 
         try:
             status = json.loads(status_text)
         except json.JSONDecodeError:
             self.gum.error("Failed to read rpm-ostree status.")
-            return False
+            return SCAN_UNAVAILABLE
         # Valid JSON is not necessarily the object shape we expect: an override
         # file may hold `[]`, and a future rpm-ostree could change the schema.
         # Everything below must reach the friendly error, not an AttributeError.
         if not isinstance(status, dict):
             self.gum.error("Failed to read rpm-ostree status.")
-            return False
+            return SCAN_UNAVAILABLE
         raw_deployments = status.get("deployments")
         deployments = [item for item in raw_deployments if isinstance(item, dict)] if isinstance(raw_deployments, list) else []
         booted = next((item for item in deployments if item.get("booted")), deployments[0] if deployments else {})
         if not booted:
             self.gum.error("No deployment information found.")
-            return False
+            return SCAN_UNAVAILABLE
 
         container_ref = (
             booted.get("container-image-reference")
@@ -2308,7 +2400,7 @@ class App:
             self.gum.error(
                 "This deployment has no container image reference; scanning only supports bootc / image-based deployments."
             )
-            return False
+            return SCAN_UNAVAILABLE
         base = normalize_container_image_reference(container_ref)
         self.config.scanned_packages = unique(string_list(booted.get("requested-packages")))
         self.config.scanned_removed = unique(string_list(booted.get("requested-base-removals")))
@@ -2340,8 +2432,25 @@ class App:
         ]
         self.gum.table(rows, columns="Setting,Value", widths=self.gum.table_widths(22))
         print()
+        # The table states facts and nothing else. Without this a user is left
+        # looking at their own system's details with no idea what the tool is
+        # about to do with them, or that the base is settled and will not be
+        # asked about again.
+        self.menu_section(
+            "What Happens Next",
+            f"Your image will be built on {self.config.base_image_name} - the base this system already runs.",
+            "Next you choose which of these packages to carry over, then name the repo and review.",
+            "Nothing is created on GitHub until you confirm at the end.",
+        )
+        print()
 
         if self.config.scanned_packages:
+            # The scan results are a page of their own: read them, then move on.
+            # gum choose draws inline rather than taking over the screen, so
+            # without the pause and the clear that header() does, the results,
+            # the explanation and a twenty-item list all pile onto one screen.
+            self.gum.enter_to_continue("Press Enter to choose which packages to carry over...")
+            self.gum.header("Packages To Carry Over")
             self.gum.controls("Up/Down move", "x select", "Enter continue", "Esc back", "Ctrl+C quit")
             self.menu_section("Selection", "Leave everything unselected if you want to skip carrying these packages over.")
             print()
@@ -2351,19 +2460,20 @@ class App:
                     height=20,
                     no_limit=True,
                     selected=self.config.scanned_packages,
-                    header="Layered Packages",
                     selected_prefix="[x] ",
                     unselected_prefix="[ ] ",
                 )
             except ScreenBack:
-                return False
+                return SCAN_CANCELLED
             self.config.packages = selected
         else:
             self.gum.warn("No layered packages found.")
             if not self.gum.confirm("Continue to create a custom image anyway?", default=True):
-                return False
+                return SCAN_CANCELLED
 
         if self.config.scanned_removed:
+            # Same again: its own page rather than stacked under the last one.
+            self.gum.header("Base Packages To Remove")
             self.gum.controls("Up/Down move", "x select", "Enter continue", "Esc back", "Ctrl+C quit")
             self.menu_section("Selection", "Leave everything unselected if you do not want to remove any base packages.")
             print()
@@ -2373,16 +2483,15 @@ class App:
                     height=20,
                     no_limit=True,
                     selected=self.config.scanned_removed,
-                    header="Base Packages To Remove",
                     selected_prefix="[x] ",
                     unselected_prefix="[ ] ",
                 )
             except ScreenBack:
-                return False
+                return SCAN_CANCELLED
             self.config.removed_packages = selected_removed
 
         self.config.normalize()
-        return True
+        return SCAN_OK
 
     def match_base_image(self, value: str) -> BaseImage | None:
         for image in BASE_IMAGES:
@@ -2433,6 +2542,22 @@ class App:
     def repo_file_exists(self, owner: str, repo: str, path: str) -> bool:
         proc = run(["gh", "api", f"/repos/{owner}/{repo}/contents/{path}"], check=False)
         return proc.returncode == 0
+
+    def repo_carried_scan_customizations(self, owner: str, repo: str) -> bool:
+        # Reads the flag out of a managed repo's state file without cloning it.
+        # Any failure means "do not know", and the caller stays quiet rather
+        # than guessing -- a wrong migration reminder is worse than none.
+        try:
+            proc = run(
+                ["gh", "api", f"repos/{owner}/{repo}/contents/{STATE_FILE}", "--jq", ".content"],
+                check=False,
+            )
+            if proc.returncode != 0 or not proc.stdout.strip():
+                return False
+            payload = json.loads(base64.b64decode(proc.stdout.strip()).decode("utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
+        return isinstance(payload, dict) and payload.get("scan_customizations_carried") is True
 
     def repo_has_state_file(self, owner: str, repo: str) -> bool:
         return self.repo_file_exists(owner, repo, STATE_FILE)
@@ -3150,8 +3275,8 @@ class App:
                 width=self.gum.content_width(reserve=8),
                 margin="1",
                 padding="1 2",
-                foreground=10,
-                border_foreground=10,
+                foreground=SUCCESS_COLOR,
+                border_foreground=SUCCESS_COLOR,
                 border="double",
             )
         )
@@ -3383,6 +3508,27 @@ class App:
                 except (ValueError, TypeError, OverflowError):
                     when = "unknown"
             self.gum.hint(f"{icon:<7} {workflow:<22} {title:<38} {when:<12} {item.get('url') or ''}")
+
+        # The riskiest step in the whole workflow is unassisted: after a build
+        # that carried scanned packages, the user has to remember to reset and
+        # switch in one session, without rebooting in between -- and by now the
+        # build has taken the better part of an hour. This is the moment they
+        # are standing there ready to do it, so say it again here.
+        latest_succeeded = any(
+            isinstance(item, dict) and item.get("conclusion") == "success" for item in runs
+        )
+        if latest_succeeded and self.repo_carried_scan_customizations(owner, repo):
+            print()
+            self.menu_section(
+                "Switching This Machine",
+                "This image carries package changes scanned from your system.",
+                "Run both in the same session, and do not reboot in between:",
+                "  sudo rpm-ostree reset",
+                # Built from the arguments, not from self.config: this screen is
+                # reachable via the repo picker, which does not load the config.
+                f"  sudo bootc switch ghcr.io/{owner.lower()}/{repo}:latest",
+                "  systemctl reboot",
+            )
         self.gum.enter_to_continue("Press Enter to return to the main menu...")
 
     def load_repo_config(self, repo_dir: Path) -> None:

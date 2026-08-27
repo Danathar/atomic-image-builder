@@ -15,7 +15,7 @@ already present. The container image bundles its own, so Podman really is the
 only prerequisite there.
 
 What the container cannot bundle is your host's rpm-ostree *state*: it has no
-access to the host's system D-Bus, so the Scan OS menu depends on the `aib`
+access to the host's system D-Bus, so the system scan depends on the `aib`
 wrapper handing that state in. See
 [Limitations of running in a container](#limitations-of-running-in-a-container).
 
@@ -75,7 +75,7 @@ aib
 
 The wrapper forwards your host's `gh` login when there is one (otherwise it
 persists an in-container login across runs in a podman-managed volume), makes
-your host's `rpm-ostree` state available to the Scan OS menu, and mounts your
+your host's `rpm-ostree` state available to the system scan, and mounts your
 local timezone. See the comments at the top of [`contrib/aib`](../contrib/aib)
 for exactly what it mounts and why.
 
@@ -101,7 +101,7 @@ image exists, so it still works offline.
 
 [Distrobox](https://distrobox.it/) integrates the container with your host: it
 shares your home directory, so your host `gh` login is reused directly, and host
-system access, so the Scan OS menu can read the host's `rpm-ostree` state — no
+system access, so the system scan can read the host's `rpm-ostree` state — no
 wrapper or manual mounts needed:
 
 ```bash
@@ -126,7 +126,7 @@ you installed inside the box, not your own files or your `gh` login.
 | Feature | Containerized (`podman run` or distrobox) |
 |---|---|
 | Create/update image repos, view build status, rotate signing key | Full fidelity |
-| Scan OS & Migrate Layered Packages | Works via the `aib` wrapper or distrobox; unavailable with a bare `podman run` (no host state) |
+| Create Image From This System (the scan) | Works via the `aib` wrapper or distrobox; unavailable with a bare `podman run` (no host state) |
 | Package search | Works, but the image ships with no DNF metadata, so the first search offers to download it. The `aib` wrapper keeps that download in a named volume; with a bare `podman run --rm` it repeats every run |
 | Local Podman test build | Not available — the option reports this and does nothing; see below |
 
