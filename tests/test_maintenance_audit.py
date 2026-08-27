@@ -78,6 +78,23 @@ class MaintenanceAuditTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid revision"):
                 load_template_source(source_path)
 
+    def test_load_template_source_rejects_missing_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / ".template-source"
+            source_path.write_text("revision=" + "a" * 40 + "\n")
+            with self.assertRaisesRegex(ValueError, "missing repo="):
+                load_template_source(source_path)
+
+    def test_load_template_source_skips_blank_and_comment_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / ".template-source"
+            source_path.write_text(
+                "\n# a comment\nrepo=https://github.com/example/repo.git\n\nrevision=" + "a" * 40 + "\n"
+            )
+            source = load_template_source(source_path)
+        self.assertEqual(source.repo, "https://github.com/example/repo.git")
+        self.assertEqual(source.revision, "a" * 40)
+
     def test_audit_local_snapshot_passes_for_current_repo(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         self.assertEqual(audit_local_snapshot(repo_root), [])
@@ -154,6 +171,15 @@ class MaintenanceAuditTests(unittest.TestCase):
 
         self.assertEqual(len(findings), 1)
         self.assertIn("differs from upstream HEAD", findings[0])
+
+    def test_audit_upstream_drift_quiet_when_head_matches_pinned_revision(self) -> None:
+        source = TemplateSource(
+            repo="https://github.com/ublue-os/image-template.git",
+            revision="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        with patch("maintenance_audit.query_remote_head", return_value=source.revision):
+            findings = audit_upstream_drift(source)
+        self.assertEqual(findings, [])
 
     def test_audit_action_update_availability_reports_newer_tags(self) -> None:
         actions = {"docker/login-action": ("deadbeef", "v4.0.0")}
