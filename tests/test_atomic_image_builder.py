@@ -1,3 +1,4 @@
+import contextlib
 import http.client
 import io
 import json
@@ -3816,6 +3817,48 @@ class BuilderTests(unittest.TestCase):
         ):
             with patch("atomic_image_builder.run", return_value=proc):
                 self.assertFalse(app.repo_carried_scan_customizations("owner", "repo"))
+
+    def test_open_url_in_browser_discards_output_and_does_not_wait(self) -> None:
+        # A GUI browser is chatty on stderr. Inheriting the terminal writes
+        # Mesa and EGL warnings straight over the running TUI -- seen for real
+        # on a VM with software rendering.
+        calls: list[dict] = []
+
+        def fake_popen(args, **kwargs):
+            calls.append({"args": args, **kwargs})
+            return object()
+
+        with patch("atomic_image_builder.command_exists", side_effect=lambda n: n == "xdg-open"):
+            with patch("subprocess.Popen", side_effect=fake_popen):
+                self.assertTrue(atomic_image_builder.open_url_in_browser("https://example.com"))
+
+        self.assertEqual(calls[0]["args"], ["xdg-open", "https://example.com"])
+        self.assertEqual(calls[0]["stdout"], subprocess.DEVNULL)
+        self.assertEqual(calls[0]["stderr"], subprocess.DEVNULL)
+        # Detached, so a slow browser cannot stall the prompt that follows.
+        self.assertTrue(calls[0]["start_new_session"])
+
+    def test_open_url_in_browser_reports_when_it_cannot_open_one(self) -> None:
+        with patch("atomic_image_builder.command_exists", return_value=False):
+            self.assertFalse(atomic_image_builder.open_url_in_browser("https://example.com"))
+        with patch("atomic_image_builder.command_exists", side_effect=lambda n: n == "xdg-open"):
+            with patch("subprocess.Popen", side_effect=OSError("no display")):
+                self.assertFalse(atomic_image_builder.open_url_in_browser("https://example.com"))
+
+    def test_github_setup_guide_tells_you_the_url_when_no_browser_opens(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.confirm = lambda _prompt, **_kwargs: True
+        # Take the "I need to create a GitHub account first" branch.
+        stub.choose = lambda options, **_kwargs: [next(o for o in options if o.startswith("I need to create"))]
+        app.gum = stub
+        with patch("atomic_image_builder.open_url_in_browser", return_value=False):
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+                with redirect_stdout(io.StringIO()):
+                    with contextlib.suppress(Exception):
+                        app.github_setup_guide()
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertIn("github.com/signup", hints)
 
     def test_scan_os_resets_stale_config_before_loading_host_state(self) -> None:
         app = self.make_app()

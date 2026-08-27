@@ -461,6 +461,29 @@ def ghcr_package_exists(owner: str, name: str, *, timeout: float = 6.0) -> bool:
         return False
 
 
+def open_url_in_browser(url: str) -> bool:
+    # Fire and forget, with the browser's output thrown away. A GUI browser is
+    # chatty on stderr -- Mesa, EGL and sandbox warnings -- and inheriting this
+    # terminal writes all of it over the running TUI. It is also detached and
+    # not waited on, so a browser that takes its time starting cannot stall the
+    # prompt that follows.
+    for opener in ("xdg-open", "open"):
+        if not command_exists(opener):
+            continue
+        try:
+            subprocess.Popen(
+                [opener, url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            return False
+        return True
+    return False
+
+
 def command_exists(name: str) -> bool:
     return shutil.which(name) is not None
 
@@ -1607,10 +1630,8 @@ class App:
             )
             print()
             if self.gum.confirm("Open github.com/signup now?", default=True):
-                if command_exists("xdg-open"):
-                    run(["xdg-open", "https://github.com/signup"], check=False, capture=False)
-                elif command_exists("open"):
-                    run(["open", "https://github.com/signup"], check=False, capture=False)
+                if not open_url_in_browser("https://github.com/signup"):
+                    self.gum.hint("Could not open a browser here. Go to https://github.com/signup manually.")
             self.gum.enter_to_continue("Press Enter after you've created the account...")
 
         print(
