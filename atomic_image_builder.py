@@ -2445,6 +2445,12 @@ class App:
         print()
 
         if self.config.scanned_packages:
+            # The chooser takes the screen as soon as it opens, so without a
+            # pause the scan results flash past unread. Until recently `gum
+            # table` blocked for a row selection and stood in for this by
+            # accident; printing it properly removed the only thing making this
+            # a page rather than a flicker.
+            self.gum.enter_to_continue("Press Enter to choose which packages to carry over...")
             self.gum.controls("Up/Down move", "x select", "Enter continue", "Esc back", "Ctrl+C quit")
             self.menu_section("Selection", "Leave everything unselected if you want to skip carrying these packages over.")
             print()

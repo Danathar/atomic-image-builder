@@ -3897,6 +3897,9 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("built on", hints)
         self.assertIn("the base this system already runs", hints)
         self.assertIn("Nothing is created on GitHub until you confirm", hints)
+        # The chooser takes the screen the moment it opens, so the results need
+        # a pause or they flash past unread.
+        self.assertTrue(any("carry over" in prompt for prompt in stub.prompts), stub.prompts)
 
     def test_scan_os_resets_stale_config_before_loading_host_state(self) -> None:
         app = self.make_app()
