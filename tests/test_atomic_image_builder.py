@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import atomic_image_builder
 from atomic_image_builder import (
+    ACCENT_COLOR,
     ACTION_PINS,
     ACTION_REF_PINS,
     BASE_IMAGES,
@@ -23,6 +24,7 @@ from atomic_image_builder import (
     BLUEBUILD_TEMPLATE_DIR,
     COMMON_SERVICES,
     CONTAINERFILE_TEMPLATE_DIR,
+    CONTROLS_COLOR,
     DEFAULT_GITHUB_BUILD_CRON,
     DEFAULT_REPO_NAME,
     FEDORA_ATOMIC_DEFAULT_TAG,
@@ -8134,6 +8136,160 @@ class BuilderTests(unittest.TestCase):
             with patch.dict(os.environ, {"TERM": "xterm-256color"}):
                 result = gum.apply_ansi_fallback("hello", bold=False, align="center", width=40)
         self.assertEqual(result, "hello")
+
+    # ── Gum terminal sizing and widget plumbing ─────────────────────────
+
+    def test_terminal_width_reads_shutil_terminal_size_columns(self) -> None:
+        gum = Gum()
+        with patch("atomic_image_builder.shutil.get_terminal_size", return_value=os.terminal_size((132, 40))):
+            self.assertEqual(gum.terminal_width(), 132)
+
+    def test_content_width_clamps_between_min_and_max(self) -> None:
+        gum = Gum()
+        with patch.object(Gum, "terminal_width", return_value=200):
+            self.assertEqual(gum.content_width(max_width=120, min_width=40, reserve=4), 120)
+        with patch.object(Gum, "terminal_width", return_value=10):
+            self.assertEqual(gum.content_width(max_width=120, min_width=40, reserve=4), 40)
+
+    def test_form_width_clamps_between_min_and_max(self) -> None:
+        gum = Gum()
+        with patch.object(Gum, "terminal_width", return_value=200):
+            self.assertEqual(gum.form_width(max_width=96, min_width=40, reserve=6), 96)
+        with patch.object(Gum, "terminal_width", return_value=10):
+            self.assertEqual(gum.form_width(max_width=96, min_width=40, reserve=6), 40)
+
+    def test_table_widths_reserves_left_column_and_floors_right_column(self) -> None:
+        gum = Gum()
+        with patch.object(Gum, "content_width", return_value=80):
+            self.assertEqual(gum.table_widths(50, min_right=24), "50,26")
+            self.assertEqual(gum.table_widths(70, min_right=24), "70,24")
+
+    def test_clear_runs_clear_command_only_when_interactive_tty(self) -> None:
+        gum = Gum()
+        with patch("atomic_image_builder.run") as run_mock:
+            with patch("sys.stdout.isatty", return_value=True):
+                with patch.dict(os.environ, {"TERM": "xterm-256color"}):
+                    gum.clear()
+        run_mock.assert_called_once_with(["clear"], capture=False, check=False)
+
+    def test_clear_does_nothing_when_not_a_tty(self) -> None:
+        gum = Gum()
+        with patch("atomic_image_builder.run") as run_mock:
+            with patch("sys.stdout.isatty", return_value=False):
+                with patch.dict(os.environ, {"TERM": "xterm-256color"}):
+                    gum.clear()
+        run_mock.assert_not_called()
+
+    def test_interactive_stdout_pipes_stdin_and_captures_stdout_only(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "input"], 0, "answer\n", "")
+        with patch("atomic_image_builder.subprocess.run", return_value=completed) as run_mock:
+            result = gum.interactive_stdout(["gum", "input"], stdin="typed text")
+        self.assertEqual(result.stdout, "answer\n")
+        run_mock.assert_called_once_with(
+            ["gum", "input"],
+            input="typed text",
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            check=False,
+        )
+
+    def test_ensure_available_raises_system_exit_when_gum_missing(self) -> None:
+        gum = Gum()
+        with patch("atomic_image_builder.command_exists", return_value=False):
+            with self.assertRaisesRegex(SystemExit, "gum is required"):
+                gum.ensure_available()
+
+    def test_ensure_available_is_a_noop_when_gum_present(self) -> None:
+        gum = Gum()
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            gum.ensure_available()
+
+    def test_style_applies_ansi_fallback_to_output_without_ansi_codes(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "style"], 0, "plain output\n", "")
+        with patch("atomic_image_builder.run", return_value=completed):
+            with patch.object(Gum, "apply_ansi_fallback", return_value="styled") as fallback_mock:
+                result = gum.style("plain output", bold=True)
+        fallback_mock.assert_called_once_with("plain output", bold=True)
+        self.assertEqual(result, "styled")
+
+    def test_style_skips_ansi_fallback_when_output_already_has_ansi_codes(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "style"], 0, "\x1b[1mstyled\x1b[0m\n", "")
+        with patch("atomic_image_builder.run", return_value=completed):
+            with patch.object(Gum, "apply_ansi_fallback") as fallback_mock:
+                result = gum.style("styled")
+        fallback_mock.assert_not_called()
+        self.assertEqual(result, "\x1b[1mstyled\x1b[0m")
+
+    def test_success_logs_at_info_level(self) -> None:
+        gum = Gum()
+        with patch.object(Gum, "log") as log_mock:
+            gum.success("all done")
+        log_mock.assert_called_once_with("info", "all done")
+
+    def test_warn_logs_at_warn_level(self) -> None:
+        gum = Gum()
+        with patch.object(Gum, "log") as log_mock:
+            gum.warn("careful now")
+        log_mock.assert_called_once_with("warn", "careful now")
+
+    def test_hint_prints_styled_message_at_content_width(self) -> None:
+        gum = Gum()
+        with patch.object(Gum, "content_width", return_value=60):
+            with patch.object(Gum, "style", return_value="styled hint") as style_mock:
+                with redirect_stdout(io.StringIO()) as out:
+                    gum.hint("a helpful hint")
+        style_mock.assert_called_once_with("a helpful hint", width=60)
+        self.assertEqual(out.getvalue(), "styled hint\n")
+
+    def test_instruction_prints_styled_message_with_accent_and_bold(self) -> None:
+        gum = Gum()
+        with patch.object(Gum, "content_width", return_value=60):
+            with patch.object(Gum, "style", return_value="styled instruction") as style_mock:
+                with redirect_stdout(io.StringIO()) as out:
+                    gum.instruction("do this next")
+        style_mock.assert_called_once_with("do this next", foreground=ACCENT_COLOR, bold=True, width=60)
+        self.assertEqual(out.getvalue(), "styled instruction\n")
+
+    def test_controls_prints_pipe_joined_parts_after_styled_keys_label(self) -> None:
+        gum = Gum()
+        with patch.object(Gum, "style", return_value="Keys:") as style_mock:
+            with redirect_stdout(io.StringIO()) as out:
+                gum.controls("enter: select", "esc: back")
+        style_mock.assert_called_once_with("Keys:", foreground=CONTROLS_COLOR, bold=True)
+        self.assertEqual(out.getvalue(), "Keys: enter: select | esc: back\n\n")
+
+    def test_input_passes_value_placeholder_and_width_flags_through(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "input"], 0, "typed\n", "")
+        with patch.object(Gum, "interactive_stdout", return_value=completed) as interactive_mock:
+            result = gum.input(prompt="Name: ", value="preset", placeholder="e.g. my-image", width=50)
+        self.assertEqual(result, "typed")
+        args = interactive_mock.call_args[0][0]
+        self.assertIn("--value", args)
+        self.assertEqual(args[args.index("--value") + 1], "preset")
+        self.assertIn("--placeholder", args)
+        self.assertEqual(args[args.index("--placeholder") + 1], "e.g. my-image")
+        self.assertIn("--placeholder.foreground", args)
+        self.assertIn("--width", args)
+        self.assertEqual(args[args.index("--width") + 1], "50")
+
+    def test_write_passes_placeholder_height_and_width_and_strips_trailing_newline(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "write"], 0, "typed text\n", "")
+        with patch.object(Gum, "interactive_stdout", return_value=completed) as interactive_mock:
+            result = gum.write(placeholder="Describe your image", height=6, width=60)
+        self.assertEqual(result, "typed text")
+        args = interactive_mock.call_args[0][0]
+        self.assertIn("--placeholder", args)
+        self.assertEqual(args[args.index("--placeholder") + 1], "Describe your image")
+        self.assertIn("--height", args)
+        self.assertEqual(args[args.index("--height") + 1], "6")
+        self.assertIn("--width", args)
+        self.assertEqual(args[args.index("--width") + 1], "60")
 
     # ── select_packages wizard-step dispatch ───────────────────────────
 
