@@ -3860,6 +3860,21 @@ class BuilderTests(unittest.TestCase):
         hints = " ".join(m for level, m in stub.messages if level == "hint")
         self.assertIn("github.com/signup", hints)
 
+    def test_scan_results_explain_what_happens_next(self) -> None:
+        # The results table is all facts and no orientation: a user is left
+        # looking at their own system's details with nothing telling them what
+        # the tool will do with them.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        payload = self.scan_payload(["tmux"], [])
+        with redirect_stdout(io.StringIO()):
+            self.run_scan(app, payload)
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertIn("built on", hints)
+        self.assertIn("the base this system already runs", hints)
+        self.assertIn("Nothing is created on GitHub until you confirm", hints)
+
     def test_scan_os_resets_stale_config_before_loading_host_state(self) -> None:
         app = self.make_app()
         app.github_user = "example"

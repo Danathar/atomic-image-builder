@@ -2410,6 +2410,17 @@ class App:
         ]
         self.gum.table(rows, columns="Setting,Value", widths=self.gum.table_widths(22))
         print()
+        # The table states facts and nothing else. Without this a user is left
+        # looking at their own system's details with no idea what the tool is
+        # about to do with them, or that the base is settled and will not be
+        # asked about again.
+        self.menu_section(
+            "What Happens Next",
+            f"Your image will be built on {self.config.base_image_name} - the base this system already runs.",
+            "Next you choose which of these packages to carry over, then name the repo and review.",
+            "Nothing is created on GitHub until you confirm at the end.",
+        )
+        print()
 
         if self.config.scanned_packages:
             self.gum.controls("Up/Down move", "x select", "Enter continue", "Esc back", "Ctrl+C quit")
