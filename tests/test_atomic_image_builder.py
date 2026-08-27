@@ -3874,6 +3874,43 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("rpm-ostree reset", " ".join(m for _l, m in stub.messages))
         carried.assert_not_called()
 
+    def test_render_build_status_reports_unparseable_run_data(self) -> None:
+        # `gh run list` succeeded (returncode 0) but printed something that is
+        # not valid JSON -- seen in practice when gh emits a warning banner on
+        # stdout ahead of the payload. This must not raise out of the screen.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, "not json", "")):
+            with redirect_stdout(io.StringIO()):
+                app.render_build_status("Example", "my-image")
+        errors = " ".join(m for level, m in stub.messages if level == "error")
+        self.assertIn("Unable to read GitHub Actions run data.", errors)
+
+    def test_render_build_status_warns_when_no_runs_are_returned(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, "[]", "")):
+            with redirect_stdout(io.StringIO()):
+                app.render_build_status("Example", "my-image")
+        warnings = " ".join(m for level, m in stub.messages if level == "warn")
+        self.assertIn("No recent GitHub Actions runs found for Example/my-image.", warnings)
+
+    def test_render_build_status_warns_when_run_data_is_not_a_list(self) -> None:
+        # gh's --json flag is documented to emit an array, but a future gh
+        # version or a wrapping error object should degrade the same way an
+        # empty list does rather than crashing the screen.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        payload = json.dumps({"error": "unexpected"})
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, payload, "")):
+            with redirect_stdout(io.StringIO()):
+                app.render_build_status("Example", "my-image")
+        warnings = " ".join(m for level, m in stub.messages if level == "warn")
+        self.assertIn("No recent GitHub Actions runs found for Example/my-image.", warnings)
+
     def test_repo_carried_scan_customizations_reads_the_remote_state_file(self) -> None:
         import base64
         payload = base64.b64encode(json.dumps({"scan_customizations_carried": True}).encode()).decode()
