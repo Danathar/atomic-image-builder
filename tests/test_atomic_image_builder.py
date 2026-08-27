@@ -3865,11 +3865,16 @@ class BuilderTests(unittest.TestCase):
         # white and 117 a pale blue, and gum was handed 117 for
         # `choose --selected.foreground` -- so on a light terminal a list with
         # everything selected rendered as a blank screen.
+        # A single numeric range cannot express this: 16-231 is a colour cube
+        # and 232-255 a greyscale ramp, so 244 is a perfectly readable mid grey
+        # while 252 is nearly white. Exclude the extremes of each instead.
+        near_white = set(range(250, 256)) | {15, 231}
+        near_black = set(range(232, 239)) | {0, 16}
         for name in ("ACCENT_COLOR", "MUTED_COLOR", "SUCCESS_COLOR", "WARNING_COLOR", "NOTICE_COLOR"):
             value = getattr(atomic_image_builder, name)
             with self.subTest(colour=name):
-                self.assertGreaterEqual(value, 20, f"{name} disappears on a dark background")
-                self.assertLessEqual(value, 230, f"{name} washes out on a light background")
+                self.assertNotIn(value, near_white, f"{name} washes out on a light background")
+                self.assertNotIn(value, near_black, f"{name} disappears on a dark background")
 
     def test_no_colour_is_hardcoded_past_the_named_palette(self) -> None:
         # A bare index slipped past the constants is how this regressed before.
