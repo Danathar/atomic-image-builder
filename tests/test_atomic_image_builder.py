@@ -3860,6 +3860,23 @@ class BuilderTests(unittest.TestCase):
         hints = " ".join(m for level, m in stub.messages if level == "hint")
         self.assertIn("github.com/signup", hints)
 
+    def test_every_colour_stays_legible_on_light_and_dark_terminals(self) -> None:
+        # The original palette was picked on a dark terminal. 252 is almost
+        # white and 117 a pale blue, and gum was handed 117 for
+        # `choose --selected.foreground` -- so on a light terminal a list with
+        # everything selected rendered as a blank screen.
+        for name in ("ACCENT_COLOR", "MUTED_COLOR", "SUCCESS_COLOR", "WARNING_COLOR", "NOTICE_COLOR"):
+            value = getattr(atomic_image_builder, name)
+            with self.subTest(colour=name):
+                self.assertGreaterEqual(value, 20, f"{name} disappears on a dark background")
+                self.assertLessEqual(value, 230, f"{name} washes out on a light background")
+
+    def test_no_colour_is_hardcoded_past_the_named_palette(self) -> None:
+        # A bare index slipped past the constants is how this regressed before.
+        source = Path(__file__).resolve().parents[1].joinpath("atomic_image_builder.py").read_text()
+        stray = re.findall(r"foreground=(\d+)", source) + re.findall(r'foreground",\s*\n\s*"(\d+)"', source)
+        self.assertEqual(stray, [], f"colours must go through the named palette, found {stray}")
+
     def test_scan_results_explain_what_happens_next(self) -> None:
         # The results table is all facts and no orientation: a user is left
         # looking at their own system's details with nothing telling them what

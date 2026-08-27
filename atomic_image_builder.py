@@ -54,8 +54,20 @@ DEFAULT_GITHUB_BUILD_CRON = "05 10 * * *"
 FEDORA_ATOMIC_FALLBACK_TAG = "44"
 UNIVERSAL_BLUE_BREW_IMAGE = "ghcr.io/ublue-os/brew:latest"
 MAX_UI_WIDTH = 120
-ACCENT_COLOR = 117
-CONTROLS_COLOR = 10
+# Every colour here is a 256-palette index chosen to stay legible on BOTH a
+# light and a dark terminal. The originals were picked on a dark background and
+# were near-invisible on a light one -- 252 is almost white, and 117 is a pale
+# blue that gum was also given for `choose --selected.foreground`, so on a light
+# terminal an all-selected list rendered as an empty screen.
+#
+# The rule for anything added here: mid-range indices only. Nothing above ~230
+# (washes out on white) and nothing below ~20 (disappears on black).
+ACCENT_COLOR = 33      # blue, for headers, cursors and selections
+MUTED_COLOR = 244      # grey, for secondary text and placeholders
+SUCCESS_COLOR = 28     # green, for the "created" panel
+WARNING_COLOR = 178    # gold, for the attention panel
+NOTICE_COLOR = 214     # orange, already legible on both
+CONTROLS_COLOR = SUCCESS_COLOR
 PACKAGE_SEARCH_LIMIT = 40
 MANAGED_REPO_WARNING = "If you hand-edit a repo after this tool creates or manages it, stop using this tool for that repo."
 MANAGED_REPO_HINT_CONTAINERFILE = (
@@ -998,7 +1010,7 @@ class Gum:
             args.extend(["--value", value])
         if placeholder is not None:
             args.extend(["--placeholder", placeholder])
-            args.extend(["--placeholder.foreground", "248"])
+            args.extend(["--placeholder.foreground", str(MUTED_COLOR)])
         if width is not None:
             args.extend(["--width", str(width)])
         return self.require_interactive_success(self.interactive_stdout(args)).stdout.rstrip("\n")
@@ -1013,7 +1025,7 @@ class Gum:
                     "--placeholder",
                     placeholder,
                     "--placeholder.foreground",
-                    "248",
+                    str(MUTED_COLOR),
                     "--cursor.foreground",
                     str(ACCENT_COLOR),
                     "--height",
@@ -1086,7 +1098,7 @@ class Gum:
                     "--match.foreground",
                     str(ACCENT_COLOR),
                     "--placeholder.foreground",
-                    "248",
+                    str(MUTED_COLOR),
                 ],
                 stdin="\n".join(options) + "\n",
             )
@@ -1237,9 +1249,9 @@ class App:
     def banner(self) -> None:
         panel_width = self.landing_panel_width()
         print()
-        print(self.gum.style(f"{TOOL_NAME}  v{VERSION}", align="center", width=panel_width, foreground=117, bold=True))
-        print(self.gum.style("GitHub-backed bootc image repo builder", align="center", width=panel_width, foreground=252))
-        print(self.gum.style("for Universal Blue and Fedora Atomic desktops", align="center", width=panel_width, foreground=252))
+        print(self.gum.style(f"{TOOL_NAME}  v{VERSION}", align="center", width=panel_width, foreground=ACCENT_COLOR, bold=True))
+        print(self.gum.style("GitHub-backed bootc image repo builder", align="center", width=panel_width, foreground=MUTED_COLOR))
+        print(self.gum.style("for Universal Blue and Fedora Atomic desktops", align="center", width=panel_width, foreground=MUTED_COLOR))
         print()
 
     def startup_requirements(self) -> None:
@@ -1262,7 +1274,7 @@ class App:
                 "supported images and change infrequently.",
             ],
             width=info_width,
-            border_foreground=117,
+            border_foreground=ACCENT_COLOR,
         )
         print()
         self.landing_card(
@@ -1279,7 +1291,7 @@ class App:
                 "and system changes are your risk.",
             ],
             width=info_width,
-            border_foreground=214,
+            border_foreground=NOTICE_COLOR,
         )
         print()
         self.gum.enter_to_continue("Press Enter to start the preflight checks...")
@@ -1593,8 +1605,8 @@ class App:
                 width=self.gum.content_width(max_width=100, reserve=8),
                 margin="0 2",
                 padding="1 2",
-                foreground=117,
-                border_foreground=117,
+                foreground=ACCENT_COLOR,
+                border_foreground=ACCENT_COLOR,
                 border="rounded",
             )
         )
@@ -1623,8 +1635,8 @@ class App:
                     width=self.gum.content_width(max_width=100, reserve=8),
                     margin="0 2",
                     padding="1 2",
-                    foreground=11,
-                    border_foreground=11,
+                    foreground=WARNING_COLOR,
+                    border_foreground=WARNING_COLOR,
                     border="rounded",
                 )
             )
@@ -1644,8 +1656,8 @@ class App:
                 width=self.gum.content_width(max_width=100, reserve=8),
                 margin="0 2",
                 padding="1 2",
-                foreground=117,
-                border_foreground=117,
+                foreground=ACCENT_COLOR,
+                border_foreground=ACCENT_COLOR,
                 border="rounded",
             )
         )
@@ -1819,7 +1831,7 @@ class App:
             matched = self.match_base_image(self.config.base_image_uri)
             if matched:
                 print(f"  Detected base image: {self.gum.style(self.config.base_image_name or self.config.base_image_uri, bold=True)}")
-                print(f"  Image: {self.gum.style(self.config.base_image_uri, foreground=117)}")
+                print(f"  Image: {self.gum.style(self.config.base_image_uri, foreground=ACCENT_COLOR)}")
                 print()
                 if self.gum.confirm("Use this base image?", default=True):
                     self.offer_brew_if_applicable()
@@ -3247,8 +3259,8 @@ class App:
                 width=self.gum.content_width(reserve=8),
                 margin="1",
                 padding="1 2",
-                foreground=10,
-                border_foreground=10,
+                foreground=SUCCESS_COLOR,
+                border_foreground=SUCCESS_COLOR,
                 border="double",
             )
         )
