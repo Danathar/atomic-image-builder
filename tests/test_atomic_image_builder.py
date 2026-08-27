@@ -1230,6 +1230,75 @@ class BuilderTests(unittest.TestCase):
                         with self.assertRaisesRegex(CommandError, "status could not be verified"):
                             app.repo_secret_exists("example", "test-image", "SIGNING_SECRET")
 
+    def test_repo_secret_exists_raises_when_gh_not_installed(self) -> None:
+        app = self.make_app()
+        with patch("atomic_image_builder.command_exists", return_value=False):
+            with patch("atomic_image_builder.run") as run_mock:
+                with self.assertRaisesRegex(CommandError, "gh is not installed"):
+                    app.repo_secret_exists("example", "test-image", "SIGNING_SECRET")
+        run_mock.assert_not_called()
+
+    def test_command_exists_reflects_shutil_which(self) -> None:
+        with patch("shutil.which", return_value="/usr/bin/gh"):
+            self.assertTrue(atomic_image_builder.command_exists("gh"))
+        with patch("shutil.which", return_value=None):
+            self.assertFalse(atomic_image_builder.command_exists("gh"))
+
+    def test_repo_file_exists_returns_true_on_success(self) -> None:
+        app = self.make_app()
+        completed = subprocess.CompletedProcess(["gh", "api"], 0, "{}", "")
+        with patch("atomic_image_builder.run", return_value=completed) as run_mock:
+            self.assertTrue(app.repo_file_exists("example", "test-image", "cosign.pub"))
+        run_mock.assert_called_once_with(
+            ["gh", "api", "/repos/example/test-image/contents/cosign.pub"], check=False
+        )
+
+    def test_repo_file_exists_returns_false_on_nonzero_exit(self) -> None:
+        app = self.make_app()
+        completed = subprocess.CompletedProcess(["gh", "api"], 1, "", "not found")
+        with patch("atomic_image_builder.run", return_value=completed):
+            self.assertFalse(app.repo_file_exists("example", "test-image", "cosign.pub"))
+
+    def test_repo_has_state_file_delegates_to_repo_file_exists(self) -> None:
+        app = self.make_app()
+        with patch.object(app, "repo_file_exists", return_value=True) as file_exists_mock:
+            self.assertTrue(app.repo_has_state_file("example", "test-image"))
+        file_exists_mock.assert_called_once_with("example", "test-image", STATE_FILE)
+
+    def test_gh_json_parses_command_output(self) -> None:
+        app = self.make_app()
+        completed = subprocess.CompletedProcess(["gh"], 0, '{"login":"example"}', "")
+        with patch("atomic_image_builder.run", return_value=completed) as run_mock:
+            self.assertEqual(app.gh_json(["api", "user"]), {"login": "example"})
+        run_mock.assert_called_once_with(["gh", "api", "user"])
+
+    def test_gh_json_treats_blank_stdout_as_null(self) -> None:
+        app = self.make_app()
+        completed = subprocess.CompletedProcess(["gh"], 0, "", "")
+        with patch("atomic_image_builder.run", return_value=completed):
+            self.assertIsNone(app.gh_json(["api", "user"]))
+
+    def test_gh_json_with_spinner_parses_captured_output(self) -> None:
+        app = self.make_app()
+        with patch.object(app.gum, "spinner_capture", return_value='{"login":"example"}') as spinner_mock:
+            self.assertEqual(app.gh_json_with_spinner("Loading...", ["api", "user"]), {"login": "example"})
+        spinner_mock.assert_called_once_with("Loading...", ["gh", "api", "user"])
+
+    def test_gh_json_with_spinner_treats_blank_output_as_null(self) -> None:
+        app = self.make_app()
+        with patch.object(app.gum, "spinner_capture", return_value=""):
+            self.assertIsNone(app.gh_json_with_spinner("Loading...", ["api", "user"]))
+
+    def test_clone_repo_invokes_gum_spinner_with_gh_repo_clone(self) -> None:
+        app = self.make_app()
+        target = Path("/tmp/example-target")
+        with patch.object(app.gum, "spinner") as spinner_mock:
+            app.clone_repo("example", "test-image", target)
+        spinner_mock.assert_called_once_with(
+            "Cloning example/test-image...",
+            ["gh", "repo", "clone", "example/test-image", str(target)],
+        )
+
     def test_ensure_signing_ready_fails_closed_when_cosign_password_missing(self) -> None:
         # SIGNING_SECRET present but COSIGN_PASSWORD absent: the Containerfile
         # workflow cannot decrypt the key, so this must not report ready.
