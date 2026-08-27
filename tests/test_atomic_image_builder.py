@@ -3866,6 +3866,7 @@ class BuilderTests(unittest.TestCase):
         # the tool will do with them.
         app = self.make_app()
         stub = GumStub()
+        stub.choose = lambda options, **_kwargs: list(options)
         app.gum = stub
         payload = self.scan_payload(["tmux"], [])
         with redirect_stdout(io.StringIO()):
