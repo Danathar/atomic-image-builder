@@ -27,6 +27,7 @@ from atomic_image_builder import (
     DEFAULT_REPO_NAME,
     FEDORA_ATOMIC_DEFAULT_TAG,
     FEDORA_ATOMIC_FALLBACK_TAG,
+    MANAGED_REPO_HINT_BLUEBUILD,
     MANAGED_REPO_WARNING,
     METHOD_DISPLAY,
     PACKAGE_SEARCH_LIMIT,
@@ -61,9 +62,13 @@ class GumStub:
     def __init__(self) -> None:
         self.messages: list[tuple[str, str]] = []
         self.prompts: list[str] = []
+        self.clear_calls = 0
 
     def header(self, *_args, **_kwargs) -> None:
         pass
+
+    def clear(self) -> None:
+        self.clear_calls += 1
 
     def hint(self, message: str = "", *_args, **_kwargs) -> None:
         self.messages.append(("hint", message))
@@ -4607,6 +4612,34 @@ class BuilderTests(unittest.TestCase):
         )
         self.assertIn("Press Enter to choose a different repository...", app.gum.prompts)
 
+    def test_select_repo_truncates_long_descriptions_in_the_picker_label(self) -> None:
+        # Descriptions over 40 chars are clipped to keep the picker's fixed-width
+        # rows aligned; this pins the clip point (37 chars + "...") rather than
+        # letting a long GitHub description overflow the row.
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        long_description = "x" * 45
+        expected_label = f"{'long-repo':<30} {'x' * 37}..."
+        seen_options: list[str] = []
+
+        def fake_filter(options, **_kwargs):
+            seen_options.extend(options)
+            return options[0]
+
+        stub = GumStub()
+        stub.filter = fake_filter
+        app.gum = stub
+        with patch.object(
+            app,
+            "gh_json_with_spinner",
+            return_value=[{"name": "long-repo", "description": long_description}],
+        ):
+            owner, repo = app.select_repo()
+
+        self.assertEqual((owner, repo), ("example", "long-repo"))
+        self.assertIn(expected_label, seen_options)
+
     def test_copy_template_snapshot_errors_when_bundled_snapshot_is_missing(self) -> None:
         # The snapshots are pinned inputs shipped with the tool; a missing one
         # is a packaging fault that must fail closed rather than produce a
@@ -7147,6 +7180,30 @@ class BuilderTests(unittest.TestCase):
             app.update_menu()
         mock.assert_called_once()
 
+    def test_update_menu_dispatches_to_offer_brew_if_applicable(self) -> None:
+        """Selecting 'Homebrew' from the menu dispatches to offer_brew_if_applicable.
+
+        The task only appears on non-Universal-Blue bases (is_universal_blue_base()
+        is False), so the fixture's ublue-os base is swapped for a plain bootc one.
+        """
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora/fedora-bootc:41"
+        app.config.base_image_name = "Fedora bootc"
+        call_count = [0]
+        def fake_choose(options, **_kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                for opt in options:
+                    if "Homebrew" in opt:
+                        return [opt]
+            return ["Cancel and go back"]
+        stub = GumStub()
+        stub.choose = fake_choose
+        app.gum = stub
+        with patch.object(app, "offer_brew_if_applicable") as mock:
+            app.update_menu()
+        mock.assert_called_once()
+
     def test_update_menu_esc_returns_false(self) -> None:
         """ScreenBack from choose returns False (cancel)."""
         app = self.make_app()
@@ -8474,6 +8531,57 @@ class BuilderTests(unittest.TestCase):
             app.select_packages()
 
         self.assertFalse(any(message.startswith("Step ") for _level, message in stub.messages))
+
+    def test_clear_delegates_to_gum(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        app.clear()
+        self.assertEqual(stub.clear_calls, 1)
+
+    def test_show_step_header_prints_next_hint_before_the_step_count(self) -> None:
+        # next_hint is optional context about what the step is for; when present
+        # it must read before the generic "Step N of M." so the hint isn't lost
+        # below the boilerplate.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.show_step_header("Choose a base image", step=2, total_steps=5, next_hint="Pick the OS you want to build on.")
+
+        hints = [message for level, message in stub.messages if level == "hint"]
+        self.assertEqual(hints, ["Pick the OS you want to build on.", "Step 2 of 5."])
+
+    def test_show_step_header_omits_hint_line_when_no_next_hint_given(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.show_step_header("Choose a base image", step=2, total_steps=5)
+
+        hints = [message for level, message in stub.messages if level == "hint"]
+        self.assertEqual(hints, ["Step 2 of 5."])
+
+    def test_show_managed_repo_warning_hints_bluebuild_docs_for_bluebuild_method(self) -> None:
+        app = self.make_bluebuild_app()
+        stub = GumStub()
+        app.gum = stub
+        app.show_managed_repo_warning()
+
+        hints = [message for level, message in stub.messages if level == "hint"]
+        self.assertEqual(hints, [MANAGED_REPO_HINT_BLUEBUILD])
+
+    def test_create_new_image_scanned_reuses_the_detected_github_user(self) -> None:
+        # scanned=True is the "resume after a repo scan" entry point: it must
+        # carry the already-detected github_user into the fresh wizard config
+        # instead of dropping it, which is why the assignment happens before
+        # fresh_config() would otherwise wipe it.
+        app = self.make_app()
+        app.github_user = "detected-user"
+        with patch.object(app, "choose_method", side_effect=ScreenBack):
+            app.create_new_image(scanned=True)
+
+        self.assertEqual(app.config.github_user, "detected-user")
 
     # ── menu summary formatting helpers ────────────────────────────────
 
