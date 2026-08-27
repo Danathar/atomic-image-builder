@@ -2,23 +2,25 @@
 
 However you launch it, the guided menu is the same.
 
-## Which entry to pick
+## Creating an image
 
-**Create Image From This System** is the normal one. It reads your running
-system's image reference and layered packages, so it already knows which base
-image you are on — it never asks you to choose one. That matters: Universal Blue
-images are not rebase-compatible with each other, so an image built on the wrong
-base is one you cannot switch to.
+**Create Image** scans your running system first. It reads the image you are on
+and any packages you have layered, so it already knows the base — it never asks
+you to choose one. That matters: Universal Blue images are not rebase-compatible
+with each other, so an image built on the wrong base is one you cannot switch to.
 
-It works whether or not you have layered anything. With no layered packages it
-simply starts you from your current base, and you add what you want from there —
+It works whether or not you have layered anything. With nothing layered it
+simply starts from your current base, and you add what you want from there —
 packages, COPR repositories, systemd services, base-package removals.
 
-**Create Image From Scratch** is for the case where there is no system to read:
-you have not installed an atomic desktop yet, or you are building an image for a
-different machine. This is the one place you pick a base image from a list. The
-generated repo also builds installable media, so you can install directly from
-your own image.
+The main menu lists every base image the tool supports, so you can see up front
+whether your system is one of them.
+
+**If the scan cannot run**, the tool says so and offers to let you pick a base
+image by hand instead. That happens with a bare `podman run`, which has no
+access to your host's state — the `aib` wrapper and distrobox both hand it in,
+so neither hits this. See
+[container limitations](installing.md#limitations-of-running-in-a-container).
 
 ## What else to expect
 

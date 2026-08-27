@@ -31,6 +31,9 @@ from atomic_image_builder import (
     MANAGED_REPO_WARNING,
     METHOD_DISPLAY,
     PACKAGE_SEARCH_LIMIT,
+    SCAN_CANCELLED,
+    SCAN_OK,
+    SCAN_UNAVAILABLE,
     STATE_FILE,
     TOOL_NAME,
     TOOL_SLUG,
@@ -3650,10 +3653,10 @@ class BuilderTests(unittest.TestCase):
         # return to the main menu instead of propagating out of the app.
         app = self.make_app()
         stub = GumStub()
-        choices = ["Create Image From Scratch", "Quit"]
+        choices = ["Create Image", "Quit"]
         stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
         app.gum = stub
-        with patch.object(app, "create_new_image", side_effect=CommandError("menu boom")):
+        with patch.object(app, "create_image", side_effect=CommandError("menu boom")):
             with self.assertRaises(SystemExit):
                 app.main_menu()
 
@@ -3683,26 +3686,53 @@ class BuilderTests(unittest.TestCase):
         # which is what preserves the detected host state.
         app = self.make_app()
         stub = GumStub()
-        choices = ["Create Image From This System", "Quit"]
+        choices = ["Create Image", "Quit"]
         stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
         app.gum = stub
-        with patch.object(app, "scan_os", return_value=True):
+        with patch.object(app, "scan_os", return_value=SCAN_OK):
             with patch.object(app, "create_new_image") as create_mock:
                 with self.assertRaises(SystemExit):
                     app.main_menu()
         create_mock.assert_called_once_with(scanned=True)
 
-    def test_main_menu_scan_os_failure_does_not_start_wizard(self) -> None:
+    def test_create_image_falls_back_to_manual_base_when_scanning_is_impossible(self) -> None:
+        # A bare `podman run` has no host state to read. That is the one case
+        # where the base genuinely is a choice, so the flow offers it there
+        # rather than in the menu.
         app = self.make_app()
         stub = GumStub()
-        choices = ["Create Image From This System", "Quit"]
-        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        stub.confirm = lambda _prompt, **_kwargs: True
         app.gum = stub
-        with patch.object(app, "scan_os", return_value=False):
+        with patch.object(app, "scan_os", return_value=SCAN_UNAVAILABLE):
             with patch.object(app, "create_new_image") as create_mock:
-                with self.assertRaises(SystemExit):
-                    app.main_menu()
+                with redirect_stdout(io.StringIO()):
+                    app.create_image()
+        create_mock.assert_called_once_with()
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertIn("chosen by hand", hints)
+
+    def test_create_image_declining_the_fallback_starts_nothing(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        stub.confirm = lambda _prompt, **_kwargs: False
+        app.gum = stub
+        with patch.object(app, "scan_os", return_value=SCAN_UNAVAILABLE):
+            with patch.object(app, "create_new_image") as create_mock:
+                with redirect_stdout(io.StringIO()):
+                    app.create_image()
         create_mock.assert_not_called()
+
+    def test_create_image_backing_out_of_the_scan_returns_to_the_menu(self) -> None:
+        # Cancelling is not the same as being unable to scan: it must not drop
+        # the user into a base-image list they did not ask for.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        with patch.object(app, "scan_os", return_value=SCAN_CANCELLED):
+            with patch.object(app, "create_new_image") as create_mock:
+                app.create_image()
+        create_mock.assert_not_called()
+        self.assertEqual(stub.messages, [])
 
     def test_main_menu_dispatches_to_update_existing_image(self) -> None:
         app = self.make_app()
@@ -3756,7 +3786,7 @@ class BuilderTests(unittest.TestCase):
             ):
                 result = app.scan_os()
 
-        self.assertTrue(result)
+        self.assertEqual(result, SCAN_OK)
         self.assertEqual(app.config.packages, [])
         self.assertEqual(app.config.removed_packages, [])
         self.assertEqual(app.config.base_image_name, "Bazzite (KDE)")
@@ -3790,7 +3820,7 @@ class BuilderTests(unittest.TestCase):
             ):
                 result = app.scan_os()
 
-        self.assertTrue(result)
+        self.assertEqual(result, SCAN_OK)
         self.assertEqual(app.config.base_image_uri, "ghcr.io/ublue-os/bazzite:testing")
         self.assertEqual(app.config.base_image_name, "Bazzite (KDE)")
         # Verify the warning was shown
@@ -3802,7 +3832,7 @@ class BuilderTests(unittest.TestCase):
         app.gum = stub
         with patch("atomic_image_builder.command_exists", return_value=False):
             with patch("atomic_image_builder.run") as run_mock:
-                self.assertFalse(app.scan_os())
+                self.assertEqual(app.scan_os(), SCAN_UNAVAILABLE)
 
         run_mock.assert_not_called()
         self.assertTrue(
@@ -3838,7 +3868,7 @@ class BuilderTests(unittest.TestCase):
         app.gum = GumStub()
         with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
             with patch("atomic_image_builder.run", side_effect=fake_run):
-                self.assertTrue(app.scan_os())
+                self.assertEqual(app.scan_os(), SCAN_OK)
 
         self.assertEqual(
             commands,
@@ -3877,7 +3907,7 @@ class BuilderTests(unittest.TestCase):
         app.gum = GumStub()
         with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
             with patch("atomic_image_builder.run", side_effect=fake_run):
-                self.assertTrue(app.scan_os())
+                self.assertEqual(app.scan_os(), SCAN_OK)
 
         self.assertEqual(len(commands), 2)
 
@@ -3890,7 +3920,7 @@ class BuilderTests(unittest.TestCase):
                 "atomic_image_builder.run",
                 return_value=subprocess.CompletedProcess(["rpm-ostree"], 1, "", "boom"),
             ):
-                self.assertFalse(app.scan_os())
+                self.assertEqual(app.scan_os(), SCAN_UNAVAILABLE)
 
         self.assertTrue(
             any(level == "error" and "Failed to read rpm-ostree status" in message for level, message in stub.messages)
@@ -3916,7 +3946,7 @@ class BuilderTests(unittest.TestCase):
             ):
                 result = app.scan_os()
 
-        self.assertFalse(result)
+        self.assertEqual(result, SCAN_UNAVAILABLE)
         self.assertTrue(
             any(
                 level == "error" and "rpm-ostree" in message
@@ -3955,7 +3985,7 @@ class BuilderTests(unittest.TestCase):
             ):
                 result = app.scan_os()
 
-        self.assertFalse(result)
+        self.assertEqual(result, SCAN_UNAVAILABLE)
         self.assertTrue(
             any(
                 level == "error" and "container image" in message
@@ -3987,7 +4017,7 @@ class BuilderTests(unittest.TestCase):
             ):
                 result = app.scan_os()
 
-        self.assertTrue(result)
+        self.assertEqual(result, SCAN_OK)
         self.assertEqual(app.config.base_image_uri, "quay.io/fedora-ostree-desktops/kinoite:44")
         self.assertEqual(app.config.base_image_name, "Fedora Kinoite")
 
@@ -4020,7 +4050,7 @@ class BuilderTests(unittest.TestCase):
                     with patch.dict("os.environ", {"AIB_RPM_OSTREE_STATUS_FILE": str(status_path)}):
                         result = app.scan_os()
 
-        self.assertTrue(result)
+        self.assertEqual(result, SCAN_OK)
         self.assertEqual(app.config.packages, [])
         self.assertEqual(app.config.removed_packages, [])
         self.assertEqual(app.config.base_image_name, "Bazzite (KDE)")
@@ -4037,7 +4067,7 @@ class BuilderTests(unittest.TestCase):
                 with patch.dict("os.environ", {"AIB_RPM_OSTREE_STATUS_FILE": str(missing_path)}):
                     result = app.scan_os()
 
-        self.assertFalse(result)
+        self.assertEqual(result, SCAN_UNAVAILABLE)
         self.assertTrue(
             any(level == "error" and "rpm-ostree" in message for level, message in stub.messages)
         )
@@ -4054,7 +4084,7 @@ class BuilderTests(unittest.TestCase):
                 with patch.dict("os.environ", {"AIB_RPM_OSTREE_STATUS_FILE": str(status_path)}):
                     result = app.scan_os()
 
-        self.assertFalse(result)
+        self.assertEqual(result, SCAN_UNAVAILABLE)
         self.assertTrue(
             any(level == "error" and "rpm-ostree" in message for level, message in stub.messages)
         )
@@ -4077,21 +4107,21 @@ class BuilderTests(unittest.TestCase):
 
     def test_scan_os_status_file_override_json_array_returns_false(self) -> None:
         _, stub, result = self.scan_with_status("[]")
-        self.assertFalse(result)
+        self.assertEqual(result, SCAN_UNAVAILABLE)
         self.assertTrue(
             any(level == "error" and "rpm-ostree" in message for level, message in stub.messages)
         )
 
     def test_scan_os_status_file_override_json_scalar_returns_false(self) -> None:
         _, stub, result = self.scan_with_status('"a string, not an object"')
-        self.assertFalse(result)
+        self.assertEqual(result, SCAN_UNAVAILABLE)
         self.assertTrue(
             any(level == "error" and "rpm-ostree" in message for level, message in stub.messages)
         )
 
     def test_scan_os_status_file_override_non_dict_deployments_returns_false(self) -> None:
         _, stub, result = self.scan_with_status('{"deployments": [1, 2]}')
-        self.assertFalse(result)
+        self.assertEqual(result, SCAN_UNAVAILABLE)
         self.assertTrue(
             any(level == "error" and "deployment" in message.lower() for level, message in stub.messages)
         )
@@ -4100,7 +4130,7 @@ class BuilderTests(unittest.TestCase):
         _, stub, result = self.scan_with_status(
             '{"deployments": [{"booted": true, "container-image-reference": 123}]}'
         )
-        self.assertFalse(result)
+        self.assertEqual(result, SCAN_UNAVAILABLE)
         self.assertTrue(
             any(level == "error" and "container image reference" in message for level, message in stub.messages)
         )
@@ -4119,7 +4149,7 @@ class BuilderTests(unittest.TestCase):
             '"requested-base-removals": "notalist"}]}',
             stub=ChoosingStub(),
         )
-        self.assertTrue(result)
+        self.assertEqual(result, SCAN_OK)
         self.assertEqual(app.config.scanned_packages, ["vim", "git"])
         self.assertEqual(app.config.scanned_removed, [])
 
@@ -4144,7 +4174,7 @@ class BuilderTests(unittest.TestCase):
                 with patch.dict("os.environ", {"AIB_RPM_OSTREE_STATUS_FILE": str(status_path)}):
                     result = app.scan_os()
 
-        self.assertFalse(result)
+        self.assertEqual(result, SCAN_UNAVAILABLE)
         self.assertTrue(
             any(level == "error" and "rpm-ostree" in message for level, message in stub.messages)
         )
@@ -6908,7 +6938,7 @@ class BuilderTests(unittest.TestCase):
         stub.choose = lambda _options, **_kwargs: next(selections)
         app.gum = stub
         result = self.run_scan(app, self.scan_payload(["tmux", "htop"], ["firefox"]))
-        self.assertTrue(result)
+        self.assertEqual(result, SCAN_OK)
         self.assertEqual(app.config.packages, ["tmux"])
         self.assertEqual(app.config.removed_packages, ["firefox"])
 
@@ -6917,7 +6947,7 @@ class BuilderTests(unittest.TestCase):
         stub = GumStub()
         stub.choose = lambda _options, **_kwargs: (_ for _ in ()).throw(ScreenBack())
         app.gum = stub
-        self.assertFalse(self.run_scan(app, self.scan_payload(["tmux"], [])))
+        self.assertEqual(self.run_scan(app, self.scan_payload(["tmux"], [])), SCAN_CANCELLED)
 
     def test_scan_os_escape_from_removal_selection_aborts(self) -> None:
         app = self.make_app()
@@ -6932,14 +6962,14 @@ class BuilderTests(unittest.TestCase):
 
         stub.choose = choose
         app.gum = stub
-        self.assertFalse(self.run_scan(app, self.scan_payload(["tmux"], ["firefox"])))
+        self.assertEqual(self.run_scan(app, self.scan_payload(["tmux"], ["firefox"])), SCAN_CANCELLED)
 
     def test_scan_os_declining_empty_package_scan_aborts(self) -> None:
         app = self.make_app()
         stub = GumStub()
         stub.confirm = lambda *_a, **_k: False
         app.gum = stub
-        self.assertFalse(self.run_scan(app, self.scan_payload([], [])))
+        self.assertEqual(self.run_scan(app, self.scan_payload([], [])), SCAN_CANCELLED)
         self.assertTrue(any(level == "warn" and "No layered packages" in msg for level, msg in stub.messages))
 
     def test_manage_packages_dispatches_each_editing_task(self) -> None:

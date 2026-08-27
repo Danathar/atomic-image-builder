@@ -248,6 +248,23 @@ BASE_IMAGES: tuple[BaseImage, ...] = (
 def supported_base_image_names() -> str:
     return ", ".join(image.name for image in BASE_IMAGES)
 
+
+def supported_base_image_lines() -> list[str]:
+    # Grouped by provider so the main menu can say what this tool supports
+    # without printing thirteen names on one line.
+    grouped: dict[str, list[str]] = {}
+    for image in BASE_IMAGES:
+        grouped.setdefault(image.provider, []).append(image.name)
+    return [f"{provider}: {', '.join(names)}" for provider, names in grouped.items()]
+
+
+# scan_os() has three outcomes, and the caller has to tell them apart: a scan
+# that could not run at all falls back to picking a base by hand, while a user
+# who backed out should simply return to the menu.
+SCAN_OK = "ok"
+SCAN_UNAVAILABLE = "unavailable"
+SCAN_CANCELLED = "cancelled"
+
 COMMON_SERVICES: tuple[tuple[str, str], ...] = (
     ("SSH remote access", "sshd.service"),
     ("Tailscale VPN", "tailscaled.service"),
@@ -1629,15 +1646,12 @@ class App:
         while True:
             self.gum.header("Main Menu")
             self.gum.controls("Up/Down move", "Enter choose", "Esc quit", "Ctrl+C quit")
+            self.menu_section("Supported Base Images", *supported_base_image_lines())
+            print()
             try:
                 action = self.gum.choose(
                     [
-                        # Scanning first is the normal path: it reads the base
-                        # image off the running system, so the user is never
-                        # asked to pick one. The from-scratch entry is for the
-                        # case where there is no system to read yet.
-                        "Create Image From This System",
-                        "Create Image From Scratch",
+                        "Create Image",
                         "Update Existing Image",
                         "View Build Status",
                         "Quit",
@@ -1650,11 +1664,8 @@ class App:
             if selected == "Quit":
                 raise SystemExit(0)
             try:
-                if selected == "Create Image From This System":
-                    if self.scan_os():
-                        self.create_new_image(scanned=True)
-                elif selected == "Create Image From Scratch":
-                    self.create_new_image()
+                if selected == "Create Image":
+                    self.create_image()
                 elif selected == "Update Existing Image":
                     self.update_existing_image()
                 elif selected == "View Build Status":
@@ -1666,6 +1677,24 @@ class App:
                 # whole app down.
                 self.gum.error(str(exc))
                 self.gum.enter_to_continue("Press Enter to return to the main menu...")
+
+    def create_image(self) -> None:
+        # One door. The scan decides which flow you get: it reads the base off
+        # the running system, so nobody is asked to pick one unless there is no
+        # system to read -- a bare `podman run` has no host state, and that is
+        # the only case where the base is genuinely a choice.
+        outcome = self.scan_os()
+        if outcome == SCAN_OK:
+            self.create_new_image(scanned=True)
+            return
+        if outcome == SCAN_CANCELLED:
+            return
+        print()
+        self.gum.hint("Without your system's details, the base image has to be chosen by hand.")
+        self.gum.hint("Running through the aib wrapper or distrobox lets the tool read it for you.")
+        print()
+        if self.gum.confirm("Choose a base image and continue?", default=True):
+            self.create_new_image()
 
     def create_new_image(self, *, scanned: bool = False) -> None:
         # This is a simple step-by-step wizard. The steps are held in a list
@@ -2265,7 +2294,7 @@ class App:
                 continue
             return "cancel"
 
-    def scan_os(self) -> bool:
+    def scan_os(self) -> str:
         # This is the one place where the beginner tool looks at the running
         # host. It only reads rpm-ostree state so it can carry layered packages
         # and base-package removals into a new GitHub-backed image repo.
@@ -2283,37 +2312,37 @@ class App:
                 # UnicodeDecodeError: a non-text (e.g. binary) file. Both are
                 # "unreadable" and must hit the friendly error, not a traceback.
                 self.gum.error("Failed to read rpm-ostree status.")
-                return False
+                return SCAN_UNAVAILABLE
         else:
             if not command_exists("rpm-ostree"):
                 self.gum.error("rpm-ostree not found. OS scanning is unavailable.")
-                return False
+                return SCAN_UNAVAILABLE
 
             proc = run(["rpm-ostree", "status", "--json", "--booted"], check=False)
             if proc.returncode != 0 or not proc.stdout.strip():
                 proc = run(["rpm-ostree", "status", "--json"], check=False)
             if proc.returncode != 0 or not proc.stdout.strip():
                 self.gum.error("Failed to read rpm-ostree status.")
-                return False
+                return SCAN_UNAVAILABLE
             status_text = proc.stdout
 
         try:
             status = json.loads(status_text)
         except json.JSONDecodeError:
             self.gum.error("Failed to read rpm-ostree status.")
-            return False
+            return SCAN_UNAVAILABLE
         # Valid JSON is not necessarily the object shape we expect: an override
         # file may hold `[]`, and a future rpm-ostree could change the schema.
         # Everything below must reach the friendly error, not an AttributeError.
         if not isinstance(status, dict):
             self.gum.error("Failed to read rpm-ostree status.")
-            return False
+            return SCAN_UNAVAILABLE
         raw_deployments = status.get("deployments")
         deployments = [item for item in raw_deployments if isinstance(item, dict)] if isinstance(raw_deployments, list) else []
         booted = next((item for item in deployments if item.get("booted")), deployments[0] if deployments else {})
         if not booted:
             self.gum.error("No deployment information found.")
-            return False
+            return SCAN_UNAVAILABLE
 
         container_ref = (
             booted.get("container-image-reference")
@@ -2327,7 +2356,7 @@ class App:
             self.gum.error(
                 "This deployment has no container image reference; scanning only supports bootc / image-based deployments."
             )
-            return False
+            return SCAN_UNAVAILABLE
         base = normalize_container_image_reference(container_ref)
         self.config.scanned_packages = unique(string_list(booted.get("requested-packages")))
         self.config.scanned_removed = unique(string_list(booted.get("requested-base-removals")))
@@ -2375,12 +2404,12 @@ class App:
                     unselected_prefix="[ ] ",
                 )
             except ScreenBack:
-                return False
+                return SCAN_CANCELLED
             self.config.packages = selected
         else:
             self.gum.warn("No layered packages found.")
             if not self.gum.confirm("Continue to create a custom image anyway?", default=True):
-                return False
+                return SCAN_CANCELLED
 
         if self.config.scanned_removed:
             self.gum.controls("Up/Down move", "x select", "Enter continue", "Esc back", "Ctrl+C quit")
@@ -2397,11 +2426,11 @@ class App:
                     unselected_prefix="[ ] ",
                 )
             except ScreenBack:
-                return False
+                return SCAN_CANCELLED
             self.config.removed_packages = selected_removed
 
         self.config.normalize()
-        return True
+        return SCAN_OK
 
     def match_base_image(self, value: str) -> BaseImage | None:
         for image in BASE_IMAGES:
