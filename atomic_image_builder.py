@@ -1109,8 +1109,18 @@ class Gum:
         run(["gum", "pager"], capture=False, stdin=text)
 
     def table(self, rows: Sequence[Sequence[str]], *, columns: str, widths: str) -> None:
+        # --print is what makes this a display widget. Without it `gum table` is
+        # an interactive row picker: it draws the rows, highlights one, shows a
+        # "1/4 navigate / enter select" footer and blocks. Every screen that
+        # showed a table therefore stopped there, and everything meant to follow
+        # it -- hints, controls, the package chooser -- never ran, so the screen
+        # looked like a table floating above an empty page.
         text = "\n".join("\t".join(row) for row in rows) + "\n"
-        run(["gum", "table", "--separator", "\t", "--columns", columns, "--widths", widths], capture=False, stdin=text)
+        run(
+            ["gum", "table", "--print", "--separator", "\t", "--columns", columns, "--widths", widths],
+            capture=False,
+            stdin=text,
+        )
 
     def require_spinner_success(
         self, proc: subprocess.CompletedProcess[str], args: Sequence[str]

@@ -5249,9 +5249,12 @@ class BuilderTests(unittest.TestCase):
             gum.table([["a", "1"], ["b", "2"]], columns="Name,Count", widths="10,5")
         args, kwargs = run_mock.call_args
         call_args = args[0]
+        # --print matters: without it `gum table` is an interactive row picker
+        # that draws the rows and then blocks on "1/4 navigate / enter select",
+        # so every screen with a table stopped there and nothing after it ran.
         self.assertEqual(
             call_args,
-            ["gum", "table", "--separator", "\t", "--columns", "Name,Count", "--widths", "10,5"],
+            ["gum", "table", "--print", "--separator", "\t", "--columns", "Name,Count", "--widths", "10,5"],
         )
         self.assertEqual(kwargs["capture"], False)
         self.assertEqual(kwargs["stdin"], "a\t1\nb\t2\n")
