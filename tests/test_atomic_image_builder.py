@@ -43,11 +43,14 @@ from atomic_image_builder import (
     config_from_state_payload,
     determine_fedora_atomic_default_tag,
     ensure_trailing_newline,
+    ensure_workflow_job_env_entries,
     format_daily_rebuild_note,
     is_valid_repo_name,
     normalize_container_image_reference,
     patch_cosign_compatibility,
     patch_workflow_steps,
+    pin_action_uses_line,
+    read_os_release_fields,
     string_list,
 )
 
@@ -1133,6 +1136,32 @@ class BuilderTests(unittest.TestCase):
             os_release = Path(tmp) / "os-release"
             os_release.write_text('ID="ubuntu"\nVERSION_ID="24.04"\n')
             self.assertEqual(determine_fedora_atomic_default_tag(os_release_path=os_release), FEDORA_ATOMIC_FALLBACK_TAG)
+
+    def test_read_os_release_fields_returns_empty_dict_when_file_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "does-not-exist"
+            self.assertEqual(read_os_release_fields(missing), {})
+
+    def test_read_os_release_fields_skips_blank_and_comment_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            os_release = Path(tmp) / "os-release"
+            os_release.write_text('\n# a comment\nID=fedora\n\nVERSION_ID="44"\n')
+            self.assertEqual(
+                read_os_release_fields(os_release),
+                {"ID": "fedora", "VERSION_ID": "44"},
+            )
+
+    def test_pin_action_uses_line_leaves_unrecognized_action_unchanged(self) -> None:
+        # Matches the "uses: action@ref" shape but names an action this tool
+        # has no pin recorded for -- must pass through untouched rather than
+        # dropping or mangling the line.
+        line = "      uses: some-org/unpinned-action@v9"
+        self.assertEqual(pin_action_uses_line(line), line)
+
+    def test_ensure_workflow_job_env_entries_returns_unchanged_without_env_or_steps_anchor(self) -> None:
+        workflow_text = "name: Build\njobs:\n  build:\n    name: build\n"
+        result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
+        self.assertEqual(result, workflow_text)
 
     def test_validate_config_rejects_unsupported_base_image(self) -> None:
         app = self.make_app()
@@ -4342,6 +4371,29 @@ class BuilderTests(unittest.TestCase):
             app.write_project_files(repo_dir, include_workflow=False)
             self.assertEqual((repo_dir / "cosign.pub").read_text(), "PUBLIC KEY DATA\n")
 
+    def test_write_bluebuild_project_files_writes_generated_cosign_pub(self) -> None:
+        # The Containerfile-method write path has its own cosign.pub write
+        # (test_write_project_files_writes_generated_cosign_pub above); the
+        # BlueBuild-method path has a separate one that was untested.
+        app = self.make_bluebuild_app()
+        app.generated_cosign_pub = "BLUEBUILD PUBLIC KEY DATA"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.write_project_files(repo_dir, include_workflow=False)
+            self.assertEqual((repo_dir / "cosign.pub").read_text(), "BLUEBUILD PUBLIC KEY DATA\n")
+
+    def test_write_container_project_files_generates_workflow_when_missing(self) -> None:
+        # Every other write_project_files(include_workflow=True) test seeds
+        # the repo via clone_container_template() first, so the workflow file
+        # already exists and only the patch branch runs. This covers the
+        # from-scratch generate branch for a repo with no workflow yet.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.write_project_files(repo_dir, include_workflow=True, default_branch="master")
+            workflow = (repo_dir / ".github/workflows/build.yml").read_text()
+        self.assertEqual(workflow, app.generate_container_workflow(default_branch="master"))
+
     def test_write_project_files_updates_template_workflow_branch_filters(self) -> None:
         app = self.make_app()
         with tempfile.TemporaryDirectory() as tmp:
@@ -5661,6 +5713,12 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("scanned_packages", rewritten)
         self.assertNotIn("scanned_removed", rewritten)
         self.assertNotIn("steam", json.dumps(rewritten))
+
+    def test_generate_readme_notes_carried_scan_customizations(self) -> None:
+        readme = self.scanned_app().generate_readme()
+        self.assertIn("This repo carries over package changes scanned from your current system.", readme)
+        self.assertIn("sudo rpm-ostree reset", readme)
+        self.assertIn("Do not reboot between `rpm-ostree reset` and `bootc switch`.", readme)
 
     def test_config_from_state_payload_roundtrips_brew_enabled(self) -> None:
         cfg = config_from_state_payload({"brew_enabled": True})
@@ -7847,6 +7905,20 @@ class BuilderTests(unittest.TestCase):
             repo_dir = Path(tmp)
             # No disk_config/ directory
             app.write_installer_configs(repo_dir)  # Should not raise
+
+    def test_write_installer_configs_falls_back_to_bundled_template(self) -> None:
+        """When the selected installer config isn't in the repo yet, it is
+        read from the bundled template snapshot rather than raising."""
+        app = self.make_app()  # base_image_uri maps to the "kde" profile
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            disk_dir = repo_dir / "disk_config"
+            disk_dir.mkdir()
+            # iso-kde.toml is absent from the repo but present in the bundled
+            # template snapshot.
+            app.write_installer_configs(repo_dir)
+            iso_text = (disk_dir / "iso.toml").read_text()
+        self.assertIn("bootc switch --mutate-in-place --transport registry ghcr.io/example/test-image:latest", iso_text)
 
     # ── patch_container_disk_workflow unit test ─────────────────────────
 
