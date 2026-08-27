@@ -3901,6 +3901,24 @@ class BuilderTests(unittest.TestCase):
         # a pause or they flash past unread.
         self.assertTrue(any("carry over" in prompt for prompt in stub.prompts), stub.prompts)
 
+    def test_scan_results_and_the_package_chooser_are_separate_pages(self) -> None:
+        # gum choose draws inline, so without a clear the results, the
+        # explanation and a twenty-item list all land on one screen.
+        app = self.make_app()
+        stub = GumStub()
+        headers: list[str] = []
+        stub.header = lambda title, **_kwargs: headers.append(title)
+        stub.choose = lambda options, **_kwargs: list(options)
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            self.run_scan(app, self.scan_payload(["tmux"], ["firefox"]))
+        # One page for the results, then one per chooser. ("Scanning Running OS"
+        # comes first, while the scan is still reading the host.)
+        self.assertEqual(
+            headers,
+            ["Scanning Running OS", "Scan Results", "Packages To Carry Over", "Base Packages To Remove"],
+        )
+
     def test_scan_os_resets_stale_config_before_loading_host_state(self) -> None:
         app = self.make_app()
         app.github_user = "example"

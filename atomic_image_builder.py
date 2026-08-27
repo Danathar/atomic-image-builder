@@ -2445,12 +2445,12 @@ class App:
         print()
 
         if self.config.scanned_packages:
-            # The chooser takes the screen as soon as it opens, so without a
-            # pause the scan results flash past unread. Until recently `gum
-            # table` blocked for a row selection and stood in for this by
-            # accident; printing it properly removed the only thing making this
-            # a page rather than a flicker.
+            # The scan results are a page of their own: read them, then move on.
+            # gum choose draws inline rather than taking over the screen, so
+            # without the pause and the clear that header() does, the results,
+            # the explanation and a twenty-item list all pile onto one screen.
             self.gum.enter_to_continue("Press Enter to choose which packages to carry over...")
+            self.gum.header("Packages To Carry Over")
             self.gum.controls("Up/Down move", "x select", "Enter continue", "Esc back", "Ctrl+C quit")
             self.menu_section("Selection", "Leave everything unselected if you want to skip carrying these packages over.")
             print()
@@ -2460,7 +2460,6 @@ class App:
                     height=20,
                     no_limit=True,
                     selected=self.config.scanned_packages,
-                    header="Layered Packages",
                     selected_prefix="[x] ",
                     unselected_prefix="[ ] ",
                 )
@@ -2473,6 +2472,8 @@ class App:
                 return SCAN_CANCELLED
 
         if self.config.scanned_removed:
+            # Same again: its own page rather than stacked under the last one.
+            self.gum.header("Base Packages To Remove")
             self.gum.controls("Up/Down move", "x select", "Enter continue", "Esc back", "Ctrl+C quit")
             self.menu_section("Selection", "Leave everything unselected if you do not want to remove any base packages.")
             print()
@@ -2482,7 +2483,6 @@ class App:
                     height=20,
                     no_limit=True,
                     selected=self.config.scanned_removed,
-                    header="Base Packages To Remove",
                     selected_prefix="[x] ",
                     unselected_prefix="[ ] ",
                 )
