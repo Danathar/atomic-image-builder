@@ -3886,6 +3886,29 @@ class BuilderTests(unittest.TestCase):
                 app.render_build_status("Example", "my-image")
         errors = " ".join(m for level, m in stub.messages if level == "error")
         self.assertIn("Unable to read GitHub Actions run data.", errors)
+        # view_build_status has nothing after this call, so control returns into
+        # main_menu's loop and redraws. Without a pause the error never gets read.
+        self.assertIn("Press Enter to return to the main menu...", stub.prompts)
+
+    def test_every_render_build_status_exit_pauses_before_the_menu_redraws(self) -> None:
+        # The three failure branches drifted apart: two paused, one did not, so
+        # malformed gh output flashed an error and vanished. They are only
+        # correct together, so assert them together.
+        cases = {
+            "gh call failed": subprocess.CompletedProcess([], 1, "", "boom"),
+            "malformed json": subprocess.CompletedProcess([], 0, "not json", ""),
+            "no runs": subprocess.CompletedProcess([], 0, "[]", ""),
+            "not a list": subprocess.CompletedProcess([], 0, '{"runs": []}', ""),
+        }
+        for label, proc in cases.items():
+            with self.subTest(case=label):
+                app = self.make_app()
+                stub = GumStub()
+                app.gum = stub
+                with patch("atomic_image_builder.run", return_value=proc):
+                    with redirect_stdout(io.StringIO()):
+                        app.render_build_status("Example", "my-image")
+                self.assertIn("Press Enter to return to the main menu...", stub.prompts)
 
     def test_render_build_status_warns_when_no_runs_are_returned(self) -> None:
         app = self.make_app()
