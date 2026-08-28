@@ -3469,7 +3469,12 @@ class App:
         try:
             runs = json.loads(proc.stdout or "[]")
         except json.JSONDecodeError:
+            # Pause like the branches either side of this one. view_build_status
+            # has nothing after this call, so returning goes straight back into
+            # main_menu's loop, which redraws immediately -- without a pause the
+            # error is wiped off the screen before it can be read.
             self.gum.error("Unable to read GitHub Actions run data.")
+            self.gum.enter_to_continue("Press Enter to return to the main menu...")
             return
         if not isinstance(runs, list) or not runs:
             self.gum.warn(f"No recent GitHub Actions runs found for {owner}/{repo}.")
