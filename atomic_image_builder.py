@@ -277,6 +277,9 @@ def supported_base_image_lines() -> list[str]:
 SCAN_OK = "ok"
 SCAN_UNAVAILABLE = "unavailable"
 SCAN_CANCELLED = "cancelled"
+# The running image is not one of the curated bases. Distinct from
+# SCAN_UNAVAILABLE: the scan worked perfectly, and what it found is the problem.
+SCAN_UNSUPPORTED_BASE = "unsupported-base"
 
 COMMON_SERVICES: tuple[tuple[str, str], ...] = (
     ("SSH remote access", "sshd.service"),
@@ -1733,6 +1736,13 @@ class App:
             return
         if outcome == SCAN_CANCELLED:
             return
+        if outcome == SCAN_UNSUPPORTED_BASE:
+            # scan_os has already explained what it found. Defaulting to no:
+            # if this is their own managed image, starting fresh from a curated
+            # base discards the settings that repo already holds.
+            if self.gum.confirm("Start fresh from a supported base image instead?", default=False):
+                self.create_new_image()
+            return
         print()
         self.gum.hint("Without your system's details, the base image has to be chosen by hand.")
         self.gum.hint("Running through the aib wrapper or distrobox lets the tool read it for you.")
@@ -2409,6 +2419,36 @@ class App:
         self.config.base_image_uri = base
         self.config.base_image_name = base
         matched = self.match_base_image(base)
+        if matched is None:
+            # choose_base_image already refuses an image that is not curated.
+            # This path stopped honouring that when the base step was removed
+            # from the scanned flow, so an unsupported image was rejected when
+            # typed in and accepted silently when detected. Building on top of
+            # a custom image is not supported, so refuse here too. Clear the
+            # detected ref the same way choose_base_image does, so a refused
+            # image cannot leak into a later step through the config.
+            self.config.base_image_uri = ""
+            self.config.base_image_name = ""
+            self.gum.warn(f"This system is running {base}, which is not one of the images this tool supports.")
+            self.gum.hint(f"Supported: {supported_base_image_names()}")
+            print()
+            managed = self.scanned_image_is_managed(base)
+            if managed is not None:
+                owner, repo = managed
+                self.menu_section(
+                    "This Is One Of Yours",
+                    f"{owner}/{repo} is a repo this tool manages.",
+                    "Use 'Update Existing Image' to change it -- its saved settings are the source of truth.",
+                    "Building a new image on top of it would lose them.",
+                )
+            else:
+                self.menu_section(
+                    "Why This Stops Here",
+                    "Building a new image on top of a custom image is not supported.",
+                    "You can start from one of the supported base images instead.",
+                )
+            print()
+            return SCAN_UNSUPPORTED_BASE
         if matched:
             self.config.base_image_name = matched.name
             # Warn when the host is running a non-standard tag (e.g. :testing,
@@ -2492,6 +2532,33 @@ class App:
 
         self.config.normalize()
         return SCAN_OK
+
+    def scanned_image_owner_repo(self, image_ref: str) -> tuple[str, str] | None:
+        # ghcr.io/<owner>/<repo>[:tag|@digest] -> (owner, repo). Anything else,
+        # including a registry with a longer path, is not something this tool
+        # could have produced, so it is not worth a lookup.
+        ref = image_ref.split("@", 1)[0]
+        parts = ref.split("/")
+        if parts and ":" in parts[-1]:
+            parts[-1] = parts[-1].rsplit(":", 1)[0]
+        if len(parts) != 3 or parts[0] != "ghcr.io" or not parts[1] or not parts[2]:
+            return None
+        return parts[1], parts[2]
+
+    def scanned_image_is_managed(self, image_ref: str) -> tuple[str, str] | None:
+        # Worth one API call: telling someone their own image apart from a
+        # stranger's changes the advice completely. A managed repo's saved
+        # settings are the source of truth, so the answer is "update it", not
+        # "start again and lose them". Any failure means "cannot tell", and the
+        # caller falls back to the generic message.
+        parsed = self.scanned_image_owner_repo(image_ref)
+        if parsed is None or not command_exists("gh"):
+            return None
+        owner, repo = parsed
+        try:
+            return parsed if self.repo_has_state_file(owner, repo) else None
+        except (CommandError, OSError):
+            return None
 
     def match_base_image(self, value: str) -> BaseImage | None:
         for image in BASE_IMAGES:
