@@ -245,6 +245,15 @@ class BuilderTests(unittest.TestCase):
             "quay.io/fedora-ostree-desktops/kinoite:43",
         )
 
+    def test_normalize_container_image_reference_keeps_a_truncated_remote_prefix(self) -> None:
+        # ostree-remote-registry:<remote>:<ref> needs all three fields. A ref
+        # missing the third is malformed, and the tool must hand it back
+        # untouched rather than index into a field that is not there.
+        self.assertEqual(
+            normalize_container_image_reference("ostree-remote-registry:fedora"),
+            "ostree-remote-registry:fedora",
+        )
+
     def test_normalize_container_image_reference_handles_image_signed_docker_prefix(self) -> None:
         self.assertEqual(
             normalize_container_image_reference("ostree-image-signed:docker://ghcr.io/ublue-os/bazzite:stable"),
@@ -4222,6 +4231,22 @@ class BuilderTests(unittest.TestCase):
         hints = " ".join(m for level, m in stub.messages if level == "hint")
         self.assertIn("github.com/signup", hints)
 
+    def test_github_setup_guide_stays_quiet_when_the_browser_opens(self) -> None:
+        # The "go there manually" hint is the fallback. When the browser does
+        # open, repeating the URL is noise on a screen that already has plenty.
+        app = self.make_app()
+        stub = GumStub()
+        stub.confirm = lambda _prompt, **_kwargs: True
+        stub.choose = lambda options, **_kwargs: [next(o for o in options if o.startswith("I need to create"))]
+        app.gum = stub
+        with patch("atomic_image_builder.open_url_in_browser", return_value=True):
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+                with redirect_stdout(io.StringIO()):
+                    with contextlib.suppress(Exception):
+                        app.github_setup_guide()
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertNotIn("manually", hints)
+
     def test_every_colour_stays_legible_on_light_and_dark_terminals(self) -> None:
         # The original palette was picked on a dark terminal. 252 is almost
         # white and 117 a pale blue, and gum was handed 117 for
@@ -5890,6 +5915,27 @@ class BuilderTests(unittest.TestCase):
         self.assert_dash_text_is_positional(args, prompt)
         self.assertIn("--default=true", args)
         self.assertLess(args.index("--default=true"), args.index("--"))
+
+    def test_gum_style_omits_a_boolean_flag_that_is_false(self) -> None:
+        # Boolean options are flag-presence, not flag-with-value: passing
+        # bold=False has to leave --bold off entirely, because "--bold false"
+        # is not something gum understands.
+        gum = Gum()
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, "styled", "")) as run_mock:
+            gum.style("text", bold=False, italic=True)
+        args = run_mock.call_args.args[0]
+        self.assertNotIn("--bold", args)
+        self.assertIn("--italic", args)
+
+    def test_gum_header_can_leave_the_screen_alone(self) -> None:
+        # Screens that print a header partway through their own output must
+        # not wipe what they have already shown.
+        gum = Gum()
+        with patch.object(gum, "clear") as clear_mock:
+            with patch.object(gum, "style", return_value="styled"):
+                with redirect_stdout(io.StringIO()):
+                    gum.header("Scan Results", clear_screen=False)
+        clear_mock.assert_not_called()
 
     def test_gum_style_survives_real_gum_with_dash_text(self) -> None:
         # Integration check against the actual binary, skipped when absent.
@@ -7593,6 +7639,36 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(any(level == "warn" and "curated" in msg for level, msg in stub.messages))
         self.assertEqual(app.config.base_image_name, "Aurora (KDE)")
         self.assertEqual(app.config.base_image_uri, "ghcr.io/ublue-os/aurora:stable")
+
+    def test_choose_base_image_declining_the_detected_image_offers_the_list(self) -> None:
+        # Answering no to "Use this base image?" is not a cancel: it means
+        # "show me the others", so the picker has to run and win.
+        app = self.make_app()
+        stub = GumStub()
+        stub.confirm = lambda *_a, **_k: False
+        stub.choose = lambda options, **_kwargs: [next(o for o in options if "Aurora (KDE)" in o)]
+        app.gum = stub
+        with patch.object(app, "offer_brew_if_applicable"):
+            with redirect_stdout(io.StringIO()):
+                app.choose_base_image(step=2, total_steps=5)
+        self.assertEqual(app.config.base_image_name, "Aurora (KDE)")
+        self.assertEqual(app.config.base_image_uri, "ghcr.io/ublue-os/aurora:stable")
+
+    def test_choose_base_image_keeps_the_previous_image_when_nothing_matches(self) -> None:
+        # The picker matches the returned line back to an image by name. If
+        # nothing matches, the loop finishes without setting anything, and the
+        # config must be left as it was rather than half-written.
+        app = self.make_app()
+        app.config.base_image_uri = ""
+        app.config.base_image_name = ""
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["[ublue] Something Else  [ghcr.io/example/other:latest]"]
+        app.gum = stub
+        with patch.object(app, "offer_brew_if_applicable"):
+            with redirect_stdout(io.StringIO()):
+                app.choose_base_image()
+        self.assertEqual(app.config.base_image_uri, "")
+        self.assertEqual(app.config.base_image_name, "")
 
     def test_choose_base_image_defaults_to_first_option_on_empty_choice(self) -> None:
         app = self.make_app()
