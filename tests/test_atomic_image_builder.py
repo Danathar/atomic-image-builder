@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -2736,8 +2737,13 @@ class BuilderTests(unittest.TestCase):
                 first = app.dnf5_state_dir()
                 # Called on every use, so it has to stay happy with its own work.
                 second = app.dnf5_state_dir()
-        self.assertEqual(first, second)
-        self.assertEqual(first.name, f"{atomic_image_builder.TOOL_SLUG}-dnf5-{os.getuid()}")
+            # Inside the context, while the directory still exists: the point of
+            # this directory is that nobody else can read or write it, and a
+            # regression to 0o755 would satisfy every other assertion here.
+            self.assertEqual(stat.S_IMODE(first.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(second.stat().st_mode), 0o700)
+            self.assertEqual(first, second)
+            self.assertEqual(first.name, f"{atomic_image_builder.TOOL_SLUG}-dnf5-{os.getuid()}")
 
     def test_dnf5_state_dir_is_scoped_per_uid(self) -> None:
         # An unscoped name would let one user's directory block another's.
