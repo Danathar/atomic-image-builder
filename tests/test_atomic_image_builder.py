@@ -319,6 +319,16 @@ class BuilderTests(unittest.TestCase):
                 with self.assertRaisesRegex(CommandError, "saved settings file"):
                     app.load_repo_config(repo_dir)
 
+    def test_load_repo_config_wraps_state_payload_value_errors(self) -> None:
+        # Valid JSON, but not an object: config_from_state_payload rejects it
+        # with a ValueError, which load_repo_config must also wrap.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / STATE_FILE).write_text(json.dumps(["not", "an", "object"]))
+            with self.assertRaisesRegex(CommandError, "saved settings file"):
+                app.load_repo_config(repo_dir)
+
     def test_patch_container_workflow_pins_actions_and_ignores_state_file(self) -> None:
         app = self.make_app()
         app.config.signing_enabled = True
