@@ -2992,8 +2992,19 @@ class App:
         # their real dnf5 state. The metadata *cache* is deliberately left
         # alone: refreshing it should benefit the rest of the system, and be
         # satisfied by it, rather than building a private copy.
-        state_dir = Path(tempfile.gettempdir()) / f"{TOOL_SLUG}-dnf5"
-        state_dir.mkdir(parents=True, exist_ok=True)
+        #
+        # Scoped by uid and validated on every use: tempfile.gettempdir() is
+        # shared and world-writable, so a fixed, unscoped name here would let
+        # another local user pre-create it -- as a symlink, say -- before we
+        # do, and dnf5 would then read/write through that path as us.
+        state_dir = Path(tempfile.gettempdir()) / f"{TOOL_SLUG}-dnf5-{os.getuid()}"
+        if state_dir.is_symlink() or (state_dir.exists() and not state_dir.is_dir()):
+            raise CommandError(f"refusing to use {state_dir}: not a plain directory (possible symlink attack)")
+        state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        state_dir.chmod(0o700)
+        st = state_dir.stat()
+        if st.st_uid != os.getuid():
+            raise CommandError(f"refusing to use {state_dir}: owned by uid {st.st_uid}, not us")
         return state_dir
 
     def refresh_package_metadata(self) -> bool:
