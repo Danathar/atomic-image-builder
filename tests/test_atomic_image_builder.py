@@ -3910,6 +3910,33 @@ class BuilderTests(unittest.TestCase):
                         app.render_build_status("Example", "my-image")
                 self.assertIn("Press Enter to return to the main menu...", stub.prompts)
 
+    def test_render_build_status_skips_entries_that_are_not_objects(self) -> None:
+        # gh's --json output is a list of objects, but a single malformed entry
+        # must not take the whole screen down -- every field read below this
+        # guard assumes a dict. The good rows either side still render.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        runs = json.dumps(
+            [
+                {"conclusion": "success", "workflowName": "build", "displayTitle": "first", "url": "u1"},
+                "not an object",
+                None,
+                42,
+                {"conclusion": "failure", "workflowName": "build", "displayTitle": "last", "url": "u2"},
+            ]
+        )
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+            with patch.object(app, "repo_carried_scan_customizations", return_value=False):
+                with redirect_stdout(io.StringIO()):
+                    app.render_build_status("Example", "my-image")
+
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertIn("first", hints)
+        self.assertIn("last", hints)
+        self.assertNotIn("not an object", hints)
+        self.assertIn("Press Enter to return to the main menu...", stub.prompts)
+
     def test_render_build_status_warns_when_no_runs_are_returned(self) -> None:
         app = self.make_app()
         stub = GumStub()
