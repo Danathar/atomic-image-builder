@@ -2449,19 +2449,19 @@ class App:
                 )
             print()
             return SCAN_UNSUPPORTED_BASE
-        if matched:
-            self.config.base_image_name = matched.name
-            # Warn when the host is running a non-standard tag (e.g. :testing,
-            # :44) that differs from the curated image_uri.  Offer to use the
-            # curated tag so the generated repo tracks a known-good stream.
-            scanned_tag = base.rsplit(":", 1)[-1] if ":" in base else ""
-            curated_tag = matched.image_uri.rsplit(":", 1)[-1] if ":" in matched.image_uri else ""
-            if scanned_tag and curated_tag and scanned_tag != curated_tag:
-                self.gum.warn(
-                    f"Your system is running :{scanned_tag}, but this tool recommends :{curated_tag} for {matched.name}."
-                )
-                if self.gum.confirm(f"Use the recommended :{curated_tag} tag instead?", default=True):
-                    self.config.base_image_uri = matched.image_uri
+        # Past the refusal above, matched is always a curated image.
+        self.config.base_image_name = matched.name
+        # Warn when the host is running a non-standard tag (e.g. :testing,
+        # :44) that differs from the curated image_uri.  Offer to use the
+        # curated tag so the generated repo tracks a known-good stream.
+        scanned_tag = base.rsplit(":", 1)[-1] if ":" in base else ""
+        curated_tag = matched.image_uri.rsplit(":", 1)[-1] if ":" in matched.image_uri else ""
+        if scanned_tag and curated_tag and scanned_tag != curated_tag:
+            self.gum.warn(
+                f"Your system is running :{scanned_tag}, but this tool recommends :{curated_tag} for {matched.name}."
+            )
+            if self.gum.confirm(f"Use the recommended :{curated_tag} tag instead?", default=True):
+                self.config.base_image_uri = matched.image_uri
 
         self.gum.header("Scan Results")
         rows = [
