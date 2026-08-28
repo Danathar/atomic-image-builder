@@ -6500,6 +6500,79 @@ class BuilderTests(unittest.TestCase):
         # Should not leave double blank lines after replacement.
         self.assertNotIn("\n\n\n", result)
 
+    def test_render_containerfile_removes_brew_copy_that_ends_the_file(self) -> None:
+        # A brew COPY with nothing after it: the scan for the preset RUN walks
+        # straight off the end of the file, and so does the trailing-blank
+        # check. Both must stop at the boundary rather than index past it.
+        app = self.make_app()
+        app.config.brew_enabled = False
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable
+
+            COPY --from=ghcr.io/ublue-os/brew:latest /system_files /
+        """)
+        result = app.render_containerfile(existing)
+        self.assertNotIn("system_files", result)
+        self.assertIn("FROM ghcr.io/ublue-os/bazzite:stable", result)
+
+    def test_render_containerfile_removes_brew_copy_followed_by_another_instruction(self) -> None:
+        # The next instruction is not a RUN, so there is no preset RUN to
+        # absorb. Only the COPY goes; the unrelated instruction stays put.
+        app = self.make_app()
+        app.config.brew_enabled = False
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable
+
+            COPY --from=ghcr.io/ublue-os/brew:latest /system_files /
+            LABEL org.opencontainers.image.title="example"
+
+            RUN /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertNotIn("system_files", result)
+        self.assertIn('LABEL org.opencontainers.image.title="example"', result)
+        self.assertIn("/ctx/build.sh", result)
+
+    def test_render_containerfile_removes_brew_run_followed_immediately_by_an_instruction(self) -> None:
+        # No blank line after the preset RUN, so there is no trailing blank to
+        # consume. The instruction on the very next line must survive.
+        app = self.make_app()
+        app.config.brew_enabled = False
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable
+
+            COPY --from=ghcr.io/ublue-os/brew:latest /system_files /
+            RUN /usr/bin/systemctl preset brew-setup.service
+            RUN /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertNotIn("brew", result.lower())
+        self.assertIn("RUN /ctx/build.sh", result)
+
+    def test_render_containerfile_injects_brew_block_after_a_final_from_line(self) -> None:
+        # Injecting after a FROM that ends the file: the skip-a-blank-line step
+        # has no line to look at and must not read past the end.
+        app = self.make_app()
+        app.config.brew_enabled = True
+        existing = "FROM ghcr.io/ublue-os/bazzite:stable\n"
+        result = app.render_containerfile(existing)
+        self.assertIn("FROM ghcr.io/ublue-os/bazzite:stable", result)
+        self.assertIn(f"COPY --from={UNIVERSAL_BLUE_BREW_IMAGE} /system_files /", result)
+        self.assertLess(result.index("FROM ghcr.io"), result.index("system_files"))
+
+    def test_render_containerfile_injects_brew_block_before_an_adjacent_instruction(self) -> None:
+        # FROM followed immediately by an instruction, no blank line to skip.
+        # The block goes between them without swallowing the instruction.
+        app = self.make_app()
+        app.config.brew_enabled = True
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable
+            RUN /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertIn("RUN /ctx/build.sh", result)
+        self.assertLess(result.index("system_files"), result.index("/ctx/build.sh"))
+
     # ── state file must not publish the host inventory ──────────────────
 
     def scanned_app(self) -> App:
