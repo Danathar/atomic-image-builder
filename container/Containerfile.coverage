@@ -19,9 +19,15 @@ RUN dnf5 -y install python3-coverage && dnf5 clean all
 # a shim so `atomic-image-builder "$@"` still works for entrypoint.sh. The
 # data file location comes from COVERAGE_FILE at run time, which the CI job
 # points at a bind-mounted directory so each scenario lands in its own file.
+#
+# --branch is passed explicitly because nothing here reads .coveragerc: only
+# the script and its snapshots are COPY'd into the image, so the shim runs with
+# no rcfile at all. Without it the e2e data is statement-only and cannot be
+# merged with the unit data, which coverage rejects outright rather than
+# degrading.
 RUN rm -f /usr/local/bin/atomic-image-builder && \
     printf '%s\n' \
       '#!/bin/bash' \
-      'exec python3 -m coverage run --source=/opt/atomic-image-builder /opt/atomic-image-builder/atomic_image_builder.py "$@"' \
+      'exec python3 -m coverage run --branch --source=/opt/atomic-image-builder /opt/atomic-image-builder/atomic_image_builder.py "$@"' \
       > /usr/local/bin/atomic-image-builder && \
     chmod +x /usr/local/bin/atomic-image-builder

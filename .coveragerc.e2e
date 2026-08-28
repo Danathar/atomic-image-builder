@@ -13,6 +13,11 @@
 source =
     atomic_image_builder
 relative_files = True
+# Must match .coveragerc. coverage refuses outright to merge branch data with
+# statement data -- "Can't combine branch coverage data with statement data" --
+# so the moment the unit job turned branch on, the documented cross-suite merge
+# of coverage-unit and coverage-e2e stopped working entirely.
+branch = True
 
 [report]
 show_missing = True
