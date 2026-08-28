@@ -245,6 +245,15 @@ class BuilderTests(unittest.TestCase):
             "quay.io/fedora-ostree-desktops/kinoite:43",
         )
 
+    def test_normalize_container_image_reference_keeps_a_truncated_remote_prefix(self) -> None:
+        # ostree-remote-registry:<remote>:<ref> needs all three fields. A ref
+        # missing the third is malformed, and the tool must hand it back
+        # untouched rather than index into a field that is not there.
+        self.assertEqual(
+            normalize_container_image_reference("ostree-remote-registry:fedora"),
+            "ostree-remote-registry:fedora",
+        )
+
     def test_normalize_container_image_reference_handles_image_signed_docker_prefix(self) -> None:
         self.assertEqual(
             normalize_container_image_reference("ostree-image-signed:docker://ghcr.io/ublue-os/bazzite:stable"),
@@ -1022,6 +1031,24 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("- main", patched)
         self.assertEqual(patched.count("branches:"), 2)
 
+    def test_patch_workflow_branch_filters_patches_a_trigger_that_ends_the_file(self) -> None:
+        # The block scan normally stops at the next sibling trigger. When the
+        # trigger it is patching is the last thing in the file there is no
+        # sibling to stop at, so the scan has to end at the file boundary
+        # instead of running past it.
+        app = self.make_app()
+        workflow = textwrap.dedent("""\
+            name: build
+            on:
+              workflow_dispatch:
+              push:
+                paths:
+                  - Containerfile
+        """)
+        result = app.patch_workflow_branch_filters(workflow, default_branch="develop")
+        self.assertIn("  push:\n    branches:\n      - develop", result)
+        self.assertIn("      - Containerfile", result)
+
     def test_patch_workflow_branch_filters_bundled_bluebuild_snapshot(self) -> None:
         app = self.make_bluebuild_app()
         snapshot = (
@@ -1566,6 +1593,39 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(any(level == "warn" and "half-complete" in message for level, message in app.gum.messages))
         self.assertFalse(any(call[:2] == ["git", "commit"] for call in calls))
 
+    def test_rotate_signing_key_bluebuild_abort_is_not_half_complete(self) -> None:
+        # The half-complete warning is specific to the containerfile method,
+        # where COSIGN_PASSWORD has already been replaced by the time
+        # SIGNING_SECRET fails. bluebuild never uploads COSIGN_PASSWORD, so
+        # declining the retry leaves the repo exactly as it was -- warning
+        # about a broken signing setup there would send the user chasing a
+        # problem that does not exist.
+        app = self.make_bluebuild_app()
+        app.gum = GumStub()
+        confirm_answers = iter([True, False])
+        app.gum.confirm = lambda _prompt, default=False: next(confirm_answers)
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                assert cwd is not None
+                (cwd / "cosign.key").write_text("PRIVATE KEY")
+                (cwd / "cosign.pub").write_text("NEW PUBLIC KEY\n")
+                return subprocess.CompletedProcess(list(args), 0, "", "")
+            if args[:4] == ["gh", "secret", "set", "SIGNING_SECRET"]:
+                return subprocess.CompletedProcess(list(args), 1, "", "nope")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            self.init_signing_repo(repo_dir)
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    with patch("atomic_image_builder.secrets.token_urlsafe", return_value="ROTATE_PASSWORD"):
+                        app.rotate_signing_key(repo_dir)
+            self.assertEqual((repo_dir / "cosign.pub").read_text(), "OLD PUBLIC KEY\n")
+
+        self.assertFalse(any(level == "warn" and "half-complete" in message for level, message in app.gum.messages))
+
     def test_rotate_signing_key_warns_when_post_upload_commit_fails(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
@@ -1848,6 +1908,38 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(attempts["count"], 2)
         errors = [msg for level, msg in app.gum.messages if level == "error"]
         self.assertIn("upload failed", errors)
+
+    def test_generate_and_upload_signing_key_retries_after_half_complete_upload(self) -> None:
+        # The containerfile method uploads COSIGN_PASSWORD first, so a failed
+        # SIGNING_SECRET leaves GitHub half-configured. Agreeing to retry has
+        # to loop and finish the job -- the decline path was covered, the
+        # accept path was not, and this is the one that repairs the repo.
+        app = self.make_app()
+        app.gum = GumStub()
+        app.gum.confirm = lambda _prompt, default=False: True
+        attempts = {"signing": 0}
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                assert cwd is not None
+                (cwd / "cosign.key").write_text("PRIVATE KEY")
+                (cwd / "cosign.pub").write_text("NEW PUBLIC KEY\n")
+                return subprocess.CompletedProcess(list(args), 0, "", "")
+            if args[:3] == ["gh", "secret", "set"] and "SIGNING_SECRET" in args:
+                attempts["signing"] += 1
+                return subprocess.CompletedProcess(list(args), 1 if attempts["signing"] == 1 else 0, "", "")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                pub = app.generate_and_upload_signing_key(
+                    "example", "test-image", upload_failed_note="upload failed", half_complete_note="half complete"
+                )
+
+        self.assertEqual(pub, "NEW PUBLIC KEY\n")
+        self.assertEqual(attempts["signing"], 2)
+        errors = [msg for level, msg in app.gum.messages if level == "error"]
+        self.assertIn("half complete", errors)
 
     def test_rotate_signing_key_happy_path(self) -> None:
         app = self.make_app()
@@ -2376,6 +2468,19 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.config.removed_packages, ["vim-enhanced", "nano"])
         self.assertTrue(any(level == "success" for level, _message in app.gum.messages))
 
+    def test_add_removed_packages_to_config_trusts_a_scanned_source(self) -> None:
+        # The availability filter exists to catch typos in hand-typed names.
+        # Names that came from the scan were read off the running system, so
+        # re-checking them would be pointless work -- and would drop a real
+        # removal if the host lookup happened to fail.
+        app = self.make_app()
+        app.gum = GumStub()
+        with patch.object(app, "filter_available_manual_removed_packages") as filter_mock:
+            added = app.add_removed_packages_to_config(["firefox"], source_label="system scan")
+        filter_mock.assert_not_called()
+        self.assertTrue(added)
+        self.assertEqual(app.config.removed_packages, ["firefox"])
+
     def test_add_removed_packages_to_config_rejects_unsafe_tokens(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
@@ -2451,6 +2556,27 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("nethock", calls[0])
         self.assertIn("%{name}\n", calls[0])
         self.assertEqual(results, {"tmux": True, "htop": True, "nethock": False})
+
+    def test_lookup_host_packages_asks_about_each_name_once(self) -> None:
+        # A duplicate in the requested list must not become a duplicate
+        # argument to dnf5. The one-call-for-everything batching is what keeps
+        # this screen from stalling, and it only holds if the batch is a set.
+        app = self.make_app()
+        stub = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            calls.append(list(command))
+            return subprocess.CompletedProcess(list(command), 0, "tmux\n", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            results = app.lookup_host_packages(["tmux", "tmux", "htop"])
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].count("tmux"), 1)
+        self.assertEqual(results, {"tmux": True, "htop": False})
 
     def test_lookup_host_packages_skips_already_cached_packages(self) -> None:
         app = self.make_app()
@@ -2587,6 +2713,44 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(len(results), PACKAGE_SEARCH_LIMIT)
         self.assertEqual(results[0], ("pkg0", "Summary 0"))
         self.assertTrue(any("%{name}\t%{summary}\n" in command for command in seen_commands))
+
+    def test_search_host_packages_reuses_the_cached_result_for_a_repeated_term(self) -> None:
+        # dnf5 repoquery is the slow part of this screen. Searching the same
+        # term twice -- which is exactly what paging back and forth does --
+        # must not pay for it again.
+        app = self.make_app()
+        stub = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            calls.append(list(command))
+            return subprocess.CompletedProcess(list(command), 0, "tmux\tTerminal multiplexer\n", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "dnf5"):
+            first = app.search_host_packages("tmux")
+            second = app.search_host_packages("TMUX")
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(first[0], second[0])
+
+    def test_search_host_packages_keeps_the_first_summary_for_a_repeated_name(self) -> None:
+        # repoquery lists a package once per matching repo, so the same name
+        # can arrive several times. The later rows are usually the same
+        # package from another repo; taking the first keeps the result stable
+        # rather than letting repo order decide the summary.
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.CompletedProcess(
+            list(command), 0, "tmux\tTerminal multiplexer\ntmux\tFrom another repo\n", ""
+        )
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "dnf5"):
+            results, _truncated, message = app.search_host_packages("tmux")
+
+        self.assertIsNone(message)
+        self.assertEqual(results, [("tmux", "Terminal multiplexer")])
 
     def test_search_host_packages_reports_missing_cache_when_refresh_is_declined(self) -> None:
         app = self.make_app()
@@ -2769,6 +2933,20 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(command[1].startswith("XDG_STATE_HOME="))
         self.assertEqual(command[2:], ["dnf5", "makecache"])
         self.assertTrue(any(level == "success" for level, _message in stub.messages))
+
+    def test_refresh_package_metadata_reports_a_bare_failure_without_detail(self) -> None:
+        # dnf5 can fail with nothing on either stream. The error still has to
+        # be reported; there is just no last line to quote under it.
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.CompletedProcess(list(command), 1, "", "")
+        stub.confirm = lambda _prompt, **_kwargs: True
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(app.refresh_package_metadata())
+        # The screen's own preamble hint still runs; what must not appear is a
+        # follow-up hint quoting a detail line that does not exist.
+        self.assertEqual(stub.messages[-1][0], "error")
 
     def test_refresh_package_metadata_reports_failure_detail(self) -> None:
         app = self.make_app()
@@ -3068,6 +3246,57 @@ class BuilderTests(unittest.TestCase):
                     with self.assertRaisesRegex(CommandError, "signing failed"):
                         app.do_build()
         self.assertIn(["gh", "repo", "delete", "example/test-image", "--yes"], run_calls)
+
+    def test_do_build_never_deletes_a_repo_it_already_pushed_to(self) -> None:
+        # The cleanup exists to remove an *empty* repo after a failed setup.
+        # Once the push lands, that repo holds the user's configuration, and
+        # deleting it on the way out of a late failure would destroy work the
+        # tool had already completed. The pushed flag is the only thing
+        # standing between those two outcomes.
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        app.config.github_user = "example"
+        app.gum = GumStub()
+
+        run_calls: list[list[str]] = []
+
+        def fake_run(args, **_kwargs):
+            run_calls.append(list(args))
+            if args[:3] == ["gh", "repo", "view"]:
+                return subprocess.CompletedProcess(list(args), 1, "", "")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        created: list[str] = []
+
+        class TempDirThatFailsToClean:
+            # Cleanup runs after the push has already succeeded, so anything
+            # it raises arrives with pushed=True.
+            def __init__(self, prefix: str = "") -> None:
+                self._path = tempfile.mkdtemp(prefix=prefix)
+                created.append(self._path)
+
+            def __enter__(self) -> str:
+                return self._path
+
+            def __exit__(self, *_exc: object) -> bool:
+                raise OSError("could not remove the temporary directory")
+
+        try:
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    with patch.object(app, "ensure_signing_ready", return_value=True):
+                        with patch("atomic_image_builder.tempfile.TemporaryDirectory", TempDirThatFailsToClean):
+                            with self.assertRaises(OSError):
+                                with redirect_stdout(io.StringIO()):
+                                    app.do_build()
+        finally:
+            for path in created:
+                shutil.rmtree(path, ignore_errors=True)
+
+        deletes = [call for call in run_calls if call[:3] == ["gh", "repo", "delete"]]
+        self.assertEqual(deletes, [])
+        self.assertFalse(any("Removing the empty repo" in msg for _level, msg in app.gum.messages))
 
     def test_do_build_hints_manual_delete_when_auto_cleanup_fails_for_unrelated_reason(self) -> None:
         app = self.make_app()
@@ -3751,6 +3980,31 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(stub.prompts)
         self.assertEqual(app.config.repo_name, "sentinel-repo")
 
+    def test_create_new_image_returns_to_review_when_build_declines(self) -> None:
+        # do_build() returning False is a decision, not a failure: the user
+        # backed out at its own confirmation. The wizard has to hand them back
+        # the review screen with everything still filled in, rather than
+        # treating the answer as "done" and dropping the whole config.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        review_actions = iter(["build", "cancel"])
+
+        def fake_configure_repo(**_kwargs):
+            app.config.repo_name = "sentinel-repo"
+
+        with patch.object(app, "choose_method", return_value=None):
+            with patch.object(app, "choose_base_image", return_value=None):
+                with patch.object(app, "configure_repo", side_effect=fake_configure_repo):
+                    with patch.object(app, "select_packages", return_value=None):
+                        with patch.object(app, "review_new_image", side_effect=lambda **_kwargs: next(review_actions)):
+                            with patch.object(app, "do_build", return_value=False) as build_mock:
+                                app.create_new_image()
+
+        build_mock.assert_called_once()
+        self.assertEqual(app.config.repo_name, "sentinel-repo")
+        self.assertFalse(any(level == "error" for level, _message in stub.messages))
+
     def test_create_new_image_returns_after_successful_build(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
@@ -4221,6 +4475,22 @@ class BuilderTests(unittest.TestCase):
                         app.github_setup_guide()
         hints = " ".join(m for level, m in stub.messages if level == "hint")
         self.assertIn("github.com/signup", hints)
+
+    def test_github_setup_guide_stays_quiet_when_the_browser_opens(self) -> None:
+        # The "go there manually" hint is the fallback. When the browser does
+        # open, repeating the URL is noise on a screen that already has plenty.
+        app = self.make_app()
+        stub = GumStub()
+        stub.confirm = lambda _prompt, **_kwargs: True
+        stub.choose = lambda options, **_kwargs: [next(o for o in options if o.startswith("I need to create"))]
+        app.gum = stub
+        with patch("atomic_image_builder.open_url_in_browser", return_value=True):
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+                with redirect_stdout(io.StringIO()):
+                    with contextlib.suppress(Exception):
+                        app.github_setup_guide()
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertNotIn("manually", hints)
 
     def test_every_colour_stays_legible_on_light_and_dark_terminals(self) -> None:
         # The original palette was picked on a dark terminal. 252 is almost
@@ -5099,6 +5369,36 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("\n".join(stderr_lines[-8:]), tails)
         self.assertTrue(all("line 1\n" not in tail for tail in tails))
 
+    def test_test_build_locally_reports_a_failure_with_no_stderr(self) -> None:
+        # podman can exit non-zero with nothing on stderr. The failure still
+        # has to be reported; there is simply no tail to show beneath it.
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.CompletedProcess(list(command), 1, "", "")
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            app.test_build_locally()
+
+        self.assertTrue(any(level == "error" and "failed with exit status 1" in message for level, message in stub.messages))
+        self.assertEqual(stub.messages[-1][0], "error")
+
+    def test_search_packages_counts_nothing_added_when_the_names_are_rejected(self) -> None:
+        # add_packages_to_config returns False when validation rejects the
+        # names, and the count has to stay at zero. Deriving it from the list
+        # length instead would report packages the config never gained.
+        app = self.make_app()
+        stub = GumStub()
+        stub.input = lambda **_kwargs: "fish"
+        stub.choose = lambda options, **_kwargs: [options[0]]
+        app.gum = stub
+        with patch.object(app, "search_host_packages", return_value=([("fish", "Friendly interactive shell")], False, None)):
+            with patch.object(app, "add_packages_to_config", return_value=False) as add_mock:
+                app.search_packages()
+
+        add_mock.assert_called_once()
+        self.assertEqual(app.config.packages, [])
+        self.assertFalse(any("Added" in prompt for prompt in stub.prompts))
+
     def test_search_packages_uses_value_delimiter_for_selected_results(self) -> None:
         app = self.make_app()
         app.config.packages = ["fish"]
@@ -5160,6 +5460,33 @@ class BuilderTests(unittest.TestCase):
             app.write_project_files(repo_dir, include_workflow=True, default_branch="master")
             workflow = (repo_dir / ".github/workflows/build.yml").read_text()
         self.assertEqual(workflow, app.generate_container_workflow(default_branch="master"))
+
+    def test_write_container_project_files_survives_a_missing_justfile_snapshot(self) -> None:
+        # The bundled template snapshot can be absent -- a trimmed install, a
+        # partial checkout. Restoring a deleted Justfile is best-effort, so a
+        # missing snapshot has to skip quietly rather than raise on a repo the
+        # user is otherwise updating fine.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as empty:
+            repo_dir = Path(tmp)
+            with patch("atomic_image_builder.CONTAINERFILE_TEMPLATE_DIR", Path(empty)):
+                app.write_project_files(repo_dir, include_workflow=False)
+            self.assertFalse((repo_dir / "Justfile").exists())
+            # The rest of the materialize step still ran.
+            self.assertTrue((repo_dir / "Containerfile").exists())
+
+    def test_write_container_project_files_survives_a_missing_env_snapshot(self) -> None:
+        # A repo whose Justfile dotenv-loads image-template.env but has lost
+        # the file itself. The restore is keyed on that reference, so it is
+        # attempted here -- and must still no-op when the snapshot is gone.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as empty:
+            repo_dir = Path(tmp)
+            (repo_dir / "Justfile").write_text("set dotenv-load := true\nset dotenv-filename := 'image-template.env'\n")
+            with patch("atomic_image_builder.CONTAINERFILE_TEMPLATE_DIR", Path(empty)):
+                app.write_project_files(repo_dir, include_workflow=False)
+            self.assertFalse((repo_dir / "image-template.env").exists())
+            self.assertIn("image-template.env", (repo_dir / "Justfile").read_text())
 
     def test_write_project_files_updates_template_workflow_branch_filters(self) -> None:
         app = self.make_app()
@@ -5501,6 +5828,25 @@ class BuilderTests(unittest.TestCase):
             with patch(
                 "atomic_image_builder.run",
                 return_value=subprocess.CompletedProcess(["gh", "api"], 0, "not json at all", ""),
+            ):
+                self.assertEqual(app.repo_default_branch("example", "test-image"), "main")
+
+        self.assertTrue(
+            any(level == "warn" and "Could not detect the GitHub default branch" in message for level, message in stub.messages)
+        )
+
+    def test_repo_default_branch_warns_when_the_rest_payload_omits_the_branch(self) -> None:
+        # Valid JSON, valid object, no default_branch key (or an empty one).
+        # Every earlier check passes, so this is the last thing standing
+        # between a malformed payload and a workflow whose branch filter
+        # points at a branch the repo does not have.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        with patch.object(app, "gh_json", return_value=None):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["gh", "api"], 0, '{"default_branch":""}', ""),
             ):
                 self.assertEqual(app.repo_default_branch("example", "test-image"), "main")
 
@@ -5864,6 +6210,27 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("--default=true", args)
         self.assertLess(args.index("--default=true"), args.index("--"))
 
+    def test_gum_style_omits_a_boolean_flag_that_is_false(self) -> None:
+        # Boolean options are flag-presence, not flag-with-value: passing
+        # bold=False has to leave --bold off entirely, because "--bold false"
+        # is not something gum understands.
+        gum = Gum()
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, "styled", "")) as run_mock:
+            gum.style("text", bold=False, italic=True)
+        args = run_mock.call_args.args[0]
+        self.assertNotIn("--bold", args)
+        self.assertIn("--italic", args)
+
+    def test_gum_header_can_leave_the_screen_alone(self) -> None:
+        # Screens that print a header partway through their own output must
+        # not wipe what they have already shown.
+        gum = Gum()
+        with patch.object(gum, "clear") as clear_mock:
+            with patch.object(gum, "style", return_value="styled"):
+                with redirect_stdout(io.StringIO()):
+                    gum.header("Scan Results", clear_screen=False)
+        clear_mock.assert_not_called()
+
     def test_gum_style_survives_real_gum_with_dash_text(self) -> None:
         # Integration check against the actual binary, skipped when absent.
         if shutil.which("gum") is None:
@@ -6030,6 +6397,19 @@ class BuilderTests(unittest.TestCase):
         with patch("atomic_image_builder.run", side_effect=results):
             with self.assertRaisesRegex(CommandError, "Could not generate a full diff for untracked file cosign.pub"):
                 app.repo_full_diff(Path("/tmp/example-repository"))
+
+    def test_repo_full_diff_skips_an_untracked_file_with_an_empty_diff(self) -> None:
+        # git diff --no-index exits 0 with no output for an empty file. That
+        # is not a failure, and appending it would put a stray blank block in
+        # the diff the user is asked to approve.
+        app = self.make_app()
+        results = [
+            subprocess.CompletedProcess(["git", "diff"], 0, "", ""),
+            subprocess.CompletedProcess(["git", "ls-files"], 0, "empty.txt\0", ""),
+            subprocess.CompletedProcess(["git", "diff", "--no-index"], 0, "", ""),
+        ]
+        with patch("atomic_image_builder.run", side_effect=results):
+            self.assertEqual(app.repo_full_diff(Path("/tmp/example-repository")), "")
 
     def test_repo_full_diff_includes_nested_untracked_files(self) -> None:
         app = self.make_app()
@@ -6499,6 +6879,79 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("/ctx/build.sh", result)
         # Should not leave double blank lines after replacement.
         self.assertNotIn("\n\n\n", result)
+
+    def test_render_containerfile_removes_brew_copy_that_ends_the_file(self) -> None:
+        # A brew COPY with nothing after it: the scan for the preset RUN walks
+        # straight off the end of the file, and so does the trailing-blank
+        # check. Both must stop at the boundary rather than index past it.
+        app = self.make_app()
+        app.config.brew_enabled = False
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable
+
+            COPY --from=ghcr.io/ublue-os/brew:latest /system_files /
+        """)
+        result = app.render_containerfile(existing)
+        self.assertNotIn("system_files", result)
+        self.assertIn("FROM ghcr.io/ublue-os/bazzite:stable", result)
+
+    def test_render_containerfile_removes_brew_copy_followed_by_another_instruction(self) -> None:
+        # The next instruction is not a RUN, so there is no preset RUN to
+        # absorb. Only the COPY goes; the unrelated instruction stays put.
+        app = self.make_app()
+        app.config.brew_enabled = False
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable
+
+            COPY --from=ghcr.io/ublue-os/brew:latest /system_files /
+            LABEL org.opencontainers.image.title="example"
+
+            RUN /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertNotIn("system_files", result)
+        self.assertIn('LABEL org.opencontainers.image.title="example"', result)
+        self.assertIn("/ctx/build.sh", result)
+
+    def test_render_containerfile_removes_brew_run_followed_immediately_by_an_instruction(self) -> None:
+        # No blank line after the preset RUN, so there is no trailing blank to
+        # consume. The instruction on the very next line must survive.
+        app = self.make_app()
+        app.config.brew_enabled = False
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable
+
+            COPY --from=ghcr.io/ublue-os/brew:latest /system_files /
+            RUN /usr/bin/systemctl preset brew-setup.service
+            RUN /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertNotIn("brew", result.lower())
+        self.assertIn("RUN /ctx/build.sh", result)
+
+    def test_render_containerfile_injects_brew_block_after_a_final_from_line(self) -> None:
+        # Injecting after a FROM that ends the file: the skip-a-blank-line step
+        # has no line to look at and must not read past the end.
+        app = self.make_app()
+        app.config.brew_enabled = True
+        existing = "FROM ghcr.io/ublue-os/bazzite:stable\n"
+        result = app.render_containerfile(existing)
+        self.assertIn("FROM ghcr.io/ublue-os/bazzite:stable", result)
+        self.assertIn(f"COPY --from={UNIVERSAL_BLUE_BREW_IMAGE} /system_files /", result)
+        self.assertLess(result.index("FROM ghcr.io"), result.index("system_files"))
+
+    def test_render_containerfile_injects_brew_block_before_an_adjacent_instruction(self) -> None:
+        # FROM followed immediately by an instruction, no blank line to skip.
+        # The block goes between them without swallowing the instruction.
+        app = self.make_app()
+        app.config.brew_enabled = True
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable
+            RUN /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertIn("RUN /ctx/build.sh", result)
+        self.assertLess(result.index("system_files"), result.index("/ctx/build.sh"))
 
     # ── state file must not publish the host inventory ──────────────────
 
@@ -7264,6 +7717,18 @@ class BuilderTests(unittest.TestCase):
             self.assertIn("  pull_request:\n    branches:\n      - master", workflow)
             self.assertIn("          build_opts: ${{ github.event_name == 'pull_request' && '--no-sign' || '' }}", workflow)
 
+    def test_write_bluebuild_project_files_survives_a_missing_workflow_snapshot(self) -> None:
+        # Same best-effort restore as the Containerfile method: no bundled
+        # snapshot means no workflow to write, and nothing to patch afterwards.
+        # Neither step may raise on the way out.
+        app = self.make_bluebuild_app()
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as empty:
+            repo_dir = Path(tmp)
+            with patch("atomic_image_builder.BLUEBUILD_TEMPLATE_DIR", Path(empty)):
+                app.write_project_files(repo_dir, include_workflow=True)
+            self.assertFalse((repo_dir / ".github/workflows/build.yml").exists())
+            self.assertTrue((repo_dir / "recipes/recipe.yml").exists())
+
     def test_write_bluebuild_project_files_updates_gitignore(self) -> None:
         app = self.make_bluebuild_app()
         with tempfile.TemporaryDirectory() as tmp:
@@ -7481,6 +7946,36 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(any(level == "warn" and "curated" in msg for level, msg in stub.messages))
         self.assertEqual(app.config.base_image_name, "Aurora (KDE)")
         self.assertEqual(app.config.base_image_uri, "ghcr.io/ublue-os/aurora:stable")
+
+    def test_choose_base_image_declining_the_detected_image_offers_the_list(self) -> None:
+        # Answering no to "Use this base image?" is not a cancel: it means
+        # "show me the others", so the picker has to run and win.
+        app = self.make_app()
+        stub = GumStub()
+        stub.confirm = lambda *_a, **_k: False
+        stub.choose = lambda options, **_kwargs: [next(o for o in options if "Aurora (KDE)" in o)]
+        app.gum = stub
+        with patch.object(app, "offer_brew_if_applicable"):
+            with redirect_stdout(io.StringIO()):
+                app.choose_base_image(step=2, total_steps=5)
+        self.assertEqual(app.config.base_image_name, "Aurora (KDE)")
+        self.assertEqual(app.config.base_image_uri, "ghcr.io/ublue-os/aurora:stable")
+
+    def test_choose_base_image_keeps_the_previous_image_when_nothing_matches(self) -> None:
+        # The picker matches the returned line back to an image by name. If
+        # nothing matches, the loop finishes without setting anything, and the
+        # config must be left as it was rather than half-written.
+        app = self.make_app()
+        app.config.base_image_uri = ""
+        app.config.base_image_name = ""
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["[ublue] Something Else  [ghcr.io/example/other:latest]"]
+        app.gum = stub
+        with patch.object(app, "offer_brew_if_applicable"):
+            with redirect_stdout(io.StringIO()):
+                app.choose_base_image()
+        self.assertEqual(app.config.base_image_uri, "")
+        self.assertEqual(app.config.base_image_name, "")
 
     def test_choose_base_image_defaults_to_first_option_on_empty_choice(self) -> None:
         app = self.make_app()
@@ -7905,6 +8400,133 @@ class BuilderTests(unittest.TestCase):
         with patch.object(app, "choose_to_remove", return_value=[]) as mock:
             app.manage_copr_repos()
         mock.assert_called_once_with(["foo/bar"], "Remove COPR Repos")
+
+    # ── menus must ignore a selection they do not recognise ────────────
+    #
+    # Every one of these menus dispatches through an if/elif chain with no
+    # else. Nothing in the tool guarantees gum hands back a string from the
+    # list it was given -- a truncated read or a garbled line is enough -- and
+    # the chain falling through is the behaviour that keeps that from turning
+    # into a crash or a silently wrong action. Until now no test had ever let
+    # one fall through, so "ignores it" and "does something unintended" were
+    # indistinguishable.
+
+    def test_main_menu_ignores_an_unrecognised_selection(self) -> None:
+        app = self.make_app()
+        choices = ["Rebuild everything", "Quit"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "create_image") as create:
+            with patch.object(app, "update_existing_image") as update:
+                with patch.object(app, "view_build_status") as status:
+                    with self.assertRaises(SystemExit):
+                        app.main_menu()
+        create.assert_not_called()
+        update.assert_not_called()
+        status.assert_not_called()
+
+    def test_select_packages_ignores_an_unrecognised_selection(self) -> None:
+        app = self.make_app()
+        app.config.packages = ["fish"]
+        choices = ["Reticulate splines", "Continue to review"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "choose_to_remove") as remove:
+            app.select_packages()
+        remove.assert_not_called()
+        self.assertEqual(app.config.packages, ["fish"])
+
+    def test_add_services_ignores_an_unrecognised_selection(self) -> None:
+        app = self.make_app()
+        choices = ["Choose from uncommon services", "Back"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "select_common_services") as common:
+            with patch.object(app, "add_services_manually") as manual:
+                with redirect_stdout(io.StringIO()):
+                    app.add_services()
+        common.assert_not_called()
+        manual.assert_not_called()
+
+    def test_update_menu_ignores_a_task_with_no_dispatch_arm(self) -> None:
+        # update_menu is the odd one out: it maps the chosen label back to a
+        # task title through a dict, so an unrecognised *label* raises
+        # KeyError rather than falling through. The fall-through here belongs
+        # to the task titles instead, and it is a maintenance hazard -- adding
+        # a title to update_task_choices without adding a dispatch arm makes
+        # that menu entry do nothing at all, silently.
+        app = self.make_app()
+        choices = ["Notifications", "Cancel and go back"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "update_task_choices", return_value=[("Notifications", "")]):
+            with patch.object(app, "format_task_choice", side_effect=lambda title, _status: title):
+                with patch.object(app, "edit_description") as edit:
+                    with patch.object(app, "offer_brew_if_applicable") as brew:
+                        with redirect_stdout(io.StringIO()):
+                            self.assertFalse(app.update_menu())
+        edit.assert_not_called()
+        brew.assert_not_called()
+
+    def test_manage_packages_ignores_an_unrecognised_selection(self) -> None:
+        app = self.make_app()
+        app.config.packages = ["tmux"]
+        choices = ["Delete packages", "Back"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "search_packages") as search:
+            with patch.object(app, "choose_to_remove") as remove:
+                with redirect_stdout(io.StringIO()):
+                    app.manage_packages()
+        search.assert_not_called()
+        remove.assert_not_called()
+        self.assertEqual(app.config.packages, ["tmux"])
+
+    def test_manage_copr_repos_ignores_an_unrecognised_selection(self) -> None:
+        app = self.make_app()
+        app.config.copr_repos = ["foo/bar"]
+        choices = ["Drop a COPR repository", "Back"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "add_copr") as add:
+            with patch.object(app, "choose_to_remove") as remove:
+                with redirect_stdout(io.StringIO()):
+                    app.manage_copr_repos()
+        add.assert_not_called()
+        remove.assert_not_called()
+        self.assertEqual(app.config.copr_repos, ["foo/bar"])
+
+    def test_manage_services_ignores_an_unrecognised_selection(self) -> None:
+        app = self.make_app()
+        app.config.services = ["sshd.service"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Disable services"]
+        app.gum = stub
+        with patch.object(app, "add_services") as add:
+            with patch.object(app, "choose_to_remove") as remove:
+                with redirect_stdout(io.StringIO()):
+                    app.manage_services()
+        add.assert_not_called()
+        remove.assert_not_called()
+        self.assertEqual(app.config.services, ["sshd.service"])
+
+    def test_manage_removed_packages_ignores_an_unrecognised_selection(self) -> None:
+        app = self.make_app()
+        app.config.removed_packages = ["firefox"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Purge base packages"]
+        app.gum = stub
+        with patch.object(app, "choose_to_remove") as remove:
+            with redirect_stdout(io.StringIO()):
+                app.manage_removed_packages()
+        remove.assert_not_called()
+        self.assertEqual(app.config.removed_packages, ["firefox"])
 
     def test_manage_copr_repos_back_exits_loop(self) -> None:
         app = self.make_app()
@@ -8800,6 +9422,15 @@ class BuilderTests(unittest.TestCase):
                 with patch.object(type(CONTAINERFILE_TEMPLATE_DIR / "disk_config" / "nonexistent.toml"), "is_file", return_value=False):
                     with self.assertRaisesRegex(CommandError, "Bundled installer config not found"):
                         app.write_installer_configs(repo_dir)
+
+    def test_patch_installer_config_leaves_a_file_with_no_switch_line_alone(self) -> None:
+        # The patcher rewrites the single bootc switch line and stops. A
+        # disk_config TOML that has no such line -- a hand-trimmed one, or a
+        # newer template shape -- must come back byte-identical rather than
+        # gaining anything on the way through.
+        app = self.make_app()
+        original = "[customizations.installer.kickstart]\ncontents = \"\"\"\ntext --non-interactive\n\"\"\"\n"
+        self.assertEqual(app.patch_installer_config(original), original)
 
     def test_write_installer_configs_skips_when_no_disk_dir(self) -> None:
         """When disk_config/ doesn't exist, write_installer_configs is a no-op."""
