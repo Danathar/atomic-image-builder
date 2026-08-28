@@ -13,6 +13,12 @@ source =
 # data file records the runner's workspace path, which makes the coverage
 # artifact useless anywhere but that runner -- see .coveragerc.e2e.
 relative_files = True
+# Statement coverage alone marks an `if` line "covered" the moment either
+# side runs once, so a branch that always goes one way reads identical to one
+# that's genuinely tested both ways. Branch tracking was off, and it was
+# hiding real gaps: 44 partial branches surfaced the moment it was turned on
+# locally, on a codebase this file already reported as 100% covered.
+branch = True
 
 [report]
 show_missing = True
