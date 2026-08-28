@@ -1793,6 +1793,38 @@ class BuilderTests(unittest.TestCase):
         secret_names = [call[3] for call in calls if call[:3] == ["gh", "secret", "set"]]
         self.assertEqual(secret_names, ["COSIGN_PASSWORD", "SIGNING_SECRET"])
 
+    def test_generate_and_upload_signing_key_retries_after_bluebuild_signing_secret_failure(self) -> None:
+        # bluebuild never uploads COSIGN_PASSWORD, so a failed SIGNING_SECRET
+        # upload there is a plain retry loop rather than the "half-complete"
+        # state that applies to the containerfile method.
+        app = self.make_bluebuild_app()
+        app.gum = GumStub()
+        app.gum.confirm = lambda _prompt, default=False: True
+        attempts = {"count": 0}
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                assert cwd is not None
+                (cwd / "cosign.key").write_text("PRIVATE KEY")
+                (cwd / "cosign.pub").write_text("NEW PUBLIC KEY\n")
+                return subprocess.CompletedProcess(list(args), 0, "", "")
+            if args[:3] == ["gh", "secret", "set"]:
+                attempts["count"] += 1
+                rc = 1 if attempts["count"] == 1 else 0
+                return subprocess.CompletedProcess(list(args), rc, "", "")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                pub = app.generate_and_upload_signing_key(
+                    "example", "test-bb-image", upload_failed_note="upload failed", half_complete_note="half complete"
+                )
+
+        self.assertEqual(pub, "NEW PUBLIC KEY\n")
+        self.assertEqual(attempts["count"], 2)
+        errors = [msg for level, msg in app.gum.messages if level == "error"]
+        self.assertIn("upload failed", errors)
+
     def test_rotate_signing_key_happy_path(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
@@ -2085,6 +2117,25 @@ class BuilderTests(unittest.TestCase):
             app.startup_requirements()
         self.assertEqual(titles, ["Before You Start", "Important"])
         self.assertIn("Press Enter to start the preflight checks...", app.gum.prompts)
+
+    def test_landing_card_passes_through_custom_style_colors(self) -> None:
+        # Every current call site uses the default colors; this pins the path
+        # a caller takes when it overrides foreground/background instead.
+        app = self.make_app()
+        stub = GumStub()
+        seen_kwargs: dict[str, object] = {}
+
+        def fake_style(*lines, **kwargs):
+            seen_kwargs.update(kwargs)
+            return "\n".join(lines)
+
+        stub.style = fake_style
+        app.gum = stub
+
+        app.landing_card("Title", ["a line"], width=40, border_foreground=5, foreground=1, background=2)
+
+        self.assertEqual(seen_kwargs["foreground"], 1)
+        self.assertEqual(seen_kwargs["background"], 2)
 
     def test_config_from_state_payload_rejects_a_non_object_payload(self) -> None:
         # The state file is fetched from a remote repo, so it is the one place
@@ -2427,6 +2478,20 @@ class BuilderTests(unittest.TestCase):
         with patch("atomic_image_builder.command_exists", return_value=True):
             results = app.lookup_host_packages(["fake-pkg-one", "fake-pkg-two"])
         self.assertEqual(results, {"fake-pkg-one": False, "fake-pkg-two": False})
+
+    def test_lookup_host_packages_treats_missing_marker_as_absent_regardless_of_returncode(self) -> None:
+        # dnf5 repoquery can exit nonzero on a genuine "not found" result; the
+        # missing-marker text in stdout/stderr is the authoritative signal for
+        # absence, checked before the returncode==0 fallback.
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, _command, *, cwd=None: subprocess.CompletedProcess(
+            _command, 1, "", "Error: no matches found"
+        )
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            results = app.lookup_host_packages(["fake-pkg"])
+        self.assertEqual(results, {"fake-pkg": False})
 
     def test_lookup_host_packages_returns_none_when_uncheckable(self) -> None:
         app = self.make_app()
@@ -5071,6 +5136,38 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual((owner, repo), ("example", "long-repo"))
         self.assertIn(expected_label, seen_options)
 
+    def test_select_repo_backs_out_when_github_is_not_available(self) -> None:
+        # require_github() gates every entry into the picker; when it returns
+        # False (e.g. gh missing or the user declines login) select_repo must
+        # back out immediately rather than attempt a repo fetch.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        with patch.object(app, "require_github", return_value=False):
+            with patch.object(app, "gh_json_with_spinner") as fetch_mock:
+                with self.assertRaises(ScreenBack):
+                    app.select_repo()
+        fetch_mock.assert_not_called()
+
+    def test_select_repo_backs_out_on_unmapped_picker_choice(self) -> None:
+        # gum.filter is expected to return one of the labels handed to it, but
+        # if the picker returns a value outside that set (and it isn't the
+        # manual-entry sentinel), select_repo must treat it as a back-out
+        # instead of raising an unrelated error.
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        stub = GumStub()
+        stub.filter = lambda _options, **_kwargs: "some unrecognized choice"
+        app.gum = stub
+        with patch.object(
+            app,
+            "gh_json_with_spinner",
+            return_value=[{"name": "existing-repo", "description": None}],
+        ):
+            with self.assertRaises(ScreenBack):
+                app.select_repo()
+
     def test_copy_template_snapshot_errors_when_bundled_snapshot_is_missing(self) -> None:
         # The snapshots are pinned inputs shipped with the tool; a missing one
         # is a packaging fault that must fail closed rather than produce a
@@ -5680,6 +5777,15 @@ class BuilderTests(unittest.TestCase):
 
         self.assertIn("new directory/nested.txt", diff)
         self.assertIn("+nested content", diff)
+
+    def test_repo_full_diff_returns_empty_string_when_nothing_changed(self) -> None:
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=repo_dir, check=True)
+            diff = app.repo_full_diff(repo_dir)
+
+        self.assertEqual(diff, "")
 
     def test_contrib_wrapper_does_not_put_github_token_in_podman_argv(self) -> None:
         wrapper = (Path(__file__).resolve().parents[1] / "contrib/aib").read_text()
@@ -6750,6 +6856,22 @@ class BuilderTests(unittest.TestCase):
         )
         keys = self.action_input_keys(app.patch_bluebuild_action_inputs(template))
         self.assertEqual(sorted(keys), ["build_opts", "chunkah", "push", "recipe"])
+
+    def test_patch_bluebuild_action_inputs_patch_step_returns_empty_list_unchanged(self) -> None:
+        # patch_workflow_steps's flush_step never calls patch_step with an
+        # empty block in practice, but patch_step still guards for it; capture
+        # the closure via the shared walker to exercise that guard directly.
+        app = self.make_bluebuild_app()
+        captured: dict[str, object] = {}
+
+        def fake_patch_workflow_steps(workflow_text, patch_step):
+            captured["patch_step"] = patch_step
+            return []
+
+        with patch("atomic_image_builder.patch_workflow_steps", side_effect=fake_patch_workflow_steps):
+            app.patch_bluebuild_action_inputs("irrelevant")
+
+        self.assertEqual(captured["patch_step"]([]), [])
 
     def test_patch_workflow_steps_splits_steps_and_passes_others_through(self) -> None:
         # The shared step walker both workflow patchers now use.
