@@ -1858,6 +1858,38 @@ class BuilderTests(unittest.TestCase):
         errors = [msg for level, msg in app.gum.messages if level == "error"]
         self.assertIn("upload failed", errors)
 
+    def test_generate_and_upload_signing_key_retries_after_half_complete_upload(self) -> None:
+        # The containerfile method uploads COSIGN_PASSWORD first, so a failed
+        # SIGNING_SECRET leaves GitHub half-configured. Agreeing to retry has
+        # to loop and finish the job -- the decline path was covered, the
+        # accept path was not, and this is the one that repairs the repo.
+        app = self.make_app()
+        app.gum = GumStub()
+        app.gum.confirm = lambda _prompt, default=False: True
+        attempts = {"signing": 0}
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                assert cwd is not None
+                (cwd / "cosign.key").write_text("PRIVATE KEY")
+                (cwd / "cosign.pub").write_text("NEW PUBLIC KEY\n")
+                return subprocess.CompletedProcess(list(args), 0, "", "")
+            if args[:3] == ["gh", "secret", "set"] and "SIGNING_SECRET" in args:
+                attempts["signing"] += 1
+                return subprocess.CompletedProcess(list(args), 1 if attempts["signing"] == 1 else 0, "", "")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                pub = app.generate_and_upload_signing_key(
+                    "example", "test-image", upload_failed_note="upload failed", half_complete_note="half complete"
+                )
+
+        self.assertEqual(pub, "NEW PUBLIC KEY\n")
+        self.assertEqual(attempts["signing"], 2)
+        errors = [msg for level, msg in app.gum.messages if level == "error"]
+        self.assertIn("half complete", errors)
+
     def test_rotate_signing_key_happy_path(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
@@ -2385,6 +2417,19 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.config.removed_packages, ["vim-enhanced", "nano"])
         self.assertTrue(any(level == "success" for level, _message in app.gum.messages))
 
+    def test_add_removed_packages_to_config_trusts_a_scanned_source(self) -> None:
+        # The availability filter exists to catch typos in hand-typed names.
+        # Names that came from the scan were read off the running system, so
+        # re-checking them would be pointless work -- and would drop a real
+        # removal if the host lookup happened to fail.
+        app = self.make_app()
+        app.gum = GumStub()
+        with patch.object(app, "filter_available_manual_removed_packages") as filter_mock:
+            added = app.add_removed_packages_to_config(["firefox"], source_label="system scan")
+        filter_mock.assert_not_called()
+        self.assertTrue(added)
+        self.assertEqual(app.config.removed_packages, ["firefox"])
+
     def test_add_removed_packages_to_config_rejects_unsafe_tokens(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
@@ -2778,6 +2823,20 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(command[1].startswith("XDG_STATE_HOME="))
         self.assertEqual(command[2:], ["dnf5", "makecache"])
         self.assertTrue(any(level == "success" for level, _message in stub.messages))
+
+    def test_refresh_package_metadata_reports_a_bare_failure_without_detail(self) -> None:
+        # dnf5 can fail with nothing on either stream. The error still has to
+        # be reported; there is just no last line to quote under it.
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.CompletedProcess(list(command), 1, "", "")
+        stub.confirm = lambda _prompt, **_kwargs: True
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(app.refresh_package_metadata())
+        # The screen's own preamble hint still runs; what must not appear is a
+        # follow-up hint quoting a detail line that does not exist.
+        self.assertEqual(stub.messages[-1][0], "error")
 
     def test_refresh_package_metadata_reports_failure_detail(self) -> None:
         app = self.make_app()
