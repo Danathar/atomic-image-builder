@@ -1,0 +1,40 @@
+# Coverage settings for the weekly maintenance-audit workflow
+# (.github/workflows/maintenance-audit.yml). Separate from .coveragerc and
+# .coveragerc.e2e because all three measure different things and must not be
+# confused for one another:
+#
+#   .coveragerc                    unit suite, source tree, all three modules
+#   .coveragerc.e2e                real runs of the packaged entrypoint inside the image
+#   .coveragerc.maintenance-audit  real runs of the maintainer scripts against live GitHub
+#
+# maintenance_audit.py and homebrew_formula.py are unit-tested only against
+# mocked network calls -- FakeResponse, patched urlopen and subprocess. The
+# weekly audit job is the only place either one runs against the real GitHub
+# API and a real tarball download, so it is the only place that can show which
+# of their network and error-handling branches a live run actually reaches.
+#
+# atomic_image_builder.py is deliberately absent: the audit job never invokes
+# it, so it can have no maintenance-audit coverage to report.
+
+[run]
+source =
+    maintenance_audit
+    homebrew_formula
+# Matches .coveragerc so this data file is path-portable and can be combined
+# with the unit data from any clone rather than only on the runner that wrote
+# it -- see CONTRIBUTING.md's Coverage section.
+relative_files = True
+# Must match .coveragerc. coverage refuses outright to merge branch data with
+# statement data, so a mismatch here would silently make this artifact
+# uncombinable with the unit one.
+branch = True
+
+[report]
+show_missing = True
+precision = 0
+exclude_also =
+    # The __main__ guard can only run when the file is executed directly.
+    # Unlike the unit suite, this job does exactly that -- but keeping the
+    # exclusion identical to .coveragerc is what lets the two data files be
+    # reported together without the guard flipping between covered and not.
+    if __name__ == .__main__.:
