@@ -1593,6 +1593,39 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(any(level == "warn" and "half-complete" in message for level, message in app.gum.messages))
         self.assertFalse(any(call[:2] == ["git", "commit"] for call in calls))
 
+    def test_rotate_signing_key_bluebuild_abort_is_not_half_complete(self) -> None:
+        # The half-complete warning is specific to the containerfile method,
+        # where COSIGN_PASSWORD has already been replaced by the time
+        # SIGNING_SECRET fails. bluebuild never uploads COSIGN_PASSWORD, so
+        # declining the retry leaves the repo exactly as it was -- warning
+        # about a broken signing setup there would send the user chasing a
+        # problem that does not exist.
+        app = self.make_bluebuild_app()
+        app.gum = GumStub()
+        confirm_answers = iter([True, False])
+        app.gum.confirm = lambda _prompt, default=False: next(confirm_answers)
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                assert cwd is not None
+                (cwd / "cosign.key").write_text("PRIVATE KEY")
+                (cwd / "cosign.pub").write_text("NEW PUBLIC KEY\n")
+                return subprocess.CompletedProcess(list(args), 0, "", "")
+            if args[:4] == ["gh", "secret", "set", "SIGNING_SECRET"]:
+                return subprocess.CompletedProcess(list(args), 1, "", "nope")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            self.init_signing_repo(repo_dir)
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    with patch("atomic_image_builder.secrets.token_urlsafe", return_value="ROTATE_PASSWORD"):
+                        app.rotate_signing_key(repo_dir)
+            self.assertEqual((repo_dir / "cosign.pub").read_text(), "OLD PUBLIC KEY\n")
+
+        self.assertFalse(any(level == "warn" and "half-complete" in message for level, message in app.gum.messages))
+
     def test_rotate_signing_key_warns_when_post_upload_commit_fails(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
@@ -3947,6 +3980,31 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(stub.prompts)
         self.assertEqual(app.config.repo_name, "sentinel-repo")
 
+    def test_create_new_image_returns_to_review_when_build_declines(self) -> None:
+        # do_build() returning False is a decision, not a failure: the user
+        # backed out at its own confirmation. The wizard has to hand them back
+        # the review screen with everything still filled in, rather than
+        # treating the answer as "done" and dropping the whole config.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        review_actions = iter(["build", "cancel"])
+
+        def fake_configure_repo(**_kwargs):
+            app.config.repo_name = "sentinel-repo"
+
+        with patch.object(app, "choose_method", return_value=None):
+            with patch.object(app, "choose_base_image", return_value=None):
+                with patch.object(app, "configure_repo", side_effect=fake_configure_repo):
+                    with patch.object(app, "select_packages", return_value=None):
+                        with patch.object(app, "review_new_image", side_effect=lambda **_kwargs: next(review_actions)):
+                            with patch.object(app, "do_build", return_value=False) as build_mock:
+                                app.create_new_image()
+
+        build_mock.assert_called_once()
+        self.assertEqual(app.config.repo_name, "sentinel-repo")
+        self.assertFalse(any(level == "error" for level, _message in stub.messages))
+
     def test_create_new_image_returns_after_successful_build(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
@@ -5770,6 +5828,25 @@ class BuilderTests(unittest.TestCase):
             with patch(
                 "atomic_image_builder.run",
                 return_value=subprocess.CompletedProcess(["gh", "api"], 0, "not json at all", ""),
+            ):
+                self.assertEqual(app.repo_default_branch("example", "test-image"), "main")
+
+        self.assertTrue(
+            any(level == "warn" and "Could not detect the GitHub default branch" in message for level, message in stub.messages)
+        )
+
+    def test_repo_default_branch_warns_when_the_rest_payload_omits_the_branch(self) -> None:
+        # Valid JSON, valid object, no default_branch key (or an empty one).
+        # Every earlier check passes, so this is the last thing standing
+        # between a malformed payload and a workflow whose branch filter
+        # points at a branch the repo does not have.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        with patch.object(app, "gh_json", return_value=None):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["gh", "api"], 0, '{"default_branch":""}', ""),
             ):
                 self.assertEqual(app.repo_default_branch("example", "test-image"), "main")
 
@@ -9345,6 +9422,15 @@ class BuilderTests(unittest.TestCase):
                 with patch.object(type(CONTAINERFILE_TEMPLATE_DIR / "disk_config" / "nonexistent.toml"), "is_file", return_value=False):
                     with self.assertRaisesRegex(CommandError, "Bundled installer config not found"):
                         app.write_installer_configs(repo_dir)
+
+    def test_patch_installer_config_leaves_a_file_with_no_switch_line_alone(self) -> None:
+        # The patcher rewrites the single bootc switch line and stops. A
+        # disk_config TOML that has no such line -- a hand-trimmed one, or a
+        # newer template shape -- must come back byte-identical rather than
+        # gaining anything on the way through.
+        app = self.make_app()
+        original = "[customizations.installer.kickstart]\ncontents = \"\"\"\ntext --non-interactive\n\"\"\"\n"
+        self.assertEqual(app.patch_installer_config(original), original)
 
     def test_write_installer_configs_skips_when_no_disk_dir(self) -> None:
         """When disk_config/ doesn't exist, write_installer_configs is a no-op."""
