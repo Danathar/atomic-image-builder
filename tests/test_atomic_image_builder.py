@@ -1031,6 +1031,24 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("- main", patched)
         self.assertEqual(patched.count("branches:"), 2)
 
+    def test_patch_workflow_branch_filters_patches_a_trigger_that_ends_the_file(self) -> None:
+        # The block scan normally stops at the next sibling trigger. When the
+        # trigger it is patching is the last thing in the file there is no
+        # sibling to stop at, so the scan has to end at the file boundary
+        # instead of running past it.
+        app = self.make_app()
+        workflow = textwrap.dedent("""\
+            name: build
+            on:
+              workflow_dispatch:
+              push:
+                paths:
+                  - Containerfile
+        """)
+        result = app.patch_workflow_branch_filters(workflow, default_branch="develop")
+        self.assertIn("  push:\n    branches:\n      - develop", result)
+        self.assertIn("      - Containerfile", result)
+
     def test_patch_workflow_branch_filters_bundled_bluebuild_snapshot(self) -> None:
         app = self.make_bluebuild_app()
         snapshot = (
@@ -2506,6 +2524,27 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("%{name}\n", calls[0])
         self.assertEqual(results, {"tmux": True, "htop": True, "nethock": False})
 
+    def test_lookup_host_packages_asks_about_each_name_once(self) -> None:
+        # A duplicate in the requested list must not become a duplicate
+        # argument to dnf5. The one-call-for-everything batching is what keeps
+        # this screen from stalling, and it only holds if the batch is a set.
+        app = self.make_app()
+        stub = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            calls.append(list(command))
+            return subprocess.CompletedProcess(list(command), 0, "tmux\n", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            results = app.lookup_host_packages(["tmux", "tmux", "htop"])
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].count("tmux"), 1)
+        self.assertEqual(results, {"tmux": True, "htop": False})
+
     def test_lookup_host_packages_skips_already_cached_packages(self) -> None:
         app = self.make_app()
         app.package_lookup_cache["tmux"] = True
@@ -2641,6 +2680,44 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(len(results), PACKAGE_SEARCH_LIMIT)
         self.assertEqual(results[0], ("pkg0", "Summary 0"))
         self.assertTrue(any("%{name}\t%{summary}\n" in command for command in seen_commands))
+
+    def test_search_host_packages_reuses_the_cached_result_for_a_repeated_term(self) -> None:
+        # dnf5 repoquery is the slow part of this screen. Searching the same
+        # term twice -- which is exactly what paging back and forth does --
+        # must not pay for it again.
+        app = self.make_app()
+        stub = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            calls.append(list(command))
+            return subprocess.CompletedProcess(list(command), 0, "tmux\tTerminal multiplexer\n", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "dnf5"):
+            first = app.search_host_packages("tmux")
+            second = app.search_host_packages("TMUX")
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(first[0], second[0])
+
+    def test_search_host_packages_keeps_the_first_summary_for_a_repeated_name(self) -> None:
+        # repoquery lists a package once per matching repo, so the same name
+        # can arrive several times. The later rows are usually the same
+        # package from another repo; taking the first keeps the result stable
+        # rather than letting repo order decide the summary.
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.CompletedProcess(
+            list(command), 0, "tmux\tTerminal multiplexer\ntmux\tFrom another repo\n", ""
+        )
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "dnf5"):
+            results, _truncated, message = app.search_host_packages("tmux")
+
+        self.assertIsNone(message)
+        self.assertEqual(results, [("tmux", "Terminal multiplexer")])
 
     def test_search_host_packages_reports_missing_cache_when_refresh_is_declined(self) -> None:
         app = self.make_app()
@@ -3136,6 +3213,57 @@ class BuilderTests(unittest.TestCase):
                     with self.assertRaisesRegex(CommandError, "signing failed"):
                         app.do_build()
         self.assertIn(["gh", "repo", "delete", "example/test-image", "--yes"], run_calls)
+
+    def test_do_build_never_deletes_a_repo_it_already_pushed_to(self) -> None:
+        # The cleanup exists to remove an *empty* repo after a failed setup.
+        # Once the push lands, that repo holds the user's configuration, and
+        # deleting it on the way out of a late failure would destroy work the
+        # tool had already completed. The pushed flag is the only thing
+        # standing between those two outcomes.
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        app.config.github_user = "example"
+        app.gum = GumStub()
+
+        run_calls: list[list[str]] = []
+
+        def fake_run(args, **_kwargs):
+            run_calls.append(list(args))
+            if args[:3] == ["gh", "repo", "view"]:
+                return subprocess.CompletedProcess(list(args), 1, "", "")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        created: list[str] = []
+
+        class TempDirThatFailsToClean:
+            # Cleanup runs after the push has already succeeded, so anything
+            # it raises arrives with pushed=True.
+            def __init__(self, prefix: str = "") -> None:
+                self._path = tempfile.mkdtemp(prefix=prefix)
+                created.append(self._path)
+
+            def __enter__(self) -> str:
+                return self._path
+
+            def __exit__(self, *_exc: object) -> bool:
+                raise OSError("could not remove the temporary directory")
+
+        try:
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    with patch.object(app, "ensure_signing_ready", return_value=True):
+                        with patch("atomic_image_builder.tempfile.TemporaryDirectory", TempDirThatFailsToClean):
+                            with self.assertRaises(OSError):
+                                with redirect_stdout(io.StringIO()):
+                                    app.do_build()
+        finally:
+            for path in created:
+                shutil.rmtree(path, ignore_errors=True)
+
+        deletes = [call for call in run_calls if call[:3] == ["gh", "repo", "delete"]]
+        self.assertEqual(deletes, [])
+        self.assertFalse(any("Removing the empty repo" in msg for _level, msg in app.gum.messages))
 
     def test_do_build_hints_manual_delete_when_auto_cleanup_fails_for_unrelated_reason(self) -> None:
         app = self.make_app()
