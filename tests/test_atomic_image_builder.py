@@ -5311,6 +5311,36 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("\n".join(stderr_lines[-8:]), tails)
         self.assertTrue(all("line 1\n" not in tail for tail in tails))
 
+    def test_test_build_locally_reports_a_failure_with_no_stderr(self) -> None:
+        # podman can exit non-zero with nothing on stderr. The failure still
+        # has to be reported; there is simply no tail to show beneath it.
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.CompletedProcess(list(command), 1, "", "")
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            app.test_build_locally()
+
+        self.assertTrue(any(level == "error" and "failed with exit status 1" in message for level, message in stub.messages))
+        self.assertEqual(stub.messages[-1][0], "error")
+
+    def test_search_packages_counts_nothing_added_when_the_names_are_rejected(self) -> None:
+        # add_packages_to_config returns False when validation rejects the
+        # names, and the count has to stay at zero. Deriving it from the list
+        # length instead would report packages the config never gained.
+        app = self.make_app()
+        stub = GumStub()
+        stub.input = lambda **_kwargs: "fish"
+        stub.choose = lambda options, **_kwargs: [options[0]]
+        app.gum = stub
+        with patch.object(app, "search_host_packages", return_value=([("fish", "Friendly interactive shell")], False, None)):
+            with patch.object(app, "add_packages_to_config", return_value=False) as add_mock:
+                app.search_packages()
+
+        add_mock.assert_called_once()
+        self.assertEqual(app.config.packages, [])
+        self.assertFalse(any("Added" in prompt for prompt in stub.prompts))
+
     def test_search_packages_uses_value_delimiter_for_selected_results(self) -> None:
         app = self.make_app()
         app.config.packages = ["fish"]
@@ -6290,6 +6320,19 @@ class BuilderTests(unittest.TestCase):
         with patch("atomic_image_builder.run", side_effect=results):
             with self.assertRaisesRegex(CommandError, "Could not generate a full diff for untracked file cosign.pub"):
                 app.repo_full_diff(Path("/tmp/example-repository"))
+
+    def test_repo_full_diff_skips_an_untracked_file_with_an_empty_diff(self) -> None:
+        # git diff --no-index exits 0 with no output for an empty file. That
+        # is not a failure, and appending it would put a stray blank block in
+        # the diff the user is asked to approve.
+        app = self.make_app()
+        results = [
+            subprocess.CompletedProcess(["git", "diff"], 0, "", ""),
+            subprocess.CompletedProcess(["git", "ls-files"], 0, "empty.txt\0", ""),
+            subprocess.CompletedProcess(["git", "diff", "--no-index"], 0, "", ""),
+        ]
+        with patch("atomic_image_builder.run", side_effect=results):
+            self.assertEqual(app.repo_full_diff(Path("/tmp/example-repository")), "")
 
     def test_repo_full_diff_includes_nested_untracked_files(self) -> None:
         app = self.make_app()
