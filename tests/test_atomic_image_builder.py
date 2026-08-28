@@ -8018,6 +8018,133 @@ class BuilderTests(unittest.TestCase):
             app.manage_copr_repos()
         mock.assert_called_once_with(["foo/bar"], "Remove COPR Repos")
 
+    # ── menus must ignore a selection they do not recognise ────────────
+    #
+    # Every one of these menus dispatches through an if/elif chain with no
+    # else. Nothing in the tool guarantees gum hands back a string from the
+    # list it was given -- a truncated read or a garbled line is enough -- and
+    # the chain falling through is the behaviour that keeps that from turning
+    # into a crash or a silently wrong action. Until now no test had ever let
+    # one fall through, so "ignores it" and "does something unintended" were
+    # indistinguishable.
+
+    def test_main_menu_ignores_an_unrecognised_selection(self) -> None:
+        app = self.make_app()
+        choices = ["Rebuild everything", "Quit"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "create_image") as create:
+            with patch.object(app, "update_existing_image") as update:
+                with patch.object(app, "view_build_status") as status:
+                    with self.assertRaises(SystemExit):
+                        app.main_menu()
+        create.assert_not_called()
+        update.assert_not_called()
+        status.assert_not_called()
+
+    def test_select_packages_ignores_an_unrecognised_selection(self) -> None:
+        app = self.make_app()
+        app.config.packages = ["fish"]
+        choices = ["Reticulate splines", "Continue to review"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "choose_to_remove") as remove:
+            app.select_packages()
+        remove.assert_not_called()
+        self.assertEqual(app.config.packages, ["fish"])
+
+    def test_add_services_ignores_an_unrecognised_selection(self) -> None:
+        app = self.make_app()
+        choices = ["Choose from uncommon services", "Back"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "select_common_services") as common:
+            with patch.object(app, "add_services_manually") as manual:
+                with redirect_stdout(io.StringIO()):
+                    app.add_services()
+        common.assert_not_called()
+        manual.assert_not_called()
+
+    def test_update_menu_ignores_a_task_with_no_dispatch_arm(self) -> None:
+        # update_menu is the odd one out: it maps the chosen label back to a
+        # task title through a dict, so an unrecognised *label* raises
+        # KeyError rather than falling through. The fall-through here belongs
+        # to the task titles instead, and it is a maintenance hazard -- adding
+        # a title to update_task_choices without adding a dispatch arm makes
+        # that menu entry do nothing at all, silently.
+        app = self.make_app()
+        choices = ["Notifications", "Cancel and go back"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "update_task_choices", return_value=[("Notifications", "")]):
+            with patch.object(app, "format_task_choice", side_effect=lambda title, _status: title):
+                with patch.object(app, "edit_description") as edit:
+                    with patch.object(app, "offer_brew_if_applicable") as brew:
+                        with redirect_stdout(io.StringIO()):
+                            self.assertFalse(app.update_menu())
+        edit.assert_not_called()
+        brew.assert_not_called()
+
+    def test_manage_packages_ignores_an_unrecognised_selection(self) -> None:
+        app = self.make_app()
+        app.config.packages = ["tmux"]
+        choices = ["Delete packages", "Back"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "search_packages") as search:
+            with patch.object(app, "choose_to_remove") as remove:
+                with redirect_stdout(io.StringIO()):
+                    app.manage_packages()
+        search.assert_not_called()
+        remove.assert_not_called()
+        self.assertEqual(app.config.packages, ["tmux"])
+
+    def test_manage_copr_repos_ignores_an_unrecognised_selection(self) -> None:
+        app = self.make_app()
+        app.config.copr_repos = ["foo/bar"]
+        choices = ["Drop a COPR repository", "Back"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "add_copr") as add:
+            with patch.object(app, "choose_to_remove") as remove:
+                with redirect_stdout(io.StringIO()):
+                    app.manage_copr_repos()
+        add.assert_not_called()
+        remove.assert_not_called()
+        self.assertEqual(app.config.copr_repos, ["foo/bar"])
+
+    def test_manage_services_ignores_an_unrecognised_selection(self) -> None:
+        app = self.make_app()
+        app.config.services = ["sshd.service"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Disable services"]
+        app.gum = stub
+        with patch.object(app, "add_services") as add:
+            with patch.object(app, "choose_to_remove") as remove:
+                with redirect_stdout(io.StringIO()):
+                    app.manage_services()
+        add.assert_not_called()
+        remove.assert_not_called()
+        self.assertEqual(app.config.services, ["sshd.service"])
+
+    def test_manage_removed_packages_ignores_an_unrecognised_selection(self) -> None:
+        app = self.make_app()
+        app.config.removed_packages = ["firefox"]
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Purge base packages"]
+        app.gum = stub
+        with patch.object(app, "choose_to_remove") as remove:
+            with redirect_stdout(io.StringIO()):
+                app.manage_removed_packages()
+        remove.assert_not_called()
+        self.assertEqual(app.config.removed_packages, ["firefox"])
+
     def test_manage_copr_repos_back_exits_loop(self) -> None:
         app = self.make_app()
         app.config.copr_repos = ["foo/bar"]
