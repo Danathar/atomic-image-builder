@@ -7609,6 +7609,30 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(any("Missing host tools: dnf5, rpm-ostree" in msg for msg in hints))
         self.assertEqual(stub.prompts, ["Press Enter to exit to the terminal..."])
 
+    def test_render_preflight_failure_plain_text_fallback_skips_absent_sections(self) -> None:
+        # The sibling test above passes every section's condition as True, so
+        # branch coverage never sees the five independent conditionals in
+        # this fallback take their False side -- each `if` looked "covered"
+        # while only ever being exercised one way. This drives all five false.
+        app = self.make_app()
+        stdout = io.StringIO()
+        with patch("atomic_image_builder.command_exists", return_value=False):
+            with redirect_stdout(stdout):
+                app.render_preflight_failure(
+                    missing_tools=[],
+                    missing_host_tools=[],
+                    github_login_missing=False,
+                    github_account_error=False,
+                )
+        output = stdout.getvalue()
+        self.assertIn("Preflight Failed", output)
+        self.assertNotIn("Missing tools:", output)
+        self.assertNotIn("Install with Homebrew:", output)
+        self.assertNotIn("gh auth login", output)
+        self.assertNotIn("gh auth status", output)
+        self.assertNotIn("Missing host tools:", output)
+        self.assertNotIn("rpm-ostree", output)
+
     def test_manage_services_remove_calls_choose_to_remove(self) -> None:
         app = self.make_app()
         app.config.services = ["sshd.service", "tailscaled.service"]
