@@ -1191,6 +1191,18 @@ class BuilderTests(unittest.TestCase):
         with self.assertRaisesRegex(CommandError, "supported base images"):
             app.validate_config()
 
+    def test_validate_config_rejects_empty_base_image_uri(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = ""
+        with self.assertRaisesRegex(CommandError, "Base image URI is missing or invalid"):
+            app.validate_config()
+
+    def test_validate_config_rejects_base_image_uri_containing_whitespace(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = "ghcr.io/ublue-os/bazzite:stable extra"
+        with self.assertRaisesRegex(CommandError, "Base image URI is missing or invalid"):
+            app.validate_config()
+
     def test_validate_config_rejects_invalid_repo_name(self) -> None:
         app = self.make_app()
         app.config.repo_name = ".git"
