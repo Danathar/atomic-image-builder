@@ -12,7 +12,7 @@ python3 -m unittest discover -s tests
 
 ## Coverage
 
-There are two separate coverage measurements, and they are not interchangeable.
+There are three separate coverage measurements, and they are not interchangeable.
 
 **Unit coverage** measures the source tree. `.coveragerc` holds the settings so a local run reports the same numbers CI does, and CI gates on it at 90%:
 
@@ -34,7 +34,17 @@ python3 -m coverage report --rcfile=.coveragerc.e2e
 
 End-to-end coverage is deliberately low and is **not** gated: the guided wizard needs a TTY, so the only end-to-end reachable paths are `--version`, `--help`, and the preflight failure. It exists so coverage gaps can be classified honestly rather than inferred from the unit run alone.
 
-Both measurements are uploaded by `.github/workflows/ci.yml` as workflow artifacts — `coverage-unit` and `coverage-e2e` — each containing `coverage.xml`, an HTML report, and the raw coverage data files (one per e2e scenario). Download both and merge them into a single report from any clone:
+**Maintenance-audit coverage** measures what a real run of `maintenance_audit.py` and `homebrew_formula.py` executes. Both are unit-tested only against mocked network calls — `FakeResponse`, patched `urlopen` and `subprocess` — and the weekly `.github/workflows/maintenance-audit.yml` job is the only place either one runs against the live GitHub API and a real tarball download. `.coveragerc.maintenance-audit` holds the settings. To reproduce a run locally (`GH_TOKEN` needs to be set for the audit's API calls):
+
+```bash
+python3 -m coverage run --rcfile=.coveragerc.maintenance-audit maintenance_audit.py --check-action-updates
+python3 -m coverage run --rcfile=.coveragerc.maintenance-audit -a homebrew_formula.py --check
+python3 -m coverage report --rcfile=.coveragerc.maintenance-audit
+```
+
+Like the end-to-end measurement it is advisory and **not** gated. Its value is the inverse of the unit number: a line that only a real network error reaches — a rate limit, an unreachable host, an unexpected API response shape — stays missing here even on a clean pass, which the unit suite's mocks cannot tell you on their own. A path that is 100% covered by mocks and never touched by a live run is exactly what this exists to make visible.
+
+All three measurements are uploaded as workflow artifacts — `coverage-unit` and `coverage-e2e` from `.github/workflows/ci.yml`, and `coverage-maintenance-audit` from the weekly audit — each containing `coverage.xml`, an HTML report, and the raw coverage data files (one per e2e scenario). Download the two CI ones and merge them into a single report from any clone:
 
 ```bash
 gh run download <run-id>
@@ -42,7 +52,9 @@ python3 -m coverage combine --rcfile=.coveragerc.e2e coverage-unit/data coverage
 python3 -m coverage report --rcfile=.coveragerc.e2e
 ```
 
-That works off the runner only because the raw data is path-portable, which took two things: `relative_files = True` in both configs, so the unit data names files relative to the checkout rather than by the runner's workspace path, and the `[paths]` mapping in `.coveragerc.e2e`, which rewrites the in-image `/opt/atomic-image-builder` onto the checkout. Removing either one makes the artifacts combinable only in the workspace that produced them.
+That works off the runner only because the raw data is path-portable, which took two things: `relative_files = True` in all three configs, so the unit data names files relative to the checkout rather than by the runner's workspace path, and the `[paths]` mapping in `.coveragerc.e2e`, which rewrites the in-image `/opt/atomic-image-builder` onto the checkout. Removing either one makes the artifacts combinable only in the workspace that produced them.
+
+The maintenance-audit data file lives under `data/` for the same reason, so it can be folded into that combine as well — the two jobs run on different schedules, so pass whichever pair of downloads you actually want to compare. Every config sets `branch = True`; coverage refuses outright to merge branch data with statement data, so a config that dropped it would silently make its artifact uncombinable with the others.
 
 A commit that changes nothing the image is built from will not produce a `coverage-e2e` artifact, since the `container-build` job is path-scoped. Run the CI workflow manually (`workflow_dispatch`) to force one.
 

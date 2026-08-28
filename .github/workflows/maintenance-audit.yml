@@ -15,6 +15,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.10"
+
+      # Both scripts below are unit-tested only against mocked network calls
+      # (FakeResponse, patched urlopen/subprocess). This job is the only place
+      # either one runs against the real GitHub API and a real tarball
+      # download, so it is also the only place that can show which of their
+      # network and error-handling branches a real run actually reaches.
+      - name: Install coverage tooling
+        run: pip install coverage
+
       # --check-action-updates was opt-in and nothing opted in, so pin drift
       # was only ever found by hand. It runs here now. Its output is advisory
       # and does not fail the job -- a pin that names a branch drifts on every
@@ -25,15 +38,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
-          python3 maintenance_audit.py --check-action-updates | tee audit.log
+          python3 -m coverage run --rcfile=.coveragerc.maintenance-audit maintenance_audit.py --check-action-updates | tee audit.log
 
       # A release tag has to exist before its tarball can be hashed, so the
       # formula is always updated after the release rather than with it -- which
       # makes it exactly the kind of step that gets skipped and then silently
       # serves the wrong version. Advisory, like the pin checks above.
+      #
+      # -a appends to the same .coverage data file the audit run above wrote,
+      # so one report covers both scripts from a single real run. The audit
+      # step fails the job on a real inconsistency, so this runs on always()
+      # and coverage.py writes its data even when the script it wrapped exits
+      # non-zero -- a failing audit still reports what it reached.
       - name: Check the Homebrew formula pin
         if: always()
-        run: python3 homebrew_formula.py --check | tee -a audit.log || true
+        run: python3 -m coverage run --rcfile=.coveragerc.maintenance-audit -a homebrew_formula.py --check | tee -a audit.log || true
 
       - name: Summarize
         if: always()
@@ -45,3 +64,42 @@ jobs:
             cat audit.log 2>/dev/null || echo "(the audit produced no output)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Advisory only, like the checks above: this reports what the live run
+      # reached, it does not gate. A branch that only a real network error
+      # trips -- a rate limit, an unreachable host, an unexpected API shape --
+      # shows up as missing here even on a clean pass, which the unit suite's
+      # mocks cannot tell you on their own.
+      - name: Report maintenance-audit coverage
+        if: always()
+        run: |
+          {
+            echo "## Maintenance-audit coverage"
+            echo
+            echo "Measured from this run's real calls to the GitHub API and a real"
+            echo "tarball download. Not gated, and not comparable to the unit or"
+            echo "end-to-end coverage numbers reported elsewhere."
+            echo '```'
+            python3 -m coverage report --rcfile=.coveragerc.maintenance-audit || echo "(no coverage data collected)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The raw data file goes under data/ to match coverage-unit's layout, so
+      # the combine recipe in CONTRIBUTING.md works on this artifact too. Both
+      # configs set relative_files, so the two merge in any clone.
+      - name: Package maintenance-audit coverage
+        if: always()
+        run: |
+          mkdir -p maintenance-audit-coverage/data
+          python3 -m coverage xml --rcfile=.coveragerc.maintenance-audit -o maintenance-audit-coverage/coverage.xml || true
+          python3 -m coverage html --rcfile=.coveragerc.maintenance-audit -d maintenance-audit-coverage/htmlcov || true
+          cp .coverage maintenance-audit-coverage/data/.coverage.maintenance-audit || true
+
+      - name: Upload maintenance-audit coverage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-maintenance-audit
+          path: maintenance-audit-coverage/
+          include-hidden-files: true
+          retention-days: 30
