@@ -5161,6 +5161,33 @@ class BuilderTests(unittest.TestCase):
             workflow = (repo_dir / ".github/workflows/build.yml").read_text()
         self.assertEqual(workflow, app.generate_container_workflow(default_branch="master"))
 
+    def test_write_container_project_files_survives_a_missing_justfile_snapshot(self) -> None:
+        # The bundled template snapshot can be absent -- a trimmed install, a
+        # partial checkout. Restoring a deleted Justfile is best-effort, so a
+        # missing snapshot has to skip quietly rather than raise on a repo the
+        # user is otherwise updating fine.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as empty:
+            repo_dir = Path(tmp)
+            with patch("atomic_image_builder.CONTAINERFILE_TEMPLATE_DIR", Path(empty)):
+                app.write_project_files(repo_dir, include_workflow=False)
+            self.assertFalse((repo_dir / "Justfile").exists())
+            # The rest of the materialize step still ran.
+            self.assertTrue((repo_dir / "Containerfile").exists())
+
+    def test_write_container_project_files_survives_a_missing_env_snapshot(self) -> None:
+        # A repo whose Justfile dotenv-loads image-template.env but has lost
+        # the file itself. The restore is keyed on that reference, so it is
+        # attempted here -- and must still no-op when the snapshot is gone.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as empty:
+            repo_dir = Path(tmp)
+            (repo_dir / "Justfile").write_text("set dotenv-load := true\nset dotenv-filename := 'image-template.env'\n")
+            with patch("atomic_image_builder.CONTAINERFILE_TEMPLATE_DIR", Path(empty)):
+                app.write_project_files(repo_dir, include_workflow=False)
+            self.assertFalse((repo_dir / "image-template.env").exists())
+            self.assertIn("image-template.env", (repo_dir / "Justfile").read_text())
+
     def test_write_project_files_updates_template_workflow_branch_filters(self) -> None:
         app = self.make_app()
         with tempfile.TemporaryDirectory() as tmp:
@@ -7336,6 +7363,18 @@ class BuilderTests(unittest.TestCase):
             self.assertIn("  push:\n    branches:\n      - master", workflow)
             self.assertIn("  pull_request:\n    branches:\n      - master", workflow)
             self.assertIn("          build_opts: ${{ github.event_name == 'pull_request' && '--no-sign' || '' }}", workflow)
+
+    def test_write_bluebuild_project_files_survives_a_missing_workflow_snapshot(self) -> None:
+        # Same best-effort restore as the Containerfile method: no bundled
+        # snapshot means no workflow to write, and nothing to patch afterwards.
+        # Neither step may raise on the way out.
+        app = self.make_bluebuild_app()
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as empty:
+            repo_dir = Path(tmp)
+            with patch("atomic_image_builder.BLUEBUILD_TEMPLATE_DIR", Path(empty)):
+                app.write_project_files(repo_dir, include_workflow=True)
+            self.assertFalse((repo_dir / ".github/workflows/build.yml").exists())
+            self.assertTrue((repo_dir / "recipes/recipe.yml").exists())
 
     def test_write_bluebuild_project_files_updates_gitignore(self) -> None:
         app = self.make_bluebuild_app()
