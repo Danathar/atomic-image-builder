@@ -224,10 +224,12 @@ def iter_pinned_refs(
     # (the tag and the SHA spellings), so dedupe on (action, label).
     seen: set[tuple[str, str]] = set()
     pinned: list[tuple[str, str, str]] = []
+    # actions is keyed by action name, so its entries are already distinct;
+    # only the ref-pin table below can repeat a pair. The set is built here
+    # for that loop to check against.
     for action, (sha, label) in actions.items():
-        if (action, label) not in seen:
-            seen.add((action, label))
-            pinned.append((action, label, sha))
+        seen.add((action, label))
+        pinned.append((action, label, sha))
     for key, (sha, label) in ref_pins.items():
         action = key.split("@", 1)[0]
         if (action, label) not in seen:
