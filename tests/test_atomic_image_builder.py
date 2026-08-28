@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -2672,6 +2673,79 @@ class BuilderTests(unittest.TestCase):
         # Query, refresh, query -- and then it stops rather than offering again.
         self.assertEqual(len(commands), 3)
         self.assertEqual(len([c for c in commands if "makecache" in c]), 1)
+
+    def test_module_refuses_to_run_on_python_older_than_3_10(self) -> None:
+        # The guard runs at import, so importing normally can never reach it --
+        # the interpreter running these tests already satisfies it. Executing
+        # the real source under a faked version is the only way to prove the
+        # check fires rather than trusting that it would.
+        module_path = Path(__file__).resolve().parents[1] / "atomic_image_builder.py"
+        # Compile against the real absolute path, not a bare filename: coverage
+        # attributes executed lines by file, so a relative name would run the
+        # guard without ever crediting the line it lives on.
+        code = compile(module_path.read_text(), str(module_path), "exec")
+        with patch.object(sys, "version_info", (3, 9, 0)):
+            with self.assertRaises(SystemExit) as raised:
+                exec(code, {"__name__": "not_main_version_probe", "__file__": str(module_path)})
+        self.assertIn("Python 3.10 or newer is required", str(raised.exception))
+
+    def test_dnf5_state_dir_refuses_a_symlinked_path(self) -> None:
+        # tempfile.gettempdir() is shared and world-writable, so another local
+        # user can pre-create this name as a symlink and have dnf5 read and
+        # write through it as us. The guard only helps if it actually fires.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "elsewhere"
+            target.mkdir()
+            attack = Path(tmp) / f"{atomic_image_builder.TOOL_SLUG}-dnf5-{os.getuid()}"
+            attack.symlink_to(target)
+            with patch("tempfile.gettempdir", return_value=tmp):
+                with self.assertRaises(CommandError) as raised:
+                    app.dnf5_state_dir()
+        self.assertIn("not a plain directory", str(raised.exception))
+        self.assertIn("symlink attack", str(raised.exception))
+
+    def test_dnf5_state_dir_refuses_a_path_that_is_not_a_directory(self) -> None:
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            blocker = Path(tmp) / f"{atomic_image_builder.TOOL_SLUG}-dnf5-{os.getuid()}"
+            blocker.write_text("not a directory")
+            with patch("tempfile.gettempdir", return_value=tmp):
+                with self.assertRaises(CommandError) as raised:
+                    app.dnf5_state_dir()
+        self.assertIn("not a plain directory", str(raised.exception))
+
+    def test_dnf5_state_dir_refuses_a_directory_owned_by_someone_else(self) -> None:
+        # Chowning needs privileges, so instead make the tool believe it is a
+        # different uid than the one that owns the directory it just made --
+        # which is exactly the state this check exists to detect.
+        app = self.make_app()
+        real_uid = os.getuid()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("tempfile.gettempdir", return_value=tmp):
+                with patch("atomic_image_builder.os.getuid", return_value=real_uid + 1):
+                    with self.assertRaises(CommandError) as raised:
+                        app.dnf5_state_dir()
+        self.assertIn("owned by uid", str(raised.exception))
+        self.assertIn("not us", str(raised.exception))
+
+    def test_dnf5_state_dir_creates_a_private_directory_when_the_path_is_clean(self) -> None:
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("tempfile.gettempdir", return_value=tmp):
+                first = app.dnf5_state_dir()
+                # Called on every use, so it has to stay happy with its own work.
+                second = app.dnf5_state_dir()
+        self.assertEqual(first, second)
+        self.assertEqual(first.name, f"{atomic_image_builder.TOOL_SLUG}-dnf5-{os.getuid()}")
+
+    def test_dnf5_state_dir_is_scoped_per_uid(self) -> None:
+        # An unscoped name would let one user's directory block another's.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("tempfile.gettempdir", return_value=tmp):
+                mine = app.dnf5_state_dir()
+        self.assertTrue(mine.name.endswith(f"-{os.getuid()}"))
 
     def test_refresh_package_metadata_runs_makecache_with_scoped_state_dir(self) -> None:
         app = self.make_app()
