@@ -303,6 +303,17 @@ class BuilderTests(unittest.TestCase):
             "ghcr.io/ublue-os/bazzite:stable",
         )
 
+    def test_normalize_container_image_reference_handles_malformed_remote_image_prefix(self) -> None:
+        # "ostree-remote-image:" and "ostree-remote-registry:" are documented
+        # as carrying a remote name and a transport-qualified ref as a second
+        # and third colon-separated field. A malformed origin missing that
+        # third field (only two fields after split(":", 2)) must fall through
+        # unchanged rather than raise or silently drop content.
+        self.assertEqual(
+            normalize_container_image_reference("ostree-remote-image:fedora"),
+            "ostree-remote-image:fedora",
+        )
+
     def test_load_repo_config_rejects_repo_without_state_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_dir = Path(tmp)
@@ -8822,6 +8833,16 @@ class BuilderTests(unittest.TestCase):
             app.write_installer_configs(repo_dir)
             iso_text = (disk_dir / "iso.toml").read_text()
         self.assertIn("bootc switch --mutate-in-place --transport registry ghcr.io/example/test-image:latest", iso_text)
+
+    def test_patch_installer_config_leaves_text_unchanged_when_no_switch_line(self) -> None:
+        # Every existing installer-config test goes through a bundled or
+        # repo-provided disk_config/*.toml, which always contains a "bootc
+        # switch --mutate-in-place --transport registry ..." line, so the
+        # loop's no-match path (an installer config missing that line
+        # entirely) was never exercised.
+        app = self.make_app()
+        existing_text = "[some]\nother = \"toml\"\n"
+        self.assertEqual(app.patch_installer_config(existing_text), existing_text)
 
     # ── patch_container_disk_workflow unit test ─────────────────────────
 
