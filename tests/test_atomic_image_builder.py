@@ -248,11 +248,13 @@ class BuilderTests(unittest.TestCase):
     def test_normalize_container_image_reference_keeps_a_truncated_remote_prefix(self) -> None:
         # ostree-remote-registry:<remote>:<ref> needs all three fields. A ref
         # missing the third is malformed, and the tool must hand it back
-        # untouched rather than index into a field that is not there.
-        self.assertEqual(
-            normalize_container_image_reference("ostree-remote-registry:fedora"),
-            "ostree-remote-registry:fedora",
-        )
+        # untouched rather than index into a field that is not there. Both
+        # prefixes share the one startswith() tuple, so both get a case here:
+        # a future split of that tuple should not quietly lose the coverage
+        # on whichever half moves.
+        for malformed in ("ostree-remote-registry:fedora", "ostree-remote-image:fedora"):
+            with self.subTest(reference=malformed):
+                self.assertEqual(normalize_container_image_reference(malformed), malformed)
 
     def test_normalize_container_image_reference_handles_image_signed_docker_prefix(self) -> None:
         self.assertEqual(
