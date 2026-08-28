@@ -38,6 +38,7 @@ from atomic_image_builder import (
     SCAN_CANCELLED,
     SCAN_OK,
     SCAN_UNAVAILABLE,
+    SCAN_UNSUPPORTED_BASE,
     STATE_FILE,
     TOOL_NAME,
     TOOL_SLUG,
@@ -3967,6 +3968,48 @@ class BuilderTests(unittest.TestCase):
         create_mock.assert_not_called()
         self.assertEqual(stub.messages, [])
 
+    def test_create_image_offers_a_supported_base_after_refusing_an_unsupported_one(self) -> None:
+        # scan_os has already said why it stopped, so this path only routes the
+        # offer to start over -- it must not repeat the explanation.
+        app = self.make_app()
+        stub = GumStub()
+        prompts: list[str] = []
+
+        def confirm(prompt: str, **_kwargs: object) -> bool:
+            prompts.append(prompt)
+            return True
+
+        stub.confirm = confirm
+        app.gum = stub
+        with patch.object(app, "scan_os", return_value=SCAN_UNSUPPORTED_BASE):
+            with patch.object(app, "create_new_image") as create_mock:
+                with redirect_stdout(io.StringIO()):
+                    app.create_image()
+        create_mock.assert_called_once_with()
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("supported base image", prompts[0])
+
+    def test_create_image_unsupported_base_offer_defaults_to_no(self) -> None:
+        # If the running image is one this tool manages, starting fresh throws
+        # away the settings that repo already holds, so the safe answer is the
+        # default one.
+        app = self.make_app()
+        stub = GumStub()
+        defaults: list[object] = []
+
+        def confirm(_prompt: str, **kwargs: object) -> bool:
+            defaults.append(kwargs.get("default"))
+            return False
+
+        stub.confirm = confirm
+        app.gum = stub
+        with patch.object(app, "scan_os", return_value=SCAN_UNSUPPORTED_BASE):
+            with patch.object(app, "create_new_image") as create_mock:
+                with redirect_stdout(io.StringIO()):
+                    app.create_image()
+        create_mock.assert_not_called()
+        self.assertEqual(defaults, [False])
+
     def test_main_menu_dispatches_to_update_existing_image(self) -> None:
         app = self.make_app()
         stub = GumStub()
@@ -4498,6 +4541,133 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(result, SCAN_OK)
         self.assertEqual(app.config.base_image_uri, "quay.io/fedora-ostree-desktops/kinoite:44")
         self.assertEqual(app.config.base_image_name, "Fedora Kinoite")
+
+    def test_scan_os_refuses_an_image_that_is_not_a_supported_base(self) -> None:
+        # choose_base_image already refuses an image that is not curated. The
+        # scanned path has to agree: the same image must not be rejected when
+        # typed in and accepted silently when detected.
+        app = self.make_app()
+        app.github_user = "example"
+        status_payload = json.dumps(
+            {
+                "deployments": [
+                    {
+                        "booted": True,
+                        "container-image-reference": "ostree-unverified-registry:ghcr.io/danathar/my-custom-image:latest",
+                        "requested-packages": ["htop"],
+                        "requested-base-removals": [],
+                    }
+                ]
+            }
+        )
+        app.gum = GumStub()
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["rpm-ostree"], 0, status_payload, ""),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    result = app.scan_os()
+
+        self.assertEqual(result, SCAN_UNSUPPORTED_BASE)
+        self.assertEqual(app.config.base_image_uri, "")
+        self.assertEqual(app.config.base_image_name, "")
+        warnings = " ".join(m for level, m in app.gum.messages if level == "warn")
+        self.assertIn("ghcr.io/danathar/my-custom-image:latest", warnings)
+        self.assertIn("not one of the images this tool supports", warnings)
+
+    def test_scan_os_names_the_repo_when_the_running_image_is_tool_managed(self) -> None:
+        # Telling someone their own image apart from a stranger's changes the
+        # advice completely: update the repo, do not rebuild from scratch.
+        app = self.make_app()
+        app.github_user = "danathar"
+        status_payload = json.dumps(
+            {
+                "deployments": [
+                    {
+                        "booted": True,
+                        "container-image-reference": "ostree-unverified-registry:ghcr.io/danathar/my-image:latest",
+                        "requested-packages": [],
+                        "requested-base-removals": [],
+                    }
+                ]
+            }
+        )
+        app.gum = GumStub()
+        sections: list[tuple[str, tuple[str, ...]]] = []
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["rpm-ostree"], 0, status_payload, ""),
+            ):
+                with patch.object(app, "repo_has_state_file", return_value=True) as state_mock:
+                    with patch.object(app, "menu_section", side_effect=lambda title, *lines: sections.append((title, lines))):
+                        with redirect_stdout(io.StringIO()):
+                            result = app.scan_os()
+
+        self.assertEqual(result, SCAN_UNSUPPORTED_BASE)
+        state_mock.assert_called_once_with("danathar", "my-image")
+        self.assertEqual(len(sections), 1)
+        self.assertIn("danathar/my-image", " ".join(sections[0][1]))
+        self.assertIn("Update Existing Image", " ".join(sections[0][1]))
+
+    def test_scan_os_unsupported_base_lookup_failure_falls_back_to_generic_advice(self) -> None:
+        # A failed lookup means "cannot tell", not "not yours". The refusal
+        # still stands; only the wording is less specific.
+        app = self.make_app()
+        app.github_user = "danathar"
+        status_payload = json.dumps(
+            {
+                "deployments": [
+                    {
+                        "booted": True,
+                        "container-image-reference": "ostree-unverified-registry:ghcr.io/danathar/my-image:latest",
+                        "requested-packages": [],
+                        "requested-base-removals": [],
+                    }
+                ]
+            }
+        )
+        app.gum = GumStub()
+        sections: list[tuple[str, tuple[str, ...]]] = []
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["rpm-ostree"], 0, status_payload, ""),
+            ):
+                with patch.object(app, "repo_has_state_file", side_effect=CommandError("boom")):
+                    with patch.object(app, "menu_section", side_effect=lambda title, *lines: sections.append((title, lines))):
+                        with redirect_stdout(io.StringIO()):
+                            result = app.scan_os()
+
+        self.assertEqual(result, SCAN_UNSUPPORTED_BASE)
+        self.assertEqual(len(sections), 1)
+        self.assertIn("custom image is not supported", " ".join(sections[0][1]))
+
+    def test_scanned_image_owner_repo_parses_only_ghcr_owner_repo_refs(self) -> None:
+        app = self.make_app()
+        self.assertEqual(app.scanned_image_owner_repo("ghcr.io/owner/repo:latest"), ("owner", "repo"))
+        self.assertEqual(app.scanned_image_owner_repo("ghcr.io/owner/repo"), ("owner", "repo"))
+        self.assertEqual(app.scanned_image_owner_repo("ghcr.io/owner/repo@sha256:abc123"), ("owner", "repo"))
+        self.assertIsNone(app.scanned_image_owner_repo("quay.io/fedora-ostree-desktops/kinoite:44"))
+        self.assertIsNone(app.scanned_image_owner_repo("ghcr.io/ublue-os/akmods/extra:latest"))
+        self.assertIsNone(app.scanned_image_owner_repo("ghcr.io/owner"))
+        self.assertIsNone(app.scanned_image_owner_repo("localhost:5000/owner/repo"))
+
+    def test_scanned_image_is_managed_skips_the_lookup_without_gh(self) -> None:
+        # No gh means no answer to be had, and the refusal does not depend on
+        # one, so the call is not worth attempting.
+        app = self.make_app()
+        with patch("atomic_image_builder.command_exists", return_value=False):
+            with patch.object(app, "repo_has_state_file") as state_mock:
+                self.assertIsNone(app.scanned_image_is_managed("ghcr.io/owner/repo:latest"))
+        state_mock.assert_not_called()
+
+    def test_scanned_image_is_managed_returns_none_for_a_repo_without_state(self) -> None:
+        app = self.make_app()
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch.object(app, "repo_has_state_file", return_value=False):
+                self.assertIsNone(app.scanned_image_is_managed("ghcr.io/owner/repo:latest"))
 
     def test_scan_os_honors_status_file_override(self) -> None:
         app = self.make_app()
