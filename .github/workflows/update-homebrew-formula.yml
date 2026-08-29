@@ -48,18 +48,35 @@ jobs:
         with:
           python-version: "3.10"
 
+      # homebrew_formula.py's --update path is unit-tested only against a
+      # mocked fetch_sha256 (see tests/test_homebrew_formula.py), so the unit
+      # number for this module is 100% without a single real tarball download
+      # ever having been measured. A release is the only place --update runs
+      # for real, which makes it the only place that measurement can be taken.
+      # .coveragerc.maintenance-audit already scopes exactly these maintainer
+      # scripts for this same "real run against live GitHub" purpose, so it is
+      # reused rather than adding a fourth coverage config.
+      - name: Install coverage tooling
+        run: pip install coverage
+
       - name: Point the formula at the release
         id: update
         env:
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           set -euo pipefail
-          python3 homebrew_formula.py --update "$TAG"
+          python3 -m coverage run --rcfile=.coveragerc.maintenance-audit homebrew_formula.py --update "$TAG"
           # Verified independently of the code that just wrote it. This also
           # fails when a release was tagged without bumping VERSION first,
           # because --check compares the formula's tag against VERSION -- and
           # that release would ship a formula whose own test block cannot pass.
-          python3 homebrew_formula.py --check
+          #
+          # -a appends to the data file the --update run above wrote, so one
+          # report covers both invocations. Coverage warns here that
+          # maintenance_audit is never imported -- that is expected and
+          # harmless: this job runs only the one script the shared config
+          # names, and coverage omits the absent module from the report.
+          python3 -m coverage run --rcfile=.coveragerc.maintenance-audit -a homebrew_formula.py --check
           if git diff --quiet -- Formula/; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
@@ -105,3 +122,46 @@ jobs:
             grep -E '^\s+(url|sha256)' Formula/atomic-image-builder.rb || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Advisory only, like the weekly maintenance-audit coverage: this reports
+      # what this real release run reached, it does not gate. A branch that
+      # only a real tarball download or a real formula rewrite trips stays
+      # missing here even on a clean pass, which the mocked unit suite cannot
+      # tell you on its own.
+      #
+      # Runs after the push deliberately: nothing here may sit between the
+      # formula being written and the formula being pushed.
+      - name: Report homebrew-release coverage
+        if: always()
+        run: |
+          {
+            echo "## Homebrew-release coverage"
+            echo
+            echo "Measured from this run's real tarball download and formula"
+            echo "rewrite. Not gated, and not comparable to the unit,"
+            echo "end-to-end, or maintenance-audit coverage numbers reported"
+            echo "elsewhere."
+            echo '```'
+            python3 -m coverage report --rcfile=.coveragerc.maintenance-audit || echo "(no coverage data collected)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The raw data file goes under data/ to match the other coverage
+      # artifacts' layout, so the combine recipe in CONTRIBUTING.md works on
+      # this one too.
+      - name: Package homebrew-release coverage
+        if: always()
+        run: |
+          mkdir -p homebrew-release-coverage/data
+          python3 -m coverage xml --rcfile=.coveragerc.maintenance-audit -o homebrew-release-coverage/coverage.xml || true
+          python3 -m coverage html --rcfile=.coveragerc.maintenance-audit -d homebrew-release-coverage/htmlcov || true
+          cp .coverage homebrew-release-coverage/data/.coverage.homebrew-release || true
+
+      - name: Upload homebrew-release coverage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-homebrew-release
+          path: homebrew-release-coverage/
+          include-hidden-files: true
+          retention-days: 30

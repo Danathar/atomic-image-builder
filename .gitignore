@@ -7,3 +7,4 @@ htmlcov/
 unit-coverage/
 e2e-coverage/
 maintenance-audit-coverage/
+homebrew-release-coverage/

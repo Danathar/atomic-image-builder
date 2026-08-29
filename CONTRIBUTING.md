@@ -12,7 +12,7 @@ python3 -m unittest discover -s tests
 
 ## Coverage
 
-There are three separate coverage measurements, and they are not interchangeable.
+There are four separate coverage measurements, and they are not interchangeable.
 
 **Unit coverage** measures the source tree. `.coveragerc` holds the settings so a local run reports the same numbers CI does, and CI gates on it at 90%:
 
@@ -44,7 +44,19 @@ python3 -m coverage report --rcfile=.coveragerc.maintenance-audit
 
 Like the end-to-end measurement it is advisory and **not** gated. Its value is the inverse of the unit number: a line that only a real network error reaches — a rate limit, an unreachable host, an unexpected API response shape — stays missing here even on a clean pass, which the unit suite's mocks cannot tell you on their own. A path that is 100% covered by mocks and never touched by a live run is exactly what this exists to make visible.
 
-All three measurements are uploaded as workflow artifacts — `coverage-unit` and `coverage-e2e` from `.github/workflows/ci.yml`, and `coverage-maintenance-audit` from the weekly audit — each containing `coverage.xml`, an HTML report, and the raw coverage data files (one per e2e scenario). Download the two CI ones and merge them into a single report from any clone:
+**Homebrew-release coverage** measures what a real run of `homebrew_formula.py --update` executes when `.github/workflows/update-homebrew-formula.yml` points the formula at a published release. This is the narrowest and most easily misread of the four. Every test in `tests/test_homebrew_formula.py` that exercises `update()` patches `fetch_sha256`, so the unit suite reports this module at 100% without a single real tarball download ever having been measured; a release is the only place `--update` downloads one and rewrites the formula for real. It reuses `.coveragerc.maintenance-audit`, since that config already scopes exactly these maintainer scripts for the same "real run against live GitHub" purpose. To reproduce locally (`--update` rewrites `Formula/`, so do it on a throwaway branch):
+
+```bash
+python3 -m coverage run --rcfile=.coveragerc.maintenance-audit homebrew_formula.py --update <tag>
+python3 -m coverage run --rcfile=.coveragerc.maintenance-audit -a homebrew_formula.py --check
+python3 -m coverage report --rcfile=.coveragerc.maintenance-audit
+```
+
+Because that config also names `maintenance_audit`, which this job never runs, coverage prints a `module-not-imported` warning and then omits the absent module from the report. Both are expected.
+
+Like the maintenance-audit measurement it is advisory and **not** gated, and for a sharper version of the same reason: it only runs when a release is published, so there is no push that could be blocked on it.
+
+All four measurements are uploaded as workflow artifacts — `coverage-unit` and `coverage-e2e` from `.github/workflows/ci.yml`, `coverage-maintenance-audit` from the weekly audit, and `coverage-homebrew-release` from the release workflow — each containing `coverage.xml`, an HTML report, and the raw coverage data files (one per e2e scenario). Download the two CI ones and merge them into a single report from any clone:
 
 ```bash
 gh run download <run-id>
@@ -54,7 +66,7 @@ python3 -m coverage report --rcfile=.coveragerc.e2e
 
 That works off the runner only because the raw data is path-portable, which took two things: `relative_files = True` in all three configs, so the unit data names files relative to the checkout rather than by the runner's workspace path, and the `[paths]` mapping in `.coveragerc.e2e`, which rewrites the in-image `/opt/atomic-image-builder` onto the checkout. Removing either one makes the artifacts combinable only in the workspace that produced them.
 
-The maintenance-audit data file lives under `data/` for the same reason, so it can be folded into that combine as well — the two jobs run on different schedules, so pass whichever pair of downloads you actually want to compare. Every config sets `branch = True`; coverage refuses outright to merge branch data with statement data, so a config that dropped it would silently make its artifact uncombinable with the others.
+The maintenance-audit and homebrew-release data files live under `data/` for the same reason, so either can be folded into that combine as well — these jobs all run on different schedules, so pass whichever pair of downloads you actually want to compare. Every config sets `branch = True`; coverage refuses outright to merge branch data with statement data, so a config that dropped it would silently make its artifact uncombinable with the others.
 
 A commit that changes nothing the image is built from will not produce a `coverage-e2e` artifact, since the `container-build` job is path-scoped. Run the CI workflow manually (`workflow_dispatch`) to force one.
 
