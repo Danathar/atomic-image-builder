@@ -16,10 +16,19 @@ pass=0
 fail=0
 
 # Each test gets its own stub bin/ dir and workdir, isolated from the others
-# and from the real host tools.
+# and from the real host tools. The stub dir is the *entire* PATH aib runs
+# with, so a host that happens to have podman/gh/rpm-ostree installed (any
+# atomic desktop, for one) cannot satisfy an absence test. Everything aib and
+# the stubs genuinely need is symlinked in explicitly.
 setup_stubs() {
     stub_dir="$(mktemp -d)"
     podman_log="$stub_dir/podman.log"
+
+    local tool src
+    for tool in bash env mktemp rm; do
+        src="$(command -v "$tool")"
+        ln -s "$src" "$stub_dir/$tool"
+    done
 
     cat >"$stub_dir/podman" <<PODMAN
 #!/usr/bin/env bash
@@ -74,7 +83,7 @@ test_podman_missing() {
     setup_stubs
     rm -f "$stub_dir/podman"
     local out status
-    out="$(PATH="$stub_dir:/usr/bin:/bin" HOME="$stub_dir/home" "$aib" 2>&1)"
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" "$aib" 2>&1)"
     status=$?
     assert_eq "$status" "1" "podman missing: exit status"
     assert_contains "$out" "podman is required but was not found on PATH" "podman missing: error message"
@@ -96,7 +105,7 @@ fi
 exit 1
 GH
     chmod +x "$stub_dir/gh"
-    PATH="$stub_dir:/usr/bin:/bin" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1
+    PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1
     local args
     args="$(cat "$podman_log")"
     assert_contains "$args" "-e GH_TOKEN" "gh authenticated: GH_TOKEN forwarded"
@@ -108,7 +117,7 @@ GH
 test_gh_missing() {
     setup_stubs
     local args
-    args="$(PATH="$stub_dir:/usr/bin:/bin" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1; cat "$podman_log")"
+    args="$(PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1; cat "$podman_log")"
     assert_contains "$args" "aib-gh:/root/.config/gh" "gh missing: aib-gh volume mounted"
     assert_not_contains "$args" "-e GH_TOKEN" "gh missing: GH_TOKEN not forwarded"
     cleanup_stubs
@@ -123,7 +132,7 @@ exit 1
 GH
     chmod +x "$stub_dir/gh"
     local args
-    args="$(PATH="$stub_dir:/usr/bin:/bin" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1; cat "$podman_log")"
+    args="$(PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1; cat "$podman_log")"
     assert_contains "$args" "aib-gh:/root/.config/gh" "gh not logged in: aib-gh volume mounted"
     assert_not_contains "$args" "-e GH_TOKEN" "gh not logged in: GH_TOKEN not forwarded"
     cleanup_stubs
@@ -139,7 +148,7 @@ exit 0
 RPMOSTREE
     chmod +x "$stub_dir/rpm-ostree"
     local args
-    args="$(PATH="$stub_dir:/usr/bin:/bin" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1; cat "$podman_log")"
+    args="$(PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1; cat "$podman_log")"
     assert_contains "$args" "/run/aib-rpm-ostree-status.json:ro,Z" "rpm-ostree success: status file mounted read-only"
     assert_contains "$args" "AIB_RPM_OSTREE_STATUS_FILE=/run/aib-rpm-ostree-status.json" "rpm-ostree success: env var set"
     cleanup_stubs
@@ -154,8 +163,9 @@ exit 1
 RPMOSTREE
     chmod +x "$stub_dir/rpm-ostree"
     local args status
-    args="$(PATH="$stub_dir:/usr/bin:/bin" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1; cat "$podman_log")"
+    PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1
     status=$?
+    args="$(cat "$podman_log")"
     assert_not_contains "$args" "AIB_RPM_OSTREE_STATUS_FILE" "rpm-ostree failure: no status file mounted"
     assert_eq "$status" "0" "rpm-ostree failure: aib itself still succeeds (silent fallback)"
     cleanup_stubs
@@ -165,7 +175,7 @@ RPMOSTREE
 test_rpm_ostree_absent() {
     setup_stubs
     local args
-    args="$(PATH="$stub_dir:/usr/bin:/bin" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1; cat "$podman_log")"
+    args="$(PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1; cat "$podman_log")"
     assert_not_contains "$args" "AIB_RPM_OSTREE_STATUS_FILE" "rpm-ostree absent: no status env var"
     assert_not_contains "$args" "aib-rpm-ostree-status.json" "rpm-ostree absent: no status file mount"
     cleanup_stubs
@@ -175,7 +185,7 @@ test_rpm_ostree_absent() {
 test_always_present_args() {
     setup_stubs
     local args
-    args="$(PATH="$stub_dir:/usr/bin:/bin" HOME="$stub_dir/home" AIB_IMAGE=test/image:tag "$aib" foo --bar >/dev/null 2>&1; cat "$podman_log")"
+    args="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_IMAGE=test/image:tag "$aib" foo --bar >/dev/null 2>&1; cat "$podman_log")"
     assert_contains "$args" "aib-dnf-cache:/var/cache/libdnf5" "always present: dnf cache volume"
     assert_contains "$args" "test/image:tag" "always present: custom AIB_IMAGE used"
     assert_contains "$args" "foo" "always present: extra args forwarded"
@@ -187,7 +197,7 @@ test_always_present_args() {
 test_default_image() {
     setup_stubs
     local args
-    args="$(PATH="$stub_dir:/usr/bin:/bin" HOME="$stub_dir/home" env -u AIB_IMAGE "$aib" >/dev/null 2>&1; cat "$podman_log")"
+    args="$(PATH="$stub_dir" HOME="$stub_dir/home" env -u AIB_IMAGE "$aib" >/dev/null 2>&1; cat "$podman_log")"
     assert_contains "$args" "ghcr.io/danathar/atomic-image-builder:latest" "default image: used when AIB_IMAGE unset"
     cleanup_stubs
 }
@@ -201,7 +211,7 @@ exit 42
 PODMAN
     chmod +x "$stub_dir/podman"
     local status
-    PATH="$stub_dir:/usr/bin:/bin" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1
+    PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1
     status=$?
     assert_eq "$status" "42" "exit code: podman's exit status is preserved"
     cleanup_stubs

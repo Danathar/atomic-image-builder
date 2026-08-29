@@ -68,6 +68,17 @@ jobs:
       - name: Run ruff
         run: ruff check
 
+      # contrib/aib is the host-side wrapper users curl into ~/.local/bin. It
+      # is not part of the Python package and is deliberately not baked into
+      # the image, so neither the unittest suite above nor the container-build
+      # job below ever reaches it. These two steps are its entire safety net.
+      # shellcheck ships preinstalled on the ubuntu-24.04 runner image.
+      - name: Run shellcheck
+        run: shellcheck contrib/aib tests/test_contrib_aib.sh
+
+      - name: Test contrib/aib
+        run: bash tests/test_contrib_aib.sh
+
   container-build:
     name: Build container image
     runs-on: ubuntu-24.04

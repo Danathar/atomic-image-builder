@@ -86,7 +86,10 @@ fi
 
 # --- OS scan support -----------------------------------------------------
 status_file=""
-# shellcheck disable=SC2329 # invoked indirectly via `trap cleanup EXIT` below
+# Invoked indirectly via `trap cleanup EXIT` below, which shellcheck cannot
+# see. Both codes are needed: 0.10+ reports SC2329 on the function, older
+# versions (the ubuntu-24.04 runner ships 0.9.0) report SC2317 on its body.
+# shellcheck disable=SC2317,SC2329
 cleanup() {
     if [ -n "$status_file" ]; then
         rm -f "$status_file"
