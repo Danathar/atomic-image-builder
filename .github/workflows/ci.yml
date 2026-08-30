@@ -25,7 +25,11 @@ jobs:
           python-version: "3.10"
 
       - name: Install test tooling
-        run: pip install coverage ruff
+        run: |
+          pip install coverage ruff
+          GEM_HOME="$RUNNER_TEMP/gems" gem install bashcov -v 4.0.0 --no-document --bindir "$RUNNER_TEMP/bin"
+          echo "GEM_HOME=$RUNNER_TEMP/gems" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Run tests
         run: python3 -m coverage run -m unittest discover -s tests
@@ -80,11 +84,35 @@ jobs:
       - name: Run shellcheck
         run: shellcheck contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/test_entrypoint.sh
 
-      - name: Test contrib/aib
-        run: bash tests/test_contrib_aib.sh
+      # Bashcov follows the child Bash processes launched by each harness, so
+      # this measures the real wrapper and container entrypoint rather than the
+      # harnesses themselves. The .simplecov file restricts the report to those
+      # two files. Coverage is advisory: test failures still fail this step,
+      # but there is deliberately no coverage threshold.
+      - name: Test shell entrypoints with coverage
+        run: |
+          bashcov --root "$PWD" --command-name contrib -- tests/test_contrib_aib.sh
+          bashcov --root "$PWD" --command-name entrypoint -- tests/test_entrypoint.sh
+          {
+            echo "## Shell entrypoint coverage"
+            echo
+            echo "Advisory line coverage from the behavioral shell tests."
+            echo '```'
+            jq -r '
+              "Line coverage: \(.total.lines.covered) / \(.total.lines.total) (\((.total.lines.percent * 100 | round) / 100)%)",
+              (.coverage | to_entries[] | "\(.key): \(.value.covered_lines) / \(.value.total_lines) lines (\((.value.lines_covered_percent * 100 | round) / 100)%)")
+            ' shell-coverage/coverage.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Test container entrypoint
-        run: bash tests/test_entrypoint.sh
+      - name: Upload shell entrypoint coverage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-shell
+          path: shell-coverage/
+          include-hidden-files: true
+          retention-days: 30
 
   publish-coverage:
     name: Publish coverage badge and trend
