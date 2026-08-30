@@ -6460,6 +6460,15 @@ class BuilderTests(unittest.TestCase):
         # The README is deliberately short, but it must still lead somewhere.
         self.assertIn("docs/installing.md", (root / "README.md").read_text())
 
+    def test_readme_explains_the_coverage_badge(self) -> None:
+        # The badge is the first thing a stranger sees and links to a raw CSV,
+        # which explains nothing on its own. The README has to say what the
+        # number is and hand off to CONTRIBUTING for the four measurements.
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+        self.assertIn("Unit coverage", readme)
+        self.assertIn("https://en.wikipedia.org/wiki/Code_coverage", readme)
+        self.assertIn("CONTRIBUTING.md#coverage", readme)
+
     def test_show_summary_uses_pager_for_read_only_view(self) -> None:
         app = self.make_app()
         app.github_user = "example"
