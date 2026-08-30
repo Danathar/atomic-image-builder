@@ -12,7 +12,7 @@ python3 -m unittest discover -s tests
 
 ## Coverage
 
-There are four separate coverage measurements, and they are not interchangeable.
+There are four separate coverage measurements, and they are not interchangeable. `contrib/aib` and `container/entrypoint.sh` are a deliberate fifth case, covered below.
 
 **Unit coverage** measures the source tree. `.coveragerc` holds the settings so a local run reports the same numbers CI does, and CI gates on it at 90%:
 
@@ -55,6 +55,8 @@ python3 -m coverage report --rcfile=.coveragerc.maintenance-audit
 Because that config also names `maintenance_audit`, which this job never runs, coverage prints a `module-not-imported` warning and then omits the absent module from the report. Both are expected.
 
 Like the maintenance-audit measurement it is advisory and **not** gated, and for a sharper version of the same reason: it only runs when a release is published, so there is no push that could be blocked on it.
+
+**Shell entrypoints are a documented gap, not a fifth measurement.** `contrib/aib` (the host-side wrapper) and `container/entrypoint.sh` (baked into the image) sit outside all four tiers above: `tests/test_contrib_aib.sh` and `tests/test_entrypoint.sh` exercise both with every external command stubbed, and shellcheck lints them, but no tool reports which lines or branches those tests actually reach — unlike every Python path in the repo, which is either gated or explicitly reported as advisory. A bash coverage tool such as [`kcov`](https://github.com/SimonKagstrom/kcov) was evaluated for this, but its bash instrumentation depends on ptrace and DWARF debug info from the CI runner's toolchain and needs a `workflows`-scoped credential this repo's automation doesn't grant, which is more fragility and setup cost than the two scripts' combined 141 lines currently justify. Treat this the same as the end-to-end TTY gap above: a known, deliberate limitation rather than an inferred one, worth revisiting if either script grows enough to make the blind spot expensive.
 
 All four measurements are uploaded as workflow artifacts — `coverage-unit` and `coverage-e2e` from `.github/workflows/ci.yml`, `coverage-maintenance-audit` from the weekly audit, and `coverage-homebrew-release` from the release workflow — each containing `coverage.xml`, an HTML report, and the raw coverage data files (one per e2e scenario). Download the two CI ones and merge them into a single report from any clone:
 
