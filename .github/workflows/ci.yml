@@ -111,7 +111,6 @@ jobs:
           else
             git worktree add --detach "$badge_worktree"
             git -C "$badge_worktree" switch --orphan coverage-data
-            git -C "$badge_worktree" rm -rf .
           fi
 
           python3 coverage_badge.py "$COVERAGE_PERCENT" \
