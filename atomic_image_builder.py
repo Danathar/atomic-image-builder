@@ -4654,7 +4654,7 @@ class App:
         if self.config.services:
             lines.extend(["", "  - type: systemd", "    system:", "      enabled:"])
             for svc in self.config.services:
-                lines.append(f"        - {svc}")
+                lines.append(f"        - {yaml_scalar(svc)}")
 
         lines.extend(["", "  - type: signing"])
         return "\n".join(lines) + "\n"
