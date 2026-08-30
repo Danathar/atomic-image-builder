@@ -1,14 +1,18 @@
 # Coverage settings for CI and local runs.
 #
-# Keep this in sync with the two modules that ship in the image: the tool
-# itself and the maintenance audit helper. Tests are deliberately excluded
-# from measurement — covering the test file tells us nothing.
+# Keep this in sync with the modules under unit test: the tool itself, the
+# maintenance/release helpers, and coverage_badge (a CI-only helper -- see
+# CONTRIBUTING.md's Coverage section -- not shipped in the image or run by
+# the maintenance-audit job, so it has no e2e or maintenance-audit coverage
+# of its own). Tests are deliberately excluded from measurement — covering
+# the test file tells us nothing.
 
 [run]
 source =
     atomic_image_builder
     homebrew_formula
     maintenance_audit
+    coverage_badge
 # Store paths relative to the checkout instead of absolute. Without this the
 # data file records the runner's workspace path, which makes the coverage
 # artifact useless anywhere but that runner -- see .coveragerc.e2e.
