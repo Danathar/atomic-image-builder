@@ -5,10 +5,10 @@
 
 # Atomic Image Builder
 
-A guided terminal tool for creating and updating GitHub-backed bootc image repositories — for people who want a custom image without learning the full template and workflow setup first. (The author RECOMMENDS YOU LEARN anyway!) Works with [Universal Blue](https://universal-blue.org) and [Fedora Atomic desktops](https://fedoraproject.org/atomic-desktops/).
+A guided terminal tool that turns the customizations already on your atomic desktop into a GitHub-backed bootc image. It scans your running system, carries the packages you have layered with `rpm-ostree` into a new repository, and lets GitHub Actions build the image — for people who want a custom image without learning the full template and workflow setup first. (The author RECOMMENDS YOU LEARN anyway!) Works with [Universal Blue](https://universal-blue.org) and [Fedora Atomic desktops](https://fedoraproject.org/atomic-desktops/).
 
 > [!TIP]
-> **Safe to explore — it won't touch the system you're running on.** Everything happens on GitHub: it creates a new repo and lets GitHub Actions build your image. It never modifies, rebases, or removes packages from your current install. Switching your machine to the built image is a separate, deliberate step you take later.
+> **Safe to explore — it won't touch the system you're running on.** The scan only reads your `rpm-ostree` state; everything it creates happens on GitHub. It never modifies, rebases, or removes packages from your current install. Switching your machine to the built image is a separate, deliberate step you take later.
 
 > [!WARNING]
 > **0.9 beta, not fully tested.** Review the changes it makes before applying them.
@@ -37,19 +37,23 @@ Other options — plain `podman run`, distrobox, running from source — are in 
 
 ## What it does
 
-Creates and maintains a **separate GitHub repository** that builds a custom bootc image for you through GitHub Actions. From the guided menu you can:
+**Create Image** starts by scanning the system you are on. It reads your booted deployment's `rpm-ostree` state — the image you are running, the packages you have layered, and any base packages you have removed — and offers all of it, pre-selected, to carry into a new repo. The base image comes from your system rather than a menu, because Universal Blue images are not rebase-compatible with each other and one built on the wrong base is one you cannot switch back onto.
 
-- Create a repo using either build method — **Containerfile** (from a bundled snapshot of [`ublue-os/image-template`](https://github.com/ublue-os/image-template)) or **BlueBuild** (from [`blue-build/template`](https://github.com/blue-build/template)).
-- Add packages, COPR repos, systemd services, and base-package removals.
-- Scan your running system and carry layered packages into a new repo.
+What it creates and maintains is a **separate GitHub repository** that builds your image through GitHub Actions. From the guided menu you can:
+
+- Carry layered packages and base-package removals from the running system into a new repo, picking which ones come along.
+- Add more on top: packages, COPR repos, systemd services, and further base-package removals.
+- Choose the build method — **Containerfile** (from a bundled snapshot of [`ublue-os/image-template`](https://github.com/ublue-os/image-template)) or **BlueBuild** (from [`blue-build/template`](https://github.com/blue-build/template)).
 - Update repos it created, view build status, and rotate the cosign signing key.
 - Test-build a Containerfile image locally with Podman before pushing.
 
-Supported bases: **[Universal Blue](https://universal-blue.org)** — [Bazzite](https://bazzite.gg) (also GNOME, DX, DX GNOME), [Aurora](https://getaurora.dev) (also DX), [Bluefin](https://projectbluefin.io) (also DX) — and **[Fedora Atomic](https://fedoraproject.org/atomic-desktops/)**: Silverblue, Kinoite, Sway, Budgie, COSMIC.
+Nothing has to be layered for this to be useful — with a clean system it simply starts from the base you are on and you add what you want. And if there is no system to read, as with a bare `podman run`, the tool says so and lets you pick a base image by hand.
+
+Supported bases — the scan needs you to be running one of these: **[Universal Blue](https://universal-blue.org)** — [Bazzite](https://bazzite.gg) (also GNOME, DX, DX GNOME), [Aurora](https://getaurora.dev) (also DX), [Bluefin](https://projectbluefin.io) (also DX) — and **[Fedora Atomic](https://fedoraproject.org/atomic-desktops/)**: Silverblue, Kinoite, Sway, Budgie, COSMIC.
 
 ### What it does not do
 
-- **Leaves the system you run it on alone** — no in-place changes, no automatic rebase, never removes layered packages from your current install.
+- **Leaves the system you run it on alone** — the scan reads and never writes: no in-place changes, no automatic rebase, and your layered packages stay exactly where they are.
 - Does not adopt repos it did not create — a repo without `.atomic-image-builder.json` is not treated as managed.
 - Local test builds are Containerfile-only.
 - Advanced BlueBuild modules beyond the guided wizard are out of scope.
@@ -61,7 +65,7 @@ Supported bases: **[Universal Blue](https://universal-blue.org)** — [Bazzite](
 
 ## Who it's for
 
-Beginner and intermediate atomic-desktop users who want a guided path to a custom image repo. Bootc desktops are powerful, but the normal setup assumes you are comfortable with image templates, GitHub Actions, signing, and image maintenance. This tool trades that setup cost for a guided workflow with stricter defaults — it is intentionally **not** aimed at exposing every advanced workflow.
+Beginner and intermediate atomic-desktop users who want a guided path to a custom image repo — in particular anyone who has accumulated a pile of `rpm-ostree` layered packages and would rather have them baked into the image than re-applied on top of every update. Bootc desktops are powerful, but the normal setup assumes you are comfortable with image templates, GitHub Actions, signing, and image maintenance. This tool trades that setup cost for a guided workflow with stricter defaults — it is intentionally **not** aimed at exposing every advanced workflow.
 
 ## Feedback
 
