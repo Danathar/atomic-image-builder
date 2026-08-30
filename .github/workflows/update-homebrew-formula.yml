@@ -64,7 +64,7 @@ jobs:
       # the step below falls back to running the script unmeasured.
       - name: Install coverage tooling
         continue-on-error: true
-        run: pip install coverage
+        run: pip install coverage==7.16.0
 
       - name: Point the formula at the release
         id: update
