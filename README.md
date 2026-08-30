@@ -1,7 +1,7 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Danathar/atomic-image-builder)
 [![Maintenance assisted by KubeStellar Hive](https://img.shields.io/badge/maintenance%20assisted%20by-KubeStellar%20Hive-1f6feb)](https://github.com/kubestellar/hive)
 [![ACMM L4 Security-Aware](https://img.shields.io/badge/ACMM-L4%20Security--Aware-2da44e)](https://github.com/kubestellar/hive#acmm-levels)
-[![Unit coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDanathar%2Fatomic-image-builder%2Fcoverage-data%2Fcoverage-unit.json)](https://raw.githubusercontent.com/Danathar/atomic-image-builder/coverage-data/coverage-trend.csv)
+[![Unit coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDanathar%2Fatomic-image-builder%2Fcoverage-data%2Fcoverage-unit.json)](https://raw.githubusercontent.com/Danathar/atomic-image-builder/coverage-data/coverage-trend.csv) [what is coverage?](docs/coverage.md)
 
 # Atomic Image Builder
 
@@ -88,14 +88,6 @@ Bugs, confusing behavior, and rough edges are all welcome: [open an issue](https
 > At **L4 (Security-Aware)** all agents may file issues, and the quality, security and CI agents may additionally open pull requests that carry a hold label. The rest stay advisory: they report, they do not act. Every change is still reviewed and merged by a human maintainer.
 >
 > Learn more: [KubeStellar](https://kubestellar.io) · [Hive](https://github.com/kubestellar/hive) · [Hive Hub](https://hive.kubestellar.io) · [full ACMM policy matrix](https://github.com/kubestellar/hive/blob/v4/src/docs/acmm-policy-matrix.md)
-
-### What the coverage badge means
-
-The **Unit coverage** badge at the top is [code coverage](https://en.wikipedia.org/wiki/Code_coverage): the share of this project's own source lines — and of the branches through them — that the automated test suite actually executes when it runs. CI measures it with [coverage.py](https://coverage.readthedocs.io/) on every push and pull request, and fails the build if it drops below 90%.
-
-Read it as a floor, not a grade. It says how much of the code is exercised by tests at all; it does not say the tested parts are correct, since a line can be run by a test that never checks the result. What it does tell you is where nothing is watching: uncovered code has never been run by a test, so no test would notice if a change broke it. That matters here because this tool creates and edits GitHub repositories on your behalf, and most of what it does is impractical to verify by hand on every change.
-
-The badge links to the [full history](https://raw.githubusercontent.com/Danathar/atomic-image-builder/coverage-data/coverage-trend.csv), one row per push to `main`, so the trend is visible rather than just today's snapshot. Unit coverage is only one of four separate measurements this project tracks, and they are not interchangeable — [CONTRIBUTING.md](CONTRIBUTING.md#coverage) explains what each one covers and how to reproduce it locally.
 
 ## License
 
