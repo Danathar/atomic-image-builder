@@ -1,6 +1,7 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Danathar/atomic-image-builder)
 [![Maintenance assisted by KubeStellar Hive](https://img.shields.io/badge/maintenance%20assisted%20by-KubeStellar%20Hive-1f6feb)](https://github.com/kubestellar/hive)
 [![ACMM L4 Security-Aware](https://img.shields.io/badge/ACMM-L4%20Security--Aware-2da44e)](https://github.com/kubestellar/hive#acmm-levels)
+[![Unit coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDanathar%2Fatomic-image-builder%2Fcoverage-data%2Fcoverage-unit.json)](https://raw.githubusercontent.com/Danathar/atomic-image-builder/coverage-data/coverage-trend.csv)
 
 # Atomic Image Builder
 

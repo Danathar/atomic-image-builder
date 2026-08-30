@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    outputs:
+      unit_coverage: ${{ steps.coverage.outputs.percent }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -33,6 +35,7 @@ jobs:
       # summary is written before the gate so a failing run still shows which
       # lines are missing.
       - name: Report coverage
+        id: coverage
         run: |
           {
             echo "## Coverage"
@@ -42,6 +45,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           python3 -m coverage report --fail-under=90
+          echo "percent=$(python3 -m coverage report --format=total)" >> "$GITHUB_OUTPUT"
 
       # Uploaded even when the gate above fails: a run that dropped below the
       # threshold is exactly when someone wants the line-level data. The raw
@@ -81,6 +85,51 @@ jobs:
 
       - name: Test container entrypoint
         run: bash tests/test_entrypoint.sh
+
+  publish-coverage:
+    name: Publish coverage badge and trend
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: coverage-data
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Publish coverage data
+        env:
+          COVERAGE_PERCENT: ${{ needs.test.outputs.unit_coverage }}
+        run: |
+          set -euo pipefail
+          publish_root="$(mktemp -d)"
+          badge_worktree="$publish_root/coverage-data"
+          trap 'git worktree remove --force "$badge_worktree" 2>/dev/null || true; rmdir "$publish_root" 2>/dev/null || true' EXIT
+
+          if git fetch origin coverage-data:refs/remotes/origin/coverage-data; then
+            git worktree add --detach "$badge_worktree" refs/remotes/origin/coverage-data
+          else
+            git worktree add --detach "$badge_worktree"
+            git -C "$badge_worktree" switch --orphan coverage-data
+          fi
+
+          python3 coverage_badge.py "$COVERAGE_PERCENT" \
+            --date "$(date -u +%Y-%m-%d)" \
+            --sha "$GITHUB_SHA" \
+            --badge-out "$badge_worktree/coverage-unit.json" \
+            --trend-out "$badge_worktree/coverage-trend.csv"
+
+          git -C "$badge_worktree" config user.name "github-actions[bot]"
+          git -C "$badge_worktree" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$badge_worktree" add coverage-unit.json coverage-trend.csv
+          if git -C "$badge_worktree" diff --cached --quiet; then
+            exit 0
+          fi
+          git -C "$badge_worktree" commit -m "chore: record unit coverage for ${GITHUB_SHA::12}"
+          git -C "$badge_worktree" push origin HEAD:coverage-data
 
   container-build:
     name: Build container image

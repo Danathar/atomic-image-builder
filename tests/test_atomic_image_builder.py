@@ -7226,10 +7226,12 @@ class BuilderTests(unittest.TestCase):
 
     def test_generate_recipe_includes_services(self) -> None:
         app = self.make_bluebuild_app()
-        app.config.services = ["tailscaled.service"]
+        app.config.services = ["tailscaled.service", "@my-instance.service"]
         recipe = app.generate_recipe()
         self.assertIn("- type: systemd", recipe)
-        self.assertIn("        - tailscaled.service", recipe)
+        self.assertIn('        - "tailscaled.service"', recipe)
+        self.assertIn('        - "@my-instance.service"', recipe)
+        self.assertNotIn("        - @my-instance.service", recipe)
 
     def test_generate_recipe_includes_brew_oci_layer(self) -> None:
         app = self.make_bluebuild_app()
