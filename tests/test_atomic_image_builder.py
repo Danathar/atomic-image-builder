@@ -7207,22 +7207,39 @@ class BuilderTests(unittest.TestCase):
         app.config.packages = ["htop", "tmux"]
         recipe = app.generate_recipe()
         self.assertIn("- type: dnf", recipe)
-        self.assertIn("        - htop", recipe)
-        self.assertIn("        - tmux", recipe)
+        self.assertIn('        - "htop"', recipe)
+        self.assertIn('        - "tmux"', recipe)
+
+    def test_generate_recipe_quotes_package_with_trailing_colon(self) -> None:
+        # PACKAGE_TOKEN_RE permits ":", so "epel:" passes validation. Emitted
+        # bare it would become a mapping node instead of the string BlueBuild
+        # expects, silently corrupting the recipe.
+        app = self.make_bluebuild_app()
+        app.config.packages = ["epel:"]
+        recipe = app.generate_recipe()
+        self.assertIn('        - "epel:"', recipe)
+        self.assertNotIn("        - epel:", recipe)
 
     def test_generate_recipe_includes_copr_repos(self) -> None:
         app = self.make_bluebuild_app()
         app.config.copr_repos = ["kylegospo/bazzite"]
         recipe = app.generate_recipe()
         self.assertIn("copr:", recipe)
-        self.assertIn("        - kylegospo/bazzite", recipe)
+        self.assertIn('        - "kylegospo/bazzite"', recipe)
 
     def test_generate_recipe_includes_removed_packages(self) -> None:
         app = self.make_bluebuild_app()
         app.config.removed_packages = ["firefox"]
         recipe = app.generate_recipe()
         self.assertIn("remove:", recipe)
-        self.assertIn("        - firefox", recipe)
+        self.assertIn('        - "firefox"', recipe)
+
+    def test_generate_recipe_quotes_removed_package_with_trailing_colon(self) -> None:
+        app = self.make_bluebuild_app()
+        app.config.removed_packages = ["epel:"]
+        recipe = app.generate_recipe()
+        self.assertIn('        - "epel:"', recipe)
+        self.assertNotIn("        - epel:", recipe)
 
     def test_generate_recipe_includes_services(self) -> None:
         app = self.make_bluebuild_app()
@@ -7680,7 +7697,7 @@ class BuilderTests(unittest.TestCase):
             recipe = recipe_path.read_text()
             self.assertIn("name: test-bb-image", recipe)
             self.assertIn("- type: dnf", recipe)
-            self.assertIn("        - htop", recipe)
+            self.assertIn('        - "htop"', recipe)
 
     def test_write_bluebuild_project_files_writes_readme(self) -> None:
         app = self.make_bluebuild_app()

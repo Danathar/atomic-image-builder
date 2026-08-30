@@ -4602,8 +4602,10 @@ class App:
 
     def generate_recipe(self) -> str:
         # Generate a BlueBuild recipe YAML from Config without needing pyyaml.
-        # Values that might need quoting use yaml_scalar(); plain tokens like
-        # package names are safe because validate_config() already checked them.
+        # Every user-supplied scalar goes through yaml_scalar(). The token
+        # validators are not enough on their own: PACKAGE_TOKEN_RE allows ":",
+        # so a name like "epel:" would otherwise emit "- epel:", which YAML
+        # parses as a mapping instead of the string BlueBuild's schema expects.
         base_image, image_version = self._split_image_ref(self.config.base_image_uri)
         lines = [
             "---",
@@ -4641,15 +4643,15 @@ class App:
             if self.config.copr_repos:
                 lines.extend(["    repos:", "      copr:"])
                 for repo in self.config.copr_repos:
-                    lines.append(f"        - {repo}")
+                    lines.append(f"        - {yaml_scalar(repo)}")
             if self.config.packages:
                 lines.extend(["    install:", "      packages:"])
                 for pkg in self.config.packages:
-                    lines.append(f"        - {pkg}")
+                    lines.append(f"        - {yaml_scalar(pkg)}")
             if self.config.removed_packages:
                 lines.extend(["    remove:", "      packages:"])
                 for pkg in self.config.removed_packages:
-                    lines.append(f"        - {pkg}")
+                    lines.append(f"        - {yaml_scalar(pkg)}")
 
         if self.config.services:
             lines.extend(["", "  - type: systemd", "    system:", "      enabled:"])
