@@ -6460,20 +6460,24 @@ class BuilderTests(unittest.TestCase):
         # The README is deliberately short, but it must still lead somewhere.
         self.assertIn("docs/installing.md", (root / "README.md").read_text())
 
-    def test_readme_badge_row_links_to_the_coverage_explainer(self) -> None:
-        # The badge itself links to a raw CSV, which explains nothing to a
-        # reader who does not already know what coverage is. The plain-language
-        # link beside it is the only thing that does, so it has to stay put.
+    def test_readme_coverage_badge_links_to_the_explainer(self) -> None:
+        # Clicking the badge used to land on the raw trend CSV -- a wall of
+        # date/SHA/percentage rows that explains nothing to a reader who does
+        # not already know what coverage is. It points at the explainer
+        # instead, which is the only thing in the repo that does explain it.
         readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
         self.assertIn("Unit coverage", readme)
-        self.assertIn("[what is coverage?](docs/coverage.md)", readme)
+        self.assertIn("coverage-unit.json)](docs/coverage.md)", readme)
+        self.assertNotIn("coverage-trend.csv", readme)
 
     def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
-        # The explainer has to define the term for a newcomer and route a
-        # reader who wants more to CONTRIBUTING, where all four measurements
+        # The explainer has to define the term for a newcomer, keep the trend
+        # history reachable now that the badge no longer links to it, and route
+        # a reader who wants more to CONTRIBUTING, where all four measurements
         # (unit, e2e, maintenance-audit, homebrew-release) are documented.
         explainer = (Path(__file__).resolve().parents[1] / "docs/coverage.md").read_text()
         self.assertIn("https://en.wikipedia.org/wiki/Code_coverage", explainer)
+        self.assertIn("coverage-trend.csv", explainer)
         self.assertIn("../CONTRIBUTING.md#coverage", explainer)
 
     def test_show_summary_uses_pager_for_read_only_view(self) -> None:
