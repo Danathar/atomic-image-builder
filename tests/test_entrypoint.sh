@@ -75,7 +75,9 @@ assert_eq() {
 }
 
 read_log() {
-    [ -f "$1" ] && cat "$1" || true
+    if [ -f "$1" ]; then
+        cat "$1"
+    fi
 }
 
 # --- GH_TOKEN set, gh present and logged in: setup-git runs ---------------
