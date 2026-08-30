@@ -70,6 +70,8 @@ The maintenance-audit and homebrew-release data files live under `data/` for the
 
 A commit that changes nothing the image is built from will not produce a `coverage-e2e` artifact, since the `container-build` job is path-scoped. Run the CI workflow manually (`workflow_dispatch`) to force one.
 
+Because artifacts expire after 30 days, `coverage_badge.py` exists to publish the unit number somewhere durable: given a percentage, a date, and a SHA, it writes a shields.io endpoint-badge payload and appends a trend row (date, SHA, percentage) to a CSV. It only writes those two files -- wiring it into `ci.yml` (running it after the coverage gate as `python3 coverage_badge.py "$(python3 -m coverage report --format=total)" --date ... --sha "$GITHUB_SHA" --badge-out ... --trend-out ...`, then pushing the resulting files to a dedicated branch on `main`) and adding a README badge that reads from that branch is a follow-up. See `coverage_badge.py --help` and `tests/test_coverage_badge.py` for its behavior.
+
 ## Linting
 
 ```bash
