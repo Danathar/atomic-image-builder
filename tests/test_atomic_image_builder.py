@@ -6460,14 +6460,21 @@ class BuilderTests(unittest.TestCase):
         # The README is deliberately short, but it must still lead somewhere.
         self.assertIn("docs/installing.md", (root / "README.md").read_text())
 
-    def test_readme_explains_the_coverage_badge(self) -> None:
-        # The badge is the first thing a stranger sees and links to a raw CSV,
-        # which explains nothing on its own. The README has to say what the
-        # number is and hand off to CONTRIBUTING for the four measurements.
+    def test_readme_badge_row_links_to_the_coverage_explainer(self) -> None:
+        # The badge itself links to a raw CSV, which explains nothing to a
+        # reader who does not already know what coverage is. The plain-language
+        # link beside it is the only thing that does, so it has to stay put.
         readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
         self.assertIn("Unit coverage", readme)
-        self.assertIn("https://en.wikipedia.org/wiki/Code_coverage", readme)
-        self.assertIn("CONTRIBUTING.md#coverage", readme)
+        self.assertIn("[what is coverage?](docs/coverage.md)", readme)
+
+    def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
+        # The explainer has to define the term for a newcomer and route a
+        # reader who wants more to CONTRIBUTING, where all four measurements
+        # (unit, e2e, maintenance-audit, homebrew-release) are documented.
+        explainer = (Path(__file__).resolve().parents[1] / "docs/coverage.md").read_text()
+        self.assertIn("https://en.wikipedia.org/wiki/Code_coverage", explainer)
+        self.assertIn("../CONTRIBUTING.md#coverage", explainer)
 
     def test_show_summary_uses_pager_for_read_only_view(self) -> None:
         app = self.make_app()
