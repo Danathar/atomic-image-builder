@@ -26,7 +26,7 @@ jobs:
       # download, so it is also the only place that can show which of their
       # network and error-handling branches a real run actually reaches.
       - name: Install coverage tooling
-        run: pip install coverage
+        run: pip install coverage==7.16.0
 
       # --check-action-updates was opt-in and nothing opted in, so pin drift
       # was only ever found by hand. It runs here now. Its output is advisory
