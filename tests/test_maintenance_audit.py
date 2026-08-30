@@ -33,8 +33,8 @@ from maintenance_audit import (
 class FakeResponse:
     """Minimal context-manager stand-in for urllib.request.urlopen."""
 
-    def __init__(self, payload: object) -> None:
-        self._body = json.dumps(payload)
+    def __init__(self, payload: object, *, raw: bytes | None = None) -> None:
+        self._body = raw if raw is not None else json.dumps(payload).encode()
 
     def __enter__(self) -> "FakeResponse":
         return self
@@ -43,7 +43,7 @@ class FakeResponse:
         return None
 
     def read(self) -> bytes:
-        return self._body.encode()
+        return self._body
 
 
 class MaintenanceAuditTests(unittest.TestCase):
@@ -254,7 +254,7 @@ class MaintenanceAuditTests(unittest.TestCase):
         self.assertIsNone(without_token.get_header("Authorization"))
         self.assertEqual(with_token.get_header("Accept"), "application/vnd.github+json")
 
-    def test_github_api_json_wraps_http_and_url_errors(self) -> None:
+    def test_github_api_json_wraps_response_errors(self) -> None:
         http_error = urllib.error.HTTPError(
             "https://api.github.com/x", 403, "Forbidden", {}, io.BytesIO(b"rate limit exceeded")
         )
@@ -272,6 +272,16 @@ class MaintenanceAuditTests(unittest.TestCase):
         url_error = urllib.error.URLError("name resolution failed")
         with patch("maintenance_audit.urllib.request.urlopen", side_effect=url_error):
             with self.assertRaisesRegex(RuntimeError, "name resolution failed"):
+                github_api_json("https://api.github.com/x")
+
+        invalid_json = FakeResponse(None, raw=b"not json")
+        with patch("maintenance_audit.urllib.request.urlopen", return_value=invalid_json):
+            with self.assertRaisesRegex(RuntimeError, "Invalid JSON response from GitHub"):
+                github_api_json("https://api.github.com/x")
+
+        invalid_encoding = FakeResponse(None, raw=b"\x80")
+        with patch("maintenance_audit.urllib.request.urlopen", return_value=invalid_encoding):
+            with self.assertRaisesRegex(RuntimeError, "Invalid JSON response from GitHub"):
                 github_api_json("https://api.github.com/x")
 
     def test_query_latest_github_semver_tag_picks_highest_and_skips_noise(self) -> None:
