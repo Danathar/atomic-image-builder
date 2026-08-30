@@ -178,6 +178,8 @@ def github_api_json(url: str) -> object:
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             return json.load(response)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid JSON response from GitHub: {exc}") from exc
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace").strip()
         raise RuntimeError(detail or f"HTTP {exc.code}") from exc
