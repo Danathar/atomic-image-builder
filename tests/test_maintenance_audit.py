@@ -33,8 +33,8 @@ from maintenance_audit import (
 class FakeResponse:
     """Minimal context-manager stand-in for urllib.request.urlopen."""
 
-    def __init__(self, payload: object, *, raw: str | None = None) -> None:
-        self._body = raw if raw is not None else json.dumps(payload)
+    def __init__(self, payload: object, *, raw: bytes | None = None) -> None:
+        self._body = raw if raw is not None else json.dumps(payload).encode()
 
     def __enter__(self) -> "FakeResponse":
         return self
@@ -43,7 +43,7 @@ class FakeResponse:
         return None
 
     def read(self) -> bytes:
-        return self._body.encode()
+        return self._body
 
 
 class MaintenanceAuditTests(unittest.TestCase):
@@ -274,8 +274,13 @@ class MaintenanceAuditTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "name resolution failed"):
                 github_api_json("https://api.github.com/x")
 
-        invalid_json = FakeResponse(None, raw="not json")
+        invalid_json = FakeResponse(None, raw=b"not json")
         with patch("maintenance_audit.urllib.request.urlopen", return_value=invalid_json):
+            with self.assertRaisesRegex(RuntimeError, "Invalid JSON response from GitHub"):
+                github_api_json("https://api.github.com/x")
+
+        invalid_encoding = FakeResponse(None, raw=b"\x80")
+        with patch("maintenance_audit.urllib.request.urlopen", return_value=invalid_encoding):
             with self.assertRaisesRegex(RuntimeError, "Invalid JSON response from GitHub"):
                 github_api_json("https://api.github.com/x")
 
