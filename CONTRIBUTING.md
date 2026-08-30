@@ -12,7 +12,7 @@ python3 -m unittest discover -s tests
 
 ## Coverage
 
-There are four separate coverage measurements, and they are not interchangeable.
+There are five separate coverage measurements, and they are not interchangeable.
 
 **Unit coverage** measures the source tree. `.coveragerc` holds the settings so a local run reports the same numbers CI does, and CI gates on it at 90%:
 
@@ -33,6 +33,16 @@ python3 -m coverage report --rcfile=.coveragerc.e2e
 ```
 
 End-to-end coverage is deliberately low and is **not** gated: the guided wizard needs a TTY, so the only end-to-end reachable paths are `--version`, `--help`, and the preflight failure. It exists so coverage gaps can be classified honestly rather than inferred from the unit run alone.
+
+**Shell-entrypoint coverage** measures executable lines in `contrib/aib` and `container/entrypoint.sh`. The same behavioral suites used by CI run under Bashcov, which follows the child Bash processes they launch. `.simplecov` restricts the report to those two user-facing scripts so the test harnesses and temporary command stubs do not inflate the denominator. To reproduce it locally with the version used by CI:
+
+```bash
+gem install bashcov -v 4.0.0 --no-document
+bashcov --root "$PWD" --command-name contrib -- tests/test_contrib_aib.sh
+bashcov --root "$PWD" --command-name entrypoint -- tests/test_entrypoint.sh
+```
+
+The report is written to `shell-coverage/` as HTML and JSON. Warnings that a temporary stub was deleted before reporting are expected: the harnesses deliberately remove their fake `gh`, `podman`, `rpm-ostree`, and `atomic-image-builder` commands after every scenario, and `.simplecov` excludes them from the report anyway. This tier is advisory and has no minimum. Bashcov reports line coverage, not branch coverage, so condition outcomes remain proven by the behavioral assertions rather than a branch percentage.
 
 **Maintenance-audit coverage** measures what a real run of `maintenance_audit.py` and `homebrew_formula.py` executes. Both are unit-tested only against mocked network calls — `FakeResponse`, patched `urlopen` and `subprocess` — and the weekly `.github/workflows/maintenance-audit.yml` job is the only place either one runs against the live GitHub API and a real tarball download. `.coveragerc.maintenance-audit` holds the settings. To reproduce a run locally (`GH_TOKEN` needs to be set for the audit's API calls):
 
@@ -56,7 +66,7 @@ Because that config also names `maintenance_audit`, which this job never runs, c
 
 Like the maintenance-audit measurement it is advisory and **not** gated, and for a sharper version of the same reason: it only runs when a release is published, so there is no push that could be blocked on it.
 
-All four measurements are uploaded as workflow artifacts — `coverage-unit` and `coverage-e2e` from `.github/workflows/ci.yml`, `coverage-maintenance-audit` from the weekly audit, and `coverage-homebrew-release` from the release workflow — each containing `coverage.xml`, an HTML report, and the raw coverage data files (one per e2e scenario). Download the two CI ones and merge them into a single report from any clone:
+All five measurements are uploaded as workflow artifacts — `coverage-unit`, `coverage-shell`, and `coverage-e2e` from `.github/workflows/ci.yml`, `coverage-maintenance-audit` from the weekly audit, and `coverage-homebrew-release` from the release workflow. The Python artifacts contain `coverage.xml`, an HTML report, and raw coverage data files (one per e2e scenario); the shell artifact contains Bashcov's HTML, JSON, and result-set files. Download the two Python CI artifacts and merge them into a single report from any clone:
 
 ```bash
 gh run download <run-id>
