@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from _local_http_server import closed_port_url, local_http_server
 from maintenance_audit import (
+    SNAPSHOT_DRIFT_FAILURE_COMMITS,
     TemplateSource,
     audit_action_pin_freshness,
     audit_action_update_availability,
@@ -171,53 +172,92 @@ class MaintenanceAuditTests(unittest.TestCase):
         )
         with patch("maintenance_audit.subprocess.run", return_value=completed):
             with patch("maintenance_audit.query_github_comparison", return_value=("ahead", 3, 0)):
-                findings = audit_upstream_drift(source)
+                findings, advisories = audit_upstream_drift(source)
 
+        self.assertEqual(findings, [])
+        self.assertEqual(len(advisories), 1)
+        self.assertIn("trails upstream HEAD", advisories[0])
+
+    def test_audit_upstream_drift_fails_once_the_snapshot_is_badly_stale(self) -> None:
+        # Past the threshold the drift is neglect rather than movement, and
+        # every generated repo is shipping that much stale template.
+        source = TemplateSource(
+            repo="https://github.com/ublue-os/image-template.git",
+            revision="a" * 40,
+        )
+        with patch("maintenance_audit.query_remote_head", return_value="b" * 40):
+            with patch(
+                "maintenance_audit.query_github_comparison",
+                return_value=("ahead", SNAPSHOT_DRIFT_FAILURE_COMMITS, 0),
+            ):
+                findings, advisories = audit_upstream_drift(source)
+        self.assertEqual(advisories, [])
         self.assertEqual(len(findings), 1)
-        self.assertIn("trails upstream HEAD", findings[0])
+        self.assertIn("stops being ordinary upstream movement", findings[0])
 
     def test_describe_snapshot_drift_states_how_far_behind(self) -> None:
         # The advisory has to be triageable without a checkout: three commits
         # behind is an ordinary week, eighty is a snapshot nobody has looked at.
         source = TemplateSource(repo="https://github.com/ublue-os/image-template.git", revision="a" * 40)
-        with patch("maintenance_audit.query_github_comparison", return_value=("ahead", 47, 0)) as compare:
-            message = describe_snapshot_drift(source, "b" * 40)
+        with patch("maintenance_audit.query_github_comparison", return_value=("ahead", 7, 0)) as compare:
+            drift = describe_snapshot_drift(source, "b" * 40)
         compare.assert_called_once_with("ublue-os/image-template", "a" * 40, "b" * 40)
-        self.assertIn("47 commit(s) newer", message)
-        self.assertIn("Refresh the snapshot", message)
+        self.assertIn("7 commit(s) newer", drift.message)
+        self.assertIn("Refresh the snapshot", drift.message)
+        self.assertFalse(drift.blocking)
+
+    def test_describe_snapshot_drift_blocks_only_past_the_threshold(self) -> None:
+        # The boundary is the whole point of the threshold, so pin both sides
+        # of it. All four runs behind issue #129 sat at 1-4 commits.
+        source = TemplateSource(repo="https://github.com/ublue-os/image-template.git", revision="a" * 40)
+        for ahead, blocking in (
+            (SNAPSHOT_DRIFT_FAILURE_COMMITS - 1, False),
+            (SNAPSHOT_DRIFT_FAILURE_COMMITS, True),
+        ):
+            with self.subTest(ahead=ahead):
+                with patch("maintenance_audit.query_github_comparison", return_value=("ahead", ahead, 0)):
+                    drift = describe_snapshot_drift(source, "b" * 40)
+                self.assertEqual(drift.blocking, blocking)
 
     def test_describe_snapshot_drift_refuses_to_recommend_a_rollback(self) -> None:
         # A force-pushed upstream branch can move HEAD backwards, and then
         # "refresh to HEAD" would roll the bundled snapshot back.
         source = TemplateSource(repo="https://github.com/ublue-os/image-template.git", revision="a" * 40)
         with patch("maintenance_audit.query_github_comparison", return_value=("behind", 0, 9)):
-            message = describe_snapshot_drift(source, "b" * 40)
-        self.assertIn("9 commit(s) OLDER", message)
-        self.assertIn("Look before refreshing", message)
-        self.assertNotIn("Refresh the snapshot", message)
+            drift = describe_snapshot_drift(source, "b" * 40)
+        self.assertIn("9 commit(s) OLDER", drift.message)
+        self.assertIn("Look before refreshing", drift.message)
+        self.assertNotIn("Refresh the snapshot", drift.message)
+        # Never blocking: failing the job here would demand a refresh that
+        # would roll the snapshot backwards.
+        self.assertFalse(drift.blocking)
 
     def test_describe_snapshot_drift_flags_diverged_history(self) -> None:
         source = TemplateSource(repo="https://github.com/ublue-os/image-template.git", revision="a" * 40)
         with patch("maintenance_audit.query_github_comparison", return_value=("diverged", 2, 5)):
-            message = describe_snapshot_drift(source, "b" * 40)
-        self.assertIn("diverged history", message)
+            drift = describe_snapshot_drift(source, "b" * 40)
+        self.assertIn("diverged history", drift.message)
+        self.assertFalse(drift.blocking)
 
     def test_describe_snapshot_drift_falls_back_when_compare_fails(self) -> None:
         source = TemplateSource(repo="https://github.com/ublue-os/image-template.git", revision="a" * 40)
         with patch("maintenance_audit.query_github_comparison", side_effect=RuntimeError("rate limited")):
-            message = describe_snapshot_drift(source, "b" * 40)
-        self.assertIn("trails upstream HEAD", message)
-        self.assertIn("Refresh the snapshot", message)
-        self.assertNotIn("commit(s)", message)
+            drift = describe_snapshot_drift(source, "b" * 40)
+        self.assertIn("trails upstream HEAD", drift.message)
+        self.assertIn("Refresh the snapshot", drift.message)
+        self.assertNotIn("commit(s)", drift.message)
+        # Blocking on an unknown count is how a rate limit becomes a red audit.
+        self.assertFalse(drift.blocking)
 
     def test_describe_snapshot_drift_skips_compare_for_a_non_github_remote(self) -> None:
         # The compare API is GitHub-only; a snapshot pinned to any other host
         # still has to produce a usable advisory rather than an exception.
         source = TemplateSource(repo="https://gitlab.com/example/template.git", revision="a" * 40)
         with patch("maintenance_audit.query_github_comparison") as compare:
-            message = describe_snapshot_drift(source, "b" * 40)
+            drift = describe_snapshot_drift(source, "b" * 40)
         compare.assert_not_called()
-        self.assertIn("trails upstream HEAD", message)
+        self.assertIn("trails upstream HEAD", drift.message)
+        self.assertFalse(drift.blocking)
 
     def test_github_repo_slug_parses_clone_urls(self) -> None:
         self.assertEqual(github_repo_slug("https://github.com/ublue-os/image-template.git"), "ublue-os/image-template")
@@ -231,8 +271,9 @@ class MaintenanceAuditTests(unittest.TestCase):
             revision="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
         with patch("maintenance_audit.query_remote_head", return_value=source.revision):
-            findings = audit_upstream_drift(source)
+            findings, advisories = audit_upstream_drift(source)
         self.assertEqual(findings, [])
+        self.assertEqual(advisories, [])
 
     def test_audit_action_update_availability_reports_newer_tags(self) -> None:
         actions = {"docker/login-action": ("deadbeef", "v4.0.0")}
@@ -278,16 +319,19 @@ class MaintenanceAuditTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Unexpected ls-remote output"):
                 query_remote_head("https://github.com/example/repo.git")
 
-    def test_audit_upstream_drift_reports_query_failure_as_finding(self) -> None:
+    def test_audit_upstream_drift_reports_query_failure_as_advisory(self) -> None:
+        # Being unable to check is not an inconsistency. An unreachable
+        # upstream must not take the weekly job red.
         source = TemplateSource(
             repo="https://github.com/example/repo.git",
             revision="a" * 40,
         )
         with patch("maintenance_audit.query_remote_head", side_effect=RuntimeError("offline")):
-            findings = audit_upstream_drift(source)
-        self.assertEqual(len(findings), 1)
-        self.assertIn("Unable to query upstream template HEAD", findings[0])
-        self.assertIn("offline", findings[0])
+            findings, advisories = audit_upstream_drift(source)
+        self.assertEqual(findings, [])
+        self.assertEqual(len(advisories), 1)
+        self.assertIn("Unable to query upstream template HEAD", advisories[0])
+        self.assertIn("offline", advisories[0])
 
     def test_github_api_json_sends_token_header_only_when_set(self) -> None:
         captured: list = []
@@ -389,7 +433,7 @@ class MaintenanceAuditTests(unittest.TestCase):
     def test_run_audit_queries_drift_per_template_source(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         with patch(
-            "maintenance_audit.audit_upstream_drift", return_value=["drift advisory"]
+            "maintenance_audit.audit_upstream_drift", return_value=([], ["drift advisory"])
         ) as drift:
             findings, advisories = run_audit(repo_root, skip_upstream=False)
         self.assertEqual(drift.call_count, 2)
@@ -402,11 +446,20 @@ class MaintenanceAuditTests(unittest.TestCase):
         # audit_local_snapshot() in an already-red run. See issue #129.
         repo_root = Path(__file__).resolve().parents[1]
         with patch(
-            "maintenance_audit.audit_upstream_drift", return_value=["snapshot trails upstream"]
+            "maintenance_audit.audit_upstream_drift", return_value=([], ["snapshot trails upstream"])
         ):
             findings, advisories = run_audit(repo_root, skip_upstream=False)
         self.assertEqual(findings, [])
         self.assertIn("snapshot trails upstream", advisories)
+
+    def test_run_audit_surfaces_badly_stale_snapshot_drift_as_a_failure(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        with patch(
+            "maintenance_audit.audit_upstream_drift", return_value=(["snapshot far behind"], [])
+        ):
+            findings, advisories = run_audit(repo_root, skip_upstream=False)
+        self.assertIn("snapshot far behind", findings)
+        self.assertEqual(advisories, [])
 
     def test_run_audit_tolerates_unloadable_source_when_querying_upstream(self) -> None:
         # A missing/invalid .template-source is already reported by the local

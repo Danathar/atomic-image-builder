@@ -172,31 +172,42 @@ time upstream commits, so failing on it would leave the audit permanently red
 and train everyone to ignore it — which costs the failures above their only
 channel.
 
-Template snapshot drift used to be a failure and is now an advisory (#129).
+Template snapshot drift used to be a flat failure and is now graduated (#129).
 It had taken the weekly job red on 5 of its last 6 scheduled runs, every one
-of them for that reason alone, with a manual refresh pushed hours later. A job
-that is red every Monday cannot tell you about the Monday something is
-actually wrong.
+for that reason alone and none by more than 4 commits, with a manual refresh
+pushed hours later. A job that is red every Monday cannot tell you about the
+Monday something is actually wrong.
 
-### Advisory: the bundled template snapshot trails upstream
+### Advisory → failure: the bundled template snapshot trails upstream
 
-Both template upstreams are active, so this is normal and says how far behind
-you are:
+Both template upstreams are active, so ordinary drift is an advisory and says
+how far behind you are:
 
 ```
 Bundled template snapshot trails upstream HEAD: pinned b9783f6a1e2d,
-upstream d95b282bd679, 47 commit(s) newer. Refresh the snapshot and review
+upstream d95b282bd679, 4 commit(s) newer. Refresh the snapshot and review
 pin updates.
 ```
 
-Read the count, not just the presence. A handful of commits is an ordinary
-week. Dozens means nobody has refreshed in a while, and repos generated from
-it ship that much stale template. Refresh on your own schedule rather than
-the cron's.
+Read the count, not just the presence, and refresh on your own schedule
+rather than the cron's.
 
-It reports direction, like the action-pin advisory does, because an upstream
-branch can be force-pushed backwards — `N commit(s) OLDER than the snapshot`
-means refreshing would roll it back, so look first.
+**Past `SNAPSHOT_DRIFT_FAILURE_COMMITS` (25) it fails the job again**, because
+at that point it is not upstream having moved this week, it is nobody having
+looked in months while every generated repo ships that much stale template.
+Change the constant in `maintenance_audit.py` if that is the wrong line.
+
+Three cases never block, whatever the distance, because each one would have
+the audit demand a refresh it cannot say is correct:
+
+| Message | Why it stays advisory |
+|---|---|
+| `N commit(s) OLDER than the snapshot` | Upstream was force-pushed backwards; refreshing rolls the snapshot back |
+| `on a diverged history` | Needs both sides reviewed, not a blind refresh |
+| no count at all | The compare API was unavailable — rate limit, rewritten history, non-GitHub remote. Blocking on an unknown is how a rate limit becomes a red audit |
+
+Nothing files an issue for any of this. It appears in the run's job summary,
+so a green audit still worth opening on the weeks you want to check.
 
 ### Advisory: a pin no longer matches its tag or branch
 
