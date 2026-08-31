@@ -1,4 +1,11 @@
 target-version = "py310"
+# `unittest discover -s tests` puts tests/ on sys.path, so a helper module
+# there (tests/_local_http_server.py) is first-party exactly like the root
+# modules are. Without naming tests/ as a source root, isort classifies it as
+# a third-party package and demands a section break above the project's own
+# imports -- which would state something untrue about where the module lives,
+# and would need repeating for every future test helper.
+src = [".", "tests"]
 
 [lint]
 select = ["E", "F", "W", "I", "UP"]
