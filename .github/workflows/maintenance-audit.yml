@@ -33,6 +33,13 @@ jobs:
       # and does not fail the job -- a pin that names a branch drifts on every
       # upstream commit, and a permanently red weekly audit teaches everyone
       # to ignore it. Real inconsistencies still fail.
+      #
+      # Bundled template snapshot drift is advisory for the same reason as of
+      # issue #129. It was a failure, and since both template upstreams are
+      # active it took this job red on 5 of its last 6 scheduled runs, every
+      # one of them for that alone. What fails here now is the repo
+      # contradicting itself -- an action outside the pin tables, a workflow
+      # SHA that disagrees with them, a missing .template-source.
       - name: Run maintenance audit
         env:
           GH_TOKEN: ${{ github.token }}

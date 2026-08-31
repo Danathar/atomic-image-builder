@@ -16,7 +16,9 @@ from maintenance_audit import (
     audit_local_snapshot,
     audit_upstream_drift,
     describe_pin_drift,
+    describe_snapshot_drift,
     github_api_json,
+    github_repo_slug,
     is_newer_version_available,
     iter_pinned_refs,
     load_template_source,
@@ -168,10 +170,60 @@ class MaintenanceAuditTests(unittest.TestCase):
             "",
         )
         with patch("maintenance_audit.subprocess.run", return_value=completed):
-            findings = audit_upstream_drift(source)
+            with patch("maintenance_audit.query_github_comparison", return_value=("ahead", 3, 0)):
+                findings = audit_upstream_drift(source)
 
         self.assertEqual(len(findings), 1)
-        self.assertIn("differs from upstream HEAD", findings[0])
+        self.assertIn("trails upstream HEAD", findings[0])
+
+    def test_describe_snapshot_drift_states_how_far_behind(self) -> None:
+        # The advisory has to be triageable without a checkout: three commits
+        # behind is an ordinary week, eighty is a snapshot nobody has looked at.
+        source = TemplateSource(repo="https://github.com/ublue-os/image-template.git", revision="a" * 40)
+        with patch("maintenance_audit.query_github_comparison", return_value=("ahead", 47, 0)) as compare:
+            message = describe_snapshot_drift(source, "b" * 40)
+        compare.assert_called_once_with("ublue-os/image-template", "a" * 40, "b" * 40)
+        self.assertIn("47 commit(s) newer", message)
+        self.assertIn("Refresh the snapshot", message)
+
+    def test_describe_snapshot_drift_refuses_to_recommend_a_rollback(self) -> None:
+        # A force-pushed upstream branch can move HEAD backwards, and then
+        # "refresh to HEAD" would roll the bundled snapshot back.
+        source = TemplateSource(repo="https://github.com/ublue-os/image-template.git", revision="a" * 40)
+        with patch("maintenance_audit.query_github_comparison", return_value=("behind", 0, 9)):
+            message = describe_snapshot_drift(source, "b" * 40)
+        self.assertIn("9 commit(s) OLDER", message)
+        self.assertIn("Look before refreshing", message)
+        self.assertNotIn("Refresh the snapshot", message)
+
+    def test_describe_snapshot_drift_flags_diverged_history(self) -> None:
+        source = TemplateSource(repo="https://github.com/ublue-os/image-template.git", revision="a" * 40)
+        with patch("maintenance_audit.query_github_comparison", return_value=("diverged", 2, 5)):
+            message = describe_snapshot_drift(source, "b" * 40)
+        self.assertIn("diverged history", message)
+
+    def test_describe_snapshot_drift_falls_back_when_compare_fails(self) -> None:
+        source = TemplateSource(repo="https://github.com/ublue-os/image-template.git", revision="a" * 40)
+        with patch("maintenance_audit.query_github_comparison", side_effect=RuntimeError("rate limited")):
+            message = describe_snapshot_drift(source, "b" * 40)
+        self.assertIn("trails upstream HEAD", message)
+        self.assertIn("Refresh the snapshot", message)
+        self.assertNotIn("commit(s)", message)
+
+    def test_describe_snapshot_drift_skips_compare_for_a_non_github_remote(self) -> None:
+        # The compare API is GitHub-only; a snapshot pinned to any other host
+        # still has to produce a usable advisory rather than an exception.
+        source = TemplateSource(repo="https://gitlab.com/example/template.git", revision="a" * 40)
+        with patch("maintenance_audit.query_github_comparison") as compare:
+            message = describe_snapshot_drift(source, "b" * 40)
+        compare.assert_not_called()
+        self.assertIn("trails upstream HEAD", message)
+
+    def test_github_repo_slug_parses_clone_urls(self) -> None:
+        self.assertEqual(github_repo_slug("https://github.com/ublue-os/image-template.git"), "ublue-os/image-template")
+        self.assertEqual(github_repo_slug("https://github.com/blue-build/template"), "blue-build/template")
+        self.assertEqual(github_repo_slug("git@github.com:owner/repo.git"), "owner/repo")
+        self.assertIsNone(github_repo_slug("https://gitlab.com/owner/repo.git"))
 
     def test_audit_upstream_drift_quiet_when_head_matches_pinned_revision(self) -> None:
         source = TemplateSource(
@@ -337,11 +389,24 @@ class MaintenanceAuditTests(unittest.TestCase):
     def test_run_audit_queries_drift_per_template_source(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         with patch(
-            "maintenance_audit.audit_upstream_drift", return_value=["drift finding"]
+            "maintenance_audit.audit_upstream_drift", return_value=["drift advisory"]
         ) as drift:
-            findings, _advisories = run_audit(repo_root, skip_upstream=False)
+            findings, advisories = run_audit(repo_root, skip_upstream=False)
         self.assertEqual(drift.call_count, 2)
-        self.assertEqual(findings, ["drift finding", "drift finding"])
+        self.assertEqual(advisories, ["drift advisory", "drift advisory"])
+
+    def test_run_audit_returns_snapshot_drift_as_advisory_not_failure(self) -> None:
+        # Both template upstreams are active, so the pin differs from their
+        # HEAD most weeks. As a failure this took the weekly job red 5 of its
+        # last 6 scheduled runs, which would have buried a real finding from
+        # audit_local_snapshot() in an already-red run. See issue #129.
+        repo_root = Path(__file__).resolve().parents[1]
+        with patch(
+            "maintenance_audit.audit_upstream_drift", return_value=["snapshot trails upstream"]
+        ):
+            findings, advisories = run_audit(repo_root, skip_upstream=False)
+        self.assertEqual(findings, [])
+        self.assertIn("snapshot trails upstream", advisories)
 
     def test_run_audit_tolerates_unloadable_source_when_querying_upstream(self) -> None:
         # A missing/invalid .template-source is already reported by the local
@@ -351,6 +416,8 @@ class MaintenanceAuditTests(unittest.TestCase):
             with patch("maintenance_audit.audit_upstream_drift") as drift:
                 findings, _advisories = run_audit(repo_root, skip_upstream=False)
         drift.assert_not_called()
+        # Still a failure: a missing metadata file is the repo contradicting
+        # itself, which is a different bucket from upstream having moved.
         self.assertTrue(any("Missing template metadata file" in f for f in findings))
 
     def test_run_audit_returns_action_updates_as_advisories_not_failures(self) -> None:

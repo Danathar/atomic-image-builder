@@ -161,12 +161,42 @@ from the formula-update push to `main`. Same content, harmless.
 It distinguishes **failures** from **advisories**, and the difference matters.
 
 **Failures** (exit 1) mean the repo is internally inconsistent: a snapshot
-action not covered by the pin tables, a SHA that disagrees with them, or
-template snapshot drift from the recorded upstream revision. Fix these.
+action not covered by the pin tables, a SHA that disagrees with them, a
+missing or malformed `.template-source`. The repo is contradicting itself and
+it is fixable here. Fix these.
 
-**Advisories** do not fail the run. A pin naming a branch drifts on every
-upstream commit, so failing on it would leave the audit permanently red and
-train everyone to ignore it.
+**Advisories** do not fail the run. They mean something *outside* the repo
+moved — an action pin's tag or branch, or a bundled template snapshot's
+upstream. Nothing is wrong at the moment one appears, and it reappears every
+time upstream commits, so failing on it would leave the audit permanently red
+and train everyone to ignore it — which costs the failures above their only
+channel.
+
+Template snapshot drift used to be a failure and is now an advisory (#129).
+It had taken the weekly job red on 5 of its last 6 scheduled runs, every one
+of them for that reason alone, with a manual refresh pushed hours later. A job
+that is red every Monday cannot tell you about the Monday something is
+actually wrong.
+
+### Advisory: the bundled template snapshot trails upstream
+
+Both template upstreams are active, so this is normal and says how far behind
+you are:
+
+```
+Bundled template snapshot trails upstream HEAD: pinned b9783f6a1e2d,
+upstream d95b282bd679, 47 commit(s) newer. Refresh the snapshot and review
+pin updates.
+```
+
+Read the count, not just the presence. A handful of commits is an ordinary
+week. Dozens means nobody has refreshed in a while, and repos generated from
+it ship that much stale template. Refresh on your own schedule rather than
+the cron's.
+
+It reports direction, like the action-pin advisory does, because an upstream
+branch can be force-pushed backwards — `N commit(s) OLDER than the snapshot`
+means refreshing would roll it back, so look first.
 
 ### Advisory: a pin no longer matches its tag or branch
 
