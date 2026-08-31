@@ -4900,7 +4900,7 @@ class App:
             "",
             "jobs:",
             "  build_push:",
-            "    runs-on: ubuntu-24.04",
+            "    runs-on: ubuntu-26.04",
             "    permissions:",
             "      contents: read",
             "      packages: write",
