@@ -8,6 +8,7 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
+from _local_http_server import closed_port_url, local_http_server
 from maintenance_audit import (
     TemplateSource,
     audit_action_pin_freshness,
@@ -283,6 +284,26 @@ class MaintenanceAuditTests(unittest.TestCase):
         with patch("maintenance_audit.urllib.request.urlopen", return_value=invalid_encoding):
             with self.assertRaisesRegex(RuntimeError, "Invalid JSON response from GitHub"):
                 github_api_json("https://api.github.com/x")
+
+    # The three tests below hit a real loopback socket instead of a mocked
+    # urlopen, so urllib.request's actual connect/read/error-parsing code runs
+    # -- the class of branch the weekly maintenance-audit real-run coverage
+    # (see .coveragerc.maintenance-audit) showed the mocked suite above cannot
+    # reach on its own (issue #123).
+    def test_github_api_json_real_rate_limit_response_from_local_server(self) -> None:
+        body = b'{"message": "API rate limit exceeded for 127.0.0.1."}'
+        with local_http_server(status=403, body=body) as url:
+            with self.assertRaisesRegex(RuntimeError, "rate limit exceeded"):
+                github_api_json(url)
+
+    def test_github_api_json_real_malformed_json_response_from_local_server(self) -> None:
+        with local_http_server(status=200, body=b"not-json{") as url:
+            with self.assertRaisesRegex(RuntimeError, "Invalid JSON response from GitHub"):
+                github_api_json(url)
+
+    def test_github_api_json_real_connection_refused(self) -> None:
+        with self.assertRaises(RuntimeError):
+            github_api_json(closed_port_url())
 
     def test_query_latest_github_semver_tag_picks_highest_and_skips_noise(self) -> None:
         payload = [
