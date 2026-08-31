@@ -164,6 +164,24 @@ to existing repositories takes a targeted patcher, the way
 patch_container_rechunk_config_arg() did for the ARG_MAX fix. Decide that per
 fix rather than by wholesale-replacing files on update.
 
+Containerfile Workflow Runner Baseline
+--------------------------------------
+Since the d95b282 snapshot refresh, new Containerfile-method repositories use
+the upstream Ubuntu 26.04 GitHub-hosted runners: `ubuntu-26.04` for image builds
+and `ubuntu-26.04` / `ubuntu-26.04-arm` for disk builds. The from-scratch
+generate_container_workflow() fallback uses the same image-build runner so a
+missing workflow does not silently restore the older Ubuntu 24.04 baseline.
+At this refresh GitHub lists both Ubuntu 26.04 labels as preview images in the
+official actions/runner-images table. actionlint 1.7.12 predates those labels
+and reports them as unknown, so verify that warning against GitHub's current
+runner table before treating it as a bad snapshot label.
+
+Existing managed repositories keep their current runner labels because their
+workflow files are patched in place rather than replaced. Migrating those
+repositories would require an explicit, targeted patcher; do not turn a future
+snapshot refresh into an automatic runner migration that overwrites a user's
+custom runner choice.
+
 Rechunk Recipe ARG_MAX Fix (CHUNKAH_CONFIG_STR)
 ------------------------------------------------
 Older managed repositories may still have a `rechunk` recipe that does:

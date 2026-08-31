@@ -5499,6 +5499,8 @@ class BuilderTests(unittest.TestCase):
             workflow = (repo_dir / ".github/workflows/build.yml").read_text()
         self.assertIn("  pull_request:\n    branches:\n      - master", workflow)
         self.assertIn("  push:\n    branches:\n      - master", workflow)
+        self.assertIn("    runs-on: ubuntu-26.04", workflow)
+        self.assertNotIn("ubuntu-24.04", workflow)
 
     def test_write_project_files_repairs_disk_workflow_and_installer_configs(self) -> None:
         app = self.make_app()
@@ -5512,6 +5514,8 @@ class BuilderTests(unittest.TestCase):
             iso_kde = (repo_dir / "disk_config/iso-kde.toml").read_text()
 
         self.assertIn("  pull_request:\n    branches:\n      - master", disk_workflow)
+        self.assertIn("'ubuntu-26.04' || 'ubuntu-26.04-arm'", disk_workflow)
+        self.assertNotIn("ubuntu-24.04", disk_workflow)
         self.assertIn(ACTION_REF_PINS["osbuild/bootc-image-builder-action@main"][0], disk_workflow)
         self.assertNotIn("osbuild/bootc-image-builder-action@main", disk_workflow)
         self.assertEqual(iso_toml, iso_kde)
@@ -5528,6 +5532,8 @@ class BuilderTests(unittest.TestCase):
         workflow = app.generate_container_workflow(default_branch="master")
         self.assertIn("  pull_request:\n    branches:\n      - master", workflow)
         self.assertIn("  push:\n    branches:\n      - master", workflow)
+        self.assertIn("    runs-on: ubuntu-26.04", workflow)
+        self.assertNotIn("ubuntu-24.04", workflow)
         self.assertIn("          cosign-release: 'v3.1.2'", workflow)
         self.assertIn("--new-bundle-format=false --use-signing-config=false", workflow)
 
@@ -5988,6 +5994,23 @@ class BuilderTests(unittest.TestCase):
     def test_bundled_template_snapshots_exist(self) -> None:
         self.assertTrue((CONTAINERFILE_TEMPLATE_DIR / "Containerfile").is_file())
         self.assertTrue((CONTAINERFILE_TEMPLATE_DIR / ".template-source").is_file())
+
+    def test_current_containerfile_snapshot_uses_upstream_ubuntu_2604_runners(self) -> None:
+        build_workflow = (
+            CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml"
+        ).read_text()
+        disk_workflow = (
+            CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build-disk.yml"
+        ).read_text()
+
+        self.assertIn("    runs-on: ubuntu-26.04", build_workflow)
+        self.assertIn(
+            "    runs-on: ${{ inputs.platform == 'amd64' && "
+            "'ubuntu-26.04' || 'ubuntu-26.04-arm' }}",
+            disk_workflow,
+        )
+        self.assertNotIn("ubuntu-24.04", build_workflow)
+        self.assertNotIn("ubuntu-24.04", disk_workflow)
 
     def test_current_containerfile_snapshot_uses_local_ostree_chunker_image(self) -> None:
         justfile = (CONTAINERFILE_TEMPLATE_DIR / "Justfile").read_text()
