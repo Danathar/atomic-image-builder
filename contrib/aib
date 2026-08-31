@@ -100,10 +100,12 @@ trap cleanup EXIT
 if command -v rpm-ostree >/dev/null 2>&1; then
     status_file="$(mktemp)"
     if rpm-ostree status --json >"$status_file" 2>/dev/null; then
-        podman_args+=(
-            -v "${status_file}:/run/aib-rpm-ostree-status.json:ro,Z"
-            -e "AIB_RPM_OSTREE_STATUS_FILE=/run/aib-rpm-ostree-status.json"
-        )
+        # One push per argument, matching every other call site in this file.
+        # A multi-line array literal reads as two uncovered lines under
+        # bashcov, which attributes a hit only to the line a statement starts
+        # on -- see issue #118.
+        podman_args+=(-v "${status_file}:/run/aib-rpm-ostree-status.json:ro,Z")
+        podman_args+=(-e "AIB_RPM_OSTREE_STATUS_FILE=/run/aib-rpm-ostree-status.json")
     else
         rm -f "$status_file"
         status_file=""
