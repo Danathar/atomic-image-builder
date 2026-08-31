@@ -24,6 +24,12 @@ WORKFLOW_DIRS: tuple[Path, ...] = (
     Path("template_snapshots/bluebuild/.github/workflows"),
 )
 REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+GITHUB_REPO_URL_RE = re.compile(r"^(?:https://|git@)github\.com[/:](?P<slug>[^/]+/[^/]+?)(?:\.git)?/?$")
+# Above this many commits behind, snapshot drift stops being routine upstream
+# movement and becomes neglect, and goes back to failing the audit. The four
+# runs that motivated #129 were 2, 3, 4 and 1 commits behind; this is roughly
+# a season of unattended drift, not a week of it.
+SNAPSHOT_DRIFT_FAILURE_COMMITS = 25
 USES_RE = re.compile(r"^\s*(?:-\s*)?uses:\s+([^@\s]+)@([^\s#]+)")
 VERSION_TAG_RE = re.compile(r"^v(\d+)(?:\.(\d+))?(?:\.(\d+))?$")
 
@@ -151,19 +157,77 @@ def query_remote_head(repo: str) -> str:
     return sha
 
 
-def audit_upstream_drift(source: TemplateSource) -> list[str]:
+def github_repo_slug(url: str) -> str | None:
+    # The compare API needs "owner/repo"; .template-source records a clone URL.
+    match = GITHUB_REPO_URL_RE.match(url.strip())
+    return match.group("slug") if match else None
+
+
+@dataclass(frozen=True)
+class SnapshotDrift:
+    message: str
+    blocking: bool
+
+
+def describe_snapshot_drift(source: TemplateSource, head: str) -> SnapshotDrift:
+    # Mostly an advisory, so it has to carry enough to triage without a
+    # checkout: three commits behind is an ordinary week, eighty is a snapshot
+    # nobody has looked at since spring, and only one of those is worth
+    # interrupting anything for. Same reasoning as describe_pin_drift(), and
+    # the same direction check -- an upstream branch can be force-pushed
+    # backwards, and "refresh to HEAD" would then be a downgrade.
+    #
+    # Only a straightforwardly stale snapshot can block. Backwards and diverged
+    # upstreams need eyes before anyone refreshes anything, and failing the job
+    # on them would be demanding an action this cannot say is correct. Same for
+    # a count we could not obtain: blocking on an unknown is how a rate limit
+    # becomes a red weekly audit.
+    prefix = (
+        "Bundled template snapshot trails upstream HEAD: "
+        f"pinned {source.revision[:12]}, upstream {head[:12]}"
+    )
+    slug = github_repo_slug(source.repo)
+    comparison = None
+    if slug is not None:
+        try:
+            comparison = query_github_comparison(slug, source.revision, head)
+        except RuntimeError:
+            comparison = None
+    if comparison is None:
+        return SnapshotDrift(f"{prefix}. Refresh the snapshot and review pin updates.", False)
+    status, ahead, behind = comparison
+    if status == "ahead":
+        if ahead >= SNAPSHOT_DRIFT_FAILURE_COMMITS:
+            return SnapshotDrift(
+                f"{prefix}, {ahead} commit(s) newer -- past the {SNAPSHOT_DRIFT_FAILURE_COMMITS}-commit "
+                "mark where this stops being ordinary upstream movement. Every repo generated from this "
+                "snapshot ships that much stale template. Refresh it and review pin updates.",
+                True,
+            )
+        return SnapshotDrift(
+            f"{prefix}, {ahead} commit(s) newer. Refresh the snapshot and review pin updates.", False
+        )
+    if status == "behind":
+        return SnapshotDrift(
+            f"{prefix}, which is {behind} commit(s) OLDER than the snapshot. Upstream moved HEAD "
+            "backwards -- refreshing to it would roll the snapshot back. Look before refreshing.",
+            False,
+        )
+    return SnapshotDrift(f"{prefix}, on a diverged history. Review both before refreshing.", False)
+
+
+def audit_upstream_drift(source: TemplateSource) -> tuple[list[str], list[str]]:
+    """Return (failures, advisories) for one bundled template snapshot."""
     try:
         head = query_remote_head(source.repo)
     except RuntimeError as exc:
-        return [f"Unable to query upstream template HEAD for {source.repo}: {exc}"]
+        # Being unable to check is not an inconsistency, and an unreachable
+        # upstream must not fail the weekly job.
+        return [], [f"Unable to query upstream template HEAD for {source.repo}: {exc}"]
     if head == source.revision:
-        return []
-    return [
-        (
-            "Bundled template snapshot differs from upstream HEAD: "
-            f"pinned {source.revision}, upstream {head}. Refresh the snapshot and review pin updates."
-        )
-    ]
+        return [], []
+    drift = describe_snapshot_drift(source, head)
+    return ([drift.message], []) if drift.blocking else ([], [drift.message])
 
 
 def github_api_json(url: str) -> object:
@@ -335,15 +399,26 @@ def run_audit(
 ) -> tuple[list[str], list[str]]:
     """Return (failures, advisories).
 
-    Failures mean the repository is internally inconsistent or has drifted
-    from its recorded upstream, and the audit exits non-zero for them.
+    Failures mean the repository is internally inconsistent -- a metadata file
+    missing, an action not covered by the pin tables, a workflow SHA that
+    disagrees with them. They are the repo contradicting itself, they are
+    fixable here, and the audit exits non-zero for them.
 
-    Advisories mean an upstream action has moved on. They are reported but do
-    not fail the run: a pin that names a branch drifts every time upstream
-    commits, so failing on it would leave the weekly audit permanently red
-    and train everyone to ignore it.
+    Advisories mean something outside the repo moved: an action pin's tag or
+    branch, or a bundled template snapshot's upstream. They are reported and do
+    not fail the run. Nothing is wrong at the moment they appear, and they
+    reappear every time upstream commits, so failing on them would leave the
+    weekly audit permanently red -- which costs the failures above their only
+    channel, since nobody re-reads a job that is red every week anyway.
+
+    The one advisory that can graduate into a failure is snapshot drift, once
+    it passes SNAPSHOT_DRIFT_FAILURE_COMMITS. Past that it is no longer
+    upstream having moved this week; it is nobody having looked in months,
+    while every generated repo ships the stale template. Red then means what
+    red should mean, and it cannot recur weekly the way a flat comparison did.
     """
     findings = audit_local_snapshot(repo_root)
+    advisories: list[str] = []
     if not skip_upstream:
         for source_rel, _workflow_rel in TEMPLATE_SOURCES:
             source_path = repo_root / source_rel
@@ -352,8 +427,18 @@ def run_audit(
             except (OSError, ValueError):
                 source = None
             if source is not None:
-                findings.extend(audit_upstream_drift(source))
-    advisories: list[str] = []
+                # Usually an advisory. Both template upstreams are active, so
+                # the pinned revision differs from their HEAD on almost any
+                # given Monday; as a flat failure this took the weekly job red
+                # on 5 of its last 6 scheduled runs, every one of them for this
+                # alone and none by more than 4 commits. A job that is always
+                # red cannot report the thing it exists to report -- a genuine
+                # inconsistency from audit_local_snapshot() would have landed
+                # in an already-failing run and gone unread. It still fails once
+                # the drift is large enough to be neglect rather than movement.
+                drift_findings, drift_advisories = audit_upstream_drift(source)
+                findings.extend(drift_findings)
+                advisories.extend(drift_advisories)
     if check_action_updates:
         advisories.extend(audit_action_update_availability())
         advisories.extend(audit_action_pin_freshness())
