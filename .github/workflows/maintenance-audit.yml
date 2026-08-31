@@ -11,6 +11,10 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      # For the snapshot drift tracking issue below. Sub-threshold drift keeps
+      # the job green (see issue #129), so without this the advisory reaches
+      # only the job summary of a passing run and nobody sees it.
+      issues: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -63,6 +67,19 @@ jobs:
       - name: Check the Homebrew formula pin
         if: always()
         run: python3 -m coverage run --rcfile=.coveragerc.maintenance-audit -a homebrew_formula.py --check | tee -a audit.log || true
+
+      # Runs on always() for the same reason the formula check does: a failing
+      # audit is exactly when the drift state is worth recording. The script
+      # exits 0 whatever GitHub does, so a hiccup here cannot turn a green
+      # audit red -- which would recreate the problem #129 was filed about.
+      - name: Track snapshot drift as an issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 snapshot_drift_issue.py \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            | tee -a audit.log
 
       - name: Summarize
         if: always()
