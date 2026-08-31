@@ -2,10 +2,12 @@ import contextlib
 import io
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
 import homebrew_formula
+from _local_http_server import closed_port_url, local_http_server
 from atomic_image_builder import VERSION
 from homebrew_formula import (
     PLACEHOLDER_SHA,
@@ -142,6 +144,23 @@ class HomebrewFormulaTests(unittest.TestCase):
 
         with patch("urllib.request.urlopen", return_value=FakeResponse()):
             self.assertEqual(homebrew_formula.fetch_sha256("https://example/x"), hashlib.sha256(b"abcdef").hexdigest())
+
+    # These two hit a real loopback socket instead of a mocked urlopen, so
+    # urllib.request's actual connect/error-parsing code runs -- the class of
+    # branch the weekly maintenance-audit real-run coverage showed the mocked
+    # tests above cannot reach on their own (issue #123).
+    def test_fetch_sha256_real_http_error_propagates(self) -> None:
+        with local_http_server(status=404, body=b"not found") as url:
+            with self.assertRaises(urllib.error.HTTPError):
+                homebrew_formula.fetch_sha256(url)
+
+    def test_check_reports_a_real_connection_refused_as_a_fetch_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "atomic-image-builder.rb"
+            broken_url = closed_port_url()
+            path.write_text(render_formula(REAL_FORMULA.read_text(), url=broken_url, sha256=SHA_A))
+            findings = check(path, expected_version=VERSION)
+        self.assertTrue(any("Unable to fetch" in finding for finding in findings))
 
     def test_release_workflow_updates_and_verifies_the_formula(self) -> None:
         # The workflow is the only thing that runs --update in anger, so pin the
