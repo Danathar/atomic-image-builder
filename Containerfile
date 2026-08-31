@@ -34,11 +34,20 @@ RUN dnf5 -y install dnf5-plugins curl && \
 # yum repo, so download the release asset directly and verify it against
 # its published sha256 before installing — no unverified curl|install.
 # Bump both the URL and the checksum together when updating this pin.
+#
+# The checksum goes through a file rather than `echo ... | sha256sum -c -`.
+# Under the default /bin/sh a pipeline reports only its LAST command's status,
+# so anything added ahead of sha256sum in that pipe would fail silently --
+# which is what hadolint DL4006 warns about. The usual answer, a SHELL
+# instruction setting pipefail, does not work here: buildah ignores SHELL under
+# the OCI image format this image is built with, so it would satisfy the linter
+# without changing the behaviour. No pipe, no ambiguity, nothing to suppress.
 RUN curl -fsSL -o /tmp/cosign.rpm \
       https://github.com/sigstore/cosign/releases/download/v3.1.2/cosign-3.1.2-1.x86_64.rpm && \
-    echo "72382d1ef1cc824e1c10acfbe7f76af76fb294a10b0d16f31b978350ec4bc3e9  /tmp/cosign.rpm" | sha256sum -c - && \
+    echo "72382d1ef1cc824e1c10acfbe7f76af76fb294a10b0d16f31b978350ec4bc3e9  /tmp/cosign.rpm" > /tmp/cosign.sha256 && \
+    sha256sum -c /tmp/cosign.sha256 && \
     dnf5 -y install /tmp/cosign.rpm && \
-    rm -f /tmp/cosign.rpm && \
+    rm -f /tmp/cosign.rpm /tmp/cosign.sha256 && \
     dnf5 clean all
 
 # The script resolves its bundled template snapshots relative to its own

@@ -24,11 +24,23 @@ jobs:
         with:
           python-version: "3.10"
 
+      # hadolint ships a static binary rather than a package, and is fetched
+      # here rather than through hadolint/hadolint-action because every `uses:`
+      # in this repo's workflows has to be covered by ACTION_PINS -- the table
+      # shipped to generated repos -- or maintenance_audit.py fails. A linter
+      # our generated repos never run does not belong in that table, so pin the
+      # binary by version and checksum instead, the same way the tools above
+      # are pinned by version.
       - name: Install test tooling
         run: |
           pip install coverage==7.16.0 ruff==0.16.5
           GEM_HOME="$RUNNER_TEMP/gems" gem install bashcov -v 4.0.0 --no-document --bindir "$RUNNER_TEMP/bin"
           echo "GEM_HOME=$RUNNER_TEMP/gems" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/bin/hadolint" \
+            https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-Linux-x86_64
+          echo "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47  $RUNNER_TEMP/bin/hadolint" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/hadolint"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Run tests
@@ -83,6 +95,15 @@ jobs:
       # host state. shellcheck ships on the ubuntu-24.04 runner image.
       - name: Run shellcheck
         run: shellcheck contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/test_entrypoint.sh
+
+      # Both Containerfiles are built by the container-build job below and
+      # Containerfile is what publish-image.yml ships to GHCR on every merge,
+      # so they get the same lint treatment as the Python and shell sources.
+      # This lives in `test` rather than `container-build` because that job is
+      # path-scoped and skips entirely on a run that touches nothing in the
+      # image -- and a lint gate that only runs sometimes is one nobody trusts.
+      - name: Run hadolint
+        run: hadolint Containerfile container/Containerfile.coverage
 
       # Bashcov follows the child Bash processes launched by each harness, so
       # this measures the real wrapper and container entrypoint rather than the

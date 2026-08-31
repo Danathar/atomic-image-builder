@@ -86,9 +86,30 @@ Because artifacts expire after 30 days, `coverage_badge.py` publishes the unit n
 
 ## Linting
 
+Three linters, one per language CI ships. All three gate the `test` job.
+
 ```bash
-ruff check
+ruff check                                    # Python
+shellcheck contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/test_entrypoint.sh
+hadolint Containerfile container/Containerfile.coverage
 ```
+
+`ruff` and `shellcheck` come from pip and the runner image. hadolint is a
+static binary; CI pins v2.14.0 by sha256 rather than using
+`hadolint/hadolint-action`, because `maintenance_audit.py` requires every
+`uses:` in this repo's workflows to appear in `ACTION_PINS` — the table
+shipped to generated repos — and a linter those repos never run does not
+belong in it. To match CI locally, install the same release from
+[hadolint/hadolint](https://github.com/hadolint/hadolint/releases/tag/v2.14.0).
+
+One hadolint finding needed a real fix rather than a suppression: DL4006 on
+the cosign checksum, which was `echo "<sha>  <file>" | sha256sum -c -`. Under
+`/bin/sh` a pipeline reports only its last command's status. Note that the
+usual remedy — a `SHELL` instruction setting `pipefail` — is a trap here:
+buildah ignores `SHELL` under the OCI image format this image is built with
+(it warns and carries on), so it silences the linter while changing nothing.
+The checksum goes through a file instead, which removes the pipe. Keep it
+that way; do not reintroduce a pipe in a `RUN` expecting pipefail to catch it.
 
 ## Maintainer Audit
 
