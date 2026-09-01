@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from snapshot_drift_issue import (
     ISSUE_TITLE,
+    SUBPROCESS_TIMEOUT_SECONDS,
     collect_drift,
     find_tracking_issue,
     main,
@@ -41,6 +42,13 @@ class RunGhTests(unittest.TestCase):
         with patch("snapshot_drift_issue.subprocess.run", side_effect=OSError("No such file")):
             with self.assertRaisesRegex(RuntimeError, "could not run gh"):
                 run_gh(["issue", "list"])
+
+    def test_run_gh_passes_a_timeout_and_converts_expiry(self) -> None:
+        with patch("snapshot_drift_issue.subprocess.run") as run:
+            run.side_effect = subprocess.TimeoutExpired(cmd=["gh", "issue", "list"], timeout=120)
+            with self.assertRaisesRegex(RuntimeError, "timed out after 120s"):
+                run_gh(["issue", "list"])
+        self.assertEqual(run.call_args.kwargs["timeout"], SUBPROCESS_TIMEOUT_SECONDS)
 
     def test_run_gh_raises_even_when_the_command_said_nothing(self) -> None:
         with patch("snapshot_drift_issue.subprocess.run", return_value=gh_result("", 1, "")):

@@ -11,6 +11,7 @@ from unittest.mock import patch
 from _local_http_server import closed_port_url, local_http_server
 from maintenance_audit import (
     SNAPSHOT_DRIFT_FAILURE_COMMITS,
+    SUBPROCESS_TIMEOUT_SECONDS,
     TemplateSource,
     audit_action_pin_freshness,
     audit_action_update_availability,
@@ -318,6 +319,17 @@ class MaintenanceAuditTests(unittest.TestCase):
         with patch("maintenance_audit.subprocess.run", return_value=garbled):
             with self.assertRaisesRegex(RuntimeError, "Unexpected ls-remote output"):
                 query_remote_head("https://github.com/example/repo.git")
+
+    def test_query_remote_head_passes_a_timeout_and_converts_expiry(self) -> None:
+        # A hung git process must not hold the weekly job open until GitHub's
+        # own six-hour runner limit kills it. TimeoutExpired is neither an
+        # OSError nor a CalledProcessError, so it needs its own conversion or
+        # it escapes every caller's RuntimeError handling.
+        with patch("maintenance_audit.subprocess.run") as run:
+            run.side_effect = subprocess.TimeoutExpired(cmd=["git", "ls-remote"], timeout=120)
+            with self.assertRaisesRegex(RuntimeError, "timed out after 120s"):
+                query_remote_head("https://github.com/example/repo.git")
+        self.assertEqual(run.call_args.kwargs["timeout"], SUBPROCESS_TIMEOUT_SECONDS)
 
     def test_audit_upstream_drift_reports_query_failure_as_advisory(self) -> None:
         # Being unable to check is not an inconsistency. An unreachable
