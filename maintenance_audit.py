@@ -30,6 +30,12 @@ GITHUB_REPO_URL_RE = re.compile(r"^(?:https://|git@)github\.com[/:](?P<slug>[^/]
 # runs that motivated #129 were 2, 3, 4 and 1 commits behind; this is roughly
 # a season of unattended drift, not a week of it.
 SNAPSHOT_DRIFT_FAILURE_COMMITS = 25
+# github_api_json() has passed timeout=20 since it was written; the subprocess
+# calls beside it had none, so a hung git or gh held the weekly job open until
+# GitHub's own six-hour limit killed it. Generous, because these are real
+# network round trips on a shared runner -- this is a hang guard, not a
+# latency budget.
+SUBPROCESS_TIMEOUT_SECONDS = 120
 USES_RE = re.compile(r"^\s*(?:-\s*)?uses:\s+([^@\s]+)@([^\s#]+)")
 VERSION_TAG_RE = re.compile(r"^v(\d+)(?:\.(\d+))?(?:\.(\d+))?$")
 
@@ -146,7 +152,18 @@ def audit_local_snapshot(repo_root: Path) -> list[str]:
 
 
 def query_remote_head(repo: str) -> str:
-    proc = subprocess.run(["git", "ls-remote", repo, "HEAD"], capture_output=True, text=True, check=False)
+    try:
+        proc = subprocess.run(
+            ["git", "ls-remote", repo, "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Not an OSError and not a CalledProcessError; without this it escapes
+        # every caller's handling and takes the audit down with a traceback.
+        raise RuntimeError(f"git ls-remote timed out after {SUBPROCESS_TIMEOUT_SECONDS}s") from exc
     if proc.returncode != 0:
         detail = "\n".join(part for part in [proc.stdout, proc.stderr] if part).strip()
         raise RuntimeError(detail or "git ls-remote failed")

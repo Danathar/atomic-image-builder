@@ -21,6 +21,7 @@ import subprocess
 from pathlib import Path
 
 from maintenance_audit import (
+    SUBPROCESS_TIMEOUT_SECONDS,
     TEMPLATE_SOURCES,
     audit_upstream_drift,
     load_template_source,
@@ -31,7 +32,14 @@ from maintenance_audit import (
 # misses an existing issue files a duplicate; listing and comparing titles is
 # slower but answers from the current state rather than the index.
 ISSUE_TITLE = "Bundled template snapshot trails upstream"
-ISSUE_LIST_LIMIT = 200
+# `gh issue list --limit N` is not a page size, it is a cap -- gh pages through
+# the API on its own until it collects N items or runs out. 200 was low enough
+# that a repo with more open issues than that could push the tracking issue
+# off the fetched page and file a duplicate every week from then on. This is
+# high enough to mean "every open issue" for any volume this project is
+# plausibly going to reach, while still bounding a pathological repo instead
+# of paging forever.
+ISSUE_LIST_LIMIT = 10000
 
 
 def run_gh(args: list[str]) -> str:
@@ -40,7 +48,15 @@ def run_gh(args: list[str]) -> str:
     # step, which fails the weekly audit for a reason having nothing to do with
     # the repo. OSError covers gh being absent or not executable.
     try:
-        proc = subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
+        proc = subprocess.run(
+            ["gh", *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"gh timed out after {SUBPROCESS_TIMEOUT_SECONDS}s") from exc
     except OSError as exc:
         raise RuntimeError(f"could not run gh: {exc}") from exc
     if proc.returncode != 0:
