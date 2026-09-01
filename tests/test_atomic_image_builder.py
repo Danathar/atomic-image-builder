@@ -6493,6 +6493,23 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("coverage-unit.json)](docs/coverage.md)", readme)
         self.assertNotIn("coverage-trend.csv", readme)
 
+    def test_readme_points_security_reports_at_security_md(self) -> None:
+        # A public issue is the wrong place for a live vulnerability; the
+        # README's Feedback section is where a reporter looks first, so the
+        # redirect has to live there rather than only in SECURITY.md itself.
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+        self.assertIn("[SECURITY.md](SECURITY.md)", readme)
+
+    def test_security_md_points_at_a_real_reporting_path(self) -> None:
+        # GitHub only renders a working "Report a vulnerability" button when
+        # private vulnerability reporting is enabled for the repo -- pointing
+        # at that URL while the feature is off would be a broken instruction.
+        # This only pins the file's own content; it cannot check the repo
+        # setting itself.
+        security = (Path(__file__).resolve().parents[1] / "SECURITY.md").read_text()
+        self.assertIn("security/advisories/new", security)
+        self.assertIn("do not open a public issue", security.lower())
+
     def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
         # The explainer has to define the term for a newcomer, keep the trend
         # history reachable now that the badge no longer links to it, and route
