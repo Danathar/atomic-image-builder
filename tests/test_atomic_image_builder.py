@@ -6510,6 +6510,32 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("security/advisories/new", security)
         self.assertIn("do not open a public issue", security.lower())
 
+    def test_readme_points_contributors_at_contributing_md(self) -> None:
+        # Someone who wants to fix a bug rather than just report it has no way
+        # to find CONTRIBUTING.md without this -- it is not linked from
+        # anywhere else a first-time visitor would land.
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+        self.assertIn("[CONTRIBUTING.md](CONTRIBUTING.md)", readme)
+
+    def test_contributing_md_explains_how_to_submit_a_change(self) -> None:
+        # Passing tests/coverage/lint locally still leaves "what do I do with
+        # this" unanswered without an explicit fork/branch/PR walkthrough.
+        contributing = (Path(__file__).resolve().parents[1] / "CONTRIBUTING.md").read_text()
+        self.assertIn("## Submitting a change", contributing)
+        self.assertIn("Fork the repo", contributing)
+        self.assertIn("pull request", contributing.lower())
+
+    def test_contributing_md_pins_the_same_tooling_versions_as_ci(self) -> None:
+        # Read ci.yml's own pin instead of hardcoding it a second time here --
+        # a bumped CI version would otherwise leave the doc silently stale
+        # with a test that still passes.
+        root = Path(__file__).resolve().parents[1]
+        ci_workflow = (root / ".github/workflows/ci.yml").read_text()
+        match = re.search(r"pip install coverage==\S+ ruff==\S+", ci_workflow)
+        self.assertIsNotNone(match, "ci.yml's pinned tooling install line has changed shape")
+        contributing = (root / "CONTRIBUTING.md").read_text()
+        self.assertIn(match.group(0), contributing)
+
     def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
         # The explainer has to define the term for a newcomer, keep the trend
         # history reachable now that the badge no longer links to it, and route
