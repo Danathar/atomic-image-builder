@@ -2,7 +2,37 @@
 
 This document covers the development and maintenance workflows for working on Atomic Image Builder itself. End-user installation and usage live in [README.md](README.md). Release procedure, what the automation does, and the traps worth knowing are in [MAINTAINER.md](maintainer_docs/MAINTAINER.md).
 
+## Submitting a change
+
+This is a normal public GitHub repo — there's no separate CLA or contributor
+setup:
+
+1. Fork the repo and create a branch off `main`.
+2. Make your change. There's no fixed branch-naming convention for
+   contributions; `maintainer_docs/MAINTAINER.md`'s `release/vX.Y.Z` pattern
+   is the maintainer's own release process, not something contributors need
+   to follow.
+3. Run the checks below locally — [Tests](#tests), [Coverage](#coverage), and
+   [Linting](#linting) — before opening a pull request. CI runs the same
+   checks (`unittest`, the 90% coverage gate, `ruff`, `shellcheck`, and
+   `hadolint`) and has to pass before a PR can be reviewed.
+4. Open the PR against `main` and describe what changed and why. Keep it
+   scoped to one thing; a PR that mixes an unrelated cleanup with the actual
+   fix is harder to review and to revert if something goes wrong.
+
+`main` is not branch-protected, but everything except the maintainer's own
+direct fixes goes through review here — see MAINTAINER.md's *Repo settings
+worth knowing* if you're curious why.
+
 ## Tests
+
+Install the pinned tooling once — this covers both the Coverage and Linting
+sections below, and matches the exact versions `ci.yml` installs so a local
+run agrees with CI instead of disagreeing in either direction:
+
+```bash
+pip install coverage==7.16.0 ruff==0.16.5
+```
 
 Run the test suite with `unittest`:
 
@@ -93,12 +123,17 @@ Because artifacts expire after 30 days, `coverage_badge.py` publishes the unit n
 Three linters, one per language CI ships. All three gate the `test` job.
 
 ```bash
-ruff check                                    # Python
+ruff check                                    # Python -- pip install command is in Tests, above
 shellcheck contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/test_entrypoint.sh
 hadolint Containerfile container/Containerfile.coverage
 ```
 
-`ruff` and `shellcheck` come from pip and the runner image. hadolint is a
+`ruff` is pinned in the install command at the top of [Tests](#tests), which
+keeps it in sync with the exact version `ci.yml` installs — an unpinned local
+`ruff` can enable or disable different rules release to release and disagree
+with CI in either direction. `shellcheck` comes from the runner image; there
+is no local pin to match, only whatever version your system package manager
+gives you. hadolint is a
 static binary; CI pins v2.14.0 by sha256 rather than using
 `hadolint/hadolint-action`, because `maintenance_audit.py` requires every
 `uses:` in this repo's workflows to appear in `ACTION_PINS` — the table
