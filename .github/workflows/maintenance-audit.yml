@@ -9,6 +9,7 @@ on:
 jobs:
   audit:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
       # For the snapshot drift tracking issue below. Sub-threshold drift keeps

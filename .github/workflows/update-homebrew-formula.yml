@@ -36,6 +36,7 @@ jobs:
   update:
     name: Point the formula at the release
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       # The release event checks out the tag; the formula lives on main.
       - name: Checkout main
