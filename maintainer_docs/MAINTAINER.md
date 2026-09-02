@@ -270,6 +270,17 @@ Leave an `ACTION_REF_PINS` entry for the old SHA pointing at the new pin, so
 
 ## Traps
 
+**Read [`maintenance_notes.txt`](../maintenance_notes.txt) before touching template
+patchers or base-image detection.** It covers the operational knowledge that
+doesn't fit inline as code comments: bumping `FEDORA_ATOMIC_FALLBACK_TAG` when
+a Fedora release goes EOL, the exact-text/indentation sensitivity of the
+workflow and `image-template.env` patchers (they silently no-op instead of
+erroring when a template refresh shifts their anchors), and the
+container-integration-only environment variables (`AIB_RPM_OSTREE_STATUS_FILE`,
+`AIB_DISABLE_LOCAL_BUILD`). It's referenced from source comments in
+`atomic_image_builder.py` and `Containerfile` but not otherwise, so it's easy
+to miss.
+
 **Never rename `TOOL_SLUG`.** It feeds `STATE_FILE` — `.atomic-image-builder.json`
 — which is written into every managed repo and is how the tool recognises repos
 it created. Renaming it orphans every repo the tool has ever made. The command
