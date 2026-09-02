@@ -71,7 +71,7 @@ Beginner and intermediate atomic-desktop users who want a guided path to a custo
 
 Bugs, confusing behavior, and rough edges are all welcome: [open an issue](https://github.com/Danathar/atomic-image-builder/issues).
 
-Want to fix something yourself? See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow — tests, coverage, linting, and how to submit a change.
+Want to fix something yourself? See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow — tests, coverage, linting, and how to submit a change — and [ARCHITECTURE.md](ARCHITECTURE.md) for a map of the code.
 
 Found a security vulnerability instead? Please don't open a public issue for it — see [SECURITY.md](SECURITY.md) for how to report it privately.
 

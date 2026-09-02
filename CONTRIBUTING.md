@@ -2,6 +2,8 @@
 
 This document covers the development and maintenance workflows for working on Atomic Image Builder itself. End-user installation and usage live in [README.md](README.md). Release procedure, what the automation does, and the traps worth knowing are in [MAINTAINER.md](maintainer_docs/MAINTAINER.md).
 
+New to the code? [ARCHITECTURE.md](ARCHITECTURE.md) maps `atomic_image_builder.py` — the repo layout, the five-stage runtime model, what each region of the file holds, and where to start for a given kind of change.
+
 ## Submitting a change
 
 This is a normal public GitHub repo — there's no separate CLA or contributor
