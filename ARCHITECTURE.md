@@ -14,9 +14,9 @@ below is greppable.
 |---|---|
 | `atomic_image_builder.py` | The whole tool. One module, standard library only. |
 | `template_snapshots/` | Pinned copies of `ublue-os/image-template` and `blue-build/template`. Inputs, not examples — each carries a `.template-source` recording its upstream revision. |
-| `maintenance_audit.py` | Weekly consistency check: snapshot drift, action pin coverage and freshness, formula pin. |
+| `maintenance_audit.py` | Weekly consistency check: snapshot drift, action pin coverage and freshness. It does not touch the Homebrew formula — `maintenance-audit.yml` checks that in a separate step. |
 | `snapshot_drift_issue.py` | Keeps the audit's sub-threshold drift tracking issue in sync. |
-| `homebrew_formula.py` | Points `Formula/atomic-image-builder.rb` at a release and verifies the pin. |
+| `homebrew_formula.py` | Points `Formula/atomic-image-builder.rb` at a release, and verifies that pin under `--check` — which is what the weekly audit workflow runs. |
 | `coverage_badge.py` | Writes the coverage badge endpoint and trend CSV. |
 | `contrib/aib` | Host-side wrapper that runs the published container image. |
 | `container/entrypoint.sh` | Entrypoint baked into that image. |
@@ -83,9 +83,18 @@ Regions, in file order:
 
 The patcher and generator groups are the ones to be careful with. A patcher
 edits text copied from a pinned upstream snapshot; a generator writes a file the
-tool owns outright. Patchers match on upstream's literal text and indentation
-and **return the input unchanged when they do not match**, by design — so a
-template refresh that shifts an anchor produces a silent no-op, not an error.
+tool owns outright. Patchers match on upstream's literal text and indentation,
+and almost all of them **return the input unchanged when they do not match**, by
+design — so a template refresh that shifts an anchor produces a silent no-op
+rather than an error, and the generated repo ships unpatched.
+
+The exception is `patch_cosign_compatibility()`, which fails closed: when it
+finds a `cosign sign --key env://` command it recognizes as needing the Cosign
+3.x flags but cannot rewrite safely — the verb split across line continuations —
+it raises `CommandError` rather than publish a workflow that signs
+incompatibly. Expect that shape from anything safety-sensitive enough that a
+silent no-op would be worse than a stop.
+
 `maintenance_notes.txt` covers which anchors matter and what breaks when they
 move.
 
