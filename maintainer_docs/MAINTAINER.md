@@ -146,6 +146,7 @@ only when you cut a release.
 | `publish-image.yml` | push to `main`, release, dispatch | Builds and pushes to GHCR |
 | `update-homebrew-formula.yml` | release published, dispatch | Points the formula at the release and pushes to `main` |
 | `maintenance-audit.yml` | Mondays 06:00 UTC, dispatch | Snapshot drift (and its tracking issue), action pin coverage, pin freshness, formula pin |
+| `nightly-compliance.yml` | Daily 04:00 UTC, dispatch | Rebuilds `main`'s image from scratch and re-runs the gate against it; a failure means something outside the repo moved |
 
 Only a build of `main` tags the image `latest` — a release published from an
 older commit must not drag `latest` backwards. All events that write image

@@ -1,0 +1,77 @@
+---
+name: Nightly compliance
+
+# The gap this fills: every other job here is triggered by a change to this
+# repo, so nothing catches `main` breaking because something *outside* it
+# moved. The container-build job in ci.yml is path-scoped and skips entirely
+# on a day nobody touched the image, which is most days -- so the published
+# image's base (fedora:44), the packages it installs, and the upstream repos
+# it adds can all drift under a `main` that stays green.
+#
+# This rebuilds the image from scratch and runs the same end-to-end suite
+# against it, on a schedule instead of on a diff. A failure here means the
+# world changed, not that someone pushed something.
+on:
+  schedule:
+    # 04:00 UTC daily, well clear of the Monday 06:00 maintenance audit so a
+    # bad night and a bad week do not arrive as one indistinguishable red.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+# Read-only. This job proves things; it publishes nothing and pushes nothing.
+permissions:
+  contents: read
+
+jobs:
+  compliance:
+    name: Rebuild main and re-run the gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.10"
+
+      - name: Install test tooling
+        run: pip install coverage==7.16.0
+
+      # The offline half. These cannot break from outside, so a failure here
+      # on a night when nothing was pushed would mean the runner image
+      # changed under us -- worth knowing either way.
+      - name: Run tests
+        run: python3 -m unittest discover -s tests
+
+      - name: Check the coverage gate
+        run: |
+          set -euo pipefail
+          threshold="$(jq -er '.gated.unit' .coverage-thresholds.json)"
+          python3 -m coverage run -m unittest discover -s tests
+          python3 -m coverage report --fail-under="$threshold"
+
+      # The point of the job. ci.yml only builds when the diff touches the
+      # image, so this is the only thing that would notice the base image or
+      # one of its package repos breaking the build.
+      - name: Build the image from scratch
+        run: podman build --pull=always --no-cache -t aib-nightly -f Containerfile .
+
+      - name: Run the end-to-end suite against it
+        run: tests/e2e/smoke.sh aib-nightly
+
+      # Local-only audit checks. The upstream half is the Monday job's;
+      # running it here too would double the advisory noise for no gain.
+      - name: Audit local consistency
+        run: python3 maintenance_audit.py --skip-upstream
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## Nightly compliance"
+            echo
+            echo "Rebuilt \`main\` from scratch and re-ran the gate against it."
+            echo "A failure here means something outside this repository moved."
+          } >> "$GITHUB_STEP_SUMMARY"
