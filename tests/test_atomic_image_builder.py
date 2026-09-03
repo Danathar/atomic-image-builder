@@ -6640,6 +6640,46 @@ class BuilderTests(unittest.TestCase):
         self.assertIsNotNone(diff_paths, "container-build's path filter has changed shape")
         self.assertIn("tests/e2e/", diff_paths.group(0))
 
+    def test_agent_guidance_has_one_canonical_file(self) -> None:
+        # Four ACMM criteria want agent-facing files that all say the same
+        # thing. Writing that content out four times would give the repo four
+        # copies of its own traps to keep in step, which is the drift the
+        # coverage-threshold test above exists to prevent. So one file carries
+        # the content and the rest defer to it.
+        root = Path(__file__).resolve().parents[1]
+        canonical = root / ".github/copilot-instructions.md"
+        self.assertTrue(canonical.is_file(), "the canonical agent guidance file is missing")
+
+        # Every other agent entry point, whichever of them exist. Listed by
+        # directory so a new file inside one is covered the day it is added
+        # rather than the day someone remembers this test.
+        pointer_roots = [".cursor", ".github/prompts", ".claude/skills", ".claude/memory"]
+        pointers = [
+            path
+            for name in pointer_roots
+            for path in sorted((root / name).rglob("*.md"))
+            if (root / name).is_dir()
+        ]
+
+        for path in pointers:
+            relative_path = path.relative_to(root)
+            text = path.read_text()
+            self.assertIn(
+                "copilot-instructions.md",
+                text,
+                f"{relative_path} does not point at the canonical guidance",
+            )
+            # Restating a trap here is how the copies start. Each of these
+            # phrases is load-bearing in the canonical file; a pointer that
+            # repeats one has stopped being a pointer.
+            for restated in ("TOOL_SLUG", "--fail-under", "ACTION_PINS"):
+                self.assertNotIn(
+                    restated,
+                    text,
+                    f"{relative_path} restates '{restated}' instead of "
+                    f"deferring to .github/copilot-instructions.md",
+                )
+
     def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
         # The explainer has to define the term for a newcomer, keep the trend
         # history reachable now that the badge no longer links to it, and route
