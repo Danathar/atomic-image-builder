@@ -6673,15 +6673,26 @@ class BuilderTests(unittest.TestCase):
                 text,
                 f"{relative_path} does not point at the canonical guidance",
             )
-            # Restating a trap here is how the copies start. Each of these
-            # phrases is load-bearing in the canonical file; a pointer that
-            # repeats one has stopped being a pointer.
-            for restated in ("TOOL_SLUG", "--fail-under", "ACTION_PINS"):
-                self.assertNotIn(
-                    restated,
-                    text,
-                    f"{relative_path} restates '{restated}' instead of "
-                    f"deferring to .github/copilot-instructions.md",
+            # Copying is what has to be caught, and naming a thing is not
+            # copying: a task prompt about refreshing the action pins has to
+            # say ACTION_PINS, and a correction log has to name what was
+            # corrected. Blocking those words would push both into vagueness
+            # to satisfy a test. Verbatim sentences are the real signal, so
+            # that is what is checked.
+            canonical_prose = {
+                line.strip()
+                for line in canonical.read_text().splitlines()
+                if len(line.strip()) > 60 and not line.startswith(("#", "-", " ", "`"))
+            }
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                # assertTrue rather than assertNotIn: the latter prints the
+                # whole canonical file as the container, burying the one line
+                # that has to change.
+                self.assertTrue(
+                    line.strip() not in canonical_prose,
+                    f"{relative_path}:{lineno} copies a sentence from "
+                    f".github/copilot-instructions.md instead of linking to "
+                    f"it: {line.strip()[:60]!r}",
                 )
 
     def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
