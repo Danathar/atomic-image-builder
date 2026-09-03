@@ -6787,11 +6787,22 @@ class BuilderTests(unittest.TestCase):
             f"the declaration points at {source}, which does not exist",
         )
 
-        threshold = json.loads((root / source).read_text())["gated"]["unit"]
+        thresholds = json.loads((root / source).read_text())
         self.assertNotIn(
-            str(threshold),
+            str(thresholds["gated"]["unit"]),
             raw,
             "the declaration copies the threshold value instead of naming its source",
+        )
+
+        # The advisory tier list is the same duplication one level down: the
+        # declaration restates it for readability, so adding or renaming a
+        # tier in the source could leave this file quietly describing a
+        # policy the repo no longer has.
+        self.assertEqual(
+            data["advisory_and_deliberately_untuned"]["tiers"],
+            thresholds["advisory"],
+            "the declaration's advisory tiers disagree with "
+            ".coverage-thresholds.json",
         )
 
     def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
