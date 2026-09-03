@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m unittest:*)",
+      "Bash(python3 -m coverage:*)",
+      "Bash(ruff check:*)",
+      "Bash(shellcheck:*)",
+      "Bash(hadolint:*)",
+      "Bash(python3 maintenance_audit.py --skip-upstream:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)"
+    ],
+    "ask": [
+      "Bash(git push:*)",
+      "Bash(gh pr merge:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh release create:*)",
+      "Bash(gh workflow run:*)",
+      "Bash(podman build:*)"
+    ],
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(podman system prune:*)",
+      "Bash(podman image prune:*)",
+      "Bash(podman rmi -a:*)",
+      "Bash(podman rm -a:*)",
+      "Bash(buildah rm --all:*)",
+      "Bash(buildah rmi --all:*)",
+      "Bash(gh repo delete:*)",
+      "Bash(rpm-ostree reset:*)",
+      "Bash(bootc switch:*)",
+      "Read(./cosign.key)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(**/*.pem)",
+      "Read(**/id_rsa)",
+      "Read(**/id_ed25519)"
+    ]
+  }
+}
