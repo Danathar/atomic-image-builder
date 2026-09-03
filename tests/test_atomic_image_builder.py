@@ -6600,6 +6600,12 @@ class BuilderTests(unittest.TestCase):
         # sentence that gets left behind. The word boundary keeps `python3`
         # and version pins out of it.
         number = re.compile(r"\b\d+\b")
+        # Clock times and ISO dates are stripped before numbers are read. A
+        # line can legitimately mention the gate and a schedule in the same
+        # breath -- "Daily 04:00 UTC ... re-runs the gate" -- and reading 04
+        # as a stale threshold is a false positive that would push docs into
+        # avoiding the word rather than into being correct.
+        not_a_threshold = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}:\d{2}\b")
 
         documented = [
             "CONTRIBUTING.md",
@@ -6616,7 +6622,7 @@ class BuilderTests(unittest.TestCase):
             ):
                 if not gate_line.search(line):
                     continue
-                for found in number.findall(line):
+                for found in number.findall(not_a_threshold.sub(" ", line)):
                     checked += 1
                     self.assertEqual(
                         int(found),
@@ -6766,6 +6772,44 @@ class BuilderTests(unittest.TestCase):
         # A rewrite that drops every entry would otherwise pass by checking
         # nothing, and an empty checkpoint is not a checkpoint.
         self.assertGreater(entries, 0, ".claude/checkpoint.md has no dated entries")
+
+    def test_auto_qa_declaration_names_the_gate_without_copying_it(self) -> None:
+        # .github/auto-qa-tuning.json declares that the gate is never moved by
+        # a machine. The temptation is to restate the number there for
+        # readability, which would make it the fifth copy and undo #144. It
+        # names the file instead, and this asserts both halves: that the path
+        # it points at is the real one, and that no threshold value is written
+        # into it.
+        root = Path(__file__).resolve().parents[1]
+        declaration = root / ".github/auto-qa-tuning.json"
+        self.assertTrue(declaration.is_file(), ".github/auto-qa-tuning.json is missing")
+
+        raw = declaration.read_text()
+        data = json.loads(raw)
+        source = data["never_auto_tuned"]["unit_coverage_gate"]["source_of_truth"]
+        self.assertEqual(source, ".coverage-thresholds.json")
+        self.assertTrue(
+            (root / source).is_file(),
+            f"the declaration points at {source}, which does not exist",
+        )
+
+        thresholds = json.loads((root / source).read_text())
+        self.assertNotIn(
+            str(thresholds["gated"]["unit"]),
+            raw,
+            "the declaration copies the threshold value instead of naming its source",
+        )
+
+        # The advisory tier list is the same duplication one level down: the
+        # declaration restates it for readability, so adding or renaming a
+        # tier in the source could leave this file quietly describing a
+        # policy the repo no longer has.
+        self.assertEqual(
+            data["advisory_and_deliberately_untuned"]["tiers"],
+            thresholds["advisory"],
+            "the declaration's advisory tiers disagree with "
+            ".coverage-thresholds.json",
+        )
 
     def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
         # The explainer has to define the term for a newcomer, keep the trend

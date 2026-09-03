@@ -74,6 +74,11 @@ is a defect regardless of how the check responds.
 
 ## 7. Is the blast radius stated?
 
+[docs/risk-tiers.md](risk-tiers.md) classifies changes by how far they reach,
+and how much evidence each tier needs. The tiers are about reach, not size: a
+one-line pin change sits in the tier that touches every generated repository.
+
+
 This tool creates and pushes to GitHub repositories, publishes images, and
 rotates a signing key. A change touching any of those should say what it can
 affect and what it deliberately leaves alone. `.claude/settings.json` holds the
