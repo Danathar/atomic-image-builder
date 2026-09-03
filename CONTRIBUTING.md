@@ -63,11 +63,18 @@ The 90 is not written into `ci.yml`. It lives in `.coverage-thresholds.json`, wh
 ```bash
 podman build -t aib-local -f Containerfile .
 podman build -t aib-local-cov -f container/Containerfile.coverage --build-arg BASE_IMAGE=aib-local .
-mkdir -p e2e-coverage/data
-podman run --rm -e COVERAGE_FILE=/cov/.coverage.version   -v "$PWD/e2e-coverage/data:/cov:z" aib-local-cov --version
+tests/e2e/coverage_scenarios.sh
 python3 -m coverage combine --rcfile=.coveragerc.e2e --keep e2e-coverage/data
 python3 -m coverage report --rcfile=.coveragerc.e2e
 ```
+
+`tests/e2e/` holds the suites CI runs against the built image: `smoke.sh`
+asserts the behaviour of every non-interactive path, and
+`coverage_scenarios.sh` runs the same paths through the coverage shim to
+produce the data above. Both default to the `aib-local` / `aib-local-cov` tags
+those two builds produce, and take an image tag as their first argument, which
+is how CI points them at its own. `tests/e2e/README.md` covers what is
+reachable end to end and what adding a scenario involves.
 
 End-to-end coverage is deliberately low and is **not** gated: the guided wizard needs a TTY, so the only end-to-end reachable paths are `--version`, `--help`, and the preflight failure. It exists so coverage gaps can be classified honestly rather than inferred from the unit run alone.
 
@@ -228,10 +235,9 @@ which re-downloads the recorded URL and confirms the recorded sha256 still match
 
 ## Container Image
 
-The tool is also published as a container image (see README.md's "Run with Podman" section for end-user usage). `Containerfile` at the repo root defines the image, built from `atomic_image_builder.py` and the bundled `template_snapshots/`. `.github/workflows/publish-image.yml` builds and pushes it to `ghcr.io/danathar/atomic-image-builder` — tagged `latest`, the tool's `VERSION`, and the short commit SHA — on every merge to `main`, when a GitHub release is published, or on manual dispatch. Only a build of `main` tags the image `latest` — a release is published from a tag ref, and one cut from an older commit must not drag `latest` backwards; it still gets the version and SHA tags. All three events share one concurrency group, since they write the same repository tags and must not race. Publishing on merge is deliberate: it previously required a release or a manual dispatch, no releases were ever cut, and `latest` sat seven weeks behind `main`. Everything the tool bakes in — the script, its `ACTION_PINS` table, and the bundled template snapshots — reaches users only through this image, so a stale image silently strands every fix made to any of them. `.github/workflows/ci.yml`'s `container-build` job builds (but does not push) the Containerfile on any push or PR that touches `Containerfile`, `container/`, `atomic_image_builder.py`, or `template_snapshots/`. It then smoke tests every non-interactive path the packaged entrypoint has and collects end-to-end coverage from them (see [Coverage](#coverage)). `contrib/aib` is the host-side wrapper and is not baked into the image, so it is deliberately not a trigger. To build and test the image locally:
+The tool is also published as a container image (see README.md's "Run with Podman" section for end-user usage). `Containerfile` at the repo root defines the image, built from `atomic_image_builder.py` and the bundled `template_snapshots/`. `.github/workflows/publish-image.yml` builds and pushes it to `ghcr.io/danathar/atomic-image-builder` — tagged `latest`, the tool's `VERSION`, and the short commit SHA — on every merge to `main`, when a GitHub release is published, or on manual dispatch. Only a build of `main` tags the image `latest` — a release is published from a tag ref, and one cut from an older commit must not drag `latest` backwards; it still gets the version and SHA tags. All three events share one concurrency group, since they write the same repository tags and must not race. Publishing on merge is deliberate: it previously required a release or a manual dispatch, no releases were ever cut, and `latest` sat seven weeks behind `main`. Everything the tool bakes in — the script, its `ACTION_PINS` table, and the bundled template snapshots — reaches users only through this image, so a stale image silently strands every fix made to any of them. `.github/workflows/ci.yml`'s `container-build` job builds (but does not push) the Containerfile on any push or PR that touches `Containerfile`, `container/`, `atomic_image_builder.py`, or `template_snapshots/`. It then runs `tests/e2e/smoke.sh` over every non-interactive path the packaged entrypoint has, and `tests/e2e/coverage_scenarios.sh` to collect end-to-end coverage from the same paths (see [Coverage](#coverage)). `contrib/aib` is the host-side wrapper and is not baked into the image, so it is deliberately not a trigger. To build and test the image locally:
 
 ```bash
 podman build -t aib-local -f Containerfile .
-podman run --rm aib-local --version
-podman run --rm aib-local --help
+tests/e2e/smoke.sh
 ```

@@ -101,8 +101,17 @@ jobs:
       # container/entrypoint.sh is baked into the published image. Behavioral
       # tests stub every external command, so neither test touches live auth or
       # host state. shellcheck ships on the ubuntu-24.04 runner image.
+      #
+      # The end-to-end suites are linted here rather than in container-build,
+      # for the same reason hadolint is: that job is path-scoped and skips on
+      # a run that touches nothing in the image, and a lint gate that only
+      # runs sometimes is one nobody trusts. `-x` follows tests/e2e/lib.sh
+      # into the suites that source it.
       - name: Run shellcheck
-        run: shellcheck contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/test_entrypoint.sh
+        run: |
+          shellcheck -x contrib/aib container/entrypoint.sh \
+            tests/test_contrib_aib.sh tests/test_entrypoint.sh \
+            tests/e2e/lib.sh tests/e2e/smoke.sh tests/e2e/coverage_scenarios.sh
 
       # Both Containerfiles are built by the container-build job below and
       # Containerfile is what publish-image.yml ships to GHCR on every merge,
@@ -206,9 +215,16 @@ jobs:
       # Containerfile, its entrypoint, the tool script, and the bundled
       # template snapshots — all of which are COPY'd in. contrib/aib is the
       # host-side wrapper and is NOT in the image, so it is intentionally not
-      # a trigger here. Falls back to building when the diff base can't be
-      # resolved (e.g. a brand new branch with no prior commit) so this never
-      # silently skips.
+      # a trigger here.
+      #
+      # tests/e2e/ is the one trigger that is not in the image. It is what
+      # proves the image, and a change to a suite that never runs the suite
+      # is worse than no suite: it reads as covered. Without it a PR editing
+      # only smoke.sh or coverage_scenarios.sh skips this whole job while the
+      # test job merely shellchecks the files.
+      #
+      # Falls back to building when the diff base can't be resolved (e.g. a
+      # brand new branch with no prior commit) so this never silently skips.
       - name: Check for container-related changes
         id: changed
         run: |
@@ -223,7 +239,7 @@ jobs:
           fi
           if [ -z "$base" ] || ! git cat-file -e "$base" 2>/dev/null; then
             echo "any_changed=true" >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$base" "${{ github.sha }}" -- Containerfile container/ atomic_image_builder.py template_snapshots/; then
+          elif git diff --quiet "$base" "${{ github.sha }}" -- Containerfile container/ atomic_image_builder.py template_snapshots/ tests/e2e/; then
             echo "any_changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "any_changed=true" >> "$GITHUB_OUTPUT"
@@ -233,28 +249,13 @@ jobs:
         if: steps.changed.outputs.any_changed == 'true'
         run: podman build -t aib-ci-test -f Containerfile .
 
-      # Every non-interactive path the packaged entrypoint has. The guided
-      # wizard needs a TTY, so the only other end-to-end reachable behaviour
-      # is the preflight failure, which is checked last.
+      # Every non-interactive path the packaged entrypoint has, asserted by
+      # tests/e2e/smoke.sh. The suite lives in the repo rather than in this
+      # step so it can be run against a locally built image without a CI run
+      # -- see tests/e2e/README.md -- and so shellcheck covers it.
       - name: Smoke test the packaged entrypoint
         if: steps.changed.outputs.any_changed == 'true'
-        run: |
-          set -euo pipefail
-          podman run --rm aib-ci-test --version | grep -F "aib-tool"
-          podman run --rm aib-ci-test -V | grep -F "aib-tool"
-          podman run --rm aib-ci-test --help | grep -F -- "--version"
-          # The image exposes the same command name the Homebrew formula does.
-          podman run --rm --entrypoint aib-tool aib-ci-test --version | grep -F "aib-tool"
-
-          # With gum missing the tool must degrade to the plain-text preflight
-          # failure and exit 1, not block on a prompt. Masking the binary with
-          # a non-executable file is how that host is simulated: command_exists
-          # uses shutil.which, which requires the executable bit.
-          : > "$RUNNER_TEMP/no-gum"
-          status=0
-          output="$(podman run --rm -v "$RUNNER_TEMP/no-gum:/usr/bin/gum:ro" aib-ci-test)" || status=$?
-          test "$status" -eq 1
-          printf '%s\n' "$output" | grep -F "Preflight Failed"
+        run: tests/e2e/smoke.sh aib-ci-test
 
       - name: Set up Python
         if: steps.changed.outputs.any_changed == 'true'
@@ -274,34 +275,12 @@ jobs:
         if: steps.changed.outputs.any_changed == 'true'
         run: podman build -t aib-ci-test-cov -f container/Containerfile.coverage --build-arg BASE_IMAGE=aib-ci-test .
 
+      # The same scenarios again, through the coverage shim. Each writes its
+      # own data file so the artifact shows which lines a given invocation
+      # reached, not just the union.
       - name: Collect end-to-end coverage
         if: steps.changed.outputs.any_changed == 'true'
-        run: |
-          set -euo pipefail
-          mkdir -p e2e-coverage/data
-          : > "$RUNNER_TEMP/no-gum"
-
-          # Each scenario writes its own data file so the artifact shows which
-          # lines a given invocation reached, not just the union.
-          scenario() {
-            name="$1"
-            expected_status="$2"
-            shift 2
-            status=0
-            podman run --rm \
-              -e COVERAGE_FILE="/cov/.coverage.${name}" \
-              -v "$PWD/e2e-coverage/data:/cov:z" \
-              "$@" || status=$?
-            if [ "$status" -ne "$expected_status" ]; then
-              echo "e2e scenario '$name' exited $status, expected $expected_status" >&2
-              exit 1
-            fi
-          }
-
-          scenario version 0 aib-ci-test-cov --version
-          scenario version-short 0 aib-ci-test-cov -V
-          scenario help 0 aib-ci-test-cov --help
-          scenario preflight-no-gum 1 -v "$RUNNER_TEMP/no-gum:/usr/bin/gum:ro" aib-ci-test-cov
+        run: tests/e2e/coverage_scenarios.sh aib-ci-test-cov e2e-coverage/data
 
       - name: Report end-to-end coverage
         if: steps.changed.outputs.any_changed == 'true'
