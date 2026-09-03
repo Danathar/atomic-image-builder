@@ -78,8 +78,13 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   stops an unpinned action reaching generated repositories.
 - Default workflow token permissions are read-only; a workflow needing more
   declares it explicitly.
-- Actions cannot create pull requests in this repository, so no automated
-  path pushes code on its own.
+- Actions cannot create pull requests in this repository. There is exactly
+  one automated write path, and it is worth knowing rather than glossing:
+  `update-homebrew-formula.yml` takes `contents: write` on a published release
+  and pushes the formula update straight to `main`. It exists because Actions
+  cannot open a pull request here, and what it pushes is a single
+  machine-generated sha256 that the job verifies before pushing. Treat a
+  change to that workflow as Tier 4.
 
 ## Reporting
 
