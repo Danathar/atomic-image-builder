@@ -6700,7 +6700,7 @@ class BuilderTests(unittest.TestCase):
         # their own, and each is loaded automatically by the tool that reads
         # it -- which makes them the likeliest place for a second set of
         # conventions to appear and go unnoticed.
-        pointer_files = ("CLAUDE.md", "AGENTS.md")
+        pointer_files = ("CLAUDE.md", "AGENTS.md", ".claude/checkpoint.md")
         pointers = [
             root / name
             for name in sorted(tracked)
@@ -6733,6 +6733,39 @@ class BuilderTests(unittest.TestCase):
                     f".github/copilot-instructions.md instead of linking to "
                     f"it: {line.strip()[:60]!r}",
                 )
+
+    def test_checkpoint_entries_are_all_dated(self) -> None:
+        # The checkpoint holds no current-state claims -- those are looked up
+        # live -- so everything in it is a dated historical fact, which is
+        # what stops it rotting the way a session summary normally does. An
+        # undated entry is how that starts, so it is a failure rather than a
+        # style note. The file says a test enforces this; this is it.
+        root = Path(__file__).resolve().parents[1]
+        checkpoint = root / ".claude/checkpoint.md"
+        self.assertTrue(checkpoint.is_file(), ".claude/checkpoint.md is missing")
+
+        # Entries are bold-led paragraphs under the content sections. The
+        # sections explaining the format do not carry entries and are skipped.
+        explanatory = {"Checkpoint", "Why this file cannot go stale"}
+        section = None
+        entries = 0
+        for lineno, line in enumerate(checkpoint.read_text().splitlines(), start=1):
+            heading = re.match(r"^#+\s+(.*)$", line)
+            if heading:
+                section = heading.group(1).strip()
+                continue
+            if section in explanatory or not line.startswith("**"):
+                continue
+            entries += 1
+            self.assertRegex(
+                line,
+                r"^\*\*\d{4}-\d{2}-\d{2} ",
+                f".claude/checkpoint.md:{lineno} starts an entry without a "
+                f"leading ISO date, which is what keeps the file from rotting",
+            )
+        # A rewrite that drops every entry would otherwise pass by checking
+        # nothing, and an empty checkpoint is not a checkpoint.
+        self.assertGreater(entries, 0, ".claude/checkpoint.md has no dated entries")
 
     def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
         # The explainer has to define the term for a newcomer, keep the trend

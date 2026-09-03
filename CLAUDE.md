@@ -19,6 +19,10 @@ Two things in this directory are worth knowing about before you start:
   things that were done wrong here and what the repo settled on instead.
   Several are mistakes worth not repeating from a cold start, because the
   correct answer looks wrong until you know why.
+- [`.claude/checkpoint.md`](.claude/checkpoint.md) is what the last session
+  handed on: decisions in force and their reasoning, dated. It deliberately
+  holds no current-state claims, so look those up rather than reading them
+  there.
 
 Nothing from the canonical brief is repeated here, and a test enforces that.
 One place to correct beats four places that agree until they do not.

@@ -8,6 +8,7 @@ __pycache__/
 !.claude/skills/
 !.claude/memory/
 !.claude/settings.json
+!.claude/checkpoint.md
 .venv/
 .coverage
 .coverage.*
