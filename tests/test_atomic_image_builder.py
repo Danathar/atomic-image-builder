@@ -6536,6 +6536,14 @@ class BuilderTests(unittest.TestCase):
         contributing = (root / "CONTRIBUTING.md").read_text()
         self.assertIn(match.group(0), contributing)
 
+    def test_ruff_config_lives_in_exactly_one_file(self) -> None:
+        # ruff reads `.ruff.toml` in preference to `ruff.toml`, so a repo that
+        # has both silently lints against the dotted one while edits land in
+        # the other. Which name wins does not matter; having only one does.
+        root = Path(__file__).resolve().parents[1]
+        present = [name for name in ("ruff.toml", ".ruff.toml") if (root / name).exists()]
+        self.assertEqual(present, ["ruff.toml"])
+
     def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
         # The explainer has to define the term for a newcomer, keep the trend
         # history reachable now that the badge no longer links to it, and route
