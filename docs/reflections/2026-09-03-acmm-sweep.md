@@ -71,12 +71,15 @@ category worth looking for first.
 ## The measurements say less than they appear to
 
 Documenting the metrics made the ranking obvious in a way the numbers alone
-never did. Unit coverage sits at 100% and is the *weakest* of the coverage
-signals: it measures the source tree with the network and subprocesses mocked.
-The end-to-end tier, which measures a real run of the built image, sits near
-10%. And the merge rate, which sits above 90%, is not an acceptance rate at
-all, since nearly every pull request is opened by the maintainer or on the
-maintainer's instruction.
+never did. At the end of the sweep, unit coverage stood at 100% and was the
+*weakest* of the coverage signals: it measures the source tree with the
+network and subprocesses mocked. The end-to-end tier, which measures a real
+run of the built image, stood near 10%. And the merge rate that day was above
+90%, which was not an acceptance rate at all, since nearly every pull request
+was opened by the maintainer or on the maintainer's instruction.
+
+Those figures are recorded as they were on 2026-09-03, not as they are.
+[docs/metrics.md](../metrics.md) has the commands to read the current ones.
 
 A dashboard would have placed all of those side by side as though comparable.
 That is why there is not one.
@@ -85,5 +88,6 @@ That is why there is not one.
 
 Checking whether a capability already existed, under another name or inline
 somewhere, before treating an issue as new work. That single check would have
-changed the shape of the first five issues, and it is now the first thing the
-`ai-fix-requested` intake comment says.
+changed the shape of the first five issues, and it was carried into the
+`ai-fix-requested` intake comment added at the end of the sweep, which opens
+by telling its reader to do exactly that.
