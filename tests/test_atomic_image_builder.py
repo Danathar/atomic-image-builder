@@ -6536,6 +6536,46 @@ class BuilderTests(unittest.TestCase):
         contributing = (root / "CONTRIBUTING.md").read_text()
         self.assertIn(match.group(0), contributing)
 
+    def test_coverage_gate_threshold_has_one_source_of_truth(self) -> None:
+        # The gate number was spelled out in five places: ci.yml plus four
+        # sentences across three docs. Nothing tied them together, so moving
+        # the gate meant finding all five by memory and a doc left behind
+        # would go on quoting the old number indefinitely. ci.yml now reads
+        # .coverage-thresholds.json, and this asserts everything else agrees
+        # with it.
+        root = Path(__file__).resolve().parents[1]
+        thresholds = json.loads((root / ".coverage-thresholds.json").read_text())
+        threshold = thresholds["gated"]["unit"]
+        self.assertIsInstance(threshold, int)
+
+        ci_workflow = (root / ".github/workflows/ci.yml").read_text()
+        self.assertIn(".coverage-thresholds.json", ci_workflow)
+        # A literal here would silently win over the file it reads.
+        self.assertNotRegex(ci_workflow, r"--fail-under=\d")
+
+        # Every other --fail-under in the repo is a command a human is told to
+        # run locally, and has to match what CI will enforce on the push.
+        documented = [
+            "CONTRIBUTING.md",
+            "maintainer_docs/MAINTAINER.md",
+            "docs/coverage.md",
+        ]
+        for relative_path in documented:
+            text = (root / relative_path).read_text()
+            for found in re.findall(r"--fail-under=(\d+)", text):
+                self.assertEqual(
+                    int(found),
+                    threshold,
+                    f"{relative_path} runs the gate at {found}, not {threshold}",
+                )
+            # assertTrue rather than assertIn: a failing assertIn prints the
+            # whole document as the haystack, which buries the one line that
+            # says what to fix.
+            self.assertTrue(
+                f"{threshold}%" in text,
+                f"{relative_path} does not quote the {threshold}% gate",
+            )
+
     def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
         # The explainer has to define the term for a newcomer, keep the trend
         # history reachable now that the badge no longer links to it, and route

@@ -53,6 +53,8 @@ python3 -m coverage run -m unittest discover -s tests
 python3 -m coverage report
 ```
 
+The 90 is not written into `ci.yml`. It lives in `.coverage-thresholds.json`, which the workflow reads at gate time and which a test compares against every `--fail-under=` and every quoted percentage in these docs — so changing the gate is one edit, and a doc left saying the old number fails the suite rather than misleading someone quietly. That file also lists the other four measurements as advisory, which is the part most easily forgotten: they are uploaded, summarized, and deliberately ungated, and the reasons are below.
+
 **End-to-end coverage** measures what a real run of the *built container image* executes. `container/Containerfile.coverage` layers coverage.py onto the built image and swaps the `atomic-image-builder` launcher for a shim that runs the packaged script under it, so `container/entrypoint.sh` and the packaged path stay in the measured run. `.coveragerc.e2e` maps the in-image path (`/opt/atomic-image-builder`) back onto the checkout. To reproduce a CI run locally:
 
 ```bash
