@@ -6600,6 +6600,12 @@ class BuilderTests(unittest.TestCase):
         # sentence that gets left behind. The word boundary keeps `python3`
         # and version pins out of it.
         number = re.compile(r"\b\d+\b")
+        # Clock times and ISO dates are stripped before numbers are read. A
+        # line can legitimately mention the gate and a schedule in the same
+        # breath -- "Daily 04:00 UTC ... re-runs the gate" -- and reading 04
+        # as a stale threshold is a false positive that would push docs into
+        # avoiding the word rather than into being correct.
+        not_a_threshold = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}:\d{2}\b")
 
         documented = [
             "CONTRIBUTING.md",
@@ -6616,7 +6622,7 @@ class BuilderTests(unittest.TestCase):
             ):
                 if not gate_line.search(line):
                     continue
-                for found in number.findall(line):
+                for found in number.findall(not_a_threshold.sub(" ", line)):
                     checked += 1
                     self.assertEqual(
                         int(found),
