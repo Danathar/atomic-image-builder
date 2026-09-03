@@ -6672,7 +6672,10 @@ class BuilderTests(unittest.TestCase):
             for lineno, line in enumerate(text.splitlines(), start=1):
                 self.assertNotRegex(
                     line.strip(),
-                    r"--fail-under=\"?\d",
+                    # Either quote style, or none: a literal is a literal
+                    # however it is written, and `--fail-under='90'` slipped
+                    # through when only the double quote was allowed.
+                    r"--fail-under=['\"]?\d",
                     f"{relative_path}:{lineno} spells the gate threshold out "
                     f"instead of reading .coverage-thresholds.json",
                 )
