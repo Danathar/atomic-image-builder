@@ -1,11 +1,12 @@
 __pycache__/
 # Personal Claude Code config stays out of the repo, but the shared agent
 # artifacts underneath it are versioned deliberately -- see
-# .claude/skills/README.md. Git will not descend into an excluded directory,
-# so the directory itself has to be re-included before anything inside it can
-# be.
+# .claude/skills/README.md and .claude/memory/README.md. Git will not descend
+# into an excluded directory, so the directory itself has to be re-included
+# before anything inside it can be.
 .claude/*
 !.claude/skills/
+!.claude/memory/
 .venv/
 .coverage
 .coverage.*
