@@ -33,6 +33,16 @@ Out of scope: the upstream projects it builds on top of
 [bootc](https://github.com/bootc-dev/bootc), GitHub itself) — please report
 those to their own maintainers.
 
+## Working on this with a coding agent
+
+Much of the maintenance here is done with coding agents, which adds a surface
+this file does not otherwise cover: prompt injection through the untrusted
+input the tool parses, and the fact that `template_snapshots/` and the action
+pin tables are copied into every repository the tool generates.
+[docs/SECURITY-AI.md](docs/SECURITY-AI.md) covers that specifically. An
+AI-specific security problem is a vulnerability in this project and goes
+through the private channel above, not a public issue.
+
 ## What to expect
 
 This is a small project maintained in the open, without a dedicated security
