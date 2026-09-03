@@ -1,0 +1,25 @@
+{
+  "$comment": "What may and may not be adjusted automatically in this repository's quality signals. This is a declaration, not a tuner: nothing here reads this file and changes a threshold. Its purpose is the opposite -- to record that the gated threshold is never moved by a machine, and why. See docs/quality.md and docs/metrics.md.",
+  "policy": "no-automatic-tuning",
+  "never_auto_tuned": {
+    "unit_coverage_gate": {
+      "source_of_truth": ".coverage-thresholds.json",
+      "enforced_by": ".github/workflows/ci.yml",
+      "reason": "A gate that follows coverage downward is not a gate. The value is deliberately not repeated here: it lives in source_of_truth and nowhere else, because a threshold written in two places is the drift that issue 144 was filed to remove. Lowering it is a reviewed commit, cross-checked by a test against every document that quotes the number."
+    }
+  },
+  "advisory_and_deliberately_untuned": {
+    "tiers": [
+      "e2e",
+      "shell",
+      "maintenance-audit",
+      "homebrew-release"
+    ],
+    "reason": "These are advisory on purpose and three of them are expected to read low. The maintenance-audit tier is low because a clean live run cannot reach a rate limit, a DNS failure or a malformed response; raising it would mean manufacturing the failures it exists to observe. See issue 123, answered by pull request 124."
+  },
+  "what_adjusts_on_its_own": {
+    "coverage_trend": "coverage-trend.csv on the coverage-data branch, appended per push to main. A record, not a control -- nothing reads it back.",
+    "reason": "Recording a number over time is safe. Letting a recorded number move a gate is not."
+  },
+  "if_a_gate_blocks_you": "Change the code, or change the threshold in a reviewed commit and update the documents that quote it. Do not pass a threshold on the command line to make a local run agree; .coveragerc sets no fail_under, so a bare coverage report exits 0 however far coverage has fallen."
+}
