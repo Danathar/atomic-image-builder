@@ -9,16 +9,16 @@ There is no dashboard, and that is a decision rather than a gap. See
 
 ## The signals, and how much to trust them
 
-| Signal | Gated? | Where | Worth |
-|---|---|---|---|
-| Unit coverage | **Yes**, 90% | README badge, `coverage-data` branch | Says the gate is not the binding constraint. Flat at 100%. |
-| `ruff`, `shellcheck`, `hadolint` | **Yes** | `ci.yml` `test` job | Binary. Either clean or the build is red. |
-| End-to-end coverage | No | `coverage-e2e` artifact | The most informative number here, and near 10% by design. |
-| Shell-entrypoint coverage | No | `coverage-shell` artifact | Line, not branch. Read the quirks first. |
-| Maintenance-audit coverage | No | weekly artifact | Low is correct. Not a target. |
-| Homebrew-release coverage | No | release artifact | Only exists after a release. |
-| Weekly audit | Partly | `maintenance-audit.yml` runs | Failures matter, advisories usually do not. |
-| Review findings per PR | No | inline PR comments | The signal that counts problems found rather than work done. |
+| Signal                           | Gated?       | Where                                | Worth                                                        |
+| -------------------------------- | ------------ | ------------------------------------ | ------------------------------------------------------------ |
+| Unit coverage                    | **Yes**, 90% | README badge, `coverage-data` branch | Says the gate is not the binding constraint. Flat at 100%.   |
+| `ruff`, `shellcheck`, `hadolint` | **Yes**      | `ci.yml` `test` job                  | Binary. Either clean or the build is red.                    |
+| End-to-end coverage              | No           | `coverage-e2e` artifact              | The most informative number here, and near 10% by design.    |
+| Shell-entrypoint coverage        | No           | `coverage-shell` artifact            | Line, not branch. Read the quirks first.                     |
+| Maintenance-audit coverage       | No           | weekly artifact                      | Low is correct. Not a target.                                |
+| Homebrew-release coverage        | No           | release artifact                     | Only exists after a release.                                 |
+| Weekly audit                     | Partly       | `maintenance-audit.yml` runs         | Failures matter, advisories usually do not.                  |
+| Review findings per PR           | No           | inline PR comments                   | The signal that counts problems found rather than work done. |
 
 [CONTRIBUTING.md's Coverage section](../CONTRIBUTING.md#coverage) explains all
 five coverage tiers and why exactly one is gated.

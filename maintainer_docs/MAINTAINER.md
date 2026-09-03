@@ -33,12 +33,12 @@ VERSION = "0.9.1"
 
 That is the only file to edit. Everything else derives from it:
 
-| Consumer | How |
-|---|---|
-| `aib-tool --version` and the TUI banner | reads the constant |
-| Published image's version tag | `publish-image.yml` runs `--version` and takes field 2 |
-| Homebrew formula | `homebrew_formula.py` imports `VERSION` and compares it to the formula's tag |
-| `tool_version` in each managed repo's state file | written on create and update |
+| Consumer                                         | How                                                                          |
+| ------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `aib-tool --version` and the TUI banner          | reads the constant                                                           |
+| Published image's version tag                    | `publish-image.yml` runs `--version` and takes field 2                       |
+| Homebrew formula                                 | `homebrew_formula.py` imports `VERSION` and compares it to the formula's tag |
+| `tool_version` in each managed repo's state file | written on create and update                                                 |
 
 **3. Commit, push, and merge it.**
 
@@ -127,11 +127,11 @@ independently rather than trusting the automation ran.
 Three, with deliberately different freshness contracts. When someone reports a
 bug, ask which one they used.
 
-| Channel | Command | Tracks | Updates when |
-|---|---|---|---|
-| Container wrapper | `aib` | `main` | Every run — `--pull=newer` |
-| Homebrew | `aib-tool` | Tagged releases | `brew upgrade` |
-| Source checkout | `./atomic_image_builder.py` | Whatever is checked out | `git pull` |
+| Channel           | Command                     | Tracks                  | Updates when               |
+| ----------------- | --------------------------- | ----------------------- | -------------------------- |
+| Container wrapper | `aib`                       | `main`                  | Every run — `--pull=newer` |
+| Homebrew          | `aib-tool`                  | Tagged releases         | `brew upgrade`             |
+| Source checkout   | `./atomic_image_builder.py` | Whatever is checked out | `git pull`                 |
 
 The container is always the freshest. Homebrew is deliberately behind, moving
 only when you cut a release.
@@ -140,15 +140,15 @@ only when you cut a release.
 
 ## What runs automatically
 
-| Workflow | Fires on | Does |
-|---|---|---|
-| `ci.yml` | push, PR, dispatch | Tests, coverage gate at 90%, ruff; builds the image and collects e2e coverage when image files change |
-| `publish-image.yml` | push to `main`, release, dispatch | Builds and pushes to GHCR |
-| `update-homebrew-formula.yml` | release published, dispatch | Points the formula at the release and pushes to `main` |
-| `maintenance-audit.yml` | Mondays 06:00 UTC, dispatch | Snapshot drift (and its tracking issue), action pin coverage, pin freshness, formula pin |
-| `nightly-compliance.yml` | Daily 04:17 UTC, dispatch | Rebuilds `main`'s image from scratch and re-runs the gate against it; a failure means something outside the repo moved |
-| `triage.yml` | Issue opened, dispatch | Adds an `acmm-lN` label by title, and `security` when the text names cosign, a token, or prompt injection. Additive only; never removes a label |
-| `ai-fix.yml` | `ai-fix-requested` label, dispatch | Posts the current gate result on the issue as context. Read-only: no code writes, no pull request, no model |
+| Workflow                      | Fires on                           | Does                                                                                                                                            |
+| ----------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ci.yml`                      | push, PR, dispatch                 | Tests, coverage gate at 90%, ruff; builds the image and collects e2e coverage when image files change                                           |
+| `publish-image.yml`           | push to `main`, release, dispatch  | Builds and pushes to GHCR                                                                                                                       |
+| `update-homebrew-formula.yml` | release published, dispatch        | Points the formula at the release and pushes to `main`                                                                                          |
+| `maintenance-audit.yml`       | Mondays 06:00 UTC, dispatch        | Snapshot drift (and its tracking issue), action pin coverage, pin freshness, formula pin                                                        |
+| `nightly-compliance.yml`      | Daily 04:17 UTC, dispatch          | Rebuilds `main`'s image from scratch and re-runs the gate against it; a failure means something outside the repo moved                          |
+| `triage.yml`                  | Issue opened, dispatch             | Adds an `acmm-lN` label by title, and `security` when the text names cosign, a token, or prompt injection. Additive only; never removes a label |
+| `ai-fix.yml`                  | `ai-fix-requested` label, dispatch | Posts the current gate result on the issue as context. Read-only: no code writes, no pull request, no model                                     |
 
 Only a build of `main` tags the image `latest` — a release published from an
 older commit must not drag `latest` backwards. All events that write image
@@ -203,11 +203,11 @@ Change the constant in `maintenance_audit.py` if that is the wrong line.
 Three cases never block, whatever the distance, because each one would have
 the audit demand a refresh it cannot say is correct:
 
-| Message | Why it stays advisory |
-|---|---|
-| `N commit(s) OLDER than the snapshot` | Upstream was force-pushed backwards; refreshing rolls the snapshot back |
-| `on a diverged history` | Needs both sides reviewed, not a blind refresh |
-| no count at all | The compare API was unavailable — rate limit, rewritten history, non-GitHub remote. Blocking on an unknown is how a rate limit becomes a red audit |
+| Message                               | Why it stays advisory                                                                                                                              |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `N commit(s) OLDER than the snapshot` | Upstream was force-pushed backwards; refreshing rolls the snapshot back                                                                            |
+| `on a diverged history`               | Needs both sides reviewed, not a blind refresh                                                                                                     |
+| no count at all                       | The compare API was unavailable — rate limit, rewritten history, non-GitHub remote. Blocking on an unknown is how a rate limit becomes a red audit |
 
 Sub-threshold drift also opens a **tracking issue**, titled *Bundled template
 snapshot trails upstream*, because otherwise a green run's advisory reaches

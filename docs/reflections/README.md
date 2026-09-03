@@ -5,11 +5,11 @@ Retrospectives on completed work, written once the outcome is known.
 This is the third learning artifact in the repo and the boundary between them
 is deliberate, because three overlapping ones would be worse than none:
 
-| Artifact | Grain | Written when |
-|---|---|---|
-| [`.claude/memory/corrections.md`](../../.claude/memory/corrections.md) | one wrong belief | a finding is settled |
-| [`.claude/checkpoint.md`](../../.claude/checkpoint.md) | one decision in force | a decision is made |
-| `docs/reflections/` | one finished work stream | after it lands |
+| Artifact                                                               | Grain                    | Written when         |
+| ---------------------------------------------------------------------- | ------------------------ | -------------------- |
+| [`.claude/memory/corrections.md`](../../.claude/memory/corrections.md) | one wrong belief         | a finding is settled |
+| [`.claude/checkpoint.md`](../../.claude/checkpoint.md)                 | one decision in force    | a decision is made   |
+| `docs/reflections/`                                                    | one finished work stream | after it lands       |
 
 A correction is "this specific belief was wrong". A checkpoint entry is "this
 is what we decided and why". A reflection is longer: what a stretch of work
