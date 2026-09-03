@@ -1,0 +1,17 @@
+# Blank issues stay enabled on purpose. The forms above are for reports coming
+# in cold; they are not a toll booth on the maintainer's own notes, and the
+# weekly maintenance audit opens its issues through the API, which bypasses
+# templates entirely either way.
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Danathar/atomic-image-builder/security/advisories/new
+    about: >-
+      Report privately, not as a public issue. This tool handles GitHub tokens and
+      a cosign signing key. See SECURITY.md.
+  - name: How do I use it?
+    url: https://github.com/Danathar/atomic-image-builder/blob/main/docs/using.md
+    about: The guided menu, migrating layered packages, and Homebrew in your built image.
+  - name: Install trouble
+    url: https://github.com/Danathar/atomic-image-builder/blob/main/docs/installing.md
+    about: Every install path, container limitations, and command-line options.
