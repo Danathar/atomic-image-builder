@@ -7,6 +7,9 @@ ROOT = Path(__file__).resolve().parents[1]
 class WorkflowDependencyTests(unittest.TestCase):
     def test_python_ci_tool_installs_are_exactly_pinned(self) -> None:
         expected_commands = {
+            ".github/workflows/ai-fix.yml": [
+                "pip install coverage==7.16.0 ruff==0.16.5",
+            ],
             ".github/workflows/ci.yml": [
                 "pip install coverage==7.16.0 ruff==0.16.5",
                 "pip install coverage==7.16.0",

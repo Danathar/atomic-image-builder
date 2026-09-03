@@ -1,0 +1,137 @@
+---
+name: AI fix intake
+
+# What this does, and deliberately does not do.
+#
+# Nearly every issue here arrives from the ACMM evaluation carrying the
+# `ai-fix-requested` label, and whoever picks one up -- person or agent --
+# starts from a cold checkout and re-derives the same context every time.
+# This runs the repo's own gate the moment the label appears and posts the
+# result as a comment, so the work starts from evidence.
+#
+# It does NOT write code, open a pull request, or invoke a model. Three
+# reasons, and they are not incidental:
+#
+#   1. Actions cannot create pull requests in this repository (a repo
+#      setting), so an automated fix path could not open one anyway.
+#   2. This repo publishes signed images and can rotate a cosign key.
+#      Automated write access to it is a decision nobody should get by
+#      default from a workflow file.
+#   3. An AI action would need adding to ACTION_PINS, which ships to every
+#      repository the tool generates -- so it would land in strangers' repos
+#      to serve a convenience here.
+#
+# See docs/SECURITY-AI.md. Its only write is one issue comment.
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to post the intake comment on
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  intake:
+    name: Gather evidence for the labeled issue
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.label.name == 'ai-fix-requested'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      # Always main, never the dispatch ref. `gh workflow run --ref` can start
+      # this from a feature branch, and without pinning the ref the job would
+      # test that branch and post the result on an issue as though it were the
+      # state of main.
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.10"
+
+      # Same version and checksum ci.yml pins, for the same reason: hadolint
+      # ships a binary rather than a package, and an action would have to
+      # enter ACTION_PINS. shellcheck is already on the runner image.
+      - name: Install test tooling
+        run: |
+          set -euo pipefail
+          pip install coverage==7.16.0 ruff==0.16.5
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/bin/hadolint" \
+            https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-Linux-x86_64
+          echo "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47  $RUNNER_TEMP/bin/hadolint" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/hadolint"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # Every step below records its outcome instead of failing the job. A red
+      # X on an intake run would say the issue is bad, when what it actually
+      # means is that `main` is currently failing -- which is exactly the
+      # context the comment exists to carry.
+      - name: Run the gate
+        id: gate
+        run: |
+          set -uo pipefail
+          {
+            echo "### Gate on \`main\` at $(git rev-parse --short HEAD)"
+            echo
+            # Every check CI gates on, or the report contradicts CI. The
+            # coverage entry carries its threshold so a below-gate run is a
+            # FAIL here rather than a percentage printed without comment;
+            # .coveragerc sets no fail_under, so a bare report always exits 0.
+            # hadolint is fetched the same way ci.yml fetches it -- by version
+            # and checksum -- because an action would have to enter
+            # ACTION_PINS, which ships to every generated repo.
+            threshold="$(jq -er '.gated.unit' .coverage-thresholds.json)"
+            for check in \
+              "unittest:python3 -m unittest discover -s tests" \
+              "coverage:python3 -m coverage run -m unittest discover -s tests \
+                 && python3 -m coverage report --fail-under=$threshold" \
+              "ruff:ruff check" \
+              "shellcheck:shellcheck -x contrib/aib container/entrypoint.sh \
+                 tests/test_contrib_aib.sh tests/test_entrypoint.sh tests/e2e/*.sh" \
+              "hadolint:hadolint Containerfile container/Containerfile.coverage" \
+              "audit:python3 maintenance_audit.py --skip-upstream"
+            do
+              name="${check%%:*}"
+              cmd="${check#*:}"
+              if output="$(bash -c "$cmd" 2>&1)"; then
+                echo "- \`$name\` — pass"
+              else
+                echo "- \`$name\` — **FAIL**"
+                echo
+                echo '```'
+                printf '%s\n' "$output" | tail -20
+                echo '```'
+              fi
+            done
+            echo
+            percent="$(python3 -m coverage report --format=total 2>/dev/null || echo unknown)"
+            echo "Coverage ${percent}% against a ${threshold}% gate."
+          } > intake.md
+
+      - name: Post the intake comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number || inputs.issue }}
+        run: |
+          set -euo pipefail
+          {
+            echo "**Intake for \`ai-fix-requested\`.** Automated context, not a fix."
+            echo
+            cat intake.md
+            echo
+            echo "Before treating this as new work, check whether the capability already"
+            echo "exists under another name — the ACMM criteria test filenames, not"
+            echo "capabilities, and several have been false negatives. Start from"
+            echo "\`.github/copilot-instructions.md\`; \`docs/risk-tiers.md\` says how much"
+            echo "evidence the change will need."
+          } | gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file -

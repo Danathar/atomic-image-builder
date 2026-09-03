@@ -148,6 +148,7 @@ only when you cut a release.
 | `maintenance-audit.yml` | Mondays 06:00 UTC, dispatch | Snapshot drift (and its tracking issue), action pin coverage, pin freshness, formula pin |
 | `nightly-compliance.yml` | Daily 04:17 UTC, dispatch | Rebuilds `main`'s image from scratch and re-runs the gate against it; a failure means something outside the repo moved |
 | `triage.yml` | Issue opened, dispatch | Adds an `acmm-lN` label by title, and `security` when the text names cosign, a token, or prompt injection. Additive only; never removes a label |
+| `ai-fix.yml` | `ai-fix-requested` label, dispatch | Posts the current gate result on the issue as context. Read-only: no code writes, no pull request, no model |
 
 Only a build of `main` tags the image `latest` — a release published from an
 older commit must not drag `latest` backwards. All events that write image
@@ -312,7 +313,8 @@ wrapper keeps that in a named volume; a bare `podman run --rm` repeats it.
   which matters, because anything landing on `main` immediately becomes the
   published image.
 - **Actions cannot create pull requests** in this repo, which is why the
-  formula update pushes directly instead of opening one. Issues are a separate
+  formula update pushes directly instead of opening one, and why
+  `ai-fix.yml` gathers evidence onto an issue rather than proposing a fix. Issues are a separate
   setting and are not blocked — the audit's snapshot-drift tracking issue
   depends on that, so if it ever starts reporting `could not sync`, check
   Settings → Actions → General before assuming the script broke.
