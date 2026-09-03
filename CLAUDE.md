@@ -24,5 +24,9 @@ Two things in this directory are worth knowing about before you start:
   holds no current-state claims, so look those up rather than reading them
   there.
 
+[docs/reflections/](docs/reflections/) is the third and longest-grained of
+these: retrospectives on finished work, written once the outcome is known.
+Its README states the boundary between all three.
+
 Nothing from the canonical brief is repeated here, and a test enforces that.
 One place to correct beats four places that agree until they do not.
