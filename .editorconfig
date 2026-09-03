@@ -31,9 +31,13 @@ trim_trailing_whitespace = false
 # Justfile is tab-indented because that is what upstream ships; saying so
 # stops an editor "fixing" it into a diff against a snapshot that has to match
 # upstream.
+# `unset` and not `false`: in EditorConfig, false means "ensure the file does
+# NOT end with a newline", which would strip the trailing newline from the 21
+# snapshot files that have one -- causing the exact drift this section exists
+# to prevent. unset disables the inherited rule without asserting the opposite.
 [template_snapshots/**]
-trim_trailing_whitespace = false
-insert_final_newline = false
+trim_trailing_whitespace = unset
+insert_final_newline = unset
 
 [template_snapshots/containerfile/Justfile]
 indent_style = tab
