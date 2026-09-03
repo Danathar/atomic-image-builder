@@ -12,6 +12,11 @@ arrived at.
 |---|---|
 | [`corrections.md`](corrections.md) | Things that were done wrong here, and what the repo decided instead |
 
+Its companion is [`../checkpoint.md`](../checkpoint.md), and the two are
+deliberately different: corrections are things done *wrong* and put right,
+while the checkpoint is things *decided* and the reasoning that would otherwise
+be lost between sessions.
+
 ## What goes in
 
 A correction earns an entry when someone acted on a belief that turned out to
