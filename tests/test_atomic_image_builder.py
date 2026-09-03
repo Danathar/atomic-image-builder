@@ -6536,6 +6536,14 @@ class BuilderTests(unittest.TestCase):
         contributing = (root / "CONTRIBUTING.md").read_text()
         self.assertIn(match.group(0), contributing)
 
+    def test_ruff_config_lives_in_exactly_one_file(self) -> None:
+        # ruff reads `.ruff.toml` in preference to `ruff.toml`, so a repo that
+        # has both silently lints against the dotted one while edits land in
+        # the other. Which name wins does not matter; having only one does.
+        root = Path(__file__).resolve().parents[1]
+        present = [name for name in ("ruff.toml", ".ruff.toml") if (root / name).exists()]
+        self.assertEqual(present, ["ruff.toml"])
+
     def test_coverage_gate_threshold_has_one_source_of_truth(self) -> None:
         # The gate number was spelled out in five places: ci.yml plus four
         # sentences across three docs. Nothing tied them together, so moving
@@ -6572,6 +6580,9 @@ class BuilderTests(unittest.TestCase):
             "CONTRIBUTING.md",
             "maintainer_docs/MAINTAINER.md",
             "docs/coverage.md",
+            # The PR template's checklist is a command a contributor copies,
+            # so a stale threshold there is one they run and believe.
+            ".github/pull_request_template.md",
         ]
         for relative_path in documented:
             checked = 0

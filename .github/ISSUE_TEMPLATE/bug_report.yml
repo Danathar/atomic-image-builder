@@ -1,0 +1,102 @@
+name: Bug report
+description: Something the tool did that it should not have, or did not do that it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Found a **security vulnerability**? Please don't file it here.
+        [Report it privately](https://github.com/Danathar/atomic-image-builder/security/advisories/new)
+        instead, per [SECURITY.md](https://github.com/Danathar/atomic-image-builder/blob/main/SECURITY.md).
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where did it go wrong?
+      description: >-
+        The tool and the repository it generates fail in different places, and the
+        two need different information. If a generated repo's GitHub Actions build
+        is what failed, say so here and link the failed run below.
+      options:
+        - The tool itself (the wizard, the scan, the menu)
+        - A repository the tool generated (its Actions build, its Containerfile)
+        - Install or launch (Homebrew, the container image, contrib/aib)
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "Output of `aib-tool --version`, or `aib --version`, or the commit you ran from."
+      placeholder: "aib-tool 0.9.x"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options:
+        - Homebrew (aib-tool)
+        - contrib/aib wrapper (aib)
+        - Plain podman run
+        - Distrobox
+        - From source
+    validations:
+      required: true
+
+  - type: input
+    id: base
+    attributes:
+      label: What are you running it on?
+      description: >-
+        The booted image, which is what the scan reads. `rpm-ostree status -b`
+        prints it. Say "container, no host scan" if you ran it somewhere with no
+        rpm-ostree to read.
+      placeholder: "ghcr.io/ublue-os/bluefin:stable"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: >-
+        The menu path you took, or the exact command. If the tool created or
+        updated a repo along the way, a link to it helps.
+      placeholder: |
+        1. Ran `aib-tool`
+        2. Chose Create Image
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output or logs
+      description: >-
+        Paste the relevant terminal output, or link the failed Actions run.
+        This is rendered as a code block, so no backticks needed.
+      render: text
+
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: Before you post
+      options:
+        - label: >-
+            I checked the pasted output for tokens, cosign keys, and anything else
+            I would not want public.
+          required: true

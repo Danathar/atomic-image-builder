@@ -21,6 +21,9 @@ setup:
 4. Open the PR against `main` and describe what changed and why. Keep it
    scoped to one thing; a PR that mixes an unrelated cleanup with the actual
    fix is harder to review and to revert if something goes wrong.
+   `.github/pull_request_template.md` prefills the description with those
+   questions and a checklist of the local checks — it's a prompt, not a gate,
+   so delete whatever doesn't apply to your change.
 
 `main` is not branch-protected, but everything except the maintainer's own
 direct fixes goes through review here — see MAINTAINER.md's *Repo settings
@@ -131,6 +134,13 @@ ruff check                                    # Python -- pip install command is
 shellcheck contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/test_entrypoint.sh
 hadolint Containerfile container/Containerfile.coverage
 ```
+
+`ruff.toml` holds the rule selection and the `py310` target, so `ruff check`
+with no arguments — the same invocation CI uses — checks the same things
+locally that it does in CI. Note the undotted name: ruff reads `.ruff.toml`
+in preference to `ruff.toml`, so adding the dotted variant would take over
+silently and leave edits to this one doing nothing. A test asserts only one of
+the two exists.
 
 `ruff` is pinned in the install command at the top of [Tests](#tests), which
 keeps it in sync with the exact version `ci.yml` installs — an unpinned local

@@ -317,6 +317,11 @@ wrapper keeps that in a named volume; a bare `podman run --rm` repeats it.
 - **Default workflow token permissions are read-only.** Workflows needing more
   declare it explicitly, as `publish-image.yml` and
   `update-homebrew-formula.yml` do.
+- **Blank issues stay enabled** alongside the forms in
+  `.github/ISSUE_TEMPLATE/`. Turning them off would not touch the audit's
+  snapshot-drift issue, which is filed through the API and never sees a
+  template, but it would put a form in front of every quick note you file
+  yourself. `config.yml` carries that reasoning next to the setting.
 
 ---
 
