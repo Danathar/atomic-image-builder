@@ -14,6 +14,9 @@ class WorkflowDependencyTests(unittest.TestCase):
             ".github/workflows/maintenance-audit.yml": [
                 "pip install coverage==7.16.0",
             ],
+            ".github/workflows/nightly-compliance.yml": [
+                "pip install coverage==7.16.0",
+            ],
             ".github/workflows/update-homebrew-formula.yml": [
                 "pip install coverage==7.16.0",
             ],
