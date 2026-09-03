@@ -4,6 +4,8 @@ This document covers the development and maintenance workflows for working on At
 
 New to the code? [ARCHITECTURE.md](ARCHITECTURE.md) maps `atomic_image_builder.py` — the repo layout, the five-stage runtime model, what each region of the file holds, and where to start for a given kind of change.
 
+Working here with a coding agent? [.github/copilot-instructions.md](.github/copilot-instructions.md) is the canonical brief for one: the checks, and the handful of things that are easy to get wrong in this repo specifically. It points at the documents below rather than restating them, and every other agent-facing file in the repo points at it.
+
 ## Submitting a change
 
 This is a normal public GitHub repo — there's no separate CLA or contributor
