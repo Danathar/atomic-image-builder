@@ -21,6 +21,9 @@ setup:
 4. Open the PR against `main` and describe what changed and why. Keep it
    scoped to one thing; a PR that mixes an unrelated cleanup with the actual
    fix is harder to review and to revert if something goes wrong.
+   `.github/pull_request_template.md` prefills the description with those
+   questions and a checklist of the local checks — it's a prompt, not a gate,
+   so delete whatever doesn't apply to your change.
 
 `main` is not branch-protected, but everything except the maintainer's own
 direct fixes goes through review here — see MAINTAINER.md's *Repo settings
