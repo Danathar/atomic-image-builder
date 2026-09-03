@@ -21,6 +21,9 @@ setup:
 4. Open the PR against `main` and describe what changed and why. Keep it
    scoped to one thing; a PR that mixes an unrelated cleanup with the actual
    fix is harder to review and to revert if something goes wrong.
+   `.github/pull_request_template.md` prefills the description with those
+   questions and a checklist of the local checks — it's a prompt, not a gate,
+   so delete whatever doesn't apply to your change.
 
 `main` is not branch-protected, but everything except the maintainer's own
 direct fixes goes through review here — see MAINTAINER.md's *Repo settings
@@ -52,6 +55,8 @@ There are five separate coverage measurements, and they are not interchangeable.
 python3 -m coverage run -m unittest discover -s tests
 python3 -m coverage report
 ```
+
+The 90 is not written into `ci.yml`. It lives in `.coverage-thresholds.json`, which the workflow reads at gate time and which a test compares against every `--fail-under=` and every quoted percentage in these docs — so changing the gate is one edit, and a doc left saying the old number fails the suite rather than misleading someone quietly. That file also lists the other four measurements as advisory, which is the part most easily forgotten: they are uploaded, summarized, and deliberately ungated, and the reasons are below.
 
 **End-to-end coverage** measures what a real run of the *built container image* executes. `container/Containerfile.coverage` layers coverage.py onto the built image and swaps the `atomic-image-builder` launcher for a shim that runs the packaged script under it, so `container/entrypoint.sh` and the packaged path stay in the measured run. `.coveragerc.e2e` maps the in-image path (`/opt/atomic-image-builder`) back onto the checkout. To reproduce a CI run locally:
 
@@ -136,6 +141,13 @@ ruff check                                    # Python -- pip install command is
 shellcheck contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/test_entrypoint.sh
 hadolint Containerfile container/Containerfile.coverage
 ```
+
+`ruff.toml` holds the rule selection and the `py310` target, so `ruff check`
+with no arguments — the same invocation CI uses — checks the same things
+locally that it does in CI. Note the undotted name: ruff reads `.ruff.toml`
+in preference to `ruff.toml`, so adding the dotted variant would take over
+silently and leave edits to this one doing nothing. A test asserts only one of
+the two exists.
 
 `ruff` is pinned in the install command at the top of [Tests](#tests), which
 keeps it in sync with the exact version `ci.yml` installs — an unpinned local

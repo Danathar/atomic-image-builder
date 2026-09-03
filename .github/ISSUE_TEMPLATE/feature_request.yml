@@ -1,0 +1,54 @@
+name: Feature request
+description: Something the tool should do that it does not
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Worth knowing before you write this: the tool is deliberately **not** aimed
+        at exposing every advanced workflow. It trades setup cost for a guided path
+        with stricter defaults, so "BlueBuild supports it" or "the template supports
+        it" is not on its own a reason for the wizard to. See the README's
+        *Who it's for* and *What it does not do*.
+
+        That is not a discouragement from filing. It is what the answer will be
+        weighed against, so the "why" below matters more than the "what".
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: >-
+        The situation you are in, before any proposed solution. What you wanted the
+        image to end up with, or what you had to do by hand instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What should the tool do?
+      description: Where it would live in the menu, and what it would ask you.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What do you do today instead?
+      description: >-
+        Editing the generated repo by hand, a script, giving up. This is the best
+        signal for how much the gap actually costs, so it is worth a sentence even
+        when the answer is "nothing".
+
+  - type: dropdown
+    id: build-method
+    attributes:
+      label: Does this depend on a build method?
+      options:
+        - Containerfile only
+        - BlueBuild only
+        - Both
+        - Neither, it's elsewhere in the tool
+    validations:
+      required: true

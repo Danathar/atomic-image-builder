@@ -49,19 +49,26 @@ jobs:
 
       # Coverage settings (which modules, which lines are excluded) live in
       # .coveragerc so a local run reports the same numbers CI does. The
-      # summary is written before the gate so a failing run still shows which
-      # lines are missing.
+      # threshold itself lives in .coverage-thresholds.json and is read here
+      # rather than spelled out, so the number the gate enforces and the
+      # number the docs quote cannot drift apart -- a test asserts they
+      # agree. The summary is written before the gate so a failing run still
+      # shows which lines are missing.
       - name: Report coverage
         id: coverage
         run: |
+          set -euo pipefail
+          threshold="$(jq -er '.gated.unit' .coverage-thresholds.json)"
           {
             echo "## Coverage"
+            echo
+            echo "Gate: ${threshold}% (.coverage-thresholds.json)"
             echo
             echo '```'
             python3 -m coverage report
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          python3 -m coverage report --fail-under=90
+          python3 -m coverage report --fail-under="$threshold"
           echo "percent=$(python3 -m coverage report --format=total)" >> "$GITHUB_OUTPUT"
 
       # Uploaded even when the gate above fails: a run that dropped below the

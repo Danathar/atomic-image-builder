@@ -317,6 +317,11 @@ wrapper keeps that in a named volume; a bare `podman run --rm` repeats it.
 - **Default workflow token permissions are read-only.** Workflows needing more
   declare it explicitly, as `publish-image.yml` and
   `update-homebrew-formula.yml` do.
+- **Blank issues stay enabled** alongside the forms in
+  `.github/ISSUE_TEMPLATE/`. Turning them off would not touch the audit's
+  snapshot-drift issue, which is filed through the API and never sees a
+  template, but it would put a form in front of every quick note you file
+  yourself. `config.yml` carries that reasoning next to the setting.
 
 ---
 
@@ -328,6 +333,12 @@ python3 -m coverage run -m unittest discover -s tests && python3 -m coverage rep
 ruff check
 python3 maintenance_audit.py --skip-upstream
 ```
+
+The `90` there is the gate CI enforces, and it is not typed into `ci.yml`
+either: both come from `.coverage-thresholds.json`. To move the gate, edit
+that file and run the suite — a doc still quoting the old number fails
+`test_coverage_gate_threshold_has_one_source_of_truth` rather than sitting
+there wrong.
 
 Do **not** run `brew audit` against your real Homebrew prefix. It bootstraps
 Homebrew's developer gem bundle, and on current versions the vendored `json`

@@ -1,0 +1,12 @@
+{
+  "description": "Coverage thresholds for this repo. .github/workflows/ci.yml reads gated.unit from here rather than spelling the number itself, and tests/test_atomic_image_builder.py asserts the docs agree with it. See CONTRIBUTING.md's Coverage section for what each measurement means and why only one of them is gated.",
+  "gated": {
+    "unit": 90
+  },
+  "advisory": [
+    "e2e",
+    "shell",
+    "maintenance-audit",
+    "homebrew-release"
+  ]
+}
