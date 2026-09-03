@@ -13,9 +13,22 @@ what to do with each result.
 
 ```bash
 python3 -m unittest discover -s tests
-python3 -m coverage run -m unittest discover -s tests && python3 -m coverage report
+
+# .coveragerc sets no fail_under, so a bare `coverage report` exits 0 however
+# far coverage has fallen. Read the gate the way ci.yml does instead of
+# writing the number here, which would be one more copy to keep in step.
+python3 -m coverage run -m unittest discover -s tests
+python3 -m coverage report --fail-under="$(jq -er '.gated.unit' .coverage-thresholds.json)"
+
 ruff check
+
+# shellcheck is static analysis only. The behavioral assertions for the two
+# shell entrypoints live in these harnesses, and CI runs them (under bashcov,
+# which adds coverage but is not needed to run them).
 shellcheck -x contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/test_entrypoint.sh tests/e2e/*.sh
+tests/test_contrib_aib.sh
+tests/test_entrypoint.sh
+
 hadolint Containerfile container/Containerfile.coverage
 python3 maintenance_audit.py --skip-upstream
 ```
@@ -39,8 +52,13 @@ not because the test is brittle. Fix the doc.
 itself and is fixable here. An advisory means something upstream moved and is
 not yours to clear. `MAINTAINER.md`'s *Reading the weekly audit* draws the line.
 
-**Nothing to run for a docs-only change.** Say which checks you skipped and
-why, rather than reporting a gate you did not run.
+**A docs-only change still runs the suite.** Several tests here read the
+documents and fail when one drifts from what it describes -- the coverage
+threshold is checked against CONTRIBUTING.md, MAINTAINER.md, docs/coverage.md
+and the PR template. Editing any of those without running the tests is the
+case most likely to pass locally and fail on the push. What a docs-only change
+can skip is the image work below; say which you skipped rather than reporting
+a gate you did not run.
 
 ## What this does not cover
 
