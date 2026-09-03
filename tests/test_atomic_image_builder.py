@@ -6638,6 +6638,95 @@ class BuilderTests(unittest.TestCase):
                 f"this test recognises",
             )
 
+    def test_every_workflow_that_gates_on_coverage_reads_the_threshold_file(self) -> None:
+        # The test above proves ci.yml reads .coverage-thresholds.json rather
+        # than spelling the number, but it names ci.yml specifically. Two more
+        # workflows now run the same gate -- nightly-compliance.yml re-runs it
+        # from main, ai-fix.yml runs it inside the agent loop -- and a literal
+        # in either would be the copy that #144 removed, reintroduced where
+        # nothing looks. Discovered by scanning rather than listed, so a
+        # fourth workflow is covered the day it is added.
+        root = Path(__file__).resolve().parents[1]
+        gating = {}
+        for workflow_path in sorted((root / ".github/workflows").iterdir()):
+            if workflow_path.suffix not in {".yml", ".yaml"}:
+                continue
+            text = workflow_path.read_text()
+            if "--fail-under" in text:
+                gating[str(workflow_path.relative_to(root))] = text
+
+        # A rename that moved the gate out of every workflow would otherwise
+        # pass by checking nothing at all.
+        self.assertTrue(gating, "no workflow runs the coverage gate any more")
+
+        for relative_path, text in gating.items():
+            self.assertIn(
+                ".coverage-thresholds.json",
+                text,
+                f"{relative_path} runs the coverage gate without reading "
+                f"the threshold from .coverage-thresholds.json",
+            )
+            # A literal here would silently win over the file it reads, the
+            # same way it would in ci.yml. Checked per line so the failure
+            # names the offending one rather than printing the workflow.
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                self.assertNotRegex(
+                    line.strip(),
+                    r"--fail-under=\"?\d",
+                    f"{relative_path}:{lineno} spells the gate threshold out "
+                    f"instead of reading .coverage-thresholds.json",
+                )
+
+    def test_quality_index_quotes_the_gate_from_its_source(self) -> None:
+        # docs/quality.md's signal table is the sixth place the gate number
+        # appears, and the one most likely to be read first, since it is the
+        # index every other quality document is reached from. The doc sweep
+        # above walks a fixed list of four files and this is not one of them,
+        # so a moved gate would leave this table quoting the old number to the
+        # readers most likely to trust it. Asserted per column rather than per
+        # line, because the same row also says "Flat at 100%" -- a true
+        # statement about the current measurement, not a stale threshold.
+        root = Path(__file__).resolve().parents[1]
+        threshold = json.loads((root / ".coverage-thresholds.json").read_text())["gated"]["unit"]
+
+        rows = []
+        for line in (root / "docs/quality.md").read_text().splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("|"):
+                continue
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            if len(cells) == 4 and not set(cells[0]) <= {"-", ":"}:
+                rows.append(cells)
+        self.assertTrue(rows, "docs/quality.md no longer has a signal table")
+
+        gated_rows = [row for row in rows if row[0] == "Unit coverage"]
+        self.assertEqual(
+            len(gated_rows),
+            1,
+            "docs/quality.md's signal table no longer has exactly one "
+            "'Unit coverage' row",
+        )
+        self.assertIn(
+            f"{threshold}%",
+            gated_rows[0][1],
+            f"docs/quality.md's unit row quotes {gated_rows[0][1]!r}, not the "
+            f"{threshold} in .coverage-thresholds.json",
+        )
+
+        # And no other row may carry a number in the Gated? column: the
+        # advisory tiers have no threshold to quote, so a number appearing
+        # there is either a second copy of the gate or an ungated tier being
+        # described as though it had one.
+        for row in rows[1:]:
+            if row[0] == "Unit coverage":
+                continue
+            self.assertNotRegex(
+                row[1],
+                r"\d",
+                f"docs/quality.md's {row[0]!r} row quotes a threshold in the "
+                f"Gated? column, but only the unit tier is gated",
+            )
+
     def test_ci_runs_the_end_to_end_suites_from_the_repo(self) -> None:
         # The point of tests/e2e/ is that the same scenarios CI runs can be
         # run against a locally built image. That holds only while ci.yml
