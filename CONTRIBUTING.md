@@ -23,6 +23,8 @@ setup:
 4. Open the PR against `main` and describe what changed and why. Keep it
    scoped to one thing; a PR that mixes an unrelated cleanup with the actual
    fix is harder to review and to revert if something goes wrong.
+   [docs/review-rubric.md](docs/review-rubric.md) is what review will look
+   for, in order, and every item in it has a real example behind it.
    `.github/pull_request_template.md` prefills the description with those
    questions and a checklist of the local checks — it's a prompt, not a gate,
    so delete whatever doesn't apply to your change.

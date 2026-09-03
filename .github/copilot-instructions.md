@@ -104,6 +104,26 @@ the alternative rejected — rather than restating what a line does, and its
 prose commits to a position instead of hedging. A change that adds a
 convention nobody asked for is a change reviewers have to undo.
 
+## Mechanical limits
+
+`.claude/settings.json` is committed and shared. It is the part of this
+document a tool enforces rather than asks you to remember, in three layers:
+
+- **allow** the repo's own read-only gate, so running the checks does not cost
+  a prompt every time.
+- **ask** before anything outward-facing: a push, a PR, a release, a workflow
+  dispatch, an image build.
+- **deny** outright what has no legitimate use here: force-push, hard reset,
+  broad Podman or Buildah cleanup, repo deletion, anything that rebases the
+  host, and reading a signing key or `.env`.
+
+The deny list is not advice. Treat a refusal as the answer rather than
+something to route around, and if a rule blocks work that is genuinely needed,
+change the rule in a reviewed commit instead of working past it.
+
+`.claude/settings.local.json` stays gitignored. That is where personal
+allowances belong, and nothing in it is shared or reviewed.
+
 ## Other agent entry points
 
 This file is the canonical one. Any other agent-facing file in this repo --
