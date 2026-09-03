@@ -104,6 +104,12 @@ the alternative rejected — rather than restating what a line does, and its
 prose commits to a position instead of hedging. A change that adds a
 convention nobody asked for is a change reviewers have to undo.
 
+`.editorconfig` carries the mechanical part: indent width, line endings, final
+newline. Markdown tables are aligned for a fixed-width reader, because that is
+where these documents are actually read -- a terminal, a pager, a diff. A test
+enforces it, so run `python3 format_markdown_tables.py` rather than padding
+cells by hand.
+
 ## Mechanical limits
 
 `.claude/settings.json` is committed and shared. It is the part of this

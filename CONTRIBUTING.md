@@ -148,6 +148,11 @@ shellcheck contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/t
 hadolint Containerfile container/Containerfile.coverage
 ```
 
+Markdown tables are kept aligned for a fixed-width reader, since most of this
+repo's documentation is read in a terminal, a pager or a diff rather than a
+browser. A test fails when one drifts; `python3 format_markdown_tables.py`
+fixes every tracked file, and takes paths to fix just some.
+
 `ruff.toml` holds the rule selection and the `py310` target, so `ruff check`
 with no arguments — the same invocation CI uses — checks the same things
 locally that it does in CI. Note the undotted name: ruff reads `.ruff.toml`

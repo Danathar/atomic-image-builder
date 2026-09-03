@@ -6811,6 +6811,30 @@ class BuilderTests(unittest.TestCase):
             ".coverage-thresholds.json",
         )
 
+    def test_markdown_tables_are_aligned_for_a_fixed_width_reader(self) -> None:
+        # Most of this repo's documentation is read in a terminal, a pager or
+        # a diff, not a browser. A table that renders fine in HTML is
+        # unreadable there unless the pipes line up, so alignment is the
+        # default rather than a tidy-up: format_markdown_tables.py fixes a
+        # file, and this fails when one drifts.
+        #
+        # template_snapshots/ is excluded by the formatter itself -- it is a
+        # pinned upstream copy, and reformatting it would be a defect however
+        # it looks.
+        import format_markdown_tables
+
+        root = Path(__file__).resolve().parents[1]
+        unaligned = [
+            str(path.relative_to(root))
+            for path in format_markdown_tables.tracked_markdown(root)
+            if format_markdown_tables.format_text(path.read_text()) != path.read_text()
+        ]
+        self.assertEqual(
+            unaligned,
+            [],
+            "run python3 format_markdown_tables.py to align these",
+        )
+
     def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
         # The explainer has to define the term for a newcomer, keep the trend
         # history reachable now that the badge no longer links to it, and route

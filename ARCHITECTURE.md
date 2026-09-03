@@ -10,18 +10,18 @@ below is greppable.
 
 ## Repository map
 
-| Path | What it is |
-|---|---|
-| `atomic_image_builder.py` | The whole tool. One module, standard library only. |
-| `template_snapshots/` | Pinned copies of `ublue-os/image-template` and `blue-build/template`. Inputs, not examples — each carries a `.template-source` recording its upstream revision. |
-| `maintenance_audit.py` | Weekly consistency check: snapshot drift, action pin coverage and freshness. It does not touch the Homebrew formula — `maintenance-audit.yml` checks that in a separate step. |
-| `snapshot_drift_issue.py` | Keeps the audit's sub-threshold drift tracking issue in sync. |
-| `homebrew_formula.py` | Points `Formula/atomic-image-builder.rb` at a release, and verifies that pin under `--check` — which is what the weekly audit workflow runs. |
-| `coverage_badge.py` | Writes the coverage badge endpoint and trend CSV. |
-| `contrib/aib` | Host-side wrapper that runs the published container image. |
-| `container/entrypoint.sh` | Entrypoint baked into that image. |
-| `tests/` | `unittest` suites; the shell entrypoints have their own `.sh` harnesses. |
-| `maintenance_notes.txt` | Operational knowledge that outlives any one change — read it before touching the patchers or base-image detection. |
+| Path                      | What it is                                                                                                                                                                    |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `atomic_image_builder.py` | The whole tool. One module, standard library only.                                                                                                                            |
+| `template_snapshots/`     | Pinned copies of `ublue-os/image-template` and `blue-build/template`. Inputs, not examples — each carries a `.template-source` recording its upstream revision.               |
+| `maintenance_audit.py`    | Weekly consistency check: snapshot drift, action pin coverage and freshness. It does not touch the Homebrew formula — `maintenance-audit.yml` checks that in a separate step. |
+| `snapshot_drift_issue.py` | Keeps the audit's sub-threshold drift tracking issue in sync.                                                                                                                 |
+| `homebrew_formula.py`     | Points `Formula/atomic-image-builder.rb` at a release, and verifies that pin under `--check` — which is what the weekly audit workflow runs.                                  |
+| `coverage_badge.py`       | Writes the coverage badge endpoint and trend CSV.                                                                                                                             |
+| `contrib/aib`             | Host-side wrapper that runs the published container image.                                                                                                                    |
+| `container/entrypoint.sh` | Entrypoint baked into that image.                                                                                                                                             |
+| `tests/`                  | `unittest` suites; the shell entrypoints have their own `.sh` harnesses.                                                                                                      |
+| `maintenance_notes.txt`   | Operational knowledge that outlives any one change — read it before touching the patchers or base-image detection.                                                            |
 
 ## Why one file
 
@@ -50,36 +50,36 @@ months earlier, and why a repo without that state file is never adopted.
 
 Regions, in file order:
 
-| Region | Contents |
-|---|---|
-| Constants | `VERSION`, `TOOL_SLUG`/`STATE_FILE` identity, UI colors and widths, template repo paths, `ACTION_PINS` and `ACTION_REF_PINS`, the validation regexes. |
-| Base images | `BaseImage`, the `BASE_IMAGES` catalog, and `determine_fedora_atomic_default_tag()`, which reads the host's `/etc/os-release` and falls back to `FEDORA_ATOMIC_FALLBACK_TAG`. |
-| `Config` | The dataclass every screen writes into, plus `config_from_state_payload()` and the `validate_string_list`/`string_list`/`unique` helpers that read it back from a state file. |
-| Small helpers | Slug and repo-name validation, YAML scalar quoting, image-reference normalization, `ghcr_package_exists()`, `command_exists()`. |
-| Action pinning | `pin_action_uses_line()` and `pinned_action()`, which rewrite `uses:` lines against the pin tables. |
+| Region                           | Contents                                                                                                                                                                                                             |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Constants                        | `VERSION`, `TOOL_SLUG`/`STATE_FILE` identity, UI colors and widths, template repo paths, `ACTION_PINS` and `ACTION_REF_PINS`, the validation regexes.                                                                |
+| Base images                      | `BaseImage`, the `BASE_IMAGES` catalog, and `determine_fedora_atomic_default_tag()`, which reads the host's `/etc/os-release` and falls back to `FEDORA_ATOMIC_FALLBACK_TAG`.                                        |
+| `Config`                         | The dataclass every screen writes into, plus `config_from_state_payload()` and the `validate_string_list`/`string_list`/`unique` helpers that read it back from a state file.                                        |
+| Small helpers                    | Slug and repo-name validation, YAML scalar quoting, image-reference normalization, `ghcr_package_exists()`, `command_exists()`.                                                                                      |
+| Action pinning                   | `pin_action_uses_line()` and `pinned_action()`, which rewrite `uses:` lines against the pin tables.                                                                                                                  |
 | Workflow patchers (module level) | `patch_workflow_steps()` and the `workflow_key`/`workflow_block_key` line classifiers underneath it, then `patch_workflow_signing_steps()`, `patch_cosign_compatibility()`, and `ensure_workflow_job_env_entries()`. |
-| Process plumbing | `CommandError`, `ScreenBack` (raised to pop back a screen), and `run()`. |
-| `Gum` | Thin wrapper over the `gum` CLI: `choose`, `filter`, `input`, `confirm`, `write`, `pager`, `table`, `spinner*`, plus the styling and ANSI-fallback layer. Every prompt in the tool goes through here. |
-| `App` | The application. See below. |
-| Entry point | `usage_text()` and `main()`. |
+| Process plumbing                 | `CommandError`, `ScreenBack` (raised to pop back a screen), and `run()`.                                                                                                                                             |
+| `Gum`                            | Thin wrapper over the `gum` CLI: `choose`, `filter`, `input`, `confirm`, `write`, `pager`, `table`, `spinner*`, plus the styling and ANSI-fallback layer. Every prompt in the tool goes through here.                |
+| `App`                            | The application. See below.                                                                                                                                                                                          |
+| Entry point                      | `usage_text()` and `main()`.                                                                                                                                                                                         |
 
 ### The `App` class
 
 ~130 methods, grouped by what they do rather than by where they sit:
 
-| Group | Representative methods |
-|---|---|
-| Startup and preflight | `startup_requirements`, `preflight`, `render_preflight_failure`, `require_github`, `github_setup_guide` |
-| Menus and navigation | `main_menu`, `create_image`, `create_new_image`, `update_menu`, `run_screen_action`, `review_new_image` |
-| Wizard screens | `choose_method`, `choose_base_image`, `configure_repo`, `select_packages`, `search_packages`, `add_copr`, `add_services`, `view_selections` |
-| System scan | `scan_os`, `match_base_image`, `carried_scan_customizations`, `scanned_image_is_managed` |
-| Host package queries | `lookup_host_packages`, `search_host_packages`, `refresh_package_metadata`, `dnf5_state_dir` |
-| GitHub operations | `gh_json`, `select_repo`, `repo_file_exists`, `batch_check_state_files`, `repo_default_branch`, `do_build`, `push_update`, `render_build_status` |
-| Signing | `generate_and_upload_signing_key`, `ensure_signing_ready`, `rotate_signing_key` |
-| Config and state | `load_repo_config`, `validate_config`, `state_payload`, `add_packages_to_config` |
-| Template patchers | `patch_container_workflow`, `patch_bluebuild_workflow`, `patch_container_justfile`, `patch_image_template_env`, `patch_container_rechunk_step`, `patch_bluebuild_action_inputs`, `patch_installer_config` |
-| Generators | `generate_containerfile`, `generate_recipe`, `generate_container_workflow`, `generate_build_sh`, `generate_readme` |
-| Project writers | `write_project_files` and its `write_container_project_files` / `write_bluebuild_project_files` halves, `copy_template_snapshot`, `seed_project_template` |
+| Group                 | Representative methods                                                                                                                                                                                    |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Startup and preflight | `startup_requirements`, `preflight`, `render_preflight_failure`, `require_github`, `github_setup_guide`                                                                                                   |
+| Menus and navigation  | `main_menu`, `create_image`, `create_new_image`, `update_menu`, `run_screen_action`, `review_new_image`                                                                                                   |
+| Wizard screens        | `choose_method`, `choose_base_image`, `configure_repo`, `select_packages`, `search_packages`, `add_copr`, `add_services`, `view_selections`                                                               |
+| System scan           | `scan_os`, `match_base_image`, `carried_scan_customizations`, `scanned_image_is_managed`                                                                                                                  |
+| Host package queries  | `lookup_host_packages`, `search_host_packages`, `refresh_package_metadata`, `dnf5_state_dir`                                                                                                              |
+| GitHub operations     | `gh_json`, `select_repo`, `repo_file_exists`, `batch_check_state_files`, `repo_default_branch`, `do_build`, `push_update`, `render_build_status`                                                          |
+| Signing               | `generate_and_upload_signing_key`, `ensure_signing_ready`, `rotate_signing_key`                                                                                                                           |
+| Config and state      | `load_repo_config`, `validate_config`, `state_payload`, `add_packages_to_config`                                                                                                                          |
+| Template patchers     | `patch_container_workflow`, `patch_bluebuild_workflow`, `patch_container_justfile`, `patch_image_template_env`, `patch_container_rechunk_step`, `patch_bluebuild_action_inputs`, `patch_installer_config` |
+| Generators            | `generate_containerfile`, `generate_recipe`, `generate_container_workflow`, `generate_build_sh`, `generate_readme`                                                                                        |
+| Project writers       | `write_project_files` and its `write_container_project_files` / `write_bluebuild_project_files` halves, `copy_template_snapshot`, `seed_project_template`                                                 |
 
 The patcher and generator groups are the ones to be careful with. A patcher
 edits text copied from a pinned upstream snapshot; a generator writes a file the
@@ -100,14 +100,14 @@ move.
 
 ## Where to start
 
-| To change | Look at |
-|---|---|
-| A prompt's wording or behavior | The `Gum` method it calls, or the wizard screen in `App` |
-| What a generated repo contains | The `generate_*` and `write_*_project_files` methods |
-| How a bundled template is adapted | The `patch_*` methods, and `template_snapshots/` for the input they match against |
-| Which Fedora version an un-detectable host gets | `FEDORA_ATOMIC_FALLBACK_TAG` and `determine_fedora_atomic_default_tag()` |
-| A pinned GitHub Action | `ACTION_PINS` / `ACTION_REF_PINS`, **and** the snapshot workflow under `template_snapshots/` — the audit fails if they disagree |
-| What the tool remembers about a repo | `Config`, `state_payload()`, `config_from_state_payload()` |
+| To change                                       | Look at                                                                                                                         |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| A prompt's wording or behavior                  | The `Gum` method it calls, or the wizard screen in `App`                                                                        |
+| What a generated repo contains                  | The `generate_*` and `write_*_project_files` methods                                                                            |
+| How a bundled template is adapted               | The `patch_*` methods, and `template_snapshots/` for the input they match against                                               |
+| Which Fedora version an un-detectable host gets | `FEDORA_ATOMIC_FALLBACK_TAG` and `determine_fedora_atomic_default_tag()`                                                        |
+| A pinned GitHub Action                          | `ACTION_PINS` / `ACTION_REF_PINS`, **and** the snapshot workflow under `template_snapshots/` — the audit fails if they disagree |
+| What the tool remembers about a repo            | `Config`, `state_payload()`, `config_from_state_payload()`                                                                      |
 
 Two build methods run through most of this, and passing one proves nothing
 about the other. Containerfile repos are patched from the `ublue-os` snapshot;

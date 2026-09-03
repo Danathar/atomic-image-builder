@@ -2,11 +2,11 @@
 
 Three ways to run Atomic Image Builder. Pick one; they are the same tool.
 
-| Path | Command | Tracks | Needs |
-|---|---|---|---|
-| [Homebrew](#homebrew) | `aib-tool` | Tagged releases | `brew`, plus host `dnf5` and `rpm-ostree` |
-| [Podman](#podman) | `aib` | `main`, rebuilt every merge | `podman` |
-| [Source](#from-source) | `./atomic_image_builder.py` | Your checkout | Python 3.10+, plus the tools below |
+| Path                   | Command                     | Tracks                      | Needs                                     |
+| ---------------------- | --------------------------- | --------------------------- | ----------------------------------------- |
+| [Homebrew](#homebrew)  | `aib-tool`                  | Tagged releases             | `brew`, plus host `dnf5` and `rpm-ostree` |
+| [Podman](#podman)      | `aib`                       | `main`, rebuilt every merge | `podman`                                  |
+| [Source](#from-source) | `./atomic_image_builder.py` | Your checkout               | Python 3.10+, plus the tools below        |
 
 The tool needs `dnf5` and `rpm-ostree`. Where they come from depends on how you
 run it. With Homebrew or a source checkout they come from the host — which is
@@ -123,12 +123,12 @@ you installed inside the box, not your own files or your `gh` login.
 
 ### Limitations of running in a container
 
-| Feature | Containerized (`podman run` or distrobox) |
-|---|---|
-| Create/update image repos, view build status, rotate signing key | Full fidelity |
-| Create Image From This System (the scan) | Works via the `aib` wrapper or distrobox; unavailable with a bare `podman run` (no host state) |
-| Package search | Works, but the image ships with no DNF metadata, so the first search offers to download it. The `aib` wrapper keeps that download in a named volume; with a bare `podman run --rm` it repeats every run |
-| Local Podman test build | Not available — the option reports this and does nothing; see below |
+| Feature                                                          | Containerized (`podman run` or distrobox)                                                                                                                                                               |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Create/update image repos, view build status, rotate signing key | Full fidelity                                                                                                                                                                                           |
+| Create Image From This System (the scan)                         | Works via the `aib` wrapper or distrobox; unavailable with a bare `podman run` (no host state)                                                                                                          |
+| Package search                                                   | Works, but the image ships with no DNF metadata, so the first search offers to download it. The `aib` wrapper keeps that download in a named volume; with a bare `podman run --rm` it repeats every run |
+| Local Podman test build                                          | Not available — the option reports this and does nothing; see below                                                                                                                                     |
 
 The image includes `podman` only because `rpm-ostree` (a required dependency the
 tool checks for at startup) pulls it in transitively. A nested build inside the
@@ -175,10 +175,10 @@ with `chmod +x atomic_image_builder.py`.
 The tool is a guided menu, so there is almost nothing to pass it. The two options
 it does take work the same however you installed it:
 
-| Option | What it does |
-|---|---|
-| `-h`, `--help` | Print a short usage summary and exit. |
-| `-V`, `--version` | Print the tool version and exit. |
+| Option            | What it does                          |
+| ----------------- | ------------------------------------- |
+| `-h`, `--help`    | Print a short usage summary and exit. |
+| `-V`, `--version` | Print the tool version and exit.      |
 
 The command name depends on how you installed it: `aib` for the container
 wrapper, `aib-tool` for the Homebrew install and inside the container image, or

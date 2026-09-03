@@ -8,8 +8,8 @@ Start with [`.github/copilot-instructions.md`](../../.github/copilot-instruction
 the canonical brief. This directory is the record of how parts of it were
 arrived at.
 
-| File | Holds |
-|---|---|
+| File                               | Holds                                                               |
+| ---------------------------------- | ------------------------------------------------------------------- |
 | [`corrections.md`](corrections.md) | Things that were done wrong here, and what the repo decided instead |
 
 Its companion is [`../checkpoint.md`](../checkpoint.md), and the two are
