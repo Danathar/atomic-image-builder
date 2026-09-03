@@ -13,9 +13,15 @@ name: Nightly compliance
 # world changed, not that someone pushed something.
 on:
   schedule:
-    # 04:00 UTC daily, well clear of the Monday 06:00 maintenance audit so a
+    # 04:17 UTC daily, well clear of the Monday 06:00 maintenance audit so a
     # bad night and a bad week do not arrive as one indistinguishable red.
-    - cron: "0 4 * * *"
+    #
+    # The odd minute is deliberate. GitHub delays or drops scheduled runs
+    # under load, and load clusters on the hour. This job is the only detector
+    # of drift from outside the repo, and a dropped run is silent -- it
+    # produces no failure to notice -- so it should not queue behind everyone
+    # else's midnight cron.
+    - cron: "17 4 * * *"
   workflow_dispatch:
 
 # Read-only. This job proves things; it publishes nothing and pushes nothing.
