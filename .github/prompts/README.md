@@ -13,11 +13,11 @@ Before using any of them, read
 [.github/copilot-instructions.md](../copilot-instructions.md) — it is the
 canonical brief for working in this repo at all.
 
-| Prompt | When |
-|---|---|
+| Prompt                                                 | When                                                 |
+| ------------------------------------------------------ | ---------------------------------------------------- |
 | [`triage-weekly-audit`](triage-weekly-audit.prompt.md) | The Monday audit ran and something is in the summary |
-| [`refresh-action-pins`](refresh-action-pins.prompt.md) | The audit says a pin trails its tag or branch |
-| [`cut-release`](cut-release.prompt.md) | Shipping a new version |
+| [`refresh-action-pins`](refresh-action-pins.prompt.md) | The audit says a pin trails its tag or branch        |
+| [`cut-release`](cut-release.prompt.md)                 | Shipping a new version                               |
 
 One-off work does not belong here. A prompt earns its place by being needed
 again.

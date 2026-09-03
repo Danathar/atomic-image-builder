@@ -7,10 +7,10 @@ image that gets published actually starts.
 
 Two scripts, with different jobs:
 
-| Script | Against | Asserts |
-|---|---|---|
-| `smoke.sh` | the plain image | behaviour: output, exit status, the command name |
-| `coverage_scenarios.sh` | the coverage-instrumented image | only exit status, and writes coverage data |
+| Script                  | Against                         | Asserts                                          |
+| ----------------------- | ------------------------------- | ------------------------------------------------ |
+| `smoke.sh`              | the plain image                 | behaviour: output, exit status, the command name |
+| `coverage_scenarios.sh` | the coverage-instrumented image | only exit status, and writes coverage data       |
 
 The split is deliberate. `coverage_scenarios.sh` is a measurement: it checks
 each scenario exited as expected, because one that crashed early would still

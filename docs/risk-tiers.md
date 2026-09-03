@@ -100,12 +100,12 @@ report the blocker. [docs/SECURITY-AI.md](SECURITY-AI.md) covers the rest.
 
 ## Quick classification
 
-| If the change touches | Tier |
-|---|---|
-| only docs, tests, or editor config | 1 |
-| the tool, the wrapper, or the image | 2 |
-| bundled snapshots, the pin tables, or the workflow patchers and generators | 3 |
-| publishing, signing, `homebrew_formula.py`, the formula, or tokens | 4 |
+| If the change touches                                                      | Tier |
+| -------------------------------------------------------------------------- | ---- |
+| only docs, tests, or editor config                                         | 1    |
+| the tool, the wrapper, or the image                                        | 2    |
+| bundled snapshots, the pin tables, or the workflow patchers and generators | 3    |
+| publishing, signing, `homebrew_formula.py`, the formula, or tokens         | 4    |
 
 A change spanning tiers takes the highest one it touches. When it is not
 obvious, the question that settles it is: *if this is wrong, who finds out,
