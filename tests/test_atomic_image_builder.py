@@ -133,6 +133,31 @@ class GumStub:
 REAL_GHCR_PACKAGE_EXISTS = atomic_image_builder.ghcr_package_exists
 
 
+def _markdown_prose(text: str) -> set[str]:
+    """Sentence-length prose lines from a Markdown document.
+
+    Fenced code blocks are skipped. A skill that tells someone which commands
+    to run has to contain those commands, and this repo already repeats its
+    check commands across CONTRIBUTING.md, MAINTAINER.md and the PR template
+    deliberately -- keeping the numbers in them consistent is
+    test_coverage_gate_threshold_has_one_source_of_truth's job, not this one.
+    Headings, list items and indented lines are skipped as too short or too
+    incidental to be evidence of copying.
+    """
+    prose = set()
+    in_fence = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        stripped = line.strip()
+        if len(stripped) > 60 and not line.startswith(("#", "-", " ", "`")):
+            prose.add(stripped)
+    return prose
+
+
 class BuilderTests(unittest.TestCase):
     def setUp(self) -> None:
         # The tool consults a couple of env vars the container distribution
@@ -6639,6 +6664,57 @@ class BuilderTests(unittest.TestCase):
         diff_paths = re.search(r"git diff --quiet .*?;", ci_workflow)
         self.assertIsNotNone(diff_paths, "container-build's path filter has changed shape")
         self.assertIn("tests/e2e/", diff_paths.group(0))
+
+    def test_agent_guidance_has_one_canonical_file(self) -> None:
+        # Four ACMM criteria want agent-facing files that all say the same
+        # thing. Writing that content out four times would give the repo four
+        # copies of its own traps to keep in step, which is the drift the
+        # coverage-threshold test above exists to prevent. So one file carries
+        # the content and the rest defer to it.
+        root = Path(__file__).resolve().parents[1]
+        canonical = root / ".github/copilot-instructions.md"
+        self.assertTrue(canonical.is_file(), "the canonical agent guidance file is missing")
+
+        # Every other agent entry point, whichever of them exist. Listed by
+        # directory so a new file inside one is covered the day it is added
+        # rather than the day someone remembers this test.
+        pointer_roots = [".cursor", ".github/prompts", ".claude/skills", ".claude/memory"]
+        pointers = [
+            path
+            for name in pointer_roots
+            if (root / name).is_dir()
+            # .mdc as well as .md: that is Cursor's own rule format, so a
+            # pointer written to actually work in Cursor would otherwise slip
+            # past this check entirely.
+            for pattern in ("*.md", "*.mdc")
+            for path in sorted((root / name).rglob(pattern))
+        ]
+
+        for path in pointers:
+            relative_path = path.relative_to(root)
+            text = path.read_text()
+            self.assertIn(
+                "copilot-instructions.md",
+                text,
+                f"{relative_path} does not point at the canonical guidance",
+            )
+            # Copying is what has to be caught, and naming a thing is not
+            # copying: a task prompt about refreshing the action pins has to
+            # say ACTION_PINS, and a correction log has to name what was
+            # corrected. Blocking those words would push both into vagueness
+            # to satisfy a test. Verbatim sentences are the real signal, so
+            # that is what is checked.
+            canonical_prose = _markdown_prose(canonical.read_text())
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                # assertTrue rather than assertNotIn: the latter prints the
+                # whole canonical file as the container, burying the one line
+                # that has to change.
+                self.assertTrue(
+                    line.strip() not in canonical_prose,
+                    f"{relative_path}:{lineno} copies a sentence from "
+                    f".github/copilot-instructions.md instead of linking to "
+                    f"it: {line.strip()[:60]!r}",
+                )
 
     def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
         # The explainer has to define the term for a newcomer, keep the trend
