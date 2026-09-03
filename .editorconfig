@@ -1,0 +1,43 @@
+# Editor defaults for this repo. Every rule here describes what the files
+# already do -- the values were measured, not chosen -- so applying it to an
+# existing file is a no-op. Conventions an editor cannot enforce are in
+# .github/copilot-instructions.md.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# YAML cannot be indented with tabs at all, and every workflow here is 2-space.
+[*.{yml,yaml}]
+indent_size = 2
+
+# .simplecov is Ruby, and Ruby is 2-space by convention here and everywhere.
+[.simplecov]
+indent_size = 2
+
+# In Markdown two trailing spaces are a hard line break, so stripping them
+# rewrites the text.
+[*.md]
+trim_trailing_whitespace = false
+
+# template_snapshots/ is a pinned copy of upstream (ublue-os/image-template
+# and blue-build/template). It is refreshed as a unit and never hand-edited --
+# see .github/copilot-instructions.md -- so nothing here should tidy it. Its
+# Justfile is tab-indented because that is what upstream ships; saying so
+# stops an editor "fixing" it into a diff against a snapshot that has to match
+# upstream.
+# `unset` and not `false`: in EditorConfig, false means "ensure the file does
+# NOT end with a newline", which would strip the trailing newline from the 21
+# snapshot files that have one -- causing the exact drift this section exists
+# to prevent. unset disables the inherited rule without asserting the opposite.
+[template_snapshots/**]
+trim_trailing_whitespace = unset
+insert_final_newline = unset
+
+[template_snapshots/containerfile/Justfile]
+indent_style = tab
