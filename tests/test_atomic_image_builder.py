@@ -133,6 +133,10 @@ class GumStub:
 REAL_GHCR_PACKAGE_EXISTS = atomic_image_builder.ghcr_package_exists
 
 
+MIRROR_START = "<!-- mirror:copilot-instructions start -->"
+MIRROR_END = "<!-- mirror:copilot-instructions end -->"
+
+
 def _markdown_prose(text: str) -> set[str]:
     """Sentence-length prose lines from a Markdown document.
 
@@ -6820,16 +6824,55 @@ class BuilderTests(unittest.TestCase):
             # corrected. Blocking those words would push both into vagueness
             # to satisfy a test. Verbatim sentences are the real signal, so
             # that is what is checked.
-            canonical_prose = _markdown_prose(canonical.read_text())
+            canonical_text = canonical.read_text()
+            canonical_prose = _markdown_prose(canonical_text)
+            # A pointer may mirror a few high-consequence paragraphs inside an
+            # explicit block. That exists because a link is inert: CLAUDE.md is
+            # auto-loaded and the canonical brief is not, so a trap that only
+            # lives behind the link costs a tool call an agent may not spend.
+            # The rule therefore inverts inside the block -- every line there
+            # must match the canonical file -- which turns the duplication
+            # into a mirror that cannot drift rather than a second copy.
+            in_mirror = False
+            mirrored = 0
             for lineno, line in enumerate(text.splitlines(), start=1):
+                stripped = line.strip()
+                if stripped == MIRROR_START:
+                    in_mirror = True
+                    continue
+                if stripped == MIRROR_END:
+                    in_mirror = False
+                    continue
+                if in_mirror:
+                    if not stripped:
+                        continue
+                    mirrored += 1
+                    self.assertIn(
+                        stripped,
+                        canonical_text,
+                        f"{relative_path}:{lineno} is inside the mirror block "
+                        f"but does not match .github/copilot-instructions.md: "
+                        f"{stripped[:60]!r}",
+                    )
+                    continue
                 # assertTrue rather than assertNotIn: the latter prints the
                 # whole canonical file as the container, burying the one line
                 # that has to change.
                 self.assertTrue(
-                    line.strip() not in canonical_prose,
+                    stripped not in canonical_prose,
                     f"{relative_path}:{lineno} copies a sentence from "
-                    f".github/copilot-instructions.md instead of linking to "
-                    f"it: {line.strip()[:60]!r}",
+                    f".github/copilot-instructions.md outside the mirror "
+                    f"block: {stripped[:60]!r}",
+                )
+            self.assertFalse(in_mirror, f"{relative_path} opens a mirror block and never closes it")
+            if path.name == "CLAUDE.md":
+                # The delivery half. CLAUDE.md is the only file a Claude Code
+                # session is handed automatically, so an empty mirror there
+                # means the traps reach nobody until someone follows a link.
+                self.assertTrue(
+                    mirrored,
+                    "CLAUDE.md carries no mirrored traps, so a session that "
+                    "does not follow the link gets no conventions at all",
                 )
 
     def test_checkpoint_entries_are_all_dated(self) -> None:
