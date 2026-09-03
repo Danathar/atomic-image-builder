@@ -1,0 +1,74 @@
+---
+name: Triage
+
+# Labels new issues by what they are, using gh in run steps rather than a
+# labeling action. That is not a style preference: every `uses:` in this
+# repo's workflows has to appear in ACTION_PINS, and that table is copied
+# into every repository the tool generates -- so a labeler action used only
+# here would be shipped to strangers' repos for no reason. The same reasoning
+# keeps hadolint pinned as a binary in ci.yml.
+#
+# Deliberately additive. It never removes a label, so a human decision always
+# wins over this one.
+on:
+  issues:
+    types: [opened]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to re-triage
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  label:
+    name: Apply labels by content
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Label the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number || inputs.issue }}
+        run: |
+          set -euo pipefail
+
+          title="$(gh issue view "$NUMBER" --repo "$REPO" --json title --jq '.title')"
+          body="$(gh issue view "$NUMBER" --repo "$REPO" --json body --jq '.body')"
+          labels=()
+
+          # ACMM issues announce their level in the title. Recording it as a
+          # label is what makes "which level are we working" answerable
+          # without opening each one.
+          case "$title" in
+            *"[ACMM L0]"*) labels+=("acmm-l0") ;;
+            *"[ACMM L1]"*) labels+=("acmm-l1") ;;
+            *"[ACMM L2]"*) labels+=("acmm-l2") ;;
+            *"[ACMM L3]"*) labels+=("acmm-l3") ;;
+            *"[ACMM L4]"*) labels+=("acmm-l4") ;;
+          esac
+
+          # A report naming a security-sensitive part of this project should
+          # be looked at before the queue, whoever filed it. `security` is an
+          # existing label here rather than a new one invented for this.
+          case "$title$body" in
+            *cosign*|*signing\ key*|*GH_TOKEN*|*credential*|*"prompt injection"*)
+              labels+=("security") ;;
+          esac
+
+          if [ ${#labels[@]} -eq 0 ]; then
+            echo "No label rule matched issue #$NUMBER."
+            exit 0
+          fi
+
+          # --add-label only adds. Nothing here removes a label a person set.
+          for label in "${labels[@]}"; do
+            gh label create "$label" --repo "$REPO" --color ededed \
+              --description "Applied by triage.yml" 2>/dev/null || true
+            gh issue edit "$NUMBER" --repo "$REPO" --add-label "$label"
+            echo "Applied $label to #$NUMBER."
+          done
