@@ -6657,8 +6657,12 @@ class BuilderTests(unittest.TestCase):
         pointers = [
             path
             for name in pointer_roots
-            for path in sorted((root / name).rglob("*.md"))
             if (root / name).is_dir()
+            # .mdc as well as .md: that is Cursor's own rule format, so a
+            # pointer written to actually work in Cursor would otherwise slip
+            # past this check entirely.
+            for pattern in ("*.md", "*.mdc")
+            for path in sorted((root / name).rglob(pattern))
         ]
 
         for path in pointers:
