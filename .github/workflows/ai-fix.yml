@@ -1,0 +1,109 @@
+---
+name: AI fix intake
+
+# What this does, and deliberately does not do.
+#
+# Nearly every issue here arrives from the ACMM evaluation carrying the
+# `ai-fix-requested` label, and whoever picks one up -- person or agent --
+# starts from a cold checkout and re-derives the same context every time.
+# This runs the repo's own gate the moment the label appears and posts the
+# result as a comment, so the work starts from evidence.
+#
+# It does NOT write code, open a pull request, or invoke a model. Three
+# reasons, and they are not incidental:
+#
+#   1. Actions cannot create pull requests in this repository (a repo
+#      setting), so an automated fix path could not open one anyway.
+#   2. This repo publishes signed images and can rotate a cosign key.
+#      Automated write access to it is a decision nobody should get by
+#      default from a workflow file.
+#   3. An AI action would need adding to ACTION_PINS, which ships to every
+#      repository the tool generates -- so it would land in strangers' repos
+#      to serve a convenience here.
+#
+# See docs/SECURITY-AI.md. Its only write is one issue comment.
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to post the intake comment on
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  intake:
+    name: Gather evidence for the labeled issue
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.label.name == 'ai-fix-requested'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.10"
+
+      - name: Install test tooling
+        run: pip install coverage==7.16.0 ruff==0.16.5
+
+      # Every step below records its outcome instead of failing the job. A red
+      # X on an intake run would say the issue is bad, when what it actually
+      # means is that `main` is currently failing -- which is exactly the
+      # context the comment exists to carry.
+      - name: Run the gate
+        id: gate
+        run: |
+          set -uo pipefail
+          {
+            echo "### Gate on \`main\` at $(git rev-parse --short HEAD)"
+            echo
+            for check in \
+              "unittest:python3 -m unittest discover -s tests" \
+              "ruff:ruff check" \
+              "audit:python3 maintenance_audit.py --skip-upstream"
+            do
+              name="${check%%:*}"
+              cmd="${check#*:}"
+              if output="$($cmd 2>&1)"; then
+                echo "- \`$name\` — pass"
+              else
+                echo "- \`$name\` — **FAIL**"
+                echo
+                echo '```'
+                printf '%s\n' "$output" | tail -20
+                echo '```'
+              fi
+            done
+            echo
+            threshold="$(jq -er '.gated.unit' .coverage-thresholds.json)"
+            python3 -m coverage run -m unittest discover -s tests >/dev/null 2>&1 || true
+            percent="$(python3 -m coverage report --format=total 2>/dev/null || echo unknown)"
+            echo "Coverage ${percent}% against a ${threshold}% gate."
+          } > intake.md
+
+      - name: Post the intake comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number || inputs.issue }}
+        run: |
+          set -euo pipefail
+          {
+            echo "**Intake for \`ai-fix-requested\`.** Automated context, not a fix."
+            echo
+            cat intake.md
+            echo
+            echo "Before treating this as new work, check whether the capability already"
+            echo "exists under another name — the ACMM criteria test filenames, not"
+            echo "capabilities, and several have been false negatives. Start from"
+            echo "\`.github/copilot-instructions.md\`; \`docs/risk-tiers.md\` says how much"
+            echo "evidence the change will need."
+          } | gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file -

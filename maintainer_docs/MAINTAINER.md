@@ -146,6 +146,7 @@ only when you cut a release.
 | `publish-image.yml` | push to `main`, release, dispatch | Builds and pushes to GHCR |
 | `update-homebrew-formula.yml` | release published, dispatch | Points the formula at the release and pushes to `main` |
 | `maintenance-audit.yml` | Mondays 06:00 UTC, dispatch | Snapshot drift (and its tracking issue), action pin coverage, pin freshness, formula pin |
+| `ai-fix.yml` | `ai-fix-requested` label, dispatch | Posts the current gate result on the issue as context. Read-only: no code writes, no pull request, no model |
 
 Only a build of `main` tags the image `latest` — a release published from an
 older commit must not drag `latest` backwards. All events that write image
@@ -310,7 +311,8 @@ wrapper keeps that in a named volume; a bare `podman run --rm` repeats it.
   which matters, because anything landing on `main` immediately becomes the
   published image.
 - **Actions cannot create pull requests** in this repo, which is why the
-  formula update pushes directly instead of opening one. Issues are a separate
+  formula update pushes directly instead of opening one, and why
+  `ai-fix.yml` gathers evidence onto an issue rather than proposing a fix. Issues are a separate
   setting and are not blocked — the audit's snapshot-drift tracking issue
   depends on that, so if it ever starts reporting `could not sync`, check
   Settings → Actions → General before assuming the script broke.
