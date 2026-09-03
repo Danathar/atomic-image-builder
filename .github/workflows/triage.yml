@@ -55,8 +55,22 @@ jobs:
           # A report naming a security-sensitive part of this project should
           # be looked at before the queue, whoever filed it. `security` is an
           # existing label here rather than a new one invented for this.
-          case "$title$body" in
-            *cosign*|*signing\ key*|*GH_TOKEN*|*credential*|*"prompt injection"*)
+          #
+          # Two things this has to get right, both of which it got wrong first.
+          #
+          # The bug form itself contains the words "tokens, cosign keys" in its
+          # pre-submit checkbox, so scanning the raw body matched every single
+          # bug report and would have flooded the label into uselessness. The
+          # form's own boilerplate is stripped before matching.
+          #
+          # And `case` is case-sensitive, so "Cosign verification fails" and
+          # "Signing key is missing" both slipped through. Everything is
+          # lowercased first.
+          haystack="$(printf '%s\n%s' "$title" "$body" \
+            | grep -vF 'I checked the pasted output for' \
+            | tr '[:upper:]' '[:lower:]')"
+          case "$haystack" in
+            *cosign*|*"signing key"*|*gh_token*|*credential*|*"prompt injection"*)
               labels+=("security") ;;
           esac
 
