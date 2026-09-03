@@ -133,6 +133,31 @@ class GumStub:
 REAL_GHCR_PACKAGE_EXISTS = atomic_image_builder.ghcr_package_exists
 
 
+def _markdown_prose(text: str) -> set[str]:
+    """Sentence-length prose lines from a Markdown document.
+
+    Fenced code blocks are skipped. A skill that tells someone which commands
+    to run has to contain those commands, and this repo already repeats its
+    check commands across CONTRIBUTING.md, MAINTAINER.md and the PR template
+    deliberately -- keeping the numbers in them consistent is
+    test_coverage_gate_threshold_has_one_source_of_truth's job, not this one.
+    Headings, list items and indented lines are skipped as too short or too
+    incidental to be evidence of copying.
+    """
+    prose = set()
+    in_fence = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        stripped = line.strip()
+        if len(stripped) > 60 and not line.startswith(("#", "-", " ", "`")):
+            prose.add(stripped)
+    return prose
+
+
 class BuilderTests(unittest.TestCase):
     def setUp(self) -> None:
         # The tool consults a couple of env vars the container distribution
@@ -6679,11 +6704,7 @@ class BuilderTests(unittest.TestCase):
             # corrected. Blocking those words would push both into vagueness
             # to satisfy a test. Verbatim sentences are the real signal, so
             # that is what is checked.
-            canonical_prose = {
-                line.strip()
-                for line in canonical.read_text().splitlines()
-                if len(line.strip()) > 60 and not line.startswith(("#", "-", " ", "`"))
-            }
+            canonical_prose = _markdown_prose(canonical.read_text())
             for lineno, line in enumerate(text.splitlines(), start=1):
                 # assertTrue rather than assertNotIn: the latter prints the
                 # whole canonical file as the container, burying the one line
