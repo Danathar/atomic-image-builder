@@ -6678,16 +6678,34 @@ class BuilderTests(unittest.TestCase):
         # Every other agent entry point, whichever of them exist. Listed by
         # directory so a new file inside one is covered the day it is added
         # rather than the day someone remembers this test.
-        pointer_roots = [".cursor", ".github/prompts", ".claude/skills", ".claude/memory"]
+        # Tracked files only. The working tree is the wrong thing to assert
+        # about: a maintainer keeping a personal AGENTS.md or a scratch note
+        # under .claude/memory/ would otherwise get a red suite for a file the
+        # repository does not ship. `.mdc` is included because that is
+        # Cursor's own rule format, so a pointer written to actually work in
+        # Cursor would slip past this check entirely.
+        tracked = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split("\0")
+        pointer_prefixes = (
+            ".cursor/",
+            ".github/prompts/",
+            ".claude/skills/",
+            ".claude/memory/",
+        )
+        # CLAUDE.md and AGENTS.md sit at the root rather than in a directory of
+        # their own, and each is loaded automatically by the tool that reads
+        # it -- which makes them the likeliest place for a second set of
+        # conventions to appear and go unnoticed.
+        pointer_files = ("CLAUDE.md", "AGENTS.md")
         pointers = [
-            path
-            for name in pointer_roots
-            if (root / name).is_dir()
-            # .mdc as well as .md: that is Cursor's own rule format, so a
-            # pointer written to actually work in Cursor would otherwise slip
-            # past this check entirely.
-            for pattern in ("*.md", "*.mdc")
-            for path in sorted((root / name).rglob(pattern))
+            root / name
+            for name in sorted(tracked)
+            if name.endswith((".md", ".mdc"))
+            and (name.startswith(pointer_prefixes) or name in pointer_files)
         ]
 
         for path in pointers:
