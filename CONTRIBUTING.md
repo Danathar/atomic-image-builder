@@ -133,6 +133,13 @@ shellcheck contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/t
 hadolint Containerfile container/Containerfile.coverage
 ```
 
+`ruff.toml` holds the rule selection and the `py310` target, so `ruff check`
+with no arguments — the same invocation CI uses — checks the same things
+locally that it does in CI. Note the undotted name: ruff reads `.ruff.toml`
+in preference to `ruff.toml`, so adding the dotted variant would take over
+silently and leave edits to this one doing nothing. A test asserts only one of
+the two exists.
+
 `ruff` is pinned in the install command at the top of [Tests](#tests), which
 keeps it in sync with the exact version `ci.yml` installs — an unpinned local
 `ruff` can enable or disable different rules release to release and disagree
