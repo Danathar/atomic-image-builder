@@ -6536,6 +6536,32 @@ class BuilderTests(unittest.TestCase):
         contributing = (root / "CONTRIBUTING.md").read_text()
         self.assertIn(match.group(0), contributing)
 
+    def test_ci_runs_the_end_to_end_suites_from_the_repo(self) -> None:
+        # The point of tests/e2e/ is that the same scenarios CI runs can be
+        # run against a locally built image. That holds only while ci.yml
+        # calls the scripts instead of carrying its own copy, so assert the
+        # scripts exist, are executable, and are what the workflow invokes.
+        root = Path(__file__).resolve().parents[1]
+        ci_workflow = (root / ".github/workflows/ci.yml").read_text()
+        for name in ("smoke.sh", "coverage_scenarios.sh"):
+            script = root / "tests/e2e" / name
+            self.assertTrue(script.is_file(), f"tests/e2e/{name} is missing")
+            self.assertTrue(
+                os.access(script, os.X_OK),
+                f"tests/e2e/{name} is not executable, so ci.yml cannot run it",
+            )
+            self.assertTrue(
+                f"tests/e2e/{name}" in ci_workflow,
+                f"ci.yml no longer runs tests/e2e/{name}",
+            )
+        # shellcheck covers them in the `test` job, which always runs --
+        # container-build is path-scoped and skips on changes that miss the
+        # image, so a lint gate placed there would only run sometimes.
+        self.assertTrue(
+            "tests/e2e/lib.sh" in ci_workflow,
+            "ci.yml no longer shellchecks tests/e2e/lib.sh",
+        )
+
     def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
         # The explainer has to define the term for a newcomer, keep the trend
         # history reachable now that the badge no longer links to it, and route
