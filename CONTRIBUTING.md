@@ -51,6 +51,8 @@ python3 -m unittest discover -s tests
 
 ## Coverage
 
+[docs/quality.md](docs/quality.md) is the index of every quality signal in this project and what each one is worth; start there if you want the overview rather than the mechanics.
+
 There are five separate coverage measurements, and they are not interchangeable.
 
 **Unit coverage** measures the source tree. `.coveragerc` holds the settings so a local run reports the same numbers CI does, and CI gates on it at 90%:
