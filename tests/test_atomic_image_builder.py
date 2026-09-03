@@ -6561,6 +6561,13 @@ class BuilderTests(unittest.TestCase):
             "tests/e2e/lib.sh" in ci_workflow,
             "ci.yml no longer shellchecks tests/e2e/lib.sh",
         )
+        # And container-build has to treat the suites as a trigger. They are
+        # not baked into the image, so they do not belong in that path list
+        # on the usual reasoning -- but a PR that edits only a suite would
+        # otherwise skip the job that runs it and read as covered.
+        diff_paths = re.search(r"git diff --quiet .*?;", ci_workflow)
+        self.assertIsNotNone(diff_paths, "container-build's path filter has changed shape")
+        self.assertIn("tests/e2e/", diff_paths.group(0))
 
     def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
         # The explainer has to define the term for a newcomer, keep the trend

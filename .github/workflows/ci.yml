@@ -208,9 +208,16 @@ jobs:
       # Containerfile, its entrypoint, the tool script, and the bundled
       # template snapshots — all of which are COPY'd in. contrib/aib is the
       # host-side wrapper and is NOT in the image, so it is intentionally not
-      # a trigger here. Falls back to building when the diff base can't be
-      # resolved (e.g. a brand new branch with no prior commit) so this never
-      # silently skips.
+      # a trigger here.
+      #
+      # tests/e2e/ is the one trigger that is not in the image. It is what
+      # proves the image, and a change to a suite that never runs the suite
+      # is worse than no suite: it reads as covered. Without it a PR editing
+      # only smoke.sh or coverage_scenarios.sh skips this whole job while the
+      # test job merely shellchecks the files.
+      #
+      # Falls back to building when the diff base can't be resolved (e.g. a
+      # brand new branch with no prior commit) so this never silently skips.
       - name: Check for container-related changes
         id: changed
         run: |
@@ -225,7 +232,7 @@ jobs:
           fi
           if [ -z "$base" ] || ! git cat-file -e "$base" 2>/dev/null; then
             echo "any_changed=true" >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$base" "${{ github.sha }}" -- Containerfile container/ atomic_image_builder.py template_snapshots/; then
+          elif git diff --quiet "$base" "${{ github.sha }}" -- Containerfile container/ atomic_image_builder.py template_snapshots/ tests/e2e/; then
             echo "any_changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "any_changed=true" >> "$GITHUB_OUTPUT"
