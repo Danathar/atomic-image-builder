@@ -1,0 +1,20 @@
+---
+description: How to work in the Atomic Image Builder repository
+alwaysApply: true
+---
+
+# Atomic Image Builder
+
+Nobody currently develops this repo in Cursor. This file exists so that if
+someone does, they get the same brief every other agent gets rather than
+inferring the conventions from the code.
+
+**Read [`.github/copilot-instructions.md`](../../.github/copilot-instructions.md).**
+It is the canonical guidance: what the project is, the checks that gate a
+change, and the handful of things that are easy to get wrong in this repo
+specifically. From there it points at ARCHITECTURE.md, CONTRIBUTING.md,
+MAINTAINER.md and maintenance_notes.txt.
+
+Nothing from that file is repeated here, deliberately. Four copies of the same
+conventions would be four things to keep in step, and a test enforces that
+this file stays a pointer.
