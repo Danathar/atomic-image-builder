@@ -7,6 +7,7 @@ __pycache__/
 .claude/*
 !.claude/skills/
 !.claude/memory/
+!.claude/settings.json
 .venv/
 .coverage
 .coverage.*
