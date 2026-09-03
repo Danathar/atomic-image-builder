@@ -136,3 +136,12 @@ This file is the canonical one. Any other agent-facing file in this repo --
 Cursor rules, a prompt catalog, packaged skills -- points back here instead of
 restating it, so there is one place to correct when something above turns out
 to be wrong. A test enforces that for every such file that exists.
+
+`CLAUDE.md` is the single exception, and it is deliberate. It is auto-loaded
+into a Claude Code session while this file is not, so a trap that lives only
+here costs a tool call an agent may not spend -- which is the wrong place to
+economise for the handful whose consequences land in other people's
+repositories. It mirrors four of the paragraphs above inside a marked block,
+verbatim. The same test inverts inside that block and requires them to match,
+so editing a mirrored paragraph here without updating the mirror fails the
+suite. Correct it here; the failure will tell you the mirror is stale.

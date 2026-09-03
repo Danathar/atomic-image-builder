@@ -133,6 +133,21 @@ class GumStub:
 REAL_GHCR_PACKAGE_EXISTS = atomic_image_builder.ghcr_package_exists
 
 
+MIRROR_START = "<!-- mirror:copilot-instructions start -->"
+MIRROR_END = "<!-- mirror:copilot-instructions end -->"
+# The paragraphs CLAUDE.md must carry, named by their opening phrase so the
+# selection survives rewording of the body. These four are the ones whose
+# consequences leave this repository: two ship to every generated repo, one
+# orphans every repo the tool has created, and one is the defect most often
+# reintroduced here.
+MIRRORED_TRAPS = (
+    "**Every `uses:` in a workflow must be covered by `ACTION_PINS` or",
+    "**`template_snapshots/` is vendored.**",
+    "**Never rename `TOOL_SLUG`.**",
+    "**The coverage threshold is not a literal.**",
+)
+
+
 def _markdown_prose(text: str) -> set[str]:
     """Sentence-length prose lines from a Markdown document.
 
@@ -6820,17 +6835,79 @@ class BuilderTests(unittest.TestCase):
             # corrected. Blocking those words would push both into vagueness
             # to satisfy a test. Verbatim sentences are the real signal, so
             # that is what is checked.
-            canonical_prose = _markdown_prose(canonical.read_text())
+            canonical_text = canonical.read_text()
+            canonical_prose = _markdown_prose(canonical_text)
+            # A pointer may mirror a few high-consequence paragraphs inside an
+            # explicit block. That exists because a link is inert: CLAUDE.md is
+            # auto-loaded and the canonical brief is not, so a trap that only
+            # lives behind the link costs a tool call an agent may not spend.
+            # The rule therefore inverts inside the block -- every line there
+            # must match the canonical file -- which turns the duplication
+            # into a mirror that cannot drift rather than a second copy.
+            # Only CLAUDE.md may mirror. Elsewhere the markers are just text,
+            # and treating them as an exemption would let any pointer opt out
+            # of the no-copy rule by wrapping a paragraph in them.
+            if path.name != "CLAUDE.md":
+                self.assertNotIn(
+                    MIRROR_START,
+                    text,
+                    f"{relative_path} uses the mirror markers, which only "
+                    f"CLAUDE.md may do -- it is the only auto-loaded file",
+                )
+            in_mirror = False
+            mirror_lines: list[str] = []
             for lineno, line in enumerate(text.splitlines(), start=1):
+                stripped = line.strip()
+                if stripped == MIRROR_START:
+                    in_mirror = True
+                    continue
+                if stripped == MIRROR_END:
+                    in_mirror = False
+                    continue
+                if in_mirror:
+                    mirror_lines.append(line.rstrip())
+                    continue
                 # assertTrue rather than assertNotIn: the latter prints the
                 # whole canonical file as the container, burying the one line
                 # that has to change.
                 self.assertTrue(
-                    line.strip() not in canonical_prose,
+                    stripped not in canonical_prose,
                     f"{relative_path}:{lineno} copies a sentence from "
-                    f".github/copilot-instructions.md instead of linking to "
-                    f"it: {line.strip()[:60]!r}",
+                    f".github/copilot-instructions.md outside the mirror "
+                    f"block: {stripped[:60]!r}",
                 )
+            self.assertFalse(in_mirror, f"{relative_path} opens a mirror block and never closes it")
+            if path.name != "CLAUDE.md":
+                continue
+
+            # The delivery half, and it has to compare the whole selection
+            # rather than line membership. Checking that each mirrored line
+            # appears somewhere in the canonical file would pass a block with
+            # three of the four paragraphs deleted, or one unrelated sentence
+            # -- both of which deliver nothing while looking correct.
+            paragraphs = [
+                paragraph
+                for paragraph in canonical_text.split("\n\n")
+                if paragraph.startswith("**")
+            ]
+            expected = []
+            for opening in MIRRORED_TRAPS:
+                match = [p for p in paragraphs if p.startswith(opening)]
+                self.assertEqual(
+                    len(match),
+                    1,
+                    f".github/copilot-instructions.md has no single paragraph "
+                    f"opening {opening!r}; CLAUDE.md's mirror names it",
+                )
+                expected.append(match[0].rstrip())
+            actual = "\n".join(mirror_lines).strip()
+            self.assertEqual(
+                actual,
+                "\n\n".join(expected),
+                "CLAUDE.md's mirror block is not the four canonical "
+                "paragraphs verbatim -- regenerate it from "
+                ".github/copilot-instructions.md",
+            )
 
     def test_checkpoint_entries_are_all_dated(self) -> None:
         # The checkpoint holds no current-state claims -- those are looked up
