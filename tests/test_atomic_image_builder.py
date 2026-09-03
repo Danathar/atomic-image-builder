@@ -6544,6 +6544,69 @@ class BuilderTests(unittest.TestCase):
         present = [name for name in ("ruff.toml", ".ruff.toml") if (root / name).exists()]
         self.assertEqual(present, ["ruff.toml"])
 
+    def test_coverage_gate_threshold_has_one_source_of_truth(self) -> None:
+        # The gate number was spelled out in five places: ci.yml plus four
+        # sentences across three docs. Nothing tied them together, so moving
+        # the gate meant finding all five by memory and a doc left behind
+        # would go on quoting the old number indefinitely. ci.yml now reads
+        # .coverage-thresholds.json, and this asserts everything else agrees
+        # with it.
+        root = Path(__file__).resolve().parents[1]
+        thresholds = json.loads((root / ".coverage-thresholds.json").read_text())
+        threshold = thresholds["gated"]["unit"]
+        self.assertIsInstance(threshold, int)
+
+        ci_workflow = (root / ".github/workflows/ci.yml").read_text()
+        self.assertIn(".coverage-thresholds.json", ci_workflow)
+        # A literal here would silently win over the file it reads.
+        self.assertNotRegex(ci_workflow, r"--fail-under=\d")
+
+        # Checking each doc merely mentions the threshold somewhere is not
+        # enough: CONTRIBUTING.md names it three times, so updating one and
+        # leaving the others would still pass while two sentences went on
+        # quoting the old number. Every line that talks about the gate is
+        # checked instead, and each number on such a line has to be the
+        # current threshold.
+        gate_line = re.compile(
+            r"fail-under|coverage gate|gates on it|fails the build|the gate"
+        )
+        # Bare \b\d+\b rather than a percentage: "The 90 is not written into
+        # ci.yml" is a gate claim with no % sign, and is exactly the kind of
+        # sentence that gets left behind. The word boundary keeps `python3`
+        # and version pins out of it.
+        number = re.compile(r"\b\d+\b")
+
+        documented = [
+            "CONTRIBUTING.md",
+            "maintainer_docs/MAINTAINER.md",
+            "docs/coverage.md",
+            # The PR template's checklist is a command a contributor copies,
+            # so a stale threshold there is one they run and believe.
+            ".github/pull_request_template.md",
+        ]
+        for relative_path in documented:
+            checked = 0
+            for lineno, line in enumerate(
+                (root / relative_path).read_text().splitlines(), start=1
+            ):
+                if not gate_line.search(line):
+                    continue
+                for found in number.findall(line):
+                    checked += 1
+                    self.assertEqual(
+                        int(found),
+                        threshold,
+                        f"{relative_path}:{lineno} quotes {found}, "
+                        f"not the {threshold} in .coverage-thresholds.json",
+                    )
+            # A rewrite that phrases the gate out of every pattern above
+            # would otherwise pass by checking nothing at all.
+            self.assertTrue(
+                checked,
+                f"{relative_path} no longer states the gate threshold anywhere "
+                f"this test recognises",
+            )
+
     def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
         # The explainer has to define the term for a newcomer, keep the trend
         # history reachable now that the badge no longer links to it, and route

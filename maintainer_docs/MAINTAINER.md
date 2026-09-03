@@ -334,6 +334,12 @@ ruff check
 python3 maintenance_audit.py --skip-upstream
 ```
 
+The `90` there is the gate CI enforces, and it is not typed into `ci.yml`
+either: both come from `.coverage-thresholds.json`. To move the gate, edit
+that file and run the suite — a doc still quoting the old number fails
+`test_coverage_gate_threshold_has_one_source_of_truth` rather than sitting
+there wrong.
+
 Do **not** run `brew audit` against your real Homebrew prefix. It bootstraps
 Homebrew's developer gem bundle, and on current versions the vendored `json`
 gem conflicts with the built-in one in portable-ruby, breaking `brew info` and
