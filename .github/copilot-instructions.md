@@ -30,12 +30,21 @@ oversight.
 
 ```bash
 python3 -m unittest discover -s tests
-python3 -m coverage run -m unittest discover -s tests && python3 -m coverage report
+python3 -m coverage run -m unittest discover -s tests
+python3 -m coverage report --fail-under="$(jq -er '.gated.unit' .coverage-thresholds.json)"
 ruff check
 shellcheck -x contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/test_entrypoint.sh tests/e2e/*.sh
+tests/test_contrib_aib.sh
+tests/test_entrypoint.sh
 hadolint Containerfile container/Containerfile.coverage
 python3 maintenance_audit.py --skip-upstream
 ```
+
+`.coveragerc` sets no `fail_under`, so a bare `coverage report` exits 0 however
+far coverage has fallen -- read the gate from the JSON as above, the way
+`ci.yml` does, rather than writing the number. `shellcheck` is static analysis
+only; the behavioral assertions for the two shell entrypoints are in the
+harnesses listed after it.
 
 Pinned tool versions are in CONTRIBUTING.md's *Tests* section, and match what
 CI installs. An unpinned local `ruff` disagrees with CI in both directions.
