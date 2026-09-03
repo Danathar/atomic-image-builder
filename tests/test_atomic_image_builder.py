@@ -6767,6 +6767,33 @@ class BuilderTests(unittest.TestCase):
         # nothing, and an empty checkpoint is not a checkpoint.
         self.assertGreater(entries, 0, ".claude/checkpoint.md has no dated entries")
 
+    def test_auto_qa_declaration_names_the_gate_without_copying_it(self) -> None:
+        # .github/auto-qa-tuning.json declares that the gate is never moved by
+        # a machine. The temptation is to restate the number there for
+        # readability, which would make it the fifth copy and undo #144. It
+        # names the file instead, and this asserts both halves: that the path
+        # it points at is the real one, and that no threshold value is written
+        # into it.
+        root = Path(__file__).resolve().parents[1]
+        declaration = root / ".github/auto-qa-tuning.json"
+        self.assertTrue(declaration.is_file(), ".github/auto-qa-tuning.json is missing")
+
+        raw = declaration.read_text()
+        data = json.loads(raw)
+        source = data["never_auto_tuned"]["unit_coverage_gate"]["source_of_truth"]
+        self.assertEqual(source, ".coverage-thresholds.json")
+        self.assertTrue(
+            (root / source).is_file(),
+            f"the declaration points at {source}, which does not exist",
+        )
+
+        threshold = json.loads((root / source).read_text())["gated"]["unit"]
+        self.assertNotIn(
+            str(threshold),
+            raw,
+            "the declaration copies the threshold value instead of naming its source",
+        )
+
     def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
         # The explainer has to define the term for a newcomer, keep the trend
         # history reachable now that the badge no longer links to it, and route
