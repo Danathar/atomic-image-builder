@@ -7004,6 +7004,55 @@ class BuilderTests(unittest.TestCase):
             "run python3 format_markdown_tables.py to align these",
         )
 
+    def test_every_row_of_a_tracked_table_ends_at_the_same_column(self) -> None:
+        # The check above asks whether the formatter would change the file,
+        # which only ever proved the docs are a fixed point of format_text --
+        # not that they are aligned. A table the formatter renders wrong is a
+        # fixed point too, so that check passed straight over a delimiter row
+        # drawn wider than its own table. This asserts the guarantee itself,
+        # reading the committed text rather than the tool that writes it, so a
+        # bug in the width arithmetic cannot vouch for its own output.
+        import format_markdown_tables
+
+        root = Path(__file__).resolve().parents[1]
+        ragged: list[str] = []
+        for path in format_markdown_tables.tracked_markdown(root):
+            in_fence = False
+            block: list[tuple[int, str]] = []
+
+            def close(block: list[tuple[int, str]], path: Path = path) -> None:
+                # Two lines is a header and a delimiter -- the shortest thing
+                # that is a table at all.
+                if len(block) < 2 or not format_markdown_tables.is_delimiter(
+                    format_markdown_tables.split_row(block[1][1]) or []
+                ):
+                    return
+                if len({len(line) for _, line in block}) > 1:
+                    name = path.relative_to(root)
+                    ragged.append(f"{name}:{block[0][0]}")
+
+            for number, line in enumerate(path.read_text().split("\n"), start=1):
+                if line.lstrip().startswith(format_markdown_tables.FENCES):
+                    in_fence = not in_fence
+                    close(block)
+                    block = []
+                    continue
+                # A bare "|" carries no cell, so it ends the table rather than
+                # belonging to it -- the same place the formatter stops.
+                if in_fence or not format_markdown_tables.split_row(line):
+                    close(block)
+                    block = []
+                    continue
+                block.append((number, line))
+            close(block)
+
+        self.assertEqual(
+            ragged,
+            [],
+            "these tables have rows of differing width, so their closing "
+            "pipes do not line up in a fixed-width viewer",
+        )
+
     def test_coverage_explainer_defines_coverage_and_hands_off(self) -> None:
         # The explainer has to define the term for a newcomer, keep the trend
         # history reachable now that the badge no longer links to it, and route
