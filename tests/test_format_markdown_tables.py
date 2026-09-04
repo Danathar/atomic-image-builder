@@ -21,6 +21,7 @@ from pathlib import Path
 
 from format_markdown_tables import (
     SKIP_PREFIXES,
+    delimiter_width,
     format_text,
     is_delimiter,
     main,
@@ -68,6 +69,18 @@ class IsDelimiterTests(unittest.TestCase):
         self.assertFalse(is_delimiter([":"]))
 
 
+class DelimiterWidthTests(unittest.TestCase):
+    def test_a_plain_delimiter_needs_three_dashes(self) -> None:
+        self.assertEqual(delimiter_width("---"), 3)
+
+    def test_an_anchored_delimiter_needs_only_its_colons_and_a_dash(self) -> None:
+        # A one-sided anchor fits in two characters and a centred one in
+        # three, so an anchored column is not forced as wide as a plain one.
+        self.assertEqual(delimiter_width(":--"), 2)
+        self.assertEqual(delimiter_width("--:"), 2)
+        self.assertEqual(delimiter_width(":-:"), 3)
+
+
 class RenderDelimiterTests(unittest.TestCase):
     def test_unaligned_delimiter_fills_the_column_width(self) -> None:
         self.assertEqual(render_delimiter("---", 6), "------")
@@ -93,10 +106,11 @@ class RenderDelimiterTests(unittest.TestCase):
 class FormatTextTests(unittest.TestCase):
     def test_cells_are_padded_to_the_widest_value_in_their_column(self) -> None:
         # The delimiter never renders shorter than three dashes, so a column
-        # narrower than that stays three wide while its cells stay narrow.
+        # narrower than that widens to three -- every row of it, not just the
+        # delimiter, or the closing pipes stop lining up.
         self.assertEqual(
             format_text("| a | bb |\n| --- | --- |\n| cccc | d |\n"),
-            "| a    | bb |\n| ---- | --- |\n| cccc | d  |\n",
+            "| a    | bb  |\n| ---- | --- |\n| cccc | d   |\n",
         )
 
     def test_alignment_colons_survive_a_reflow(self) -> None:
@@ -124,7 +138,7 @@ class FormatTextTests(unittest.TestCase):
     def test_a_fence_opening_immediately_after_a_table_ends_the_table(self) -> None:
         self.assertEqual(
             format_text("| a | bbbb |\n| --- | --- |\n```\nnot a row\n```\n"),
-            "| a | bbbb |\n| --- | ---- |\n```\nnot a row\n```\n",
+            "| a   | bbbb |\n| --- | ---- |\n```\nnot a row\n```\n",
         )
 
     def test_a_table_running_to_the_last_line_is_still_formatted(self) -> None:
@@ -133,7 +147,7 @@ class FormatTextTests(unittest.TestCase):
         # own Markdown never takes.
         self.assertEqual(
             format_text("| a | bb |\n| --- | --- |\n| cccc | d |"),
-            "| a    | bb |\n| ---- | --- |\n| cccc | d  |",
+            "| a    | bb  |\n| ---- | --- |\n| cccc | d   |",
         )
 
     def test_a_body_row_wider_than_the_header_pads_the_delimiter(self) -> None:
@@ -142,13 +156,13 @@ class FormatTextTests(unittest.TestCase):
         # delimiter cell, which would stop the table rendering at all.
         self.assertEqual(
             format_text("| a |\n| --- |\n| b | extra |\n"),
-            "| a |       |\n| --- | ----- |\n| b | extra |\n",
+            "| a   |       |\n| --- | ----- |\n| b   | extra |\n",
         )
 
     def test_a_trailing_pipe_only_line_ends_the_table(self) -> None:
         self.assertEqual(
             format_text("| a | bbbb |\n| --- | --- |\n|\n"),
-            "| a | bbbb |\n| --- | ---- |\n|\n",
+            "| a   | bbbb |\n| --- | ---- |\n|\n",
         )
 
     def test_padding_is_not_stripped_from_the_last_cell(self) -> None:
@@ -159,6 +173,35 @@ class FormatTextTests(unittest.TestCase):
             all(line.endswith(" |") for line in formatted.splitlines()),
             formatted,
         )
+
+    def test_a_column_narrower_than_its_delimiter_widens_every_row(self) -> None:
+        # Regression: the delimiter's three-dash minimum used to be applied to
+        # the delimiter cell alone and left out of the column width, so a
+        # single-character column rendered a delimiter row wider than every
+        # other row -- and the result was a fixed point, so re-running the
+        # formatter never repaired it and an idempotence check never saw it.
+        formatted = format_text("| A | B |\n| --- | --- |\n| 1 | 2 |\n")
+        self.assertEqual(
+            formatted,
+            "| A   | B   |\n| --- | --- |\n| 1   | 2   |\n",
+        )
+        self.assertEqual(
+            {len(line) for line in formatted.splitlines()},
+            {13},
+            formatted,
+        )
+
+    def test_every_row_of_a_table_ends_at_the_same_column(self) -> None:
+        # The invariant the tool exists to provide, asserted directly rather
+        # than inferred from the output being unchanged. Mixed narrow and wide
+        # columns, plain and anchored delimiters.
+        formatted = format_text(
+            "| a | long header | b |\n"
+            "| --- | :-: | --: |\n"
+            "| 1 | x | 2 |\n"
+        )
+        lengths = {len(line) for line in formatted.splitlines()}
+        self.assertEqual(len(lengths), 1, formatted)
 
     def test_formatting_is_idempotent(self) -> None:
         once = format_text("| a | bb |\n| :-- | --: |\n| cccc | d |\n")
@@ -217,11 +260,11 @@ class MainTests(unittest.TestCase):
         self.assertIn(f"aligned {self.path}", output)
         self.assertEqual(
             self.path.read_text(),
-            "| a    | bb |\n| ---- | --- |\n| cccc | d  |\n",
+            "| a    | bb  |\n| ---- | --- |\n| cccc | d   |\n",
         )
 
     def test_an_already_aligned_file_is_neither_rewritten_nor_reported(self) -> None:
-        aligned = "| a    | bb |\n| ---- | --- |\n| cccc | d  |\n"
+        aligned = "| a    | bb  |\n| ---- | --- |\n| cccc | d   |\n"
         self.path.write_text(aligned)
         before = self.path.stat().st_mtime_ns
         code, output = self.run_main([str(self.path)])

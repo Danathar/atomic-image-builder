@@ -66,10 +66,23 @@ def is_delimiter(cells: list[str]) -> bool:
     )
 
 
+def delimiter_width(cell: str) -> int:
+    """The narrowest this delimiter cell can be drawn and still be one.
+
+    Three dashes is the conventional minimum for a plain delimiter; an
+    anchored one needs only its colons plus a dash. A column whose content is
+    narrower than this has to widen to it -- every row of it, not just the
+    delimiter, or the closing pipes stop lining up.
+    """
+    left = cell.startswith(":")
+    right = cell.endswith(":")
+    return 3 if not (left or right) else 1 + left + right
+
+
 def render_delimiter(cell: str, width: int) -> str:
     left = cell.startswith(":")
     right = cell.endswith(":")
-    inner = max(width, 3 if not (left or right) else 1 + left + right)
+    inner = max(width, delimiter_width(cell))
     if left and right:
         return ":" + "-" * (inner - 2) + ":"
     if right:
@@ -119,10 +132,19 @@ def format_text(text: str) -> str:
         # emitting an empty delimiter cell that breaks rendering.
         block = [row + [""] * (columns - len(row)) for row in block]
         block[1] = [cell or "---" for cell in block[1]]
-        # The delimiter is row 1 by position. Re-detecting it by content
-        # would fail once it has been padded.
+        # The delimiter is row 1 by position -- both here and below.
+        # Re-detecting it by content would fail once it has been padded.
+        #
+        # Its own minimum is part of the column width rather than a floor
+        # applied to the delimiter cell alone: leave it out and a column
+        # narrower than three renders its delimiter wider than every other
+        # row, the exact misalignment this tool exists to remove. That
+        # output is also a fixed point, so re-running never repairs it.
         widths = [
-            max(len(row[column]) for i, row in enumerate(block) if i != 1)
+            max(
+                max(len(row[column]) for i, row in enumerate(block) if i != 1),
+                delimiter_width(block[1][column]),
+            )
             for column in range(columns)
         ]
         for i, row in enumerate(block):
