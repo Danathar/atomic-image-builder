@@ -14,6 +14,7 @@ aib="$repo_root/contrib/aib"
 
 pass=0
 fail=0
+skip=0
 
 # Each test gets its own stub bin/ dir and workdir, isolated from the others
 # and from the real host tools. The stub dir is the *entire* PATH aib runs
@@ -251,6 +252,44 @@ test_localtime_mount() {
     cleanup_stubs
 }
 
+# --- host without /etc/localtime: nothing is mounted ----------------------
+# The scenario above asserts whichever branch this host takes, and every host
+# that can run podman has /etc/localtime, so the false branch is never the one
+# taken. That leaves the guard itself unasserted: delete the `if` and mount
+# unconditionally, and the suite stays green while `podman run` fails outright
+# on a host that has no /etc/localtime -- which is the only reason the guard
+# is there. No PATH trick reaches an absolute path, but a mount namespace
+# does: mask /etc and the guard genuinely sees no file.
+#
+# Unprivileged user namespaces are not available everywhere. Where they are
+# missing this reports SKIP rather than passing, so the gap stays visible
+# instead of being silently reclassified as evidence.
+test_localtime_absent() {
+    if ! command -v unshare >/dev/null 2>&1 ||
+        ! unshare --map-root-user --mount true 2>/dev/null; then
+        skip=$((skip + 1))
+        echo "SKIP: localtime absent: unprivileged user namespaces unavailable"
+        return
+    fi
+    setup_stubs
+    # The masking runs in its own script so the namespace, not this shell,
+    # expands the paths -- and so shellcheck reads it as the bash it is.
+    cat >"$stub_dir/masked-run" <<'MASKED'
+#!/usr/bin/env bash
+masked="$(mktemp -d)"
+mount --bind "$masked" /etc || exit 3
+PATH="$AIB_STUB_DIR" HOME="$AIB_STUB_DIR/home" "$AIB_PATH" >/dev/null 2>&1
+MASKED
+    chmod +x "$stub_dir/masked-run"
+    local args
+    args="$(AIB_PATH="$aib" AIB_STUB_DIR="$stub_dir" \
+        unshare --map-root-user --mount "$stub_dir/masked-run" >/dev/null 2>&1
+        cat "$podman_log")"
+    assert_not_contains "$args" "/etc/localtime" \
+        "localtime: nothing mounted when the host has no /etc/localtime"
+    cleanup_stubs
+}
+
 # --- rpm-ostree success: the EXIT trap removes the temp status file --------
 # The mount arg proves the file was created; only this proves it was cleaned
 # up. Without it, deleting `trap cleanup EXIT` leaves the suite green while
@@ -312,10 +351,15 @@ test_rpm_ostree_status_file_removed_on_exit
 test_rpm_ostree_failure_removes_temp_file
 test_base_podman_flags
 test_localtime_mount
+test_localtime_absent
 test_always_present_args
 test_default_image
 test_exit_code_preserved
 
 echo
-echo "$pass passed, $fail failed"
+if [ "$skip" -gt 0 ]; then
+    echo "$pass passed, $fail failed, $skip skipped"
+else
+    echo "$pass passed, $fail failed"
+fi
 [ "$fail" -eq 0 ]
