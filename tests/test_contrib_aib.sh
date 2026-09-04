@@ -217,6 +217,90 @@ PODMAN
     cleanup_stubs
 }
 
+# --- base podman flags are on every invocation ----------------------------
+# --pull=newer is the one with teeth: podman's default (--pull=missing) runs
+# whatever copy was fetched first, forever, and the image bakes in action pins
+# and template snapshots, so a stale image quietly generates repos from stale
+# pins. Dropping the flag is a silent regression, not a visible one.
+test_base_podman_flags() {
+    setup_stubs
+    local args
+    args="$(PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1; cat "$podman_log")"
+    assert_contains "$args" "--pull=newer" "base flags: --pull=newer, so a stale image cannot run forever"
+    assert_contains "$args" "--rm" "base flags: --rm, so the container is not left behind"
+    assert_contains "$args" "-it" "base flags: -it, since the tool is an interactive TUI"
+    cleanup_stubs
+}
+
+# --- host timezone is mounted read-only -----------------------------------
+# The daily-rebuild note the tool prints is in local time; without this mount
+# the container defaults to UTC. The mount is conditional on the host having
+# /etc/localtime at all, and that path cannot be hidden from the script the
+# way PATH hides a command, so assert whichever branch this host takes.
+test_localtime_mount() {
+    setup_stubs
+    local args
+    args="$(PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1; cat "$podman_log")"
+    if [ -e /etc/localtime ]; then
+        assert_contains "$args" "/etc/localtime:/etc/localtime:ro" \
+            "localtime: host zone mounted read-only when /etc/localtime exists"
+    else
+        assert_not_contains "$args" "/etc/localtime" \
+            "localtime: nothing mounted when the host has no /etc/localtime"
+    fi
+    cleanup_stubs
+}
+
+# --- rpm-ostree success: the EXIT trap removes the temp status file --------
+# The mount arg proves the file was created; only this proves it was cleaned
+# up. Without it, deleting `trap cleanup EXIT` leaves the suite green while
+# every real run leaks a temp file into the user's TMPDIR.
+test_rpm_ostree_status_file_removed_on_exit() {
+    setup_stubs
+    local tmp_dir="$stub_dir/tmp"
+    mkdir -p "$tmp_dir"
+    cat >"$stub_dir/rpm-ostree" <<'RPMOSTREE'
+#!/usr/bin/env bash
+echo '{"deployments": []}'
+exit 0
+RPMOSTREE
+    chmod +x "$stub_dir/rpm-ostree"
+    local args host_path leftover
+    args="$(PATH="$stub_dir" HOME="$stub_dir/home" TMPDIR="$tmp_dir" "$aib" >/dev/null 2>&1; cat "$podman_log")"
+    # Read the host path back out of the mount argument rather than guessing
+    # what mktemp named it. Asserting it sits under our TMPDIR keeps the
+    # leftover count below from passing vacuously if mktemp ignored TMPDIR.
+    host_path="$(printf '%s\n' "$args" | tr ' ' '\n' | grep -F ':/run/aib-rpm-ostree-status.json:ro,Z' | cut -d: -f1)"
+    assert_contains "$host_path" "$tmp_dir" "rpm-ostree success: status file was created under TMPDIR"
+    leftover="$(find "$tmp_dir" -mindepth 1 | wc -l)"
+    assert_eq "$leftover" "0" "rpm-ostree success: EXIT trap removes the temp status file"
+    cleanup_stubs
+}
+
+# --- rpm-ostree failure: the fallback path removes the temp file too -------
+# The redirect creates the file before rpm-ostree is even invoked, so the
+# failure branch has its own `rm` and clears status_file, which leaves the
+# EXIT trap with nothing to do. Deleting that `rm` leaks on every failed run.
+test_rpm_ostree_failure_removes_temp_file() {
+    setup_stubs
+    local tmp_dir="$stub_dir/tmp"
+    mkdir -p "$tmp_dir"
+    cat >"$stub_dir/rpm-ostree" <<RPMOSTREE
+#!/usr/bin/env bash
+: >"$stub_dir/rpm-ostree.ran"
+exit 1
+RPMOSTREE
+    chmod +x "$stub_dir/rpm-ostree"
+    PATH="$stub_dir" HOME="$stub_dir/home" TMPDIR="$tmp_dir" "$aib" >/dev/null 2>&1
+    local ran leftover
+    ran="no"
+    [ -e "$stub_dir/rpm-ostree.ran" ] && ran="yes"
+    assert_eq "$ran" "yes" "rpm-ostree failure: the failing status call actually ran"
+    leftover="$(find "$tmp_dir" -mindepth 1 | wc -l)"
+    assert_eq "$leftover" "0" "rpm-ostree failure: temp status file removed on the fallback path"
+    cleanup_stubs
+}
+
 test_podman_missing
 test_gh_authenticated
 test_gh_missing
@@ -224,6 +308,10 @@ test_gh_not_logged_in
 test_rpm_ostree_success
 test_rpm_ostree_failure
 test_rpm_ostree_absent
+test_rpm_ostree_status_file_removed_on_exit
+test_rpm_ostree_failure_removes_temp_file
+test_base_podman_flags
+test_localtime_mount
 test_always_present_args
 test_default_image
 test_exit_code_preserved
