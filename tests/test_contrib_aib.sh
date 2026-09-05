@@ -16,6 +16,16 @@ pass=0
 fail=0
 skip=0
 
+# The stub dir isolates aib's PATH; this isolates its environment, for the
+# same reason. aib does `GH_TOKEN="$(gh auth token)"` and then `export
+# GH_TOKEN`, and bash keeps a variable exported if it was already in the
+# environment -- so on a host that exports GH_TOKEN (anyone using `gh` via a
+# token rather than a login, and most CI), the assignment alone leaves the
+# variable exported and dropping the `export` is invisible. The scenario
+# below that checks the token reaches podman's environment would pass on a
+# wrapper that no longer exports it.
+unset GH_TOKEN
+
 # Each test gets its own stub bin/ dir and workdir, isolated from the others
 # and from the real host tools. The stub dir is the *entire* PATH aib runs
 # with, so a host that happens to have podman/gh/rpm-ostree installed (any
@@ -145,7 +155,11 @@ fi
 exit 1
 GH
     chmod +x "$stub_dir/gh"
-    PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1
+    # `env -u` rather than relying on the unset at the top of the file: this
+    # scenario is the one that breaks silently if GH_TOKEN is in the
+    # environment, so it states the precondition itself rather than
+    # inheriting it from twelve screens away.
+    PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN "$aib" >/dev/null 2>&1
     local args forwarded
     args="$(cat "$podman_log")"
     forwarded="$(cat "$podman_env_log")"
