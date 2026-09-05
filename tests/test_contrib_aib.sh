@@ -24,6 +24,11 @@ skip=0
 setup_stubs() {
     stub_dir="$(mktemp -d)"
     podman_log="$stub_dir/podman.log"
+    # What podman inherits, as opposed to what it is passed. `-e GH_TOKEN`
+    # forwards a variable by name, so the argv log alone cannot tell a working
+    # forward from one that passes an empty value; this records the value the
+    # stub actually received.
+    podman_env_log="$stub_dir/podman-env.log"
 
     local tool src
     for tool in bash env mktemp rm; do
@@ -34,6 +39,7 @@ setup_stubs() {
     cat >"$stub_dir/podman" <<PODMAN
 #!/usr/bin/env bash
 printf '%s ' "\$@" > "$podman_log"
+printf '%s' "\${GH_TOKEN-<unset>}" > "$podman_env_log"
 exit 0
 PODMAN
     chmod +x "$stub_dir/podman"
@@ -111,6 +117,41 @@ GH
     args="$(cat "$podman_log")"
     assert_contains "$args" "-e GH_TOKEN" "gh authenticated: GH_TOKEN forwarded"
     assert_not_contains "$args" "aib-gh:/root/.config/gh" "gh authenticated: aib-gh volume not mounted"
+    cleanup_stubs
+}
+
+# --- the token's value goes to podman's environment, never its argv --------
+# The header comment's claim for `-e GH_TOKEN` is that the value "is never
+# placed in the Podman command line or written to disk by this script", and
+# nothing asserted it. `-e GH_TOKEN` forwards the variable by name out of the
+# wrapper's exported environment; `-e "GH_TOKEN=$GH_TOKEN"` forwards the same
+# value, satisfies the `-e GH_TOKEN` assertion above just as well, and puts
+# the token in podman's argv where any local user can read it out of `ps`.
+# The two halves need separate assertions: the value must be absent from the
+# command line, and present in the environment podman inherits. Dropping the
+# `export` leaves the argv assertions passing while the container gets an
+# unset variable and silently falls back to no GitHub auth at all.
+test_gh_token_forwarded_by_environment_not_argv() {
+    setup_stubs
+    cat >"$stub_dir/gh" <<'GH'
+#!/usr/bin/env bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+    exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
+    echo "fake-token-123"
+    exit 0
+fi
+exit 1
+GH
+    chmod +x "$stub_dir/gh"
+    PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1
+    local args forwarded
+    args="$(cat "$podman_log")"
+    forwarded="$(cat "$podman_env_log")"
+    assert_contains "$args" "-e GH_TOKEN " "gh token: forwarded as a bare -e GH_TOKEN, with no value attached"
+    assert_not_contains "$args" "fake-token-123" "gh token: the value never reaches podman's command line"
+    assert_eq "$forwarded" "fake-token-123" "gh token: the value reaches podman through the exported environment"
     cleanup_stubs
 }
 
@@ -342,6 +383,7 @@ RPMOSTREE
 
 test_podman_missing
 test_gh_authenticated
+test_gh_token_forwarded_by_environment_not_argv
 test_gh_missing
 test_gh_not_logged_in
 test_rpm_ostree_success
