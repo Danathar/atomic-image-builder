@@ -25,7 +25,7 @@ release rehearsal. CI runs the automated ones again on this PR.
 - [ ] `python3 -m unittest discover -s tests`
 - [ ] `python3 -m coverage run -m unittest discover -s tests && python3 -m coverage report --fail-under=90`
 - [ ] `ruff check`
-- [ ] `shellcheck contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/test_entrypoint.sh`
+- [ ] `shellcheck -x contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/test_entrypoint.sh tests/e2e/*.sh`
 - [ ] `hadolint Containerfile container/Containerfile.coverage`
 
 <!--
