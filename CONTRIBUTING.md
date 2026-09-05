@@ -144,7 +144,7 @@ Three linters, one per language CI ships. All three gate the `test` job.
 
 ```bash
 ruff check                                    # Python -- pip install command is in Tests, above
-shellcheck contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/test_entrypoint.sh
+shellcheck -x contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/test_entrypoint.sh tests/e2e/*.sh
 hadolint Containerfile container/Containerfile.coverage
 ```
 
@@ -165,7 +165,12 @@ keeps it in sync with the exact version `ci.yml` installs — an unpinned local
 `ruff` can enable or disable different rules release to release and disagree
 with CI in either direction. `shellcheck` comes from the runner image; there
 is no local pin to match, only whatever version your system package manager
-gives you. hadolint is a
+gives you. Its argument list is the whole of it — a shell file left off is a
+file nothing lints — so keep the command above byte-identical to the one
+`ci.yml`'s *Run shellcheck* step runs. `-x` is load-bearing rather than
+decorative: `tests/e2e/smoke.sh` and `tests/e2e/coverage_scenarios.sh` each
+carry a `# shellcheck source=tests/e2e/lib.sh` directive, and shellcheck
+follows it only when told it may read external sources. hadolint is a
 static binary; CI pins v2.14.0 by sha256 rather than using
 `hadolint/hadolint-action`, because `maintenance_audit.py` requires every
 `uses:` in this repo's workflows to appear in `ACTION_PINS` — the table
