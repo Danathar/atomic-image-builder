@@ -19,6 +19,12 @@ setup_stubs() {
     stub_dir="$(mktemp -d)"
     gh_log="$stub_dir/gh.log"
     tool_log="$stub_dir/tool.log"
+    # tool.log joins the arguments with spaces, which cannot distinguish one
+    # argument containing a space from two arguments. argv.log brackets each
+    # argument so word splitting is visible, and pid.log records the process
+    # the tool ends up in so the exec can be checked.
+    argv_log="$stub_dir/argv.log"
+    pid_log="$stub_dir/pid.log"
 
     local tool src
     for tool in bash env mktemp rm cat; do
@@ -29,6 +35,8 @@ setup_stubs() {
     cat >"$stub_dir/atomic-image-builder" <<TOOL
 #!/usr/bin/env bash
 printf '%s ' "\$@" > "$tool_log"
+printf '[%s]' "\$@" > "$argv_log"
+printf '%s' "\$\$" > "$pid_log"
 exit "\${TOOL_EXIT:-0}"
 TOOL
     chmod +x "$stub_dir/atomic-image-builder"
@@ -182,6 +190,63 @@ test_exit_code_preserved() {
     cleanup_stubs
 }
 
+# --- arguments are forwarded as written, not re-split on whitespace -------
+# `"$@"` and `$@` are indistinguishable in tool.log, which joins the arguments
+# back together with spaces. An unquoted `$@` re-splits an argument containing
+# a space into two and drops an empty one entirely, so a project name or a
+# commit message with a space in it would reach the tool as several arguments.
+test_arguments_are_forwarded_without_word_splitting() {
+    setup_stubs
+    env -u GH_TOKEN PATH="$stub_dir" bash "$entrypoint" \
+        --project "my project" --message "" --version >/dev/null 2>&1
+    assert_eq "$(read_log "$argv_log")" \
+        "[--project][my project][--message][][--version]" \
+        "arguments: spaces and empty strings survive the hand-off to the tool"
+    cleanup_stubs
+}
+
+# --- the tool replaces the shell rather than running as its child ---------
+# `exec` is what makes the tool PID 1 in the container. Without it bash stays
+# PID 1 and the tool is its child, so `podman stop` signals bash and the tool
+# never sees the SIGTERM. Every scenario above passes either way, because the
+# tool still runs and its exit status still propagates.
+test_tool_replaces_the_shell() {
+    setup_stubs
+    local shell_pid
+    env -u GH_TOKEN PATH="$stub_dir" bash "$entrypoint" --version >/dev/null 2>&1 &
+    shell_pid=$!
+    wait "$shell_pid"
+    assert_eq "$(read_log "$pid_log")" "$shell_pid" \
+        "exec: the tool runs in the entrypoint's own process, not a child"
+    cleanup_stubs
+}
+
+# --- the gh auth probe is silent ------------------------------------------
+# `gh auth status` is only asked a yes/no question here, but it reports on
+# both streams, and the tool it hands over to is a full-screen TUI. Anything
+# the probe prints lands in the terminal before the TUI takes it over.
+test_gh_auth_probe_prints_nothing() {
+    setup_stubs
+    cat >"$stub_dir/gh" <<GH
+#!/usr/bin/env bash
+printf '%s ' "\$@" >> "$gh_log"
+if [ "\$1" = "auth" ] && [ "\$2" = "status" ]; then
+    echo "probe-noise-on-stdout"
+    echo "probe-noise-on-stderr" >&2
+    exit 0
+fi
+exit 0
+GH
+    chmod +x "$stub_dir/gh"
+    local output
+    output="$(env -u GH_TOKEN PATH="$stub_dir" bash "$entrypoint" --version 2>&1)"
+    assert_not_contains "$output" "probe-noise" \
+        "gh auth status: neither stream reaches the terminal"
+    assert_contains "$(read_log "$gh_log")" "auth setup-git" \
+        "gh auth status: the probe still gates setup-git as before"
+    cleanup_stubs
+}
+
 test_gh_token_set
 test_gh_token_set_no_gh_binary
 test_gh_authenticated
@@ -189,6 +254,9 @@ test_gh_not_logged_in
 test_gh_absent
 test_setup_git_failure_swallowed
 test_exit_code_preserved
+test_arguments_are_forwarded_without_word_splitting
+test_tool_replaces_the_shell
+test_gh_auth_probe_prints_nothing
 
 echo
 echo "$pass passed, $fail failed"
