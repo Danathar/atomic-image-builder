@@ -5555,7 +5555,10 @@ class BuilderTests(unittest.TestCase):
             iso_kde = (repo_dir / "disk_config/iso-kde.toml").read_text()
 
         self.assertIn("  pull_request:\n    branches:\n      - master", disk_workflow)
-        self.assertIn("'ubuntu-26.04' || 'ubuntu-26.04-arm'", disk_workflow)
+        # The runner is now fixed rather than chosen from an input, and it
+        # keeps whichever label the snapshot uses for x86_64.
+        self.assertIn("    runs-on: ubuntu-26.04\n", disk_workflow)
+        self.assertNotIn("ubuntu-26.04-arm", disk_workflow)
         self.assertNotIn("ubuntu-24.04", disk_workflow)
         self.assertIn(ACTION_REF_PINS["osbuild/bootc-image-builder-action@main"][0], disk_workflow)
         self.assertNotIn("osbuild/bootc-image-builder-action@main", disk_workflow)
@@ -10328,6 +10331,149 @@ class BuilderTests(unittest.TestCase):
         )
         result = app.patch_container_disk_workflow(workflow_text, default_branch="develop")
         self.assertIn("- develop", result)
+
+    def test_generated_disk_workflow_only_offers_the_published_architecture(self) -> None:
+        # The image workflow builds one native x86_64 image -- a single job, a
+        # plain `just build`, no --platform, no manifest -- while the disk
+        # workflow offered arm64 and ran a native ARM builder against that same
+        # tag. bootc-image-builder requires the builder and the bootc image to
+        # agree on architecture and the pinned action does not synthesize the
+        # missing variant, so choosing ARM could not produce a matching image.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            build_workflow = (repo_dir / ".github/workflows/build.yml").read_text()
+            disk_workflow = (repo_dir / ".github/workflows/build-disk.yml").read_text()
+
+        # The premise: the image workflow really does publish one architecture.
+        self.assertNotIn("--platform", build_workflow)
+        self.assertNotIn("matrix", build_workflow)
+        # No dispatch option, no runner choice, and no condition anywhere is
+        # left reading an input that no longer exists. Asserting the absence of
+        # every reference is what turns a future upstream condition this
+        # patcher does not know about into a failure rather than a silent
+        # no-op that ships an unresolvable expression.
+        self.assertNotIn("inputs.platform", disk_workflow)
+        self.assertNotIn("arm64", disk_workflow)
+        self.assertIn("    runs-on: ubuntu-26.04\n", disk_workflow)
+
+    def test_generated_disk_workflow_has_no_unset_input_on_a_pull_request(self) -> None:
+        # The pull-request case was the sharper half: inputs.platform is unset
+        # there, so the ternary selected the ARM runner while the two step
+        # conditions read the same unset input in opposite directions. With the
+        # input gone there is nothing left to default.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            disk_workflow = (repo_dir / ".github/workflows/build-disk.yml").read_text()
+
+        runs_on = [line.strip() for line in disk_workflow.splitlines() if line.strip().startswith("runs-on:")]
+        self.assertEqual(runs_on, ["runs-on: ubuntu-26.04"])
+        self.assertNotIn("platform:", disk_workflow)
+        # The other dispatch input is untouched.
+        self.assertIn("      upload-to-s3:\n", disk_workflow)
+        self.assertIn("inputs.upload-to-s3", disk_workflow)
+
+    def test_patch_disk_workflow_platform_keeps_the_snapshots_amd64_runner(self) -> None:
+        # The label comes out of the ternary rather than being written here, so
+        # a snapshot refresh that bumps the runner image is followed instead of
+        # being pinned to whatever was current when the patcher was written.
+        app = self.make_app()
+        result = app.patch_disk_workflow_platform(
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ${{ inputs.platform == 'amd64' && 'ubuntu-99.04' || 'ubuntu-99.04-arm' }}\n"
+        )
+        self.assertIn("    runs-on: ubuntu-99.04\n", result)
+        self.assertNotIn("ubuntu-99.04-arm", result)
+
+    def test_patch_disk_workflow_platform_drops_an_arm_only_step(self) -> None:
+        app = self.make_app()
+        result = app.patch_disk_workflow_platform(
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - name: Install dependencies\n"
+            "        if: inputs.platform == 'arm64'\n"
+            "        run: sudo apt install -y podman\n"
+            "      - name: Checkout\n"
+            "        uses: actions/checkout@v6\n"
+        )
+        self.assertNotIn("Install dependencies", result)
+        self.assertIn("      - name: Checkout\n", result)
+
+    def test_patch_disk_workflow_platform_unconditions_a_non_arm_step(self) -> None:
+        # Always true once ARM is gone, so the step stays and the condition
+        # goes -- dropping the step instead would remove the space cleanup
+        # that x86_64 builds actually need.
+        app = self.make_app()
+        result = app.patch_disk_workflow_platform(
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - name: Maximize build space\n"
+            "        if: inputs.platform != 'arm64'\n"
+            "        uses: ublue-os/remove-unwanted-software@v8\n"
+        )
+        self.assertIn("      - name: Maximize build space\n", result)
+        self.assertIn("        uses: ublue-os/remove-unwanted-software@v8\n", result)
+        self.assertNotIn("inputs.platform", result)
+
+    def test_patch_disk_workflow_platform_leaves_other_conditions_alone(self) -> None:
+        # Unrecognised text is a no-op here, the way it is in every patcher in
+        # this file. The generated-project test above is what makes that loud.
+        app = self.make_app()
+        workflow_text = (
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - name: Upload\n"
+            "        if: inputs.upload-to-s3 != true\n"
+            "        uses: actions/upload-artifact@v7\n"
+        )
+        self.assertEqual(app.patch_disk_workflow_platform(workflow_text), workflow_text)
+
+    def test_patch_disk_workflow_platform_only_drops_the_dispatch_input(self) -> None:
+        # Scoped to workflow_dispatch inputs: a key called "platform" anywhere
+        # else in the workflow is not this input and must survive.
+        app = self.make_app()
+        result = app.patch_disk_workflow_platform(
+            "on:\n"
+            "  workflow_dispatch:\n"
+            "    inputs:\n"
+            "      upload-to-s3:\n"
+            "        type: boolean\n"
+            "      platform:\n"
+            "        required: true\n"
+            "        type: choice\n"
+            "        options:\n"
+            "          - amd64\n"
+            "          - arm64\n"
+            "  pull_request:\n"
+            "    branches:\n"
+            "      - main\n"
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - with:\n"
+            "          platform: linux/amd64\n"
+        )
+        self.assertNotIn("      platform:\n", result)
+        self.assertNotIn("arm64", result)
+        self.assertIn("      upload-to-s3:\n", result)
+        self.assertIn("  pull_request:\n", result)
+        self.assertIn("          platform: linux/amd64\n", result)
+
+    def test_patch_disk_workflow_platform_is_idempotent(self) -> None:
+        app = self.make_app()
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build-disk.yml").read_text()
+        once = app.patch_disk_workflow_platform(snapshot)
+        self.assertEqual(app.patch_disk_workflow_platform(once), once)
+        self.assertNotIn("inputs.platform", once)
 
     # ── search_packages deselection-only path ──────────────────────────
 

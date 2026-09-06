@@ -167,10 +167,14 @@ fix rather than by wholesale-replacing files on update.
 Containerfile Workflow Runner Baseline
 --------------------------------------
 Since the d95b282 snapshot refresh, new Containerfile-method repositories use
-the upstream Ubuntu 26.04 GitHub-hosted runners: `ubuntu-26.04` for image builds
-and `ubuntu-26.04` / `ubuntu-26.04-arm` for disk builds. The from-scratch
-generate_container_workflow() fallback uses the same image-build runner so a
-missing workflow does not silently restore the older Ubuntu 24.04 baseline.
+the upstream Ubuntu 26.04 GitHub-hosted runners: `ubuntu-26.04` for image
+builds, and `ubuntu-26.04` for disk builds since
+patch_disk_workflow_platform() fixed the disk workflow to the one architecture
+this tool publishes (see the next section; the snapshot still ships the
+`ubuntu-26.04` / `ubuntu-26.04-arm` choice, and the patcher resolves it). The
+from-scratch generate_container_workflow() fallback uses the same image-build
+runner so a missing workflow does not silently restore the older Ubuntu 24.04
+baseline.
 At this refresh GitHub lists both Ubuntu 26.04 labels as preview images in the
 official actions/runner-images table. actionlint 1.7.12 predates those labels
 and reports them as unknown, so verify that warning against GitHub's current
@@ -181,6 +185,38 @@ workflow files are patched in place rather than replaced. Migrating those
 repositories would require an explicit, targeted patcher; do not turn a future
 snapshot refresh into an automatic runner migration that overwrites a user's
 custom runner choice.
+
+Disk Workflow Architecture: Restricted, Not Chosen
+--------------------------------------------------
+The bundled disk workflow offers an arm64 dispatch option and picks a native
+ARM runner for it. The image workflow it builds from publishes one native
+x86_64 image -- one job, a plain `just build`, no --platform and no
+multi-architecture manifest -- and bootc-image-builder requires the builder and
+the bootc image to agree on architecture. Choosing ARM therefore could not
+produce a matching OS image, and the pinned action does not synthesize the
+missing variant. A multi-architecture *base* image does not make the
+customized build on top of it multi-architecture either.
+
+patch_disk_workflow_platform() removes the input rather than relabelling the
+runner: it drops the `platform:` dispatch input, resolves the runner ternary to
+its own amd64 label (captured from the ternary, so a snapshot refresh that
+bumps the runner is followed automatically), drops the ARM-only "Install
+dependencies" step, and unconditions the "Maximize build space" step whose
+`if:` is now always true. That also removes the separate pull-request defect:
+on a PR `inputs.platform` is unset, so the ternary selected the ARM runner
+while those two step conditions read the same unset input in opposite
+directions.
+
+It recognises exactly the two `if:` conditions upstream ships and no-ops on
+anything else, like every patcher here. What makes that safe is
+test_generated_disk_workflow_only_offers_the_published_architecture, which
+asserts no reference to `inputs.platform` survives in the generated project --
+so a third condition from a future refresh fails the suite rather than shipping
+a workflow with an expression nothing can resolve.
+
+Offering ARM again is not a runner label away. It needs the image workflow to
+build and publish the ARM variant first; only then is the disk side worth
+changing back.
 
 remove-unwanted-software Pin Tracks a Branch, Not a Tag
 -------------------------------------------------------
