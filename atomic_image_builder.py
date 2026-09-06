@@ -50,6 +50,12 @@ TOOL_SLUG = "atomic-image-builder"
 TOOL_COMMAND = "aib-tool"
 STATE_FILE = f".{TOOL_SLUG}.json"
 DEFAULT_REPO_NAME = "my-atomic-image"
+# Said the same way wherever a name is refused, because the wizard's field
+# error and validate_config()'s final gate are the same rule.
+REPO_NAME_RULE = (
+    "It must start and end with a letter or number, cannot end with .git, and can join "
+    "parts only with a single dot, one or two underscores, or dashes."
+)
 DEFAULT_GITHUB_BUILD_CRON = "05 10 * * *"
 FEDORA_ATOMIC_FALLBACK_TAG = "44"
 UNIVERSAL_BLUE_BREW_IMAGE = "ghcr.io/ublue-os/brew:latest"
@@ -90,6 +96,14 @@ BLUEBUILD_RECIPE_SCHEMA = "https://schema.blue-build.org/recipe-v1.json"
 PACKAGE_TOKEN_RE = re.compile(r"^[A-Za-z0-9._+:-]+$")
 COPR_REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 SERVICE_TOKEN_RE = re.compile(r"^[A-Za-z0-9@._:+-]+$")
+# The repo name becomes the image name in ghcr.io/<owner>/<repo>, so it has to
+# satisfy the container-reference grammar as well as GitHub's naming rules.
+# This is distribution/reference's path-component production: alphanumeric runs
+# joined by a single dot, one or two underscores, or a run of hyphens. Names
+# GitHub accepts but that grammar does not -- "a..b", "a.-b", "a___b" -- parse
+# as an invalid reference, so the wizard would create a repo and signing key
+# for an image that nothing can push or pull.
+OCI_PATH_COMPONENT_RE = re.compile(r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*")
 FROM_LINE_RE = re.compile(r"^(\s*FROM(?:\s+--platform=\S+)?\s+)(\S+)(.*)$", flags=re.IGNORECASE)
 INSTALLER_SWITCH_RE = re.compile(r"^(\s*bootc switch --mutate-in-place --transport registry )(\S+)(.*)$")
 # dnf5 prints this when -C (cache-only) is used and no repository metadata has
@@ -354,14 +368,18 @@ def sanitize_slug(value: str, default: str = DEFAULT_REPO_NAME) -> str:
 
 
 def is_valid_repo_name(value: str) -> bool:
-    # Keep this aligned with the subset of GitHub naming rules we want to
-    # support in the beginner UI. We are intentionally stricter than necessary
-    # so error messages stay simple.
+    # Two rules, and the name has to satisfy both: the subset of GitHub naming
+    # rules we support in the beginner UI, and the reference grammar that
+    # decides whether ghcr.io/<owner>/<name> can be parsed at all. The first
+    # alone let "test..image" through as far as repository creation and signing
+    # setup, and every later push and pull of it failed to parse.
     if not value or len(value) > 100:
         return False
     if value.endswith(".git"):
         return False
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9._-]{0,98}[a-z0-9])?", value):
+        return False
+    if not OCI_PATH_COMPONENT_RE.fullmatch(value):
         return False
     return True
 
@@ -1912,6 +1930,7 @@ class App:
             self.menu_section(
                 "Repository Rules",
                 "Repository names use letters, numbers, dashes, and dots. Spaces are turned into dashes.",
+                "The name also becomes the image name, so parts are joined by a single dot, one or two underscores, or dashes.",
             )
             print()
             default_name = self.config.repo_name or DEFAULT_REPO_NAME
@@ -1922,7 +1941,7 @@ class App:
             )
             candidate_name = sanitize_slug(raw_name or default_name, default_name)
             if not is_valid_repo_name(candidate_name):
-                self.gum.error("Repository names must start and end with a letter or number, and they cannot end with .git.")
+                self.gum.error(REPO_NAME_RULE)
                 self.gum.enter_to_continue("Press Enter to try another repository name...")
                 continue
             self.config.repo_name = candidate_name
@@ -4012,9 +4031,7 @@ class App:
         self.validate_token_list(self.config.copr_repos, COPR_REPO_RE, "COPR repository")
         self.validate_token_list(self.config.services, SERVICE_TOKEN_RE, "systemd service")
         if not is_valid_repo_name(self.config.repo_name):
-            raise CommandError(
-                "Repository name is invalid. It must start and end with a letter or number, and it cannot end with .git."
-            )
+            raise CommandError(f"Repository name is invalid. {REPO_NAME_RULE}")
 
     def state_payload(self) -> dict[str, object]:
         # The JSON state file is the canonical source of truth for future

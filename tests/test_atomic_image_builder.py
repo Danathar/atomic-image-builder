@@ -275,6 +275,29 @@ class BuilderTests(unittest.TestCase):
     def test_is_valid_repo_name_rejects_disallowed_characters(self) -> None:
         self.assertFalse(is_valid_repo_name("My Image!"))
 
+    def test_is_valid_repo_name_rejects_separator_runs_no_reference_can_parse(self) -> None:
+        # GitHub accepts all three. ghcr.io/<owner>/<name> does not parse with
+        # any of them, so the wizard would create the repo and the signing key
+        # for an image nothing could push or pull. Verified against podman's
+        # own reference parser, which reports "invalid reference format" for
+        # each before it makes a request.
+        self.assertFalse(is_valid_repo_name("test..image"))
+        self.assertFalse(is_valid_repo_name("test.-image"))
+        self.assertFalse(is_valid_repo_name("test___image"))
+        self.assertFalse(is_valid_repo_name("test-.image"))
+        self.assertFalse(is_valid_repo_name("test._image"))
+
+    def test_is_valid_repo_name_keeps_the_separators_the_grammar_allows(self) -> None:
+        # The controls that stop the rule above from being written as "one
+        # separator character only": a double underscore and a run of hyphens
+        # are both valid path components, and rejecting them would refuse
+        # names people really use.
+        self.assertTrue(is_valid_repo_name("test.image"))
+        self.assertTrue(is_valid_repo_name("test_image"))
+        self.assertTrue(is_valid_repo_name("test__image"))
+        self.assertTrue(is_valid_repo_name("test--image"))
+        self.assertTrue(is_valid_repo_name("test---image"))
+
     def test_repository_status_omits_description_separator_when_unset(self) -> None:
         app = self.make_app()
         app.config.image_desc = ""
@@ -1280,6 +1303,34 @@ class BuilderTests(unittest.TestCase):
         app.config.repo_name = ".git"
         with self.assertRaisesRegex(CommandError, "Repository name is invalid"):
             app.validate_config()
+
+    def test_validate_config_rejects_unparseable_image_names_for_both_methods(self) -> None:
+        # validate_config() is the gate a config loaded from a state file goes
+        # through as well as one the wizard just built, and it runs before
+        # repository creation and signing setup. Both build methods put the
+        # repo name in the published reference, so neither may pass one that
+        # cannot be parsed.
+        for method in ("containerfile", "bluebuild"):
+            for name in ("test..image", "test.-image", "test___image"):
+                with self.subTest(method=method, repo_name=name):
+                    app = self.make_app()
+                    app.config.method = method
+                    app.config.repo_name = name
+                    with self.assertRaisesRegex(CommandError, "Repository name is invalid"):
+                        app.validate_config()
+
+    def test_validate_config_accepts_the_separators_a_reference_allows(self) -> None:
+        for method in ("containerfile", "bluebuild"):
+            for name in ("test.image", "test_image", "test__image", "test--image"):
+                with self.subTest(method=method, repo_name=name):
+                    app = self.make_app()
+                    app.config.method = method
+                    app.config.repo_name = name
+                    app.validate_config()
+                    self.assertEqual(
+                        app.published_image_ref(),
+                        f"ghcr.io/example/{name}:latest",
+                    )
 
     def test_match_base_image_accepts_fedora_atomic_refs_with_other_tags(self) -> None:
         app = self.make_app()
@@ -8829,6 +8880,23 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.config.image_desc, "A custom description")
         self.assertTrue(any(level == "error" and ".git" in msg for level, msg in stub.messages))
         self.assertTrue(any("try another repository name" in prompt for prompt in stub.prompts))
+
+    def test_configure_repo_rejects_a_name_no_image_reference_can_parse(self) -> None:
+        # The wizard is where this has to stop: past it the name reaches
+        # `gh repo create` and the signing key, and neither is undone by
+        # discovering later that the image reference does not parse.
+        app = self.make_app()
+        stub = GumStub()
+        name_attempts = iter(["test..image", "test.image", "A custom description"])
+        stub.input = lambda **_kwargs: next(name_attempts)
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.configure_repo(step=3, total_steps=5)
+        self.assertEqual(app.config.repo_name, "test.image")
+        self.assertTrue(
+            any(level == "error" and "single dot" in msg for level, msg in stub.messages),
+            stub.messages,
+        )
 
     def test_configure_repo_empty_inputs_keep_defaults(self) -> None:
         app = self.make_app()
