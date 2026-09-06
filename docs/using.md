@@ -69,6 +69,15 @@ That clears the old layered package state from the current deployment before you
 switch to the image-based version of those changes. You do not need to reboot
 between `rpm-ostree reset` and `bootc switch`.
 
+`rpm-ostree reset` with no category flags clears **every** layered package,
+override and initramfs customization on the deployment, not only the ones the
+image reproduces. The scan says so up front: it can carry packages requested
+from a repository and base-package removals, and it stops to ask before
+continuing when it finds anything else — a locally installed RPM, a package
+replaced by a local build, a regenerated initramfs. Those are pinned to files
+on your machine, so no generated image reproduces them. Run `rpm-ostree status`
+before the reset if you want the full list.
+
 ## Homebrew on Fedora Atomic images
 
 This is about adding Homebrew to the image you **build** — not about installing
