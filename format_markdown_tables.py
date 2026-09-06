@@ -134,48 +134,61 @@ def leading_spaces(line: str) -> int:
     return len(line) - len(line.lstrip(" "))
 
 
-def format_text(text: str) -> str:
-    lines = text.split("\n")
-    out: list[str] = []
-    index = 0
+def code_block_flags(lines: list[str]) -> list[bool]:
+    """One flag per line: is it inside a code block, fence lines included?
+
+    Both the formatter and the independent alignment check in the test suite
+    read this, so the two cannot disagree about what is code. They did once:
+    the check knew only about fences, so a four-space indented example would
+    have been reported as a ragged table that the formatter then correctly
+    refused to touch -- a failure with no way to clear it.
+
+    Fenced blocks close only on the same character and at least the opening
+    run's length. Indented blocks open only where a paragraph could start --
+    at the document's beginning or after a blank line -- and close at the
+    first non-blank line under four spaces; blank lines inside one neither
+    open nor close it.
+    """
+    flags: list[bool] = []
     fence: tuple[str, int] | None = None
-    in_code_block = False
-    # An indented code block may open at the very start of a document, so the
-    # notional line before it counts as blank.
+    in_indented = False
     after_blank = True
-    while index < len(lines):
-        line = lines[index]
+    for line in lines:
         if fence is not None:
-            out.append(line)
+            flags.append(True)
             if fence_closes(line, *fence):
                 fence = None
-            index += 1
             after_blank = False
             continue
-
         stripped = line.strip()
-        indent = leading_spaces(line)
         if stripped:
-            # A blank line neither opens an indented code block nor closes
-            # one; only a non-blank line at less than four spaces ends it.
-            in_code_block = indent >= CODE_INDENT and (in_code_block or after_blank)
+            in_indented = leading_spaces(line) >= CODE_INDENT and (in_indented or after_blank)
         after_blank = not stripped
-
-        if in_code_block:
-            out.append(line)
-            index += 1
+        if in_indented:
+            flags.append(True)
             continue
-
         opened = fence_open(line)
         if opened is not None:
             fence = opened
+        flags.append(opened is not None)
+    return flags
+
+
+def format_text(text: str) -> str:
+    lines = text.split("\n")
+    code = code_block_flags(lines)
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if code[index]:
             out.append(line)
             index += 1
             continue
 
         header = split_row(line)
         delimiter = split_row(lines[index + 1]) if index + 1 < len(lines) else None
-        if not header or not delimiter or not is_delimiter(delimiter):
+        if not header or not delimiter or not is_delimiter(delimiter) or code[index + 1]:
             out.append(line)
             index += 1
             continue
@@ -184,7 +197,7 @@ def format_text(text: str) -> str:
         cursor = index + 2
         while cursor < len(lines):
             row = split_row(lines[cursor])
-            if not row or fence_open(lines[cursor]) is not None:
+            if not row or code[cursor]:
                 break
             block.append(row)
             cursor += 1
@@ -214,7 +227,7 @@ def format_text(text: str) -> str:
         # The header's own indentation, so a table nested in a list item stays
         # in that list item. split_row() strips it to find the cells, and
         # emitting at column zero moved the table out of whatever contained it.
-        prefix = line[:indent]
+        prefix = line[: leading_spaces(line)]
         for i, row in enumerate(block):
             if i == 1:
                 cells = [render_delimiter(row[c], widths[c]) for c in range(columns)]
@@ -224,7 +237,6 @@ def format_text(text: str) -> str:
             # up, which is the entire point in a fixed-width viewer.
             out.append(prefix + "| " + " | ".join(cells) + " |")
         index = cursor
-        after_blank = False
     return "\n".join(out)
 
 

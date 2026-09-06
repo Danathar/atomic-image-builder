@@ -21,6 +21,7 @@ from pathlib import Path
 
 from format_markdown_tables import (
     SKIP_PREFIXES,
+    code_block_flags,
     delimiter_width,
     fence_closes,
     fence_open,
@@ -253,6 +254,60 @@ class FormatTextTests(unittest.TestCase):
             format_text("- item\n\n  | A | B |\n  | --- | --- |\n  | 1 | 2 |\n"),
             "- item\n\n  | A   | B   |\n  | --- | --- |\n  | 1   | 2   |\n",
         )
+
+
+class CodeBlockFlagTests(unittest.TestCase):
+    """The oracle format_text() and the repo-wide alignment check share.
+
+    They used to decide this separately, and the check knew only about
+    fences. A deliberately ragged pipe table inside a four-space example
+    would have been reported as a misaligned table that the formatter then
+    correctly refused to touch -- a failure with no way to clear it.
+    """
+
+    def flags(self, text: str) -> list[bool]:
+        return code_block_flags(text.split("\n"))
+
+    def test_a_ragged_example_in_indented_code_is_all_code(self) -> None:
+        text = (
+            "An example of a ragged table:\n"
+            "\n"
+            "    | A | B |\n"
+            "    | --- | --- |\n"
+            "    | 1 | 2 |\n"
+            "\n"
+            "Back to prose.\n"
+        )
+        # The trailing blank is still inside the block: only a non-blank line
+        # under four spaces closes one. Harmless either way -- a blank line
+        # carries no pipes, so neither consumer does anything with it.
+        self.assertEqual(
+            self.flags(text),
+            [False, False, True, True, True, True, False, False],
+        )
+        # And the two agree: nothing to reformat, so nothing to report.
+        self.assertEqual(format_text(text), text)
+
+    def test_fence_lines_count_as_code(self) -> None:
+        self.assertEqual(
+            self.flags("a\n```\n| x |\n```\nb"),
+            [False, True, True, True, False],
+        )
+
+    def test_a_longer_fence_is_not_closed_by_a_shorter_run(self) -> None:
+        self.assertEqual(
+            self.flags("````\n```\n| x |\n```\n````\nafter"),
+            [True, True, True, True, True, False],
+        )
+
+    def test_a_blank_line_does_not_end_an_indented_block(self) -> None:
+        self.assertEqual(
+            self.flags("intro\n\n    code\n\n    more code\nprose"),
+            [False, False, True, True, True, False],
+        )
+
+    def test_indentation_after_prose_is_not_code(self) -> None:
+        self.assertEqual(self.flags("intro\n    | A | B |"), [False, False])
 
 
 class FenceTests(unittest.TestCase):
