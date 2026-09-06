@@ -36,6 +36,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Keyless signing exchanges this for a short-lived Fulcio certificate.
+      # No key material enters the repository and there is nothing to rotate.
+      id-token: write
 
     steps:
       - name: Checkout
@@ -90,3 +93,24 @@ jobs:
           image: ${{ steps.build-image.outputs.image }}
           tags: ${{ steps.build-image.outputs.tags }}
           registry: ghcr.io/${{ steps.meta.outputs.owner_lc }}
+
+      # Already in ACTION_PINS -- the generated Containerfile workflow uses the
+      # same pin -- so this adds nothing to the table that ships to strangers'
+      # repos, which is the objection that keeps other actions out of here.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.1.2'
+
+      # Sign the digest, not a tag. Tags are rewritten on the next merge; the
+      # digest is what was actually built here, and it is what `cosign verify`
+      # resolves a tag to anyway. Keyless signing publishes the certificate to
+      # the public Rekor transparency log; the entry records the repository,
+      # workflow path and commit, all already public here.
+      - name: Sign the published image
+        env:
+          IMAGE: ghcr.io/${{ steps.meta.outputs.owner_lc }}/atomic-image-builder
+          DIGEST: ${{ steps.push-to-ghcr.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign -y "${IMAGE}@${DIGEST}"
