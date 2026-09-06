@@ -10329,6 +10329,128 @@ class BuilderTests(unittest.TestCase):
         result = app.patch_container_disk_workflow(workflow_text, default_branch="develop")
         self.assertIn("- develop", result)
 
+    def test_patch_container_disk_workflow_removes_dot_slash_from_path_filters(self) -> None:
+        # GitHub matches a path filter against the complete path from the
+        # repository root and rejects "." and ".." in a glob, so the bundled
+        # './disk_config/disk.toml' matches nothing: the pull-request
+        # validation those filters configure never ran.
+        app = self.make_app()
+        workflow_text = (
+            "name: Build Disk\n"
+            "on:\n"
+            "  pull_request:\n"
+            "    branches:\n"
+            "      - main\n"
+            "    paths:\n"
+            "      - './disk_config/disk.toml'\n"
+            '      - "./disk_config/iso.toml"\n'
+            "      - ./.github/workflows/build-disk.yml\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+        )
+        result = app.patch_container_disk_workflow(workflow_text)
+        self.assertIn("      - 'disk_config/disk.toml'\n", result)
+        self.assertIn('      - "disk_config/iso.toml"\n', result)
+        self.assertIn("      - .github/workflows/build-disk.yml\n", result)
+        self.assertNotIn("'./", result)
+
+    def test_patch_workflow_path_filters_leaves_relative_paths_elsewhere_alone(self) -> None:
+        # './disk_config/iso.toml' appears again as an input to the builder
+        # action, where it is an ordinary relative path and correct. A
+        # file-wide substitution would have broken the build to fix the filter.
+        app = self.make_app()
+        workflow_text = (
+            "on:\n"
+            "  pull_request:\n"
+            "    paths:\n"
+            "      - './disk_config/disk.toml'\n"
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - with:\n"
+            "          config-file: ./disk_config/iso.toml\n"
+        )
+        result = app.patch_workflow_path_filters(workflow_text)
+        self.assertIn("      - 'disk_config/disk.toml'\n", result)
+        self.assertIn("          config-file: ./disk_config/iso.toml\n", result)
+
+    def test_patch_workflow_path_filters_is_idempotent(self) -> None:
+        app = self.make_app()
+        workflow_text = (
+            "on:\n"
+            "  pull_request:\n"
+            "    paths:\n"
+            "      - './a.toml'\n"
+            "      - './/b.toml'\n"
+        )
+        once = app.patch_workflow_path_filters(workflow_text)
+        self.assertEqual(app.patch_workflow_path_filters(once), once)
+        self.assertNotIn("./", once)
+
+    def test_patch_workflow_path_filters_handles_paths_ignore_too(self) -> None:
+        app = self.make_app()
+        result = app.patch_workflow_path_filters(
+            "on:\n  push:\n    paths-ignore:\n      - './README.md'\n"
+        )
+        self.assertIn("      - 'README.md'\n", result)
+
+    def test_generated_disk_workflow_filters_name_files_that_exist(self) -> None:
+        # The filters are only worth fixing if they point at something. Every
+        # non-glob entry must name a file the generator actually writes --
+        # which is the half actionlint cannot check, since it never sees the
+        # rest of the project.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            workflow = (repo_dir / ".github/workflows/build-disk.yml").read_text()
+            filters = self.workflow_path_filters(workflow)
+            self.assertTrue(filters, workflow)
+            missing = [
+                entry
+                for entry in filters
+                if "*" not in entry and not (repo_dir / entry).is_file()
+            ]
+        self.assertEqual(missing, [])
+        # A leading dot is fine -- ".github/workflows/..." is a real path.
+        # What GitHub rejects is a "." or ".." segment.
+        self.assertFalse(
+            [entry for entry in filters if {".", ".."} & set(entry.split("/"))],
+            filters,
+        )
+
+    @staticmethod
+    def workflow_path_filters(workflow: str) -> list[str]:
+        """Every entry under a paths:/paths-ignore: key, unquoted."""
+        entries: list[str] = []
+        filter_indent: int | None = None
+        for line in workflow.splitlines():
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            if stripped in {"paths:", "paths-ignore:"}:
+                filter_indent = indent
+                continue
+            if filter_indent is None:
+                continue
+            if stripped.startswith("- ") and indent > filter_indent:
+                entries.append(stripped[2:].strip().strip("'\""))
+                continue
+            filter_indent = None
+        return entries
+
+    def test_generated_disk_workflow_patching_is_idempotent(self) -> None:
+        # Managed repositories are patched in place on every update, so a
+        # patcher that changed its own output would rewrite the file forever.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            once = (repo_dir / ".github/workflows/build-disk.yml").read_text()
+        self.assertEqual(app.patch_container_disk_workflow(once), once)
+
     # ── search_packages deselection-only path ──────────────────────────
 
     def test_search_packages_deselection_only_when_all_already_selected(self) -> None:
