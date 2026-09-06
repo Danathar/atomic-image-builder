@@ -3440,6 +3440,9 @@ class BuilderTests(unittest.TestCase):
 
         self.assertIn("Scheduled rebuilds also run daily at about", output.getvalue())
         self.assertIn("sudo rpm-ostree reset", output.getvalue())
+        # The panel is the first place the command is seen, so it carries the
+        # same qualification the README does rather than deferring to it.
+        self.assertIn("not only the ones this image reproduces", output.getvalue())
 
     def test_do_build_omits_reset_hint_for_normal_build(self) -> None:
         app = self.make_app()
@@ -4981,6 +4984,178 @@ class BuilderTests(unittest.TestCase):
         with patch("atomic_image_builder.command_exists", return_value=True):
             with patch.object(app, "repo_has_state_file", return_value=False):
                 self.assertIsNone(app.scanned_image_is_managed("ghcr.io/owner/repo:latest"))
+
+    def run_scan_with_status(self, deployment: dict, *, gum: object | None = None) -> tuple[str, App, "GumStub"]:
+        """scan_os() against one synthetic booted deployment."""
+        app = self.make_app()
+        app.github_user = "example"
+        stub = gum or GumStub()
+        stub.choose = lambda options, **_kwargs: list(options)
+        app.gum = stub
+        payload = json.dumps({"deployments": [{"booted": True, **deployment}]})
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = Path(tmp) / "rpm-ostree-status.json"
+            status_path.write_text(payload)
+            with patch("atomic_image_builder.command_exists", return_value=False):
+                with patch.dict("os.environ", {"AIB_RPM_OSTREE_STATUS_FILE": str(status_path)}):
+                    with redirect_stdout(io.StringIO()):
+                        result = app.scan_os()
+        return result, app, stub
+
+    def accepting_gum(self) -> "GumStub":
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: True
+        return stub
+
+    BLUEFIN = "ostree-unverified-registry:ghcr.io/ublue-os/bluefin:stable"
+
+    def test_scan_os_names_local_rpms_it_cannot_carry_and_asks_first(self) -> None:
+        # The reported case: htop is carried, the local VPN RPM and the local
+        # base replacement are not, and nothing said so. The scan reported
+        # success and the generated README recommended `rpm-ostree reset`,
+        # which would have removed both from the next deployment.
+        result, app, stub = self.run_scan_with_status(
+            {
+                "container-image-reference": self.BLUEFIN,
+                "requested-packages": ["htop"],
+                "requested-base-removals": [],
+                "requested-local-packages": ["example-vpn-1.0-1.x86_64"],
+                "requested-base-local-replacements": ["example-driver-2.0-1.x86_64"],
+            },
+            gum=self.accepting_gum(),
+        )
+        self.assertEqual(result, SCAN_OK)
+        self.assertEqual(app.config.packages, ["htop"])
+        self.assertTrue(
+            any(level == "warn" and "cannot be carried" in message for level, message in stub.messages),
+            stub.messages,
+        )
+
+    def test_scan_os_stops_when_the_omitted_customizations_are_declined(self) -> None:
+        # Defaulting to no is the point: continuing without a local RPM has to
+        # be a decision someone made, not one made for them by a field nothing
+        # read. GumStub.confirm returns the default it is passed.
+        result, _app, _stub = self.run_scan_with_status(
+            {
+                "container-image-reference": self.BLUEFIN,
+                "requested-packages": ["htop"],
+                "requested-base-removals": [],
+                "requested-local-packages": ["example-vpn-1.0-1.x86_64"],
+            }
+        )
+        self.assertEqual(result, SCAN_CANCELLED)
+
+    def test_scan_os_does_not_call_a_local_rpm_only_host_unlayered(self) -> None:
+        # "No layered packages found." was the entire message such a host got,
+        # and it is false: there is layering, it just cannot be carried.
+        _result, _app, stub = self.run_scan_with_status(
+            {
+                "container-image-reference": self.BLUEFIN,
+                "requested-packages": [],
+                "requested-base-removals": [],
+                "requested-local-packages": ["example-vpn-1.0-1.x86_64"],
+            },
+            gum=self.accepting_gum(),
+        )
+        warnings = [message for level, message in stub.messages if level == "warn"]
+        self.assertNotIn("No layered packages found.", warnings)
+        self.assertIn("No layered packages this tool can carry over were found.", warnings)
+
+    def test_scan_os_keeps_the_plain_message_when_nothing_is_omitted(self) -> None:
+        _result, _app, stub = self.run_scan_with_status(
+            {
+                "container-image-reference": self.BLUEFIN,
+                "requested-packages": [],
+                "requested-base-removals": [],
+            },
+            gum=self.accepting_gum(),
+        )
+        warnings = [message for level, message in stub.messages if level == "warn"]
+        self.assertIn("No layered packages found.", warnings)
+
+    def test_scan_os_asks_nothing_extra_when_every_customization_is_supported(self) -> None:
+        # The existing behaviour, asserted so the new prompt cannot leak into
+        # the ordinary path: a host with only repository packages and base
+        # removals is carried exactly as before.
+        result, app, stub = self.run_scan_with_status(
+            {
+                "container-image-reference": self.BLUEFIN,
+                "requested-packages": ["htop", "tmux"],
+                "requested-base-removals": ["firefox"],
+            },
+            gum=self.accepting_gum(),
+        )
+        self.assertEqual(result, SCAN_OK)
+        self.assertEqual(app.config.packages, ["htop", "tmux"])
+        self.assertEqual(app.config.removed_packages, ["firefox"])
+        self.assertFalse(
+            [m for level, m in stub.messages if level == "warn" and "cannot be carried" in m],
+            stub.messages,
+        )
+
+    def test_unsupported_scan_customizations_reads_every_category(self) -> None:
+        # One assertion per field rpm-ostree documents, because each is a
+        # separate way for a customization to go missing and the defect was
+        # that four of them were read as absent rather than as unsupported.
+        app = self.make_app()
+        self.assertEqual(
+            app.unsupported_scan_customizations(
+                {
+                    "requested-local-packages": ["local-1.0-1.x86_64"],
+                    "requested-local-fileoverride-packages": ["fileoverride-1.0-1.x86_64"],
+                    "requested-base-local-replacements": ["local-replacement-1.0-1.x86_64"],
+                    "requested-base-remote-replacements": ["remote-replacement-1.0-1.x86_64"],
+                    "initramfs-etc": ["/etc/crypttab"],
+                    "initramfs-args": ["--arg"],
+                    "regenerate-initramfs": True,
+                }
+            ),
+            [
+                ("Locally installed RPMs", ["local-1.0-1.x86_64"]),
+                ("Local file overrides", ["fileoverride-1.0-1.x86_64"]),
+                ("Base packages replaced by a local RPM", ["local-replacement-1.0-1.x86_64"]),
+                ("Base packages replaced from a repository", ["remote-replacement-1.0-1.x86_64"]),
+                ("Files kept in the initramfs from /etc", ["/etc/crypttab"]),
+                ("Custom initramfs arguments", ["--arg"]),
+                ("A locally regenerated initramfs", []),
+            ],
+        )
+
+    def test_unsupported_scan_customizations_is_empty_for_a_supported_host(self) -> None:
+        app = self.make_app()
+        self.assertEqual(
+            app.unsupported_scan_customizations(
+                {"requested-packages": ["htop"], "requested-base-removals": ["firefox"]}
+            ),
+            [],
+        )
+
+    def test_unsupported_scan_customizations_tolerates_a_malformed_field(self) -> None:
+        # Same contract as the two supported fields: a future schema change
+        # must reach the friendly path, not an AttributeError.
+        app = self.make_app()
+        self.assertEqual(
+            app.unsupported_scan_customizations(
+                {"requested-local-packages": "local-1.0-1.x86_64", "initramfs-etc": None}
+            ),
+            [],
+        )
+
+    def test_scan_os_reports_an_initramfs_regeneration_it_cannot_reproduce(self) -> None:
+        # Not a package list, and still something the recommended reset undoes.
+        _result, _app, stub = self.run_scan_with_status(
+            {
+                "container-image-reference": self.BLUEFIN,
+                "requested-packages": ["htop"],
+                "requested-base-removals": [],
+                "regenerate-initramfs": True,
+            },
+            gum=self.accepting_gum(),
+        )
+        self.assertTrue(
+            any(level == "warn" and "cannot be carried" in message for level, message in stub.messages),
+            stub.messages,
+        )
 
     def test_scan_os_honors_status_file_override(self) -> None:
         app = self.make_app()
@@ -7717,6 +7892,23 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("This repo carries over package changes scanned from your current system.", readme)
         self.assertIn("sudo rpm-ostree reset", readme)
         self.assertIn("Do not reboot between `rpm-ostree reset` and `bootc switch`.", readme)
+
+    def test_generate_readme_says_what_the_recommended_reset_removes(self) -> None:
+        # With no category flags, `rpm-ostree reset` clears overlays,
+        # overrides and initramfs customization alike. Presented as the last
+        # step of carrying customizations over, it read as undoing exactly
+        # what had been carried -- and anything else on the host went with it.
+        readme = self.scanned_app().generate_readme()
+        self.assertIn("not only the ones this image reproduces", readme)
+        self.assertIn("override and initramfs", readme)
+        self.assertIn("rpm-ostree status", readme)
+
+    def test_generate_readme_omits_the_reset_block_without_carried_customizations(self) -> None:
+        # The qualification belongs to the reset instruction, so it must not
+        # appear on a build that never recommends one.
+        readme = self.make_app().generate_readme()
+        self.assertNotIn("rpm-ostree reset", readme)
+        self.assertNotIn("not only the ones this image reproduces", readme)
 
     def test_config_from_state_payload_roundtrips_brew_enabled(self) -> None:
         cfg = config_from_state_payload({"brew_enabled": True})
