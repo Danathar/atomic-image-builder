@@ -3519,6 +3519,11 @@ class BuilderTests(unittest.TestCase):
 
         self.assertIn("Scheduled rebuilds also run daily at about", output.getvalue())
         self.assertNotIn("sudo rpm-ostree reset", output.getvalue())
+        # The completion panel is where someone is told the build has started,
+        # so it is where the step between a green build and a working switch
+        # belongs -- there is no package to check yet at this point.
+        self.assertIn("Make it public before switching", output.getvalue())
+        self.assertIn("pkgs/container/test-image", output.getvalue())
 
     def test_do_build_summary_uses_lowercase_ghcr_owner(self) -> None:
         app = self.make_app()
@@ -4608,6 +4613,72 @@ class BuilderTests(unittest.TestCase):
         # Built from the arguments, since the picker does not load the config.
         self.assertIn("ghcr.io/example/my-image:latest", hints)
         self.assertIn("do not reboot in between", hints.lower())
+
+    def test_build_status_says_a_green_build_is_not_yet_readable(self) -> None:
+        # A green build is not a switchable image: the package it published is
+        # private, and `gh repo create --public` does not change that -- package
+        # visibility is a separate setting that does not inherit repository
+        # access. ghcr_package_exists is the same anonymous pull a host without
+        # credentials would make, so it answers the question that decides
+        # whether the switch command works. It is patched to False for every
+        # test in setUp, which is the private-or-unreachable case.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        runs = json.dumps([{"conclusion": "success", "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+            with patch.object(app, "repo_carried_scan_customizations", return_value=False):
+                with redirect_stdout(io.StringIO()):
+                    app.render_build_status("Example", "my-image")
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertIn("could not pull ghcr.io/example/my-image anonymously", hints)
+        self.assertIn("https://github.com/Example/my-image/pkgs/container/my-image", hints)
+        self.assertIn(atomic_image_builder.BOOTC_REGISTRY_DOCS_URL, hints)
+
+    def test_build_status_probe_does_not_block_the_screen(self) -> None:
+        # ghcr_package_exists makes two sequential requests, so the default
+        # six-second timeout is twelve in the worst case. That is fine before
+        # creating a repo, where the answer gates an irreversible step; this
+        # screen is one people come back to and the answer is advisory.
+        app = self.make_app()
+        app.gum = GumStub()
+        runs = json.dumps([{"conclusion": "success", "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.ghcr_package_exists", return_value=True) as probe:
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+                with patch.object(app, "repo_carried_scan_customizations", return_value=False):
+                    with redirect_stdout(io.StringIO()):
+                        app.render_build_status("Example", "my-image")
+        self.assertEqual(
+            probe.call_args.kwargs.get("timeout"),
+            atomic_image_builder.GHCR_ADVISORY_TIMEOUT,
+        )
+        self.assertLess(atomic_image_builder.GHCR_ADVISORY_TIMEOUT, 6.0)
+
+    def test_build_status_stops_saying_it_once_the_package_is_public(self) -> None:
+        # Self-clearing: the check that reports the problem is the one that
+        # confirms it is fixed, so nobody has to dismiss a stale warning.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        runs = json.dumps([{"conclusion": "success", "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.ghcr_package_exists", return_value=True):
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+                with patch.object(app, "repo_carried_scan_customizations", return_value=False):
+                    with redirect_stdout(io.StringIO()):
+                        app.render_build_status("Example", "my-image")
+        self.assertNotIn("anonymously", " ".join(m for _l, m in stub.messages))
+
+    def test_build_status_does_not_probe_before_a_build_has_succeeded(self) -> None:
+        # There is no package to be private about until a build has published
+        # one, and reporting one as unreadable then would be noise.
+        app = self.make_app()
+        app.gum = GumStub()
+        runs = json.dumps([{"conclusion": None, "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.ghcr_package_exists") as probe:
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+                with redirect_stdout(io.StringIO()):
+                    app.render_build_status("Example", "my-image")
+        probe.assert_not_called()
 
     def test_build_status_stays_quiet_when_nothing_was_scanned(self) -> None:
         app = self.make_app()
@@ -8182,6 +8253,28 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("scanned_packages", rewritten)
         self.assertNotIn("scanned_removed", rewritten)
         self.assertNotIn("steam", json.dumps(rewritten))
+
+    def test_generate_readme_says_the_package_is_private_before_the_switch(self) -> None:
+        # The switch command was presented as ready to run the moment the build
+        # went green. It is not: the package is private by default, and a
+        # public repository does not change that. This has to come before the
+        # command, not as a troubleshooting note after it.
+        app = self.make_app()
+        readme = app.generate_readme()
+        access_at = readme.index("## Before The First Switch")
+        switch_at = readme.index("sudo bootc switch")
+        self.assertLess(access_at, switch_at)
+        self.assertIn("**private** package", readme)
+        self.assertIn("https://github.com/example/test-image/pkgs/container/test-image", readme)
+        self.assertIn(atomic_image_builder.BOOTC_REGISTRY_DOCS_URL, readme)
+
+    def test_generate_readme_keeps_the_access_step_on_the_scanned_path(self) -> None:
+        # The scanned README replaces the whole "Using The Image" block, which
+        # is how the access step could have been dropped from exactly the path
+        # that has the most to go wrong.
+        readme = self.scanned_app().generate_readme()
+        self.assertIn("## Before The First Switch", readme)
+        self.assertIn("sudo rpm-ostree reset", readme)
 
     def test_generate_readme_notes_carried_scan_customizations(self) -> None:
         readme = self.scanned_app().generate_readme()

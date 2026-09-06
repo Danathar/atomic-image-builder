@@ -477,6 +477,21 @@ def format_daily_rebuild_note(
 
 GHCR_TOKEN_URL = "https://ghcr.io/token?service=ghcr.io&scope=repository:{path}:pull"
 GHCR_TAGS_URL = "https://ghcr.io/v2/{path}/tags/list"
+# A newly published GHCR package is private, whatever the repository that
+# published it is set to: package visibility is a separate setting that does
+# not inherit from repository access. `gh repo create --public` therefore does
+# not make the first build's image anonymously pullable, and `bootc switch` on
+# a host with no GHCR credentials cannot read it. There is no REST endpoint for
+# changing package visibility, so this can only be pointed at, which is also
+# what keeps it an explicit decision by the person who owns the package.
+BOOTC_REGISTRY_DOCS_URL = "https://bootc.dev/bootc/registries-and-offline.html"
+# ghcr_package_exists() makes two sequential requests, so its default timeout
+# is really twice that in the worst case. That is fine before creating a repo,
+# where the answer gates an irreversible step. The build-status screen is
+# somewhere people come back to repeatedly and the answer there is advisory --
+# an unreachable network reports the same thing a private package does -- so
+# it waits a good deal less.
+GHCR_ADVISORY_TIMEOUT = 2.5
 
 
 def ghcr_package_exists(owner: str, name: str, *, timeout: float = 6.0) -> bool:
@@ -514,6 +529,14 @@ def ghcr_package_exists(owner: str, name: str, *, timeout: float = 6.0) -> bool:
         # response truncated by GHCR or a proxy would otherwise escape an
         # advisory check and stop the user creating a repo at all.
         return False
+
+
+def ghcr_package_page_url(owner: str, repo: str) -> str:
+    # The repository-scoped package page, because "Package settings" is
+    # reachable from it for a user account and an organization alike. The
+    # /users/<owner>/packages/... settings path is not: it 404s for an org,
+    # and the repo picker can reach repositories in one.
+    return f"https://github.com/{owner}/{repo}/pkgs/container/{repo.lower()}"
 
 
 def open_url_in_browser(url: str) -> bool:
@@ -3463,7 +3486,11 @@ class App:
             "",
             "GitHub Actions is building your image now.",
             self.scheduled_rebuild_note(),
-            "After the first build finishes, switch with:",
+            "",
+            "The first build publishes a private package. Make it public before switching:",
+            ghcr_package_page_url(owner, repo),
+            "",
+            "Then switch with:",
             f"sudo bootc switch {image_uri}",
             f"Track the build: https://github.com/{owner}/{repo}/actions",
         ]
@@ -3734,6 +3761,20 @@ class App:
         latest_succeeded = any(
             isinstance(item, dict) and item.get("conclusion") == "success" for item in runs
         )
+        # A green build is not a switchable image. The package it published is
+        # private by default, and this probe is the same anonymous pull a host
+        # with no credentials would make -- so it answers the question that
+        # actually decides whether the command below works. It clears itself:
+        # once the package is public the check passes and this stops appearing.
+        if latest_succeeded and not ghcr_package_exists(owner, repo, timeout=GHCR_ADVISORY_TIMEOUT):
+            print()
+            self.menu_section(
+                "This Image Is Not Readable Yet",
+                f"I could not pull ghcr.io/{owner.lower()}/{repo.lower()} anonymously.",
+                "A newly published package is private, whatever the repository is set to, so a switch from a machine without registry credentials will fail.",
+                f"Make it public: {ghcr_package_page_url(owner, repo)} -> Package settings -> Change visibility",
+                f"Or give the machine GHCR pull credentials for root instead: {BOOTC_REGISTRY_DOCS_URL}",
+            )
         if latest_succeeded and self.repo_carried_scan_customizations(owner, repo):
             print()
             self.menu_section(
@@ -5139,7 +5180,34 @@ class App:
         copr_repos = "\n".join(f"- `{repo}`" for repo in self.config.copr_repos) or "- None."
         services = "\n".join(f"- `{service}`" for service in self.config.services) or "- None."
         removed_packages = "\n".join(f"- `{pkg}`" for pkg in self.config.removed_packages) or "- None."
+        # A public repository does not make its packages public: visibility is
+        # a separate setting on the package that does not inherit repository
+        # access. Left at its default, the first build publishes an image that
+        # `bootc switch` cannot read on a host with no GHCR credentials -- so
+        # this belongs before the switch command, not as a troubleshooting
+        # note after it.
+        package_access_lines = [
+            "## Before The First Switch",
+            "",
+            "The first build publishes",
+            "",
+            f"    {image_ref}",
+            "",
+            "as a **private** package. That is GitHub's default for a newly published package,",
+            "and it does not change with the repository's own visibility, so `bootc switch` on a",
+            "machine with no registry credentials cannot read it yet.",
+            "",
+            "Make it readable once, from the package's own page:",
+            "",
+            f"1. Open <{ghcr_package_page_url(owner, self.config.repo_name)}>",
+            "2. **Package settings** -> **Change visibility** -> **Public**",
+            "",
+            "Keeping it private is fine too, but then the machine needs GHCR pull credentials for",
+            f"root before the switch below will work. See <{BOOTC_REGISTRY_DOCS_URL}>.",
+            "",
+        ]
         using_image_lines = [
+            *package_access_lines,
             "## Using The Image",
             "",
             "After the first successful GitHub Actions build finishes, switch to it with:",
@@ -5151,6 +5219,7 @@ class App:
         ]
         if self.carried_scan_customizations():
             using_image_lines = [
+                *package_access_lines,
                 "## Using The Image",
                 "",
                 "This repo carries over package changes scanned from your current system.",
