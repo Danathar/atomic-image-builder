@@ -7213,6 +7213,106 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("cp -avf /ctx/system_files/. /", build_sh)
         self.assertIn("fi", build_sh)
 
+    # The build.sh shapes below are shared by the three structural tests that
+    # follow. Every other generate_build_sh test asserts substrings, which
+    # says nothing about whether the file the tool writes into a user's repo
+    # is a script bash can actually run.
+    BUILD_SH_SHAPES = {
+        "empty": {},
+        "packages only": {"packages": ["htop"]},
+        "several packages": {"packages": ["htop", "tmux", "fastfetch"]},
+        "one removal": {"removed_packages": ["nano"]},
+        "several removals": {"removed_packages": ["vim-enhanced", "nano"]},
+        "copr and packages": {"copr_repos": ["kylegospo/bazzite"], "packages": ["steam"]},
+        "services only": {"services": ["tailscaled.service"]},
+        "everything": {
+            "copr_repos": ["kylegospo/bazzite", "atim/starship"],
+            "packages": ["steam", "starship"],
+            "removed_packages": ["vim-enhanced", "nano"],
+            "services": ["tailscaled.service", "docker.socket"],
+        },
+        "names needing quoting": {
+            "packages": ["a b", "it's"],
+            "removed_packages": ["x$(id)"],
+            "services": ["a b.service"],
+        },
+    }
+
+    def build_sh_for_shape(self, selections: dict) -> str:
+        app = self.make_app()
+        app.config.packages = list(selections.get("packages", []))
+        app.config.removed_packages = list(selections.get("removed_packages", []))
+        app.config.copr_repos = list(selections.get("copr_repos", []))
+        app.config.services = list(selections.get("services", []))
+        return app.generate_build_sh()
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is not installed")
+    def test_generate_build_sh_output_parses_as_bash(self) -> None:
+        # build.sh is written into the generated repo and executed inside the
+        # image build, so a syntax error here breaks every build the user runs
+        # -- but no test parses the output, only searches it for substrings.
+        # Dropping the `removesuffix(" \\")` that terminates the removal list
+        # leaves `nano \` running into the `do`, which is a hard syntax error
+        # and which the whole existing suite still passes.
+        for name, selections in self.BUILD_SH_SHAPES.items():
+            with self.subTest(shape=name):
+                build_sh = self.build_sh_for_shape(selections)
+                parsed = subprocess.run(
+                    ["bash", "-n"],
+                    input=build_sh,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(
+                    parsed.returncode,
+                    0,
+                    f"generated build.sh is not valid bash: {parsed.stderr.strip()}\n{build_sh}",
+                )
+
+    def test_generate_build_sh_never_leaves_a_dangling_line_continuation(self) -> None:
+        # The package and removal lists are emitted one item per line with a
+        # trailing backslash, and the last item's backslash is stripped after
+        # the fact. Emitting it unconditionally instead leaves `htop \` joined
+        # to the blank line that follows -- still parseable, so `bash -n`
+        # misses it, and still a match for every `assertIn` in this file, but
+        # it means the next line the generator emits gets swallowed into the
+        # dnf5 command rather than run on its own.
+        for name, selections in self.BUILD_SH_SHAPES.items():
+            with self.subTest(shape=name):
+                build_sh = self.build_sh_for_shape(selections)
+                lines = build_sh.split("\n")
+                for index, line in enumerate(lines):
+                    if not line.endswith("\\"):
+                        continue
+                    self.assertLess(
+                        index + 1,
+                        len(lines),
+                        f"build.sh ends on a line continuation:\n{build_sh}",
+                    )
+                    self.assertTrue(
+                        lines[index + 1].strip(),
+                        f"line {index + 1} continues into a blank line:\n{build_sh}",
+                    )
+
+    def test_generate_build_sh_removes_packages_before_installing_and_cleans_after_both(self) -> None:
+        # Order is the contract, not just presence: a removal emitted after the
+        # install can uninstall something the user asked for (or a dependency
+        # the install just pulled in), and `dnf5 clean all` emitted before
+        # either one leaves the metadata it was added to drop in the image.
+        # test_generate_build_sh_with_copr_repos pins enable/install/disable
+        # this way already; nothing pins removals or the clean.
+        app = self.make_app()
+        app.config.removed_packages = ["vim-enhanced"]
+        app.config.packages = ["htop"]
+        app.config.services = ["tailscaled.service"]
+        build_sh = app.generate_build_sh()
+        remove_pos = build_sh.index("dnf5 remove -y")
+        install_pos = build_sh.index("dnf5 install -y")
+        clean_pos = build_sh.index("dnf5 clean all")
+        enable_pos = build_sh.index("systemctl enable")
+        self.assertLess(remove_pos, install_pos)
+        self.assertLess(install_pos, clean_pos)
+        self.assertLess(clean_pos, enable_pos)
 
     def test_generate_container_workflow_includes_template_tag_variants(self) -> None:
         app = self.make_app()
