@@ -4186,6 +4186,211 @@ class BuilderTests(unittest.TestCase):
         # not part of this flow.
         self.assertEqual(calls, ["method", "repo", "method", "repo", "software"])
 
+    def scanned_fedora_status(self) -> str:
+        return json.dumps(
+            {
+                "deployments": [
+                    {
+                        "booted": True,
+                        "container-image-reference": (
+                            "ostree-unverified-registry:quay.io/fedora-ostree-desktops/silverblue:"
+                            f"{FEDORA_ATOMIC_DEFAULT_TAG}"
+                        ),
+                        "requested-packages": [],
+                        "requested-base-removals": [],
+                    }
+                ]
+            }
+        )
+
+    def run_scanned_fedora_create_image(self, *, brew_answer: bool) -> App:
+        """The real Create Image flow on a Fedora Atomic host, up to the build.
+
+        Nothing is mocked between scan_os() and do_build(): the wizard runs its
+        own screens against a Gum stub, which is what makes the missing
+        Homebrew question visible at all -- patching create_new_image, as the
+        flow tests above do, is exactly what hid it.
+        """
+        app = self.make_app()
+        app.github_user = "example"
+        stub = GumStub()
+
+        def choose(options, **_kwargs):
+            for wanted in ("Containerfile", "Continue to review", "Start GitHub build"):
+                match = [option for option in options if option.startswith(wanted)]
+                if match:
+                    return [match[0]]
+            raise AssertionError(f"unexpected menu: {options}")
+
+        def confirm(prompt, default=False):
+            if "Homebrew" in prompt:
+                return brew_answer
+            return True
+
+        stub.choose = choose
+        stub.confirm = confirm
+        stub.input = lambda **_kwargs: ""
+        app.gum = stub
+
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = Path(tmp) / "status.json"
+            status_path.write_text(self.scanned_fedora_status())
+            with patch.dict("os.environ", {"AIB_RPM_OSTREE_STATUS_FILE": str(status_path)}):
+                with patch.object(app, "do_build", return_value=True) as build:
+                    with redirect_stdout(io.StringIO()):
+                        app.create_image()
+        self.assertTrue(build.called, "the flow never reached the build")
+        return app
+
+    def test_scanned_fedora_run_offers_homebrew_before_the_first_build(self) -> None:
+        # The reported defect: create_new_image(scanned=True) drops the base
+        # step, and the Homebrew question was attached to that screen, so a
+        # supported Fedora Atomic host reached its first build with Homebrew
+        # off and nothing having asked. The workaround was to create the repo
+        # and then turn it on through Update Existing Image, which misses the
+        # build that just ran.
+        app = self.run_scanned_fedora_create_image(brew_answer=True)
+        self.assertTrue(app.config.brew_enabled)
+        self.assertEqual(app.config.base_image_name, "Fedora Silverblue")
+
+    def test_scanned_fedora_run_honours_a_declined_homebrew_answer(self) -> None:
+        app = self.run_scanned_fedora_create_image(brew_answer=False)
+        self.assertFalse(app.config.brew_enabled)
+
+    def test_scanned_universal_blue_run_does_not_ask_about_homebrew(self) -> None:
+        # Universal Blue images already ship Homebrew, so the step is not in
+        # the scanned wizard at all rather than being asked and ignored.
+        app = self.make_app()
+        app.gum = GumStub()
+        seen: list[str] = []
+        app.config.base_image_uri = "ghcr.io/ublue-os/bazzite:stable"
+
+        def record(name):
+            return lambda **_kwargs: seen.append(name)
+
+        with patch.object(app, "choose_method", side_effect=record("method")):
+            with patch.object(app, "offer_brew_if_applicable", side_effect=record("brew")):
+                with patch.object(app, "configure_repo", side_effect=record("repo")):
+                    with patch.object(app, "select_packages", side_effect=record("software")):
+                        with patch.object(app, "review_new_image", return_value="cancel"):
+                            app.create_new_image(scanned=True)
+
+        self.assertEqual(seen, ["method", "repo", "software"])
+
+    def test_scanned_fedora_wizard_numbers_the_homebrew_step(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        seen: list[tuple[str, int, int]] = []
+
+        def record(name):
+            return lambda **kwargs: seen.append((name, kwargs["step"], kwargs["total_steps"]))
+
+        with patch.object(app, "choose_method", side_effect=record("method")):
+            with patch.object(app, "offer_brew_if_applicable", side_effect=record("brew")):
+                with patch.object(app, "configure_repo", side_effect=record("repo")):
+                    with patch.object(app, "select_packages", side_effect=record("software")):
+                        with patch.object(app, "review_new_image", side_effect=lambda **kw: (record("review")(**kw), "cancel")[1]):
+                            app.create_new_image(scanned=True)
+
+        self.assertEqual(
+            seen,
+            [("method", 1, 5), ("brew", 2, 5), ("repo", 3, 5), ("software", 4, 5), ("review", 5, 5)],
+        )
+
+    def test_offer_brew_if_applicable_renders_a_step_header_when_it_is_a_step(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        stub = GumStub()
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.offer_brew_if_applicable(step=2, total_steps=5)
+        self.assertIn(("hint", "Step 2 of 5."), stub.messages)
+
+    def test_scanned_wizard_back_navigation_returns_to_the_homebrew_step(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        calls: list[str] = []
+        repo_attempts = iter([ScreenBack(), None])
+
+        def repo(**_kwargs):
+            calls.append("repo")
+            outcome = next(repo_attempts)
+            if outcome is not None:
+                raise outcome
+
+        with patch.object(app, "choose_method", side_effect=lambda **_k: calls.append("method")):
+            with patch.object(app, "offer_brew_if_applicable", side_effect=lambda **_k: calls.append("brew")):
+                with patch.object(app, "configure_repo", side_effect=repo):
+                    with patch.object(app, "select_packages", side_effect=lambda **_k: calls.append("software")):
+                        with patch.object(app, "review_new_image", return_value="cancel"):
+                            app.create_new_image(scanned=True)
+
+        self.assertEqual(calls, ["method", "brew", "repo", "brew", "repo", "software"])
+
+    def test_review_offers_homebrew_for_a_fedora_base_and_edits_it_in_place(self) -> None:
+        # The other half: a scanned run shows the detected base as a fact, so
+        # review is the only screen left that could change this. It reported
+        # "Not included" with no way to act on it.
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.base_image_name = "Fedora Silverblue"
+        stub = GumStub()
+        offered: list[str] = []
+
+        def choose(options, **_kwargs):
+            offered.extend(options)
+            return [next(option for option in options if option.startswith("Homebrew"))]
+
+        stub.choose = choose
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            action = app.review_new_image(step=5, total_steps=5, allow_base_edit=False)
+
+        self.assertEqual(action, "brew")
+        self.assertTrue(
+            any(option.startswith("Homebrew") and "Not included" in option for option in offered),
+            offered,
+        )
+
+    def test_review_hides_homebrew_for_a_universal_blue_base(self) -> None:
+        # Same rule the update menu's task list uses: the choice exists only
+        # when the base does not already provide it.
+        app = self.make_app()
+        stub = GumStub()
+        offered: list[str] = []
+
+        def choose(options, **_kwargs):
+            offered.extend(options)
+            return [options[-1]]
+
+        stub.choose = choose
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.review_new_image(step=4, total_steps=4, allow_base_edit=False)
+        self.assertFalse([option for option in offered if option.startswith("Homebrew")], offered)
+
+    def test_review_homebrew_action_runs_in_place_and_returns_to_review(self) -> None:
+        # "brew" is not a wizard step on the manual-base path, so the action
+        # is handled in place rather than jumped to -- returning to review
+        # either way, never falling through to cancel.
+        app = self.make_app()
+        app.gum = GumStub()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        actions = iter(["brew", "cancel"])
+        brew_calls: list[None] = []
+
+        with patch.object(app, "choose_method"):
+            with patch.object(app, "choose_base_image"):
+                with patch.object(app, "configure_repo"):
+                    with patch.object(app, "select_packages"):
+                        with patch.object(app, "offer_brew_if_applicable", side_effect=lambda **_k: brew_calls.append(None)):
+                            with patch.object(app, "review_new_image", side_effect=lambda **_k: next(actions)):
+                                app.create_new_image()
+
+        self.assertEqual(len(brew_calls), 1)
+
     def test_review_screen_shows_the_detected_base_when_it_cannot_be_edited(self) -> None:
         app = self.make_app()
         stub = GumStub()

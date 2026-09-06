@@ -1785,6 +1785,16 @@ class App:
         # image they cannot switch to. The base list stays for the
         # nothing-installed-yet path, where there is no system to read.
         steps = ["method"] if scanned else ["method", "base"]
+        # Homebrew is a decision about the base, not about the base *screen*,
+        # and dropping that screen after a scan dropped the question with it:
+        # a Fedora Atomic host reached the first build with Homebrew off and
+        # nothing having asked. It can be a step of its own here precisely
+        # because the scan already settled the base, so whether it applies is
+        # known before the wizard starts. On the other path the base is not
+        # known until step 2, which is why choose_base_image() still asks it
+        # there, immediately after the choice it depends on.
+        if scanned and not self.is_universal_blue_base():
+            steps.append("brew")
         steps += ["repo", "software"]
         review_step = len(steps) + 1
         total_steps = review_step
@@ -1798,6 +1808,8 @@ class App:
                         self.choose_method(step=number, total_steps=total_steps)
                     elif name == "base":
                         self.choose_base_image(step=number, total_steps=total_steps)
+                    elif name == "brew":
+                        self.offer_brew_if_applicable(step=number, total_steps=total_steps)
                     elif name == "repo":
                         self.configure_repo(step=number, total_steps=total_steps)
                     else:
@@ -1811,6 +1823,14 @@ class App:
                 if index == 0:
                     return
                 index -= 1
+                continue
+            if action == "brew":
+                # Not a step on every path, so it is edited in place rather
+                # than jumped to, the way the local test build already is.
+                self.run_screen_action(
+                    self.offer_brew_if_applicable,
+                    return_hint="Press Enter to return to the review screen...",
+                )
                 continue
             if action == "build":
                 try:
@@ -1899,10 +1919,12 @@ class App:
         matched = self.match_base_image(self.config.base_image_uri)
         return matched is not None and matched.provider == "Universal Blue"
 
-    def offer_brew_if_applicable(self) -> None:
+    def offer_brew_if_applicable(self, *, step: int | None = None, total_steps: int | None = None) -> None:
         if self.is_universal_blue_base():
             self.config.brew_enabled = False
             return
+        if step is not None and total_steps is not None:
+            self.show_step_header("Homebrew", step=step, total_steps=total_steps)
         print()
         self.menu_section(
             "Homebrew",
@@ -2331,6 +2353,9 @@ class App:
             software_label = self.format_task_choice("Software", self.software_status())
             repo_label = self.format_task_choice("Repository settings", self.repository_status())
             base_label = self.format_task_choice("Base image", self.config.base_image_name or "(not set)")
+            brew_label = self.format_task_choice(
+                "Homebrew", "Enabled" if self.config.brew_enabled else "Not included"
+            )
             full_label = "View full configuration"
             local_build_label = "Test build locally (podman)"
             build_label = "Start GitHub build"
@@ -2340,6 +2365,13 @@ class App:
             # changed, so it is shown as a fact rather than offered as an edit.
             if allow_base_edit:
                 options.append(base_label)
+            # Same rule as the update menu's task list: the choice exists
+            # exactly when the base does not already provide it. Reviewing a
+            # setting that cannot be reached from the screen showing it is how
+            # a scanned Fedora run reported "Not included" with nothing to do
+            # about it.
+            if not self.is_universal_blue_base():
+                options.append(brew_label)
             options.append(full_label)
             if self.config.method == "containerfile":
                 options.append(local_build_label)
@@ -2362,6 +2394,8 @@ class App:
                 return "repo"
             if allow_base_edit and selected == base_label:
                 return "base"
+            if selected == brew_label:
+                return "brew"
             if selected == full_label:
                 self.show_summary(step=step, total_steps=total_steps, next_hint="This is the full build summary.")
                 continue
