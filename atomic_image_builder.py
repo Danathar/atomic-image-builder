@@ -111,6 +111,18 @@ RELATIVE_PATH_FILTER_RE = re.compile(r"^(\s*-\s+)(['\"]?)(?:\./)+(.*)$")
 # found after a pin refresh moves the SHA out from under this patcher.
 UPLOAD_ARTIFACT_ACTION = "actions/upload-artifact@"
 DISK_ARTIFACT_NAME = "${{ env.IMAGE_NAME }}-${{ matrix.disk-type }}"
+# The disk workflow's runner ternary. The amd64 label is captured rather than
+# written out, so a snapshot refresh that bumps the runner image is followed
+# automatically instead of being pinned to whatever was current when this was
+# written.
+DISK_RUNNER_CHOICE_RE = re.compile(
+    r"^(\s*runs-on:\s*)\$\{\{\s*inputs\.platform\s*==\s*'amd64'\s*&&\s*'([^']+)'\s*\|\|\s*'[^']+'\s*\}\}\s*$"
+)
+# The two conditions upstream ships on the platform input. The first gates a
+# step that only ever ran on ARM, so it goes with ARM; the second is now
+# always true, so only the condition goes.
+DISK_ARM_ONLY_IF = "if: inputs.platform == 'arm64'"
+DISK_NON_ARM_IF = "if: inputs.platform != 'arm64'"
 FROM_LINE_RE = re.compile(r"^(\s*FROM(?:\s+--platform=\S+)?\s+)(\S+)(.*)$", flags=re.IGNORECASE)
 INSTALLER_SWITCH_RE = re.compile(r"^(\s*bootc switch --mutate-in-place --transport registry )(\S+)(.*)$")
 # dnf5 prints this when -C (cache-only) is used and no repository metadata has
@@ -4535,6 +4547,7 @@ class App:
         lines = [pin_action_uses_line(line) for line in existing_text.splitlines()]
         text = self.patch_workflow_path_filters("\n".join(lines))
         text = self.patch_disk_artifact_names(text)
+        text = self.patch_disk_workflow_platform(text)
         return self.patch_workflow_branch_filters(text, default_branch)
 
     def patch_workflow_path_filters(self, workflow_text: str) -> str:
@@ -4623,6 +4636,90 @@ class App:
             return step_lines[:insert_at] + [named] + step_lines[insert_at:]
 
         return ensure_trailing_newline("\n".join(patch_workflow_steps(workflow_text, patch_step)))
+
+
+    def patch_disk_workflow_platform(self, workflow_text: str) -> str:
+        # The image workflow builds one native x86_64 image: a single
+        # ubuntu-26.04 job, a plain `just build`, no --platform, no
+        # multi-architecture manifest. The disk workflow nonetheless offered
+        # arm64 and ran a native ARM builder against that same tag.
+        # bootc-image-builder requires the builder and the bootc image to agree
+        # on architecture, and the pinned action does not synthesize the
+        # missing variant, so choosing ARM could not produce a matching
+        # operating-system image -- and a multi-architecture *base* image does
+        # not make the customized build on top of it multi-architecture.
+        #
+        # There is also no default for a non-dispatch event: on a pull request
+        # inputs.platform is unset, so the ternary selects the ARM runner while
+        # the two step conditions below read the same unset input in opposite
+        # directions. Removing the input removes that inconsistency with it,
+        # rather than leaving a second expression to keep in step.
+        #
+        # So the disk workflow is restricted to the architecture this tool
+        # actually publishes. Offering the other one is not a runner label away
+        # -- it needs the image workflow to build and publish the variant
+        # first. See #236.
+        lines = self.strip_disk_platform_input(workflow_text.splitlines())
+        output: list[str] = []
+        for line in lines:
+            match = DISK_RUNNER_CHOICE_RE.match(line)
+            if match:
+                prefix, amd64_runner = match.groups()
+                indent = line[: len(line) - len(line.lstrip())]
+                output.append(f"{indent}# Only x86_64 is published, so disk builds run on the x86_64 runner.")
+                output.append(f"{prefix}{amd64_runner}")
+                continue
+            output.append(line)
+        output = self.strip_disk_platform_conditions(output)
+        return ensure_trailing_newline("\n".join(output))
+
+    def strip_disk_platform_input(self, lines: Sequence[str]) -> list[str]:
+        # Drop the `platform:` key and everything nested under it, scoped to
+        # the workflow_dispatch inputs so a job-level or step-level key of the
+        # same name elsewhere is untouched.
+        output: list[str] = []
+        in_dispatch = False
+        inputs_indent: int | None = None
+        skip_indent: int | None = None
+        for line in lines:
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            if skip_indent is not None:
+                if not stripped or indent > skip_indent:
+                    continue
+                skip_indent = None
+            if workflow_block_key(stripped) == "workflow_dispatch" and indent == 2:
+                in_dispatch = True
+                inputs_indent = None
+            elif indent <= 2 and stripped and workflow_key(stripped) is not None:
+                in_dispatch = False
+                inputs_indent = None
+            if in_dispatch and workflow_block_key(stripped) == "inputs":
+                inputs_indent = indent
+                output.append(line)
+                continue
+            # inputs_indent is cleared by the top-level key that ends the
+            # workflow_dispatch block, so a "platform:" still measured against
+            # it is inside the dispatch inputs and nowhere else.
+            if inputs_indent is not None and indent == inputs_indent + 2 and workflow_block_key(stripped) == "platform":
+                skip_indent = indent
+                continue
+            output.append(line)
+        return output
+
+    def strip_disk_platform_conditions(self, lines: Sequence[str]) -> list[str]:
+        # An ARM-only step goes with ARM; a not-ARM condition is now always
+        # true, so only the condition goes. Anything else mentioning the input
+        # is left alone, the way every patcher here no-ops on text it does not
+        # recognise -- and the generated-project test asserts no reference to
+        # inputs.platform survives, so a third condition fails loudly instead
+        # of shipping a workflow that cannot resolve it.
+        def patch_step(step_lines: list[str]) -> list[str]:
+            if any(line.strip() == DISK_ARM_ONLY_IF for line in step_lines):
+                return []
+            return [line for line in step_lines if line.strip() != DISK_NON_ARM_IF]
+
+        return patch_workflow_steps("\n".join(lines), patch_step)
 
     def patch_workflow_branch_filters(self, workflow_text: str, default_branch: str) -> str:
         lines = workflow_text.splitlines()
