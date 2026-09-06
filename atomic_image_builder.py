@@ -4499,17 +4499,26 @@ class App:
         # a change to the files they name. actionlint reports each as
         # "'.' and '..' are not allowed in glob path".
         #
-        # Scoped to the filter list itself, and not applied file-wide, because
-        # './disk_config/iso.toml' appears again further down as an input to
-        # the builder action, where it is an ordinary relative path and
-        # correct as written.
+        # Scoped twice over, because a relative path is only wrong in this one
+        # place. './disk_config/iso.toml' appears again further down as an
+        # input to the builder action, where it is an ordinary relative path
+        # and correct as written -- so the rewrite is confined to entries
+        # under a paths: key, and to a paths: key inside the `on:` block. An
+        # action input happens to be able to be called "paths" too, and its
+        # values are not GitHub filter patterns.
         lines = workflow_text.splitlines()
         output: list[str] = []
+        in_triggers = False
         filter_indent: int | None = None
         for line in lines:
             stripped = line.strip()
             indent = len(line) - len(line.lstrip())
-            if workflow_block_key(stripped) in {"paths", "paths-ignore"}:
+            if stripped and indent == 0:
+                in_triggers = workflow_block_key(stripped) == "on"
+                filter_indent = None
+                output.append(line)
+                continue
+            if in_triggers and workflow_block_key(stripped) in {"paths", "paths-ignore"}:
                 filter_indent = indent
                 output.append(line)
                 continue

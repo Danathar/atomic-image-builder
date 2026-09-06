@@ -10906,6 +10906,28 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("      - 'disk_config/disk.toml'\n", result)
         self.assertIn("          config-file: ./disk_config/iso.toml\n", result)
 
+    def test_patch_workflow_path_filters_only_touches_the_trigger_block(self) -> None:
+        # An action input can be called "paths" too, and its values are not
+        # GitHub filter patterns -- a relative path there is correct, the same
+        # way config-file's is. Scoping to the key name alone rewrote both.
+        app = self.make_app()
+        workflow_text = (
+            "on:\n"
+            "  pull_request:\n"
+            "    paths:\n"
+            "      - './disk_config/disk.toml'\n"
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - uses: some/action@v1\n"
+            "        with:\n"
+            "          paths:\n"
+            "            - ./scripts/build.sh\n"
+        )
+        result = app.patch_workflow_path_filters(workflow_text)
+        self.assertIn("      - 'disk_config/disk.toml'\n", result)
+        self.assertIn("            - ./scripts/build.sh\n", result)
+
     def test_patch_workflow_path_filters_is_idempotent(self) -> None:
         app = self.make_app()
         workflow_text = (
