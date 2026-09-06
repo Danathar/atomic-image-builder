@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import atomic_image_builder
+from _block_yaml import parse as parse_block_yaml
 from atomic_image_builder import (
     ACCENT_COLOR,
     ACTION_PINS,
@@ -7995,6 +7996,104 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("- type: dnf", recipe)
         self.assertIn("- type: systemd", recipe)
         self.assertIn("- type: signing", recipe)
+
+    # The tests above assert substring membership, which cannot see the shape
+    # of the document: which key a list hangs under, whether a key was emitted
+    # twice, whether the indentation still parses at all. BlueBuild reads this
+    # file as YAML, so the tests below read it that way too.
+
+    def recipe_document(self, app: App) -> dict:
+        recipe = app.generate_recipe()
+        document = parse_block_yaml(recipe)
+        self.assertIsInstance(document, dict, recipe)
+        return document
+
+    def recipe_module(self, document: dict, module_type: str) -> dict:
+        modules = document["modules"]
+        matching = [module for module in modules if module.get("type") == module_type]
+        self.assertEqual(len(matching), 1, modules)
+        return matching[0]
+
+    def test_generate_recipe_parses_as_yaml_with_the_documented_top_level_keys(self) -> None:
+        app = self.make_bluebuild_app()
+        document = self.recipe_document(app)
+        self.assertEqual(
+            set(document),
+            {"name", "description", "base-image", "image-version", "modules"},
+        )
+        self.assertEqual(document["name"], "test-bb-image")
+        self.assertEqual(document["description"], "Test BlueBuild image")
+        self.assertEqual(document["base-image"], "ghcr.io/ublue-os/bazzite")
+        self.assertEqual(document["image-version"], "stable")
+        self.assertEqual([module["type"] for module in document["modules"]], ["files", "signing"])
+
+    def test_generate_recipe_nests_packages_under_install_and_removals_under_remove(self) -> None:
+        # Substring assertions cannot tell "install:" from "remove:": emitting
+        # the install list under remove keeps every assertIn passing while the
+        # generated image uninstalls what the user asked to add, and with both
+        # lists set it duplicates the key so one of them is silently dropped.
+        app = self.make_bluebuild_app()
+        app.config.packages = ["htop", "tmux"]
+        app.config.removed_packages = ["firefox"]
+        app.config.copr_repos = ["kylegospo/bazzite"]
+        dnf = self.recipe_module(self.recipe_document(app), "dnf")
+        self.assertEqual(dnf["install"], {"packages": ["htop", "tmux"]})
+        self.assertEqual(dnf["remove"], {"packages": ["firefox"]})
+        self.assertEqual(dnf["repos"], {"copr": ["kylegospo/bazzite"]})
+
+    def test_generate_recipe_enables_services_rather_than_masking_them(self) -> None:
+        # "- type: systemd" plus the quoted unit name matches whichever key
+        # the units hang under, including "masked:", which is the opposite of
+        # what the user asked for.
+        app = self.make_bluebuild_app()
+        app.config.services = ["tailscaled.service", "@my-instance.service"]
+        systemd = self.recipe_module(self.recipe_document(app), "systemd")
+        self.assertEqual(
+            systemd["system"],
+            {"enabled": ["tailscaled.service", "@my-instance.service"]},
+        )
+
+    def test_generate_recipe_keeps_a_package_with_a_trailing_colon_a_string(self) -> None:
+        # The quoting exists so "epel:" stays a scalar instead of becoming a
+        # mapping node. Asserting the quotes is asserting the fix; this asserts
+        # the property the fix is for.
+        app = self.make_bluebuild_app()
+        app.config.packages = ["epel:"]
+        app.config.removed_packages = ["epel:"]
+        dnf = self.recipe_module(self.recipe_document(app), "dnf")
+        self.assertEqual(dnf["install"]["packages"], ["epel:"])
+        self.assertEqual(dnf["remove"]["packages"], ["epel:"])
+
+    def test_generate_recipe_brew_snippets_stay_one_scalar_and_one_literal_block(self) -> None:
+        app = self.make_bluebuild_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.brew_enabled = True
+        containerfile = self.recipe_module(self.recipe_document(app), "containerfile")
+        copy_snippet, run_snippet = containerfile["snippets"]
+        self.assertEqual(copy_snippet, f"COPY --from={UNIVERSAL_BLUE_BREW_IMAGE} /system_files /")
+        self.assertTrue(run_snippet.startswith("RUN --mount=type=cache,dst=/var/cache \\"), run_snippet)
+        # The literal block is one shell command: every line but the last has
+        # to keep its continuation, or the image builds without the presets.
+        run_lines = run_snippet.splitlines()
+        self.assertTrue(all(line.endswith("\\") for line in run_lines[:-1]), run_snippet)
+        self.assertFalse(run_lines[-1].endswith("\\"), run_snippet)
+        self.assertIn("preset brew-upgrade.timer", run_lines[-1])
+
+    def test_generate_recipe_full_config_parses_into_the_expected_module_sequence(self) -> None:
+        app = self.make_bluebuild_app()
+        app.config.packages = ["htop"]
+        app.config.copr_repos = ["kylegospo/bazzite"]
+        app.config.services = ["tailscaled.service"]
+        app.config.removed_packages = ["firefox"]
+        app.config.brew_enabled = True
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        document = self.recipe_document(app)
+        self.assertEqual(
+            [module["type"] for module in document["modules"]],
+            ["files", "containerfile", "dnf", "systemd", "signing"],
+        )
+        self.assertEqual(document["modules"][0]["files"], [{"source": "system", "destination": "/"}])
+        self.assertEqual(document["modules"][-1], {"type": "signing"})
 
     def test_patch_bluebuild_workflow_pins_action(self) -> None:
         app = self.make_bluebuild_app()
