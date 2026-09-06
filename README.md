@@ -1,7 +1,12 @@
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Danathar/atomic-image-builder)
-[![Maintenance assisted by KubeStellar Hive](https://img.shields.io/badge/maintenance%20assisted%20by-KubeStellar%20Hive-1f6feb)](https://github.com/kubestellar/hive)
-[![ACMM L4 Security-Aware](https://img.shields.io/badge/ACMM-L4%20Security--Aware-2da44e)](https://github.com/kubestellar/hive#acmm-levels)
+[![CI](https://github.com/Danathar/atomic-image-builder/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Danathar/atomic-image-builder/actions/workflows/ci.yml)
+[![Maintenance audit](https://github.com/Danathar/atomic-image-builder/actions/workflows/maintenance-audit.yml/badge.svg?branch=main)](https://github.com/Danathar/atomic-image-builder/actions/workflows/maintenance-audit.yml)
+[![Nightly compliance](https://github.com/Danathar/atomic-image-builder/actions/workflows/nightly-compliance.yml/badge.svg?branch=main)](https://github.com/Danathar/atomic-image-builder/actions/workflows/nightly-compliance.yml)
 [![Unit coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDanathar%2Fatomic-image-builder%2Fcoverage-data%2Fcoverage-unit.json)](docs/coverage.md)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Danathar/atomic-image-builder)
+[![Maintenance assisted by Hivecommons Hive](https://img.shields.io/badge/maintenance%20assisted%20by-Hivecommons%20Hive-1f6feb)](https://github.com/hivecommons/hive)
+[![ACMM L4 Security-Aware](https://img.shields.io/badge/ACMM-L4%20Security--Aware-2da44e)](https://github.com/hivecommons/hive#acmm-levels)
+[![AI assisted](https://img.shields.io/badge/AI-assisted-d29922)](#about-this-project)
+[![License: GPLv3](https://img.shields.io/badge/license-GPLv3-blue)](LICENSE)
 
 # Atomic Image Builder
 
@@ -85,13 +90,13 @@ Found a security vulnerability instead? Please don't open a public issue for it 
 > It is provided as-is, without any promise that it will be safe for your repositories, data, systems, or build pipeline. Use it carefully, review its changes before applying them, and keep backups where appropriate. The maintainer is not responsible for repository damage, data loss, failed builds, system changes, or other consequences that may result from using this software.
 
 > [!NOTE]
-> **Maintenance on this repository is assisted by [KubeStellar Hive](https://github.com/kubestellar/hive) at ACMM level 4.**
+> **Maintenance on this repository is assisted by [Hivecommons Hive](https://github.com/hivecommons/hive) at ACMM level 4.**
 >
 > Hive orchestrates a fleet of AI agents that continuously review this codebase and publish what they find to a living [advisory report](https://github.com/Danathar/atomic-image-builder/issues/11).
 >
 > At **L4 (Security-Aware)** all agents may file issues, and the quality, security and CI agents may additionally open pull requests that carry a hold label. The rest stay advisory: they report, they do not act. Every change is still reviewed and merged by a human maintainer.
 >
-> Learn more: [KubeStellar](https://kubestellar.io) · [Hive](https://github.com/kubestellar/hive) · [Hive Hub](https://hive.kubestellar.io) · [full ACMM policy matrix](https://github.com/kubestellar/hive/blob/v4/src/docs/acmm-policy-matrix.md)
+> Learn more: [Hive](https://github.com/hivecommons/hive) · [Hive Hub](https://hive.kubestellar.io) · [full ACMM policy matrix](https://github.com/hivecommons/hive/blob/v4/src/docs/acmm-policy-matrix.md)
 
 ## License
 
