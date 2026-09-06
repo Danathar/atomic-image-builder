@@ -2496,7 +2496,10 @@ class App:
             ("Removed Base Packages", str(len(self.config.scanned_removed))),
         ]
         if omitted:
-            rows.append(("Cannot Be Carried Over", str(sum(len(values) for _label, values in omitted))))
+            # A category with no values -- a regenerated initramfs is a
+            # boolean, not a list -- still counts for one, or the row reads
+            # "Cannot Be Carried Over: 0" directly above the warning naming it.
+            rows.append(("Cannot Be Carried Over", str(sum(len(values) or 1 for _label, values in omitted))))
         self.gum.table(rows, columns="Setting,Value", widths=self.gum.table_widths(22))
         print()
         if omitted and not self.confirm_omitted_scan_customizations(omitted):

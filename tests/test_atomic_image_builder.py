@@ -5141,6 +5141,42 @@ class BuilderTests(unittest.TestCase):
             [],
         )
 
+    def test_scan_results_count_a_valueless_category_as_one(self) -> None:
+        # regenerate-initramfs is a boolean, not a list, so summing value
+        # counts alone showed "Cannot Be Carried Over: 0" on the very screen
+        # that then warns about it.
+        rows: list[tuple[str, str]] = []
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: True
+        stub.table = lambda table_rows, **_kwargs: rows.extend(table_rows)
+        _result, _app, _stub = self.run_scan_with_status(
+            {
+                "container-image-reference": self.BLUEFIN,
+                "requested-packages": ["htop"],
+                "requested-base-removals": [],
+                "regenerate-initramfs": True,
+            },
+            gum=stub,
+        )
+        self.assertIn(("Cannot Be Carried Over", "1"), rows)
+
+    def test_scan_results_count_every_omitted_item(self) -> None:
+        rows: list[tuple[str, str]] = []
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: True
+        stub.table = lambda table_rows, **_kwargs: rows.extend(table_rows)
+        self.run_scan_with_status(
+            {
+                "container-image-reference": self.BLUEFIN,
+                "requested-packages": [],
+                "requested-base-removals": [],
+                "requested-local-packages": ["one-1.0-1.x86_64", "two-1.0-1.x86_64"],
+                "regenerate-initramfs": True,
+            },
+            gum=stub,
+        )
+        self.assertIn(("Cannot Be Carried Over", "3"), rows)
+
     def test_scan_os_reports_an_initramfs_regeneration_it_cannot_reproduce(self) -> None:
         # Not a package list, and still something the recommended reset undoes.
         _result, _app, stub = self.run_scan_with_status(
