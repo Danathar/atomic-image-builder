@@ -104,6 +104,9 @@ SERVICE_TOKEN_RE = re.compile(r"^[A-Za-z0-9@._:+-]+$")
 # as an invalid reference, so the wizard would create a repo and signing key
 # for an image that nothing can push or pull.
 OCI_PATH_COMPONENT_RE = re.compile(r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*")
+# A "./"-prefixed entry in a workflow path filter. The prefix is repeated in
+# the pattern rather than matched once so "././x" normalises in a single pass.
+RELATIVE_PATH_FILTER_RE = re.compile(r"^(\s*-\s+)(['\"]?)(?:\./)+(.*)$")
 FROM_LINE_RE = re.compile(r"^(\s*FROM(?:\s+--platform=\S+)?\s+)(\S+)(.*)$", flags=re.IGNORECASE)
 INSTALLER_SWITCH_RE = re.compile(r"^(\s*bootc switch --mutate-in-place --transport registry )(\S+)(.*)$")
 # dnf5 prints this when -C (cache-only) is used and no repository metadata has
@@ -4526,7 +4529,47 @@ class App:
 
     def patch_container_disk_workflow(self, existing_text: str, *, default_branch: str = "main") -> str:
         lines = [pin_action_uses_line(line) for line in existing_text.splitlines()]
-        return self.patch_workflow_branch_filters("\n".join(lines), default_branch)
+        text = self.patch_workflow_path_filters("\n".join(lines))
+        return self.patch_workflow_branch_filters(text, default_branch)
+
+    def patch_workflow_path_filters(self, workflow_text: str) -> str:
+        # GitHub matches a path filter against the complete path from the
+        # repository root and rejects "." and ".." in a glob outright, so the
+        # bundled workflow's './disk_config/disk.toml' matches nothing: the
+        # pull-request validation those three filters configure never runs on
+        # a change to the files they name. actionlint reports each as
+        # "'.' and '..' are not allowed in glob path".
+        #
+        # Scoped twice over, because a relative path is only wrong in this one
+        # place. './disk_config/iso.toml' appears again further down as an
+        # input to the builder action, where it is an ordinary relative path
+        # and correct as written -- so the rewrite is confined to entries
+        # under a paths: key, and to a paths: key inside the `on:` block. An
+        # action input happens to be able to be called "paths" too, and its
+        # values are not GitHub filter patterns.
+        lines = workflow_text.splitlines()
+        output: list[str] = []
+        in_triggers = False
+        filter_indent: int | None = None
+        for line in lines:
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            if stripped and indent == 0:
+                in_triggers = workflow_block_key(stripped) == "on"
+                filter_indent = None
+                output.append(line)
+                continue
+            if in_triggers and workflow_block_key(stripped) in {"paths", "paths-ignore"}:
+                filter_indent = indent
+                output.append(line)
+                continue
+            if filter_indent is not None:
+                if stripped.startswith("- ") and indent > filter_indent:
+                    output.append(RELATIVE_PATH_FILTER_RE.sub(r"\1\2\3", line))
+                    continue
+                filter_indent = None
+            output.append(line)
+        return ensure_trailing_newline("\n".join(output))
 
     def patch_workflow_branch_filters(self, workflow_text: str, default_branch: str) -> str:
         lines = workflow_text.splitlines()
