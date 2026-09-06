@@ -97,6 +97,25 @@ an old image quietly generates repos from old pins. `--pull=newer` fetches only
 when the registry digest differs, and podman suppresses pull errors when a local
 image exists, so it still works offline.
 
+### Verifying the image
+
+Every published image is signed with keyless (OIDC) cosign at publish time, so
+you can check that what you pulled was really built by this repository's
+workflow before running it. The signature is keyless — the identity being
+verified is the publishing workflow itself, not a key anyone holds:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/Danathar/atomic-image-builder/\.github/workflows/publish-image\.yml@refs/(heads/main|tags/.+)$' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  ghcr.io/danathar/atomic-image-builder:latest
+```
+
+The `refs/(heads/main|tags/.+)` alternation matters: `latest` is signed from a
+push to `main`, but a release publishes from a tag ref, so its certificate
+identity ends `@refs/tags/<tag>` instead — a regexp that only matches `main`
+would reject a perfectly good release digest.
+
 ### Distrobox
 
 [Distrobox](https://distrobox.it/) integrates the container with your host: it
