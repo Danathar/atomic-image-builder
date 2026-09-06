@@ -30,6 +30,22 @@ import re
 # rule rather than splitting on the first colon.
 _KEY_RE = re.compile(r"^(?P<key>[^\s:][^:]*):(?:[ ](?P<value>.*))?$")
 
+# YAML 1.2's core schema resolves an unquoted scalar by its spelling: bare
+# null is not the string "null", and bare 123 is not the string "123". A
+# parser that handed every plain scalar back as a string could not tell a
+# correctly quoted recipe field from one that silently changed type -- which
+# is the entire reason generate_recipe() routes user scalars through
+# yaml_scalar(), and so is exactly what these tests have to be able to see.
+_PLAIN_NULL_RE = re.compile(r"null|Null|NULL|~")
+_PLAIN_TRUE_RE = re.compile(r"true|True|TRUE")
+_PLAIN_FALSE_RE = re.compile(r"false|False|FALSE")
+_PLAIN_INT_RE = re.compile(r"[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+")
+_PLAIN_FLOAT_RE = re.compile(
+    r"[-+]?(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?"
+    r"|[-+]?\.(inf|Inf|INF)"
+    r"|\.(nan|NaN|NAN)"
+)
+
 
 class BlockYamlError(ValueError):
     """Raised when the document is outside the supported subset or malformed."""
@@ -141,14 +157,29 @@ def _parse_literal_block(lines: list[str], index: int, indent: int) -> tuple[str
     return "\n".join(block), index
 
 
-def _scalar(raw: str) -> str:
+def _scalar(raw: str) -> object:
     if raw[:1] in {"[", "{", "&", "*", "!"}:
         raise BlockYamlError(f"unsupported YAML construct: {raw!r}")
     if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
         inner = raw[1:-1]
         if '"' in inner.replace('\\"', ""):
             raise BlockYamlError(f"unbalanced quoting: {raw!r}")
+        # Quoted, so it is a string whatever it spells.
         return inner.replace('\\"', '"')
     if '"' in raw or raw.endswith(":"):
         raise BlockYamlError(f"scalar needs quoting: {raw!r}")
+    return _resolve_plain(raw)
+
+
+def _resolve_plain(raw: str) -> object:
+    if _PLAIN_NULL_RE.fullmatch(raw):
+        return None
+    if _PLAIN_TRUE_RE.fullmatch(raw):
+        return True
+    if _PLAIN_FALSE_RE.fullmatch(raw):
+        return False
+    if _PLAIN_INT_RE.fullmatch(raw):
+        return int(raw, 0)
+    if _PLAIN_FLOAT_RE.fullmatch(raw):
+        return float(raw.replace(".inf", "inf").replace(".nan", "nan"))
     return raw

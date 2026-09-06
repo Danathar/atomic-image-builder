@@ -89,6 +89,29 @@ class BlockYamlTests(unittest.TestCase):
         # asks for a list of strings and gets a list of one-key mappings.
         self.assertEqual(parse_block_yaml("packages:\n  - epel:\n"), {"packages": [{"epel": None}]})
 
+    def test_a_plain_scalar_is_resolved_by_its_spelling(self) -> None:
+        # The rule the recipe generator exists to respect. A parser that
+        # returned every plain scalar as a string would report a recipe
+        # reading "name: null" as the string "null" and see nothing wrong.
+        self.assertEqual(
+            parse_block_yaml("a: null\nb: ~\nc: true\nd: FALSE\ne: 123\nf: 1.5\n"),
+            {"a": None, "b": None, "c": True, "d": False, "e": 123, "f": 1.5},
+        )
+
+    def test_quoting_makes_a_literal_a_string_again(self) -> None:
+        self.assertEqual(
+            parse_block_yaml('a: "null"\nb: "123"\nc: "true"\n'),
+            {"a": "null", "b": "123", "c": "true"},
+        )
+
+    def test_a_scalar_that_only_looks_numeric_stays_a_string(self) -> None:
+        # Version-like and path-like values must not be resolved: "1.2.3" is
+        # not a float and "/" is not a number.
+        self.assertEqual(
+            parse_block_yaml("a: 1.2.3\nb: /\nc: 44-rc1\nd: nullish\n"),
+            {"a": "1.2.3", "b": "/", "c": "44-rc1", "d": "nullish"},
+        )
+
     def test_empty_document_is_none(self) -> None:
         self.assertIsNone(parse_block_yaml("---\n# nothing else\n"))
 
