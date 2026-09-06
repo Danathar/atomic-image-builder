@@ -3519,6 +3519,11 @@ class BuilderTests(unittest.TestCase):
 
         self.assertIn("Scheduled rebuilds also run daily at about", output.getvalue())
         self.assertNotIn("sudo rpm-ostree reset", output.getvalue())
+        # The completion panel is where someone is told the build has started,
+        # so it is where the step between a green build and a working switch
+        # belongs -- there is no package to check yet at this point.
+        self.assertIn("Make it public before switching", output.getvalue())
+        self.assertIn("pkgs/container/test-image", output.getvalue())
 
     def test_do_build_summary_uses_lowercase_ghcr_owner(self) -> None:
         app = self.make_app()
@@ -4608,6 +4613,72 @@ class BuilderTests(unittest.TestCase):
         # Built from the arguments, since the picker does not load the config.
         self.assertIn("ghcr.io/example/my-image:latest", hints)
         self.assertIn("do not reboot in between", hints.lower())
+
+    def test_build_status_says_a_green_build_is_not_yet_readable(self) -> None:
+        # A green build is not a switchable image: the package it published is
+        # private, and `gh repo create --public` does not change that -- package
+        # visibility is a separate setting that does not inherit repository
+        # access. ghcr_package_exists is the same anonymous pull a host without
+        # credentials would make, so it answers the question that decides
+        # whether the switch command works. It is patched to False for every
+        # test in setUp, which is the private-or-unreachable case.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        runs = json.dumps([{"conclusion": "success", "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+            with patch.object(app, "repo_carried_scan_customizations", return_value=False):
+                with redirect_stdout(io.StringIO()):
+                    app.render_build_status("Example", "my-image")
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertIn("could not pull ghcr.io/example/my-image anonymously", hints)
+        self.assertIn("https://github.com/Example/my-image/pkgs/container/my-image", hints)
+        self.assertIn(atomic_image_builder.BOOTC_REGISTRY_DOCS_URL, hints)
+
+    def test_build_status_probe_does_not_block_the_screen(self) -> None:
+        # ghcr_package_exists makes two sequential requests, so the default
+        # six-second timeout is twelve in the worst case. That is fine before
+        # creating a repo, where the answer gates an irreversible step; this
+        # screen is one people come back to and the answer is advisory.
+        app = self.make_app()
+        app.gum = GumStub()
+        runs = json.dumps([{"conclusion": "success", "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.ghcr_package_exists", return_value=True) as probe:
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+                with patch.object(app, "repo_carried_scan_customizations", return_value=False):
+                    with redirect_stdout(io.StringIO()):
+                        app.render_build_status("Example", "my-image")
+        self.assertEqual(
+            probe.call_args.kwargs.get("timeout"),
+            atomic_image_builder.GHCR_ADVISORY_TIMEOUT,
+        )
+        self.assertLess(atomic_image_builder.GHCR_ADVISORY_TIMEOUT, 6.0)
+
+    def test_build_status_stops_saying_it_once_the_package_is_public(self) -> None:
+        # Self-clearing: the check that reports the problem is the one that
+        # confirms it is fixed, so nobody has to dismiss a stale warning.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        runs = json.dumps([{"conclusion": "success", "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.ghcr_package_exists", return_value=True):
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+                with patch.object(app, "repo_carried_scan_customizations", return_value=False):
+                    with redirect_stdout(io.StringIO()):
+                        app.render_build_status("Example", "my-image")
+        self.assertNotIn("anonymously", " ".join(m for _l, m in stub.messages))
+
+    def test_build_status_does_not_probe_before_a_build_has_succeeded(self) -> None:
+        # There is no package to be private about until a build has published
+        # one, and reporting one as unreadable then would be noise.
+        app = self.make_app()
+        app.gum = GumStub()
+        runs = json.dumps([{"conclusion": None, "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.ghcr_package_exists") as probe:
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+                with redirect_stdout(io.StringIO()):
+                    app.render_build_status("Example", "my-image")
+        probe.assert_not_called()
 
     def test_build_status_stays_quiet_when_nothing_was_scanned(self) -> None:
         app = self.make_app()
@@ -8183,6 +8254,28 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("scanned_removed", rewritten)
         self.assertNotIn("steam", json.dumps(rewritten))
 
+    def test_generate_readme_says_the_package_is_private_before_the_switch(self) -> None:
+        # The switch command was presented as ready to run the moment the build
+        # went green. It is not: the package is private by default, and a
+        # public repository does not change that. This has to come before the
+        # command, not as a troubleshooting note after it.
+        app = self.make_app()
+        readme = app.generate_readme()
+        access_at = readme.index("## Before The First Switch")
+        switch_at = readme.index("sudo bootc switch")
+        self.assertLess(access_at, switch_at)
+        self.assertIn("**private** package", readme)
+        self.assertIn("https://github.com/example/test-image/pkgs/container/test-image", readme)
+        self.assertIn(atomic_image_builder.BOOTC_REGISTRY_DOCS_URL, readme)
+
+    def test_generate_readme_keeps_the_access_step_on_the_scanned_path(self) -> None:
+        # The scanned README replaces the whole "Using The Image" block, which
+        # is how the access step could have been dropped from exactly the path
+        # that has the most to go wrong.
+        readme = self.scanned_app().generate_readme()
+        self.assertIn("## Before The First Switch", readme)
+        self.assertIn("sudo rpm-ostree reset", readme)
+
     def test_generate_readme_notes_carried_scan_customizations(self) -> None:
         readme = self.scanned_app().generate_readme()
         self.assertIn("This repo carries over package changes scanned from your current system.", readme)
@@ -10859,6 +10952,150 @@ class BuilderTests(unittest.TestCase):
         )
         result = app.patch_container_disk_workflow(workflow_text, default_branch="develop")
         self.assertIn("- develop", result)
+
+    def test_patch_container_disk_workflow_removes_dot_slash_from_path_filters(self) -> None:
+        # GitHub matches a path filter against the complete path from the
+        # repository root and rejects "." and ".." in a glob, so the bundled
+        # './disk_config/disk.toml' matches nothing: the pull-request
+        # validation those filters configure never ran.
+        app = self.make_app()
+        workflow_text = (
+            "name: Build Disk\n"
+            "on:\n"
+            "  pull_request:\n"
+            "    branches:\n"
+            "      - main\n"
+            "    paths:\n"
+            "      - './disk_config/disk.toml'\n"
+            '      - "./disk_config/iso.toml"\n'
+            "      - ./.github/workflows/build-disk.yml\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+        )
+        result = app.patch_container_disk_workflow(workflow_text)
+        self.assertIn("      - 'disk_config/disk.toml'\n", result)
+        self.assertIn('      - "disk_config/iso.toml"\n', result)
+        self.assertIn("      - .github/workflows/build-disk.yml\n", result)
+        self.assertNotIn("'./", result)
+
+    def test_patch_workflow_path_filters_leaves_relative_paths_elsewhere_alone(self) -> None:
+        # './disk_config/iso.toml' appears again as an input to the builder
+        # action, where it is an ordinary relative path and correct. A
+        # file-wide substitution would have broken the build to fix the filter.
+        app = self.make_app()
+        workflow_text = (
+            "on:\n"
+            "  pull_request:\n"
+            "    paths:\n"
+            "      - './disk_config/disk.toml'\n"
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - with:\n"
+            "          config-file: ./disk_config/iso.toml\n"
+        )
+        result = app.patch_workflow_path_filters(workflow_text)
+        self.assertIn("      - 'disk_config/disk.toml'\n", result)
+        self.assertIn("          config-file: ./disk_config/iso.toml\n", result)
+
+    def test_patch_workflow_path_filters_only_touches_the_trigger_block(self) -> None:
+        # An action input can be called "paths" too, and its values are not
+        # GitHub filter patterns -- a relative path there is correct, the same
+        # way config-file's is. Scoping to the key name alone rewrote both.
+        app = self.make_app()
+        workflow_text = (
+            "on:\n"
+            "  pull_request:\n"
+            "    paths:\n"
+            "      - './disk_config/disk.toml'\n"
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - uses: some/action@v1\n"
+            "        with:\n"
+            "          paths:\n"
+            "            - ./scripts/build.sh\n"
+        )
+        result = app.patch_workflow_path_filters(workflow_text)
+        self.assertIn("      - 'disk_config/disk.toml'\n", result)
+        self.assertIn("            - ./scripts/build.sh\n", result)
+
+    def test_patch_workflow_path_filters_is_idempotent(self) -> None:
+        app = self.make_app()
+        workflow_text = (
+            "on:\n"
+            "  pull_request:\n"
+            "    paths:\n"
+            "      - './a.toml'\n"
+            "      - './/b.toml'\n"
+        )
+        once = app.patch_workflow_path_filters(workflow_text)
+        self.assertEqual(app.patch_workflow_path_filters(once), once)
+        self.assertNotIn("./", once)
+
+    def test_patch_workflow_path_filters_handles_paths_ignore_too(self) -> None:
+        app = self.make_app()
+        result = app.patch_workflow_path_filters(
+            "on:\n  push:\n    paths-ignore:\n      - './README.md'\n"
+        )
+        self.assertIn("      - 'README.md'\n", result)
+
+    def test_generated_disk_workflow_filters_name_files_that_exist(self) -> None:
+        # The filters are only worth fixing if they point at something. Every
+        # non-glob entry must name a file the generator actually writes --
+        # which is the half actionlint cannot check, since it never sees the
+        # rest of the project.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            workflow = (repo_dir / ".github/workflows/build-disk.yml").read_text()
+            filters = self.workflow_path_filters(workflow)
+            self.assertTrue(filters, workflow)
+            missing = [
+                entry
+                for entry in filters
+                if "*" not in entry and not (repo_dir / entry).is_file()
+            ]
+        self.assertEqual(missing, [])
+        # A leading dot is fine -- ".github/workflows/..." is a real path.
+        # What GitHub rejects is a "." or ".." segment.
+        self.assertFalse(
+            [entry for entry in filters if {".", ".."} & set(entry.split("/"))],
+            filters,
+        )
+
+    @staticmethod
+    def workflow_path_filters(workflow: str) -> list[str]:
+        """Every entry under a paths:/paths-ignore: key, unquoted."""
+        entries: list[str] = []
+        filter_indent: int | None = None
+        for line in workflow.splitlines():
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            if stripped in {"paths:", "paths-ignore:"}:
+                filter_indent = indent
+                continue
+            if filter_indent is None:
+                continue
+            if stripped.startswith("- ") and indent > filter_indent:
+                entries.append(stripped[2:].strip().strip("'\""))
+                continue
+            filter_indent = None
+        return entries
+
+    def test_generated_disk_workflow_patching_is_idempotent(self) -> None:
+        # Managed repositories are patched in place on every update, so a
+        # patcher that changed its own output would rewrite the file forever.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            once = (repo_dir / ".github/workflows/build-disk.yml").read_text()
+        self.assertEqual(app.patch_container_disk_workflow(once), once)
 
     def test_patch_container_disk_workflow_names_the_uploaded_artifact(self) -> None:
         # Without a name, upload-artifact uses its default, "artifact". The
