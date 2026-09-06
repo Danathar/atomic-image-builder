@@ -22,6 +22,28 @@ access to your host's state — the `aib` wrapper and distrobox both hand it in,
 so neither hits this. See
 [container limitations](installing.md#limitations-of-running-in-a-container).
 
+## Make the package readable before you switch
+
+The first successful build publishes the image to GHCR as a **private**
+package. That is GitHub's default for a newly published package, and it is a
+separate setting from the repository's own visibility — a public repository
+does not publish public packages. So a green build is not yet a switchable
+image: `sudo bootc switch` on a machine with no registry credentials cannot
+read it.
+
+Make it readable once, from the package's own page:
+
+1. Open `https://github.com/<your-user>/<your-repo>/pkgs/container/<your-repo>`
+2. **Package settings** -> **Change visibility** -> **Public**
+
+The tool checks this for you. After a successful build, *View build status*
+tries the same anonymous pull your machine would make and says so if it cannot
+read the image — and stops saying it once the package is public.
+
+Keeping the package private is a fine choice, but then the machine needs GHCR
+pull credentials for root before the switch works. See
+[bootc's registry documentation](https://bootc.dev/bootc/registries-and-offline.html).
+
 ## What else to expect
 
 - The tool creates a public GitHub repo under your account, and GitHub Actions
