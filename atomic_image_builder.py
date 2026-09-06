@@ -4606,11 +4606,17 @@ class App:
         # validators are not enough on their own: PACKAGE_TOKEN_RE allows ":",
         # so a name like "epel:" would otherwise emit "- epel:", which YAML
         # parses as a mapping instead of the string BlueBuild's schema expects.
+        # The repo name is the same rule for a different reason: it is a
+        # perfectly good container name, but "null", "false" and "123" are
+        # YAML literals, so emitted bare they reach BlueBuild as null, a
+        # boolean and an integer against a schema that requires a string.
+        # base-image is not quoted because it is not user-supplied -- it is
+        # whichever curated URI match_base_image() accepted.
         base_image, image_version = self._split_image_ref(self.config.base_image_uri)
         lines = [
             "---",
             f"# yaml-language-server: $schema={BLUEBUILD_RECIPE_SCHEMA}",
-            f"name: {self.config.repo_name}",
+            f"name: {yaml_scalar(self.config.repo_name)}",
             f"description: {yaml_scalar(self.config.image_desc)}",
             "",
             f"base-image: {base_image}",
