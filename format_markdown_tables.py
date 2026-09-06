@@ -19,7 +19,10 @@ import sys
 from pathlib import Path
 
 SKIP_PREFIXES = ("template_snapshots/",)
-FENCES = ("```", "~~~")
+FENCE_CHARS = ("`", "~")
+# CommonMark's threshold for an indented code block, and the indentation at
+# which a line can no longer open or close a fence.
+CODE_INDENT = 4
 
 
 def split_row(line: str) -> list[str] | None:
@@ -92,19 +95,80 @@ def render_delimiter(cell: str, width: int) -> str:
     return "-" * inner
 
 
+def fence_open(line: str) -> tuple[str, int] | None:
+    """The character and length of the code fence this line opens, or None.
+
+    A fence closes only on the same character and at least the opening run's
+    length, so tracking a boolean is not enough: a four-backtick block whose
+    body contains a bare ``` is one block, and toggling on the inner line
+    inverts the state for everything after it. The info-string rule matters
+    for the same example -- a backtick info string may not itself contain a
+    backtick, which is what makes ```markdown inside such a block content
+    rather than a nested opener.
+    """
+    indent = leading_spaces(line)
+    if indent >= CODE_INDENT:
+        return None
+    rest = line[indent:]
+    if not rest.startswith(FENCE_CHARS):
+        return None
+    char = rest[0]
+    length = len(rest) - len(rest.lstrip(char))
+    if length < 3:
+        return None
+    if char == "`" and "`" in rest[length:]:
+        return None
+    return char, length
+
+
+def fence_closes(line: str, char: str, length: int) -> bool:
+    indent = leading_spaces(line)
+    if indent >= CODE_INDENT:
+        return False
+    rest = line[indent:]
+    run = len(rest) - len(rest.lstrip(char))
+    return run >= length and not rest[run:].strip()
+
+
+def leading_spaces(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
 def format_text(text: str) -> str:
     lines = text.split("\n")
     out: list[str] = []
     index = 0
-    in_fence = False
+    fence: tuple[str, int] | None = None
+    in_code_block = False
+    # An indented code block may open at the very start of a document, so the
+    # notional line before it counts as blank.
+    after_blank = True
     while index < len(lines):
         line = lines[index]
-        if line.lstrip().startswith(FENCES):
-            in_fence = not in_fence
+        if fence is not None:
+            out.append(line)
+            if fence_closes(line, *fence):
+                fence = None
+            index += 1
+            after_blank = False
+            continue
+
+        stripped = line.strip()
+        indent = leading_spaces(line)
+        if stripped:
+            # A blank line neither opens an indented code block nor closes
+            # one; only a non-blank line at less than four spaces ends it.
+            in_code_block = indent >= CODE_INDENT and (in_code_block or after_blank)
+        after_blank = not stripped
+
+        if in_code_block:
             out.append(line)
             index += 1
             continue
-        if in_fence:
+
+        opened = fence_open(line)
+        if opened is not None:
+            fence = opened
             out.append(line)
             index += 1
             continue
@@ -120,7 +184,7 @@ def format_text(text: str) -> str:
         cursor = index + 2
         while cursor < len(lines):
             row = split_row(lines[cursor])
-            if not row or lines[cursor].lstrip().startswith(FENCES):
+            if not row or fence_open(lines[cursor]) is not None:
                 break
             block.append(row)
             cursor += 1
@@ -147,6 +211,10 @@ def format_text(text: str) -> str:
             )
             for column in range(columns)
         ]
+        # The header's own indentation, so a table nested in a list item stays
+        # in that list item. split_row() strips it to find the cells, and
+        # emitting at column zero moved the table out of whatever contained it.
+        prefix = line[:indent]
         for i, row in enumerate(block):
             if i == 1:
                 cells = [render_delimiter(row[c], widths[c]) for c in range(columns)]
@@ -154,8 +222,9 @@ def format_text(text: str) -> str:
                 cells = [row[c].ljust(widths[c]) for c in range(columns)]
             # No rstrip: the trailing pad is what makes the closing pipes line
             # up, which is the entire point in a fixed-width viewer.
-            out.append("| " + " | ".join(cells) + " |")
+            out.append(prefix + "| " + " | ".join(cells) + " |")
         index = cursor
+        after_blank = False
     return "\n".join(out)
 
 

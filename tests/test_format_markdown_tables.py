@@ -22,6 +22,8 @@ from pathlib import Path
 from format_markdown_tables import (
     SKIP_PREFIXES,
     delimiter_width,
+    fence_closes,
+    fence_open,
     format_text,
     is_delimiter,
     main,
@@ -206,6 +208,87 @@ class FormatTextTests(unittest.TestCase):
     def test_formatting_is_idempotent(self) -> None:
         once = format_text("| a | bb |\n| :-- | --: |\n| cccc | d |\n")
         self.assertEqual(format_text(once), once)
+
+    def test_a_table_in_a_longer_fence_is_left_verbatim(self) -> None:
+        # The shape this repo's own docs use to show a fenced example: an
+        # outer four-backtick block whose body contains a bare ```. A boolean
+        # fence flag toggles on that inner line, so the table below it read as
+        # ordinary prose and was rewritten -- changing what the example says.
+        text = "````markdown\n```\n| A | B |\n| --- | --- |\n| 1 | 2 |\n```\n````\n"
+        self.assertEqual(format_text(text), text)
+
+    def test_a_tilde_fence_is_not_closed_by_backticks(self) -> None:
+        # Same failure from the other direction: a fence closes only on the
+        # character it opened with.
+        text = "~~~\n```\n| A | B |\n| --- | --- |\n```\n~~~\n"
+        self.assertEqual(format_text(text), text)
+
+    def test_an_indented_code_block_keeps_its_indentation(self) -> None:
+        # split_row() strips indentation to find cells and the rows were
+        # emitted at column zero, so a four-space code block came back as a
+        # live table -- a change of rendered meaning, not just of spacing.
+        text = "    | A | B |\n    | --- | --- |\n    | 1 | 2 |\n"
+        self.assertEqual(format_text(text), text)
+
+    def test_an_indented_code_block_ends_at_the_first_dedent(self) -> None:
+        # The lines after it are ordinary Markdown again, so a real table
+        # there still gets aligned.
+        self.assertEqual(
+            format_text("    | A | B |\n\n| C | D |\n| --- | --- |\n"),
+            "    | A | B |\n\n| C   | D   |\n| --- | --- |\n",
+        )
+
+    def test_four_space_indentation_after_prose_is_not_a_code_block(self) -> None:
+        # CommonMark only opens an indented code block where a paragraph could
+        # start. Treating every four-space line as code would leave a lazily
+        # indented table unaligned instead.
+        self.assertEqual(
+            format_text("intro\n    | A | B |\n    | --- | --- |\n"),
+            "intro\n    | A   | B   |\n    | --- | --- |\n",
+        )
+
+    def test_a_table_nested_in_a_list_item_keeps_its_indentation(self) -> None:
+        # Dedenting it to column zero moves the table out of the list item.
+        self.assertEqual(
+            format_text("- item\n\n  | A | B |\n  | --- | --- |\n  | 1 | 2 |\n"),
+            "- item\n\n  | A   | B   |\n  | --- | --- |\n  | 1   | 2   |\n",
+        )
+
+
+class FenceTests(unittest.TestCase):
+    def test_three_backticks_open_a_fence(self) -> None:
+        self.assertEqual(fence_open("```"), ("`", 3))
+
+    def test_an_info_string_is_allowed(self) -> None:
+        self.assertEqual(fence_open("```python"), ("`", 3))
+
+    def test_a_backtick_in_a_backtick_info_string_is_not_a_fence(self) -> None:
+        # CommonMark forbids it, which is the rule that makes a ```markdown
+        # line inside a four-backtick block content rather than an opener.
+        self.assertIsNone(fence_open("```md ` inline"))
+
+    def test_a_tilde_info_string_may_contain_backticks(self) -> None:
+        self.assertEqual(fence_open("~~~ ` tick"), ("~", 3))
+
+    def test_two_backticks_are_a_code_span_not_a_fence(self) -> None:
+        self.assertIsNone(fence_open("``not a fence``"))
+
+    def test_a_four_space_indent_cannot_open_a_fence(self) -> None:
+        self.assertIsNone(fence_open("    ```"))
+
+    def test_a_shorter_run_does_not_close_a_longer_fence(self) -> None:
+        self.assertFalse(fence_closes("```", "`", 4))
+
+    def test_an_equal_or_longer_run_closes_it(self) -> None:
+        self.assertTrue(fence_closes("````", "`", 4))
+        self.assertTrue(fence_closes("`````", "`", 4))
+
+    def test_a_closing_fence_takes_no_info_string(self) -> None:
+        self.assertFalse(fence_closes("``` still open", "`", 3))
+
+    def test_a_closing_fence_may_be_indented_up_to_three_spaces(self) -> None:
+        self.assertTrue(fence_closes("   ```", "`", 3))
+        self.assertFalse(fence_closes("    ```", "`", 3))
 
 
 class TrackedMarkdownTests(unittest.TestCase):

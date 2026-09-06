@@ -7018,7 +7018,7 @@ class BuilderTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         ragged: list[str] = []
         for path in format_markdown_tables.tracked_markdown(root):
-            in_fence = False
+            fence: tuple[str, int] | None = None
             block: list[tuple[int, str]] = []
 
             def close(block: list[tuple[int, str]], path: Path = path) -> None:
@@ -7033,14 +7033,24 @@ class BuilderTests(unittest.TestCase):
                     ragged.append(f"{name}:{block[0][0]}")
 
             for number, line in enumerate(path.read_text().split("\n"), start=1):
-                if line.lstrip().startswith(format_markdown_tables.FENCES):
-                    in_fence = not in_fence
+                # Fence state comes from the module because getting it wrong
+                # here would misread a four-backtick example as prose and
+                # report its contents as a ragged table. The alignment
+                # arithmetic below, which is what this test exists to check
+                # independently, is still its own.
+                if fence is not None:
+                    if format_markdown_tables.fence_closes(line, *fence):
+                        fence = None
+                    continue
+                opened = format_markdown_tables.fence_open(line)
+                if opened is not None:
+                    fence = opened
                     close(block)
                     block = []
                     continue
                 # A bare "|" carries no cell, so it ends the table rather than
                 # belonging to it -- the same place the formatter stops.
-                if in_fence or not format_markdown_tables.split_row(line):
+                if not format_markdown_tables.split_row(line):
                     close(block)
                     block = []
                     continue
