@@ -50,6 +50,12 @@ TOOL_SLUG = "atomic-image-builder"
 TOOL_COMMAND = "aib-tool"
 STATE_FILE = f".{TOOL_SLUG}.json"
 DEFAULT_REPO_NAME = "my-atomic-image"
+# Said the same way wherever a name is refused, because the wizard's field
+# error and validate_config()'s final gate are the same rule.
+REPO_NAME_RULE = (
+    "It must start and end with a letter or number, cannot end with .git, and can join "
+    "parts only with a single dot, one or two underscores, or dashes."
+)
 DEFAULT_GITHUB_BUILD_CRON = "05 10 * * *"
 FEDORA_ATOMIC_FALLBACK_TAG = "44"
 UNIVERSAL_BLUE_BREW_IMAGE = "ghcr.io/ublue-os/brew:latest"
@@ -90,6 +96,14 @@ BLUEBUILD_RECIPE_SCHEMA = "https://schema.blue-build.org/recipe-v1.json"
 PACKAGE_TOKEN_RE = re.compile(r"^[A-Za-z0-9._+:-]+$")
 COPR_REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 SERVICE_TOKEN_RE = re.compile(r"^[A-Za-z0-9@._:+-]+$")
+# The repo name becomes the image name in ghcr.io/<owner>/<repo>, so it has to
+# satisfy the container-reference grammar as well as GitHub's naming rules.
+# This is distribution/reference's path-component production: alphanumeric runs
+# joined by a single dot, one or two underscores, or a run of hyphens. Names
+# GitHub accepts but that grammar does not -- "a..b", "a.-b", "a___b" -- parse
+# as an invalid reference, so the wizard would create a repo and signing key
+# for an image that nothing can push or pull.
+OCI_PATH_COMPONENT_RE = re.compile(r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*")
 # The bundled Justfile's spawn-vm rebuild dispatch, and what it should say.
 # "the ISO" in upstream's message is wrong for every type but one, so it goes
 # with the arguments.
@@ -290,6 +304,28 @@ SCAN_CANCELLED = "cancelled"
 # SCAN_UNAVAILABLE: the scan worked perfectly, and what it found is the problem.
 SCAN_UNSUPPORTED_BASE = "unsupported-base"
 
+# rpm-ostree records customizations in more fields than this tool reads.
+# `requested-packages` and `requested-base-removals` are the two it can carry,
+# because both are just names an image build can install or remove from a
+# repository. The rest are real customizations pinned to files on this host --
+# an RPM built somewhere else, a package replaced by a local build -- and no
+# generated image reproduces them. They were read as absent rather than as
+# unsupported, so a scan reported success and recommended `rpm-ostree reset`
+# while the new image silently omitted them. See the rpm-ostree administrator
+# handbook's "rpm-ostree status --json" section for the field list.
+UNSUPPORTED_SCAN_FIELDS: tuple[tuple[str, str], ...] = (
+    ("requested-local-packages", "Locally installed RPMs"),
+    ("requested-local-fileoverride-packages", "Local file overrides"),
+    ("requested-base-local-replacements", "Base packages replaced by a local RPM"),
+    ("requested-base-remote-replacements", "Base packages replaced from a repository"),
+)
+# Not a package list, so it is reported separately -- but it belongs with them,
+# because a bare `rpm-ostree reset` removes initramfs customization too.
+INITRAMFS_SCAN_FIELDS: tuple[tuple[str, str], ...] = (
+    ("initramfs-etc", "Files kept in the initramfs from /etc"),
+    ("initramfs-args", "Custom initramfs arguments"),
+)
+
 COMMON_SERVICES: tuple[tuple[str, str], ...] = (
     ("SSH remote access", "sshd.service"),
     ("Tailscale VPN", "tailscaled.service"),
@@ -363,14 +399,18 @@ def sanitize_slug(value: str, default: str = DEFAULT_REPO_NAME) -> str:
 
 
 def is_valid_repo_name(value: str) -> bool:
-    # Keep this aligned with the subset of GitHub naming rules we want to
-    # support in the beginner UI. We are intentionally stricter than necessary
-    # so error messages stay simple.
+    # Two rules, and the name has to satisfy both: the subset of GitHub naming
+    # rules we support in the beginner UI, and the reference grammar that
+    # decides whether ghcr.io/<owner>/<name> can be parsed at all. The first
+    # alone let "test..image" through as far as repository creation and signing
+    # setup, and every later push and pull of it failed to parse.
     if not value or len(value) > 100:
         return False
     if value.endswith(".git"):
         return False
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9._-]{0,98}[a-z0-9])?", value):
+        return False
+    if not OCI_PATH_COMPONENT_RE.fullmatch(value):
         return False
     return True
 
@@ -1776,6 +1816,16 @@ class App:
         # image they cannot switch to. The base list stays for the
         # nothing-installed-yet path, where there is no system to read.
         steps = ["method"] if scanned else ["method", "base"]
+        # Homebrew is a decision about the base, not about the base *screen*,
+        # and dropping that screen after a scan dropped the question with it:
+        # a Fedora Atomic host reached the first build with Homebrew off and
+        # nothing having asked. It can be a step of its own here precisely
+        # because the scan already settled the base, so whether it applies is
+        # known before the wizard starts. On the other path the base is not
+        # known until step 2, which is why choose_base_image() still asks it
+        # there, immediately after the choice it depends on.
+        if scanned and not self.is_universal_blue_base():
+            steps.append("brew")
         steps += ["repo", "software"]
         review_step = len(steps) + 1
         total_steps = review_step
@@ -1789,6 +1839,8 @@ class App:
                         self.choose_method(step=number, total_steps=total_steps)
                     elif name == "base":
                         self.choose_base_image(step=number, total_steps=total_steps)
+                    elif name == "brew":
+                        self.offer_brew_if_applicable(step=number, total_steps=total_steps)
                     elif name == "repo":
                         self.configure_repo(step=number, total_steps=total_steps)
                     else:
@@ -1802,6 +1854,14 @@ class App:
                 if index == 0:
                     return
                 index -= 1
+                continue
+            if action == "brew":
+                # Not a step on every path, so it is edited in place rather
+                # than jumped to, the way the local test build already is.
+                self.run_screen_action(
+                    self.offer_brew_if_applicable,
+                    return_hint="Press Enter to return to the review screen...",
+                )
                 continue
             if action == "build":
                 try:
@@ -1890,10 +1950,12 @@ class App:
         matched = self.match_base_image(self.config.base_image_uri)
         return matched is not None and matched.provider == "Universal Blue"
 
-    def offer_brew_if_applicable(self) -> None:
+    def offer_brew_if_applicable(self, *, step: int | None = None, total_steps: int | None = None) -> None:
         if self.is_universal_blue_base():
             self.config.brew_enabled = False
             return
+        if step is not None and total_steps is not None:
+            self.show_step_header("Homebrew", step=step, total_steps=total_steps)
         print()
         self.menu_section(
             "Homebrew",
@@ -1921,6 +1983,7 @@ class App:
             self.menu_section(
                 "Repository Rules",
                 "Repository names use letters, numbers, dashes, and dots. Spaces are turned into dashes.",
+                "The name also becomes the image name, so parts are joined by a single dot, one or two underscores, or dashes.",
             )
             print()
             default_name = self.config.repo_name or DEFAULT_REPO_NAME
@@ -1931,7 +1994,7 @@ class App:
             )
             candidate_name = sanitize_slug(raw_name or default_name, default_name)
             if not is_valid_repo_name(candidate_name):
-                self.gum.error("Repository names must start and end with a letter or number, and they cannot end with .git.")
+                self.gum.error(REPO_NAME_RULE)
                 self.gum.enter_to_continue("Press Enter to try another repository name...")
                 continue
             self.config.repo_name = candidate_name
@@ -2321,6 +2384,9 @@ class App:
             software_label = self.format_task_choice("Software", self.software_status())
             repo_label = self.format_task_choice("Repository settings", self.repository_status())
             base_label = self.format_task_choice("Base image", self.config.base_image_name or "(not set)")
+            brew_label = self.format_task_choice(
+                "Homebrew", "Enabled" if self.config.brew_enabled else "Not included"
+            )
             full_label = "View full configuration"
             local_build_label = "Test build locally (podman)"
             build_label = "Start GitHub build"
@@ -2330,6 +2396,13 @@ class App:
             # changed, so it is shown as a fact rather than offered as an edit.
             if allow_base_edit:
                 options.append(base_label)
+            # Same rule as the update menu's task list: the choice exists
+            # exactly when the base does not already provide it. Reviewing a
+            # setting that cannot be reached from the screen showing it is how
+            # a scanned Fedora run reported "Not included" with nothing to do
+            # about it.
+            if not self.is_universal_blue_base():
+                options.append(brew_label)
             options.append(full_label)
             if self.config.method == "containerfile":
                 options.append(local_build_label)
@@ -2352,6 +2425,8 @@ class App:
                 return "repo"
             if allow_base_edit and selected == base_label:
                 return "base"
+            if selected == brew_label:
+                return "brew"
             if selected == full_label:
                 self.show_summary(step=step, total_steps=total_steps, next_hint="This is the full build summary.")
                 continue
@@ -2424,6 +2499,9 @@ class App:
         self.config.scanned_packages = unique(string_list(booted.get("requested-packages")))
         self.config.scanned_removed = unique(string_list(booted.get("requested-base-removals")))
         self.config.removed_packages = list(self.config.scanned_removed)
+        # Read alongside the two supported fields, not instead of them: a host
+        # can have both, and the counts below have to be able to say so.
+        omitted = self.unsupported_scan_customizations(booted)
 
         self.config.base_image_uri = base
         self.config.base_image_name = base
@@ -2479,8 +2557,15 @@ class App:
             ("Layered Packages", str(len(self.config.scanned_packages))),
             ("Removed Base Packages", str(len(self.config.scanned_removed))),
         ]
+        if omitted:
+            # A category with no values -- a regenerated initramfs is a
+            # boolean, not a list -- still counts for one, or the row reads
+            # "Cannot Be Carried Over: 0" directly above the warning naming it.
+            rows.append(("Cannot Be Carried Over", str(sum(len(values) or 1 for _label, values in omitted))))
         self.gum.table(rows, columns="Setting,Value", widths=self.gum.table_widths(22))
         print()
+        if omitted and not self.confirm_omitted_scan_customizations(omitted):
+            return SCAN_CANCELLED
         # The table states facts and nothing else. Without this a user is left
         # looking at their own system's details with no idea what the tool is
         # about to do with them, or that the base is settled and will not be
@@ -2516,7 +2601,14 @@ class App:
                 return SCAN_CANCELLED
             self.config.packages = selected
         else:
-            self.gum.warn("No layered packages found.")
+            # "No layered packages found" is false on a host whose only
+            # layering is local RPMs, and it was the whole message such a host
+            # got. Say what was actually found instead.
+            self.gum.warn(
+                "No layered packages this tool can carry over were found."
+                if omitted
+                else "No layered packages found."
+            )
             if not self.gum.confirm("Continue to create a custom image anyway?", default=True):
                 return SCAN_CANCELLED
 
@@ -2541,6 +2633,45 @@ class App:
 
         self.config.normalize()
         return SCAN_OK
+
+    def unsupported_scan_customizations(self, booted: dict[str, object]) -> list[tuple[str, list[str]]]:
+        # Every customization on this deployment that a generated image will
+        # not reproduce, labelled for display. Values come back with it so the
+        # user can see which packages are at stake rather than only a count --
+        # "one local RPM" is not enough to decide with.
+        found: list[tuple[str, list[str]]] = []
+        for status_key, label in UNSUPPORTED_SCAN_FIELDS + INITRAMFS_SCAN_FIELDS:
+            values = unique(string_list(booted.get(status_key)))
+            if values:
+                found.append((label, values))
+        if booted.get("regenerate-initramfs"):
+            # A boolean rather than a list, and still something reset undoes.
+            found.append(("A locally regenerated initramfs", []))
+        return found
+
+    def confirm_omitted_scan_customizations(self, omitted: Sequence[tuple[str, list[str]]]) -> bool:
+        # An explicit decision, defaulting to no. Reproducing an arbitrary
+        # local RPM is not something this tool can do, but continuing without
+        # one has to be a choice the user made rather than one made for them
+        # by a field nothing read.
+        self.gum.warn("Some of this system's customizations cannot be carried into an image.")
+        self.menu_section(
+            "Not Carried Over",
+            *[
+                # A truncated RPM name is not something anyone can act on,
+                # so these get the room a package name actually needs.
+                f"{label}: {self.preview_values(values, limit=3, item_limit=64)}" if values else label
+                for label, values in omitted
+            ],
+        )
+        self.menu_section(
+            "What This Means",
+            "The image builds without them, and they stay on this system until you remove them.",
+            "The switch instructions end with `sudo rpm-ostree reset`, which removes all of the above as well as the packages this image does reproduce.",
+            "Set up equivalents in the image later, or stop here and deal with these first.",
+        )
+        print()
+        return self.gum.confirm("Continue without these customizations?", default=False)
 
     def scanned_image_owner_repo(self, image_ref: str) -> tuple[str, str] | None:
         # ghcr.io/<owner>/<repo>[:tag|@digest] -> (owner, repo). Anything else,
@@ -3353,6 +3484,9 @@ class App:
                     "Before rebooting, run this first in the same session:",
                     "sudo rpm-ostree reset",
                     "Then run the bootc switch command above.",
+                    "",
+                    "reset removes every layered package, override and initramfs change",
+                    "on this system, not only the ones this image reproduces.",
                 ]
             )
         print(
@@ -4021,9 +4155,7 @@ class App:
         self.validate_token_list(self.config.copr_repos, COPR_REPO_RE, "COPR repository")
         self.validate_token_list(self.config.services, SERVICE_TOKEN_RE, "systemd service")
         if not is_valid_repo_name(self.config.repo_name):
-            raise CommandError(
-                "Repository name is invalid. It must start and end with a letter or number, and it cannot end with .git."
-            )
+            raise CommandError(f"Repository name is invalid. {REPO_NAME_RULE}")
 
     def state_payload(self) -> dict[str, object]:
         # The JSON state file is the canonical source of truth for future
@@ -4637,11 +4769,17 @@ class App:
         # validators are not enough on their own: PACKAGE_TOKEN_RE allows ":",
         # so a name like "epel:" would otherwise emit "- epel:", which YAML
         # parses as a mapping instead of the string BlueBuild's schema expects.
+        # The repo name is the same rule for a different reason: it is a
+        # perfectly good container name, but "null", "false" and "123" are
+        # YAML literals, so emitted bare they reach BlueBuild as null, a
+        # boolean and an integer against a schema that requires a string.
+        # base-image is not quoted because it is not user-supplied -- it is
+        # whichever curated URI match_base_image() accepted.
         base_image, image_version = self._split_image_ref(self.config.base_image_uri)
         lines = [
             "---",
             f"# yaml-language-server: $schema={BLUEBUILD_RECIPE_SCHEMA}",
-            f"name: {self.config.repo_name}",
+            f"name: {yaml_scalar(self.config.repo_name)}",
             f"description: {yaml_scalar(self.config.image_desc)}",
             "",
             f"base-image: {base_image}",
@@ -5056,6 +5194,16 @@ class App:
                 "```",
                 "",
                 "Do not reboot between `rpm-ostree reset` and `bootc switch`.",
+                "",
+                # With no category flags, reset clears overlays, overrides and
+                # initramfs customization alike -- not only the packages this
+                # image reproduces. Presenting it as the last step of carrying
+                # customizations over read as though it undid exactly what had
+                # been carried, and anything else on the system went with it.
+                "`rpm-ostree reset` removes **every** layered package, override and initramfs",
+                "customization on this system, not only the ones this image reproduces. Run",
+                "`rpm-ostree status` first and check for anything -- a local RPM, a replaced",
+                "base package -- that this image does not build in.",
             ]
 
         sections = [
