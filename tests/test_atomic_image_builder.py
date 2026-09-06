@@ -10329,6 +10329,94 @@ class BuilderTests(unittest.TestCase):
         result = app.patch_container_disk_workflow(workflow_text, default_branch="develop")
         self.assertIn("- develop", result)
 
+    def test_generated_justfile_spawn_vm_dispatches_by_disk_type(self) -> None:
+        # `just spawn-vm 1 qcow2` forwarded its own arguments to build-vm,
+        # which is an alias for build-qcow2 -- parameters target_image and tag.
+        # So "1" became the container image name and "qcow2" its tag, and the
+        # selected type chose nothing.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            justfile = (repo_dir / "Justfile").read_text()
+
+        self.assertIn("just rebuild-{{ type }}", justfile)
+        self.assertNotIn("just build-vm {{ rebuild }}", justfile)
+        # Every type spawn-vm can be given has a rebuild recipe to dispatch to.
+        for disk_type in ("qcow2", "raw", "iso"):
+            self.assertIn(f"\nrebuild-{disk_type} ", justfile)
+
+    def test_patch_spawn_vm_rebuild_is_idempotent(self) -> None:
+        app = self.make_app()
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / "Justfile").read_text()
+        once = app.patch_spawn_vm_rebuild(snapshot)
+        self.assertNotEqual(once, snapshot)
+        self.assertEqual(app.patch_spawn_vm_rebuild(once), once)
+
+    def test_patch_spawn_vm_rebuild_no_ops_on_an_unrecognised_recipe(self) -> None:
+        # Same convention as every patcher here: upstream's exact line or
+        # nothing. A repository that rewrote spawn-vm keeps its version.
+        app = self.make_app()
+        rewritten = 'spawn-vm rebuild="0":\n    just my-own-rebuild\n'
+        self.assertEqual(app.patch_spawn_vm_rebuild(rewritten), rewritten)
+
+    @unittest.skipUnless(shutil.which("just"), "requires just to exercise the recipe's parameter binding")
+    def test_spawn_vm_rebuild_invokes_the_matching_rebuild_recipe(self) -> None:
+        # `just --fmt --check` and a dry run both pass on the broken form, so
+        # the only thing that proves the binding is running it. The nested
+        # `just` and systemd-vmspawn are both stubbed: nothing is built and no
+        # VM is started.
+        for rebuild, disk_type, expected in (
+            ("1", "qcow2", "rebuild-qcow2"),
+            ("1", "raw", "rebuild-raw"),
+            ("1", "iso", "rebuild-iso"),
+        ):
+            with self.subTest(rebuild=rebuild, type=disk_type):
+                nested = self.run_spawn_vm(rebuild, disk_type)
+                self.assertEqual(nested, [f"just {expected}"])
+
+    @unittest.skipUnless(shutil.which("just"), "requires just to exercise the recipe's parameter binding")
+    def test_spawn_vm_without_rebuild_runs_nothing_first(self) -> None:
+        # The guard is an AND list under `set -e`. A failing first command
+        # there must not abort the recipe, or spawn-vm would never spawn.
+        self.assertEqual(self.run_spawn_vm("0", "qcow2"), [])
+
+    def run_spawn_vm(self, rebuild: str, disk_type: str) -> list[str]:
+        """Run the generated spawn-vm recipe; return the nested commands it ran.
+
+        The stubs go on PATH for the nested invocation only -- the parent
+        `just` is called by absolute path, so the recipe under test is the real
+        one.
+        """
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            fake_bin = repo_dir / "fake-bin"
+            fake_bin.mkdir()
+            log = repo_dir / "nested.log"
+            for name in ("just", "systemd-vmspawn"):
+                stub = fake_bin / name
+                stub.write_text(
+                    "#!/usr/bin/env bash\n"
+                    f'printf "{name} %s\\n" "$*" >> {log}\n'
+                    "exit 0\n"
+                )
+                stub.chmod(0o755)
+            subprocess.run(
+                [shutil.which("just"), "spawn-vm", rebuild, disk_type],
+                cwd=repo_dir,
+                env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            recorded = log.read_text().splitlines() if log.exists() else []
+        # systemd-vmspawn always runs; only the nested rebuild is in question.
+        return [line for line in recorded if line.startswith("just ")]
+
     # ── search_packages deselection-only path ──────────────────────────
 
     def test_search_packages_deselection_only_when_all_already_selected(self) -> None:
