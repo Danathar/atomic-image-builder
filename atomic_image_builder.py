@@ -107,6 +107,10 @@ OCI_PATH_COMPONENT_RE = re.compile(r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*")
 # A "./"-prefixed entry in a workflow path filter. The prefix is repeated in
 # the pattern rather than matched once so "././x" normalises in a single pass.
 RELATIVE_PATH_FILTER_RE = re.compile(r"^(\s*-\s+)(['\"]?)(?:\./)+(.*)$")
+# Matched on the action name rather than a pinned SHA, so the step is still
+# found after a pin refresh moves the SHA out from under this patcher.
+UPLOAD_ARTIFACT_ACTION = "actions/upload-artifact@"
+DISK_ARTIFACT_NAME = "${{ env.IMAGE_NAME }}-${{ matrix.disk-type }}"
 FROM_LINE_RE = re.compile(r"^(\s*FROM(?:\s+--platform=\S+)?\s+)(\S+)(.*)$", flags=re.IGNORECASE)
 INSTALLER_SWITCH_RE = re.compile(r"^(\s*bootc switch --mutate-in-place --transport registry )(\S+)(.*)$")
 # dnf5 prints this when -C (cache-only) is used and no repository metadata has
@@ -4530,6 +4534,7 @@ class App:
     def patch_container_disk_workflow(self, existing_text: str, *, default_branch: str = "main") -> str:
         lines = [pin_action_uses_line(line) for line in existing_text.splitlines()]
         text = self.patch_workflow_path_filters("\n".join(lines))
+        text = self.patch_disk_artifact_names(text)
         return self.patch_workflow_branch_filters(text, default_branch)
 
     def patch_workflow_path_filters(self, workflow_text: str) -> str:
@@ -4570,6 +4575,54 @@ class App:
                 filter_indent = None
             output.append(line)
         return ensure_trailing_newline("\n".join(output))
+
+
+    def patch_disk_artifact_names(self, workflow_text: str) -> str:
+        # The disk job is a matrix over disk-type, and its upload step names no
+        # artifact -- so both jobs upload as upload-artifact's default name,
+        # "artifact", with overwrite enabled. Whichever finishes second deletes
+        # the other format's successful output before uploading its own, and
+        # two jobs racing for one artifact name can also collide outright. A
+        # manually dispatched build with S3 upload off is meant to leave both
+        # downloadable formats in the completed run; it left one.
+        #
+        # matrix.disk-type alone is enough to make the name unique: artifacts
+        # are scoped to a workflow run, and the matrix is over disk types only
+        # -- the architecture is chosen once per run, not per job. The image
+        # name is prefixed because a downloaded archive should say what it is.
+        def patch_step(step_lines: list[str]) -> list[str]:
+            if not any(UPLOAD_ARTIFACT_ACTION in line for line in step_lines):
+                return step_lines
+            with_indent: int | None = None
+            # Always assigned before it is read: the `with:` line that sets
+            # with_indent sets this too, and nothing reads it until then.
+            insert_at = 0
+            for index, line in enumerate(step_lines):
+                stripped = line.strip()
+                indent = len(line) - len(line.lstrip())
+                if with_indent is None:
+                    if workflow_block_key(stripped) == "with":
+                        with_indent = indent
+                        insert_at = index + 1
+                    continue
+                if not stripped:
+                    # The bundled step ends on a whitespace-only line. Skipping
+                    # it rather than treating it as the end of the block keeps
+                    # the new key inside `with:` instead of after the blank.
+                    continue
+                if indent <= with_indent:
+                    break
+                if workflow_key(stripped) == "name":
+                    # Already named, by upstream or by an earlier run of this
+                    # patcher. Leave whatever is there alone.
+                    return step_lines
+                insert_at = index + 1
+            if with_indent is None:
+                return step_lines
+            named = f"{' ' * (with_indent + 2)}name: {DISK_ARTIFACT_NAME}"
+            return step_lines[:insert_at] + [named] + step_lines[insert_at:]
+
+        return ensure_trailing_newline("\n".join(patch_workflow_steps(workflow_text, patch_step)))
 
     def patch_workflow_branch_filters(self, workflow_text: str, default_branch: str) -> str:
         lines = workflow_text.splitlines()

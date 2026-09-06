@@ -11097,6 +11097,158 @@ class BuilderTests(unittest.TestCase):
             once = (repo_dir / ".github/workflows/build-disk.yml").read_text()
         self.assertEqual(app.patch_container_disk_workflow(once), once)
 
+    def test_patch_container_disk_workflow_names_the_uploaded_artifact(self) -> None:
+        # Without a name, upload-artifact uses its default, "artifact". The
+        # disk job is a matrix over disk-type, so both jobs uploaded under that
+        # one name with overwrite enabled: whichever finished second deleted
+        # the other format's successful output.
+        app = self.make_app()
+        workflow_text = (
+            "jobs:\n"
+            "  build:\n"
+            "    strategy:\n"
+            "      matrix:\n"
+            '        disk-type: ["qcow2", "anaconda-iso"]\n'
+            "    steps:\n"
+            "      - name: Upload disk images and Checksum to Job Artifacts\n"
+            "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
+            "        with:\n"
+            "          path: ${{ steps.build.outputs.output-directory }}\n"
+            "          overwrite: true\n"
+        )
+        result = app.patch_disk_artifact_names(workflow_text)
+        self.assertIn("          name: ${{ env.IMAGE_NAME }}-${{ matrix.disk-type }}\n", result)
+        # Inside `with:`, not after it, and the existing inputs are untouched.
+        self.assertIn("          overwrite: true\n          name: ", result)
+        self.assertIn("          path: ${{ steps.build.outputs.output-directory }}\n", result)
+
+    def test_patch_disk_artifact_names_keeps_an_existing_name(self) -> None:
+        # A managed repository is patched in place, so a name the user chose
+        # has to survive the next update.
+        app = self.make_app()
+        workflow_text = (
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - name: Upload\n"
+            "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
+            "        with:\n"
+            "          name: my-own-name\n"
+            "          path: output\n"
+        )
+        self.assertEqual(app.patch_disk_artifact_names(workflow_text), workflow_text)
+
+    def test_patch_disk_artifact_names_ignores_other_steps(self) -> None:
+        # The step's own "- name:" is not the artifact name, and a step that
+        # does not upload must not gain one.
+        app = self.make_app()
+        workflow_text = (
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - name: Checkout\n"
+            "        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6\n"
+            "        with:\n"
+            "          fetch-depth: 0\n"
+        )
+        self.assertEqual(app.patch_disk_artifact_names(workflow_text), workflow_text)
+
+    def test_patch_disk_artifact_names_stops_at_the_end_of_the_with_block(self) -> None:
+        # A key after `with:` in the same step ends the inputs. Writing the
+        # artifact name past it would put a `with:` input where it does not
+        # belong -- and worse, indent it under whatever key came next.
+        app = self.make_app()
+        workflow_text = (
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - name: Upload\n"
+            "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
+            "        with:\n"
+            "          path: output\n"
+            "        continue-on-error: true\n"
+        )
+        self.assertIn(
+            "          path: output\n          name: ${{ env.IMAGE_NAME }}-${{ matrix.disk-type }}\n        continue-on-error: true\n",
+            app.patch_disk_artifact_names(workflow_text),
+        )
+
+    def test_patch_disk_artifact_names_leaves_a_step_with_no_inputs_alone(self) -> None:
+        # No `with:` block to add an input to. Guessing where one should go is
+        # exactly the silent-corruption failure the patchers here avoid.
+        app = self.make_app()
+        workflow_text = (
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - name: Upload\n"
+            "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
+        )
+        self.assertEqual(app.patch_disk_artifact_names(workflow_text), workflow_text)
+
+    def test_patch_disk_artifact_names_is_idempotent(self) -> None:
+        app = self.make_app()
+        workflow_text = (
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - name: Upload\n"
+            "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
+            "        with:\n"
+            "          path: output\n"
+        )
+        once = app.patch_disk_artifact_names(workflow_text)
+        self.assertEqual(app.patch_disk_artifact_names(once), once)
+
+    def test_generated_disk_workflow_gives_each_matrix_job_its_own_artifact(self) -> None:
+        # Expanded over the real matrix from the real generated project: the
+        # property that matters is that no two jobs in one run resolve to the
+        # same artifact name, not that any particular string appears.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            workflow = (repo_dir / ".github/workflows/build-disk.yml").read_text()
+
+        disk_types = self.workflow_matrix_disk_types(workflow)
+        self.assertGreater(len(disk_types), 1, workflow)
+        name = self.upload_artifact_input(workflow, "name")
+        self.assertIsNotNone(name, workflow)
+        resolved = {name.replace("${{ matrix.disk-type }}", disk_type) for disk_type in disk_types}
+        self.assertEqual(len(resolved), len(disk_types), resolved)
+        # Overwrite stays on -- with unique names it makes a re-run replace its
+        # own artifact, which is what it is for.
+        self.assertEqual(self.upload_artifact_input(workflow, "overwrite"), "true")
+
+    @staticmethod
+    def workflow_matrix_disk_types(workflow: str) -> list[str]:
+        for line in workflow.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("disk-type:"):
+                inline = stripped.split(":", 1)[1].strip()
+                return [item.strip().strip("\"'") for item in inline.strip("[]").split(",")]
+        return []
+
+    @staticmethod
+    def upload_artifact_input(workflow: str, key: str) -> str | None:
+        in_step = False
+        in_with = False
+        for line in workflow.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("- name:"):
+                in_step = False
+                in_with = False
+            if "actions/upload-artifact@" in stripped:
+                in_step = True
+                continue
+            if in_step and stripped == "with:":
+                in_with = True
+                continue
+            if in_with and stripped.startswith(f"{key}:"):
+                return stripped.split(":", 1)[1].strip()
+        return None
+
     # ── search_packages deselection-only path ──────────────────────────
 
     def test_search_packages_deselection_only_when_all_already_selected(self) -> None:
