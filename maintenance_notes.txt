@@ -182,6 +182,18 @@ repositories would require an explicit, targeted patcher; do not turn a future
 snapshot refresh into an automatic runner migration that overwrites a user's
 custom runner choice.
 
+remove-unwanted-software Pin Tracks a Branch, Not a Tag
+-------------------------------------------------------
+Since the 1dd3b65 snapshot refresh, upstream image-template pins
+ublue-os/remove-unwanted-software at 695eb75b -- its master HEAD (the merge of
+the v10 work), for which no v10 tag exists yet. The ACTION_PINS entry follows
+it with the label "master", so the weekly action-pin freshness audit will
+advise when that branch moves, the same way the osbuild/bootc-image-builder
+"main"-labelled pins already behave. The older ACTION_REF_PINS entries that
+label the same SHA "v8" are deliberate history (upstream once moved the v8 tag
+backwards; see the comment in maintenance_audit.py's describe_pin_drift) and
+must not be "corrected" to match.
+
 Rechunk Recipe ARG_MAX Fix (CHUNKAH_CONFIG_STR)
 ------------------------------------------------
 Older managed repositories may still have a `rechunk` recipe that does:

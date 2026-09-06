@@ -110,7 +110,7 @@ DNF5_MISSING_MARKERS = (
 ACTION_PINS: dict[str, tuple[str, str]] = {
     "actions/checkout": ("3d3c42e5aac5ba805825da76410c181273ba90b1", "v7"),
     "actions/setup-python": ("5fda3b95a4ea91299a34e894583c3862153e4b97", "v7"),
-    "ublue-os/remove-unwanted-software": ("cc0becac701cf642c8f0a6613bbdaf5dc36b259e", "v9"),
+    "ublue-os/remove-unwanted-software": ("695eb75bc387dbcd9685a8e72d23439d8686cba6", "master"),
     "docker/metadata-action": ("dc802804100637a589fabce1cb79ff13a1411302", "v6.2.0"),
     "redhat-actions/buildah-build": ("719e3c40d8af9790c23eca13f7daa339f2867034", "v3.1.0"),
     "docker/login-action": ("dbcb813823bdd20940b903addbd779551569679f", "v4.6.0"),
