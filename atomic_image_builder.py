@@ -104,6 +104,13 @@ SERVICE_TOKEN_RE = re.compile(r"^[A-Za-z0-9@._:+-]+$")
 # as an invalid reference, so the wizard would create a repo and signing key
 # for an image that nothing can push or pull.
 OCI_PATH_COMPONENT_RE = re.compile(r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*")
+# A "./"-prefixed entry in a workflow path filter. The prefix is repeated in
+# the pattern rather than matched once so "././x" normalises in a single pass.
+RELATIVE_PATH_FILTER_RE = re.compile(r"^(\s*-\s+)(['\"]?)(?:\./)+(.*)$")
+# Matched on the action name rather than a pinned SHA, so the step is still
+# found after a pin refresh moves the SHA out from under this patcher.
+UPLOAD_ARTIFACT_ACTION = "actions/upload-artifact@"
+DISK_ARTIFACT_NAME = "${{ env.IMAGE_NAME }}-${{ matrix.disk-type }}"
 # The disk workflow's runner ternary. The amd64 label is captured rather than
 # written out, so a snapshot refresh that bumps the runner image is followed
 # automatically instead of being pinned to whatever was current when this was
@@ -489,6 +496,21 @@ def format_daily_rebuild_note(
 
 GHCR_TOKEN_URL = "https://ghcr.io/token?service=ghcr.io&scope=repository:{path}:pull"
 GHCR_TAGS_URL = "https://ghcr.io/v2/{path}/tags/list"
+# A newly published GHCR package is private, whatever the repository that
+# published it is set to: package visibility is a separate setting that does
+# not inherit from repository access. `gh repo create --public` therefore does
+# not make the first build's image anonymously pullable, and `bootc switch` on
+# a host with no GHCR credentials cannot read it. There is no REST endpoint for
+# changing package visibility, so this can only be pointed at, which is also
+# what keeps it an explicit decision by the person who owns the package.
+BOOTC_REGISTRY_DOCS_URL = "https://bootc.dev/bootc/registries-and-offline.html"
+# ghcr_package_exists() makes two sequential requests, so its default timeout
+# is really twice that in the worst case. That is fine before creating a repo,
+# where the answer gates an irreversible step. The build-status screen is
+# somewhere people come back to repeatedly and the answer there is advisory --
+# an unreachable network reports the same thing a private package does -- so
+# it waits a good deal less.
+GHCR_ADVISORY_TIMEOUT = 2.5
 
 
 def ghcr_package_exists(owner: str, name: str, *, timeout: float = 6.0) -> bool:
@@ -526,6 +548,14 @@ def ghcr_package_exists(owner: str, name: str, *, timeout: float = 6.0) -> bool:
         # response truncated by GHCR or a proxy would otherwise escape an
         # advisory check and stop the user creating a repo at all.
         return False
+
+
+def ghcr_package_page_url(owner: str, repo: str) -> str:
+    # The repository-scoped package page, because "Package settings" is
+    # reachable from it for a user account and an organization alike. The
+    # /users/<owner>/packages/... settings path is not: it 404s for an org,
+    # and the repo picker can reach repositories in one.
+    return f"https://github.com/{owner}/{repo}/pkgs/container/{repo.lower()}"
 
 
 def open_url_in_browser(url: str) -> bool:
@@ -3475,7 +3505,11 @@ class App:
             "",
             "GitHub Actions is building your image now.",
             self.scheduled_rebuild_note(),
-            "After the first build finishes, switch with:",
+            "",
+            "The first build publishes a private package. Make it public before switching:",
+            ghcr_package_page_url(owner, repo),
+            "",
+            "Then switch with:",
             f"sudo bootc switch {image_uri}",
             f"Track the build: https://github.com/{owner}/{repo}/actions",
         ]
@@ -3746,6 +3780,20 @@ class App:
         latest_succeeded = any(
             isinstance(item, dict) and item.get("conclusion") == "success" for item in runs
         )
+        # A green build is not a switchable image. The package it published is
+        # private by default, and this probe is the same anonymous pull a host
+        # with no credentials would make -- so it answers the question that
+        # actually decides whether the command below works. It clears itself:
+        # once the package is public the check passes and this stops appearing.
+        if latest_succeeded and not ghcr_package_exists(owner, repo, timeout=GHCR_ADVISORY_TIMEOUT):
+            print()
+            self.menu_section(
+                "This Image Is Not Readable Yet",
+                f"I could not pull ghcr.io/{owner.lower()}/{repo.lower()} anonymously.",
+                "A newly published package is private, whatever the repository is set to, so a switch from a machine without registry credentials will fail.",
+                f"Make it public: {ghcr_package_page_url(owner, repo)} -> Package settings -> Change visibility",
+                f"Or give the machine GHCR pull credentials for root instead: {BOOTC_REGISTRY_DOCS_URL}",
+            )
         if latest_succeeded and self.repo_carried_scan_customizations(owner, repo):
             print()
             self.menu_section(
@@ -4497,8 +4545,98 @@ class App:
 
     def patch_container_disk_workflow(self, existing_text: str, *, default_branch: str = "main") -> str:
         lines = [pin_action_uses_line(line) for line in existing_text.splitlines()]
-        text = self.patch_disk_workflow_platform("\n".join(lines))
+        text = self.patch_workflow_path_filters("\n".join(lines))
+        text = self.patch_disk_artifact_names(text)
+        text = self.patch_disk_workflow_platform(text)
         return self.patch_workflow_branch_filters(text, default_branch)
+
+    def patch_workflow_path_filters(self, workflow_text: str) -> str:
+        # GitHub matches a path filter against the complete path from the
+        # repository root and rejects "." and ".." in a glob outright, so the
+        # bundled workflow's './disk_config/disk.toml' matches nothing: the
+        # pull-request validation those three filters configure never runs on
+        # a change to the files they name. actionlint reports each as
+        # "'.' and '..' are not allowed in glob path".
+        #
+        # Scoped twice over, because a relative path is only wrong in this one
+        # place. './disk_config/iso.toml' appears again further down as an
+        # input to the builder action, where it is an ordinary relative path
+        # and correct as written -- so the rewrite is confined to entries
+        # under a paths: key, and to a paths: key inside the `on:` block. An
+        # action input happens to be able to be called "paths" too, and its
+        # values are not GitHub filter patterns.
+        lines = workflow_text.splitlines()
+        output: list[str] = []
+        in_triggers = False
+        filter_indent: int | None = None
+        for line in lines:
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            if stripped and indent == 0:
+                in_triggers = workflow_block_key(stripped) == "on"
+                filter_indent = None
+                output.append(line)
+                continue
+            if in_triggers and workflow_block_key(stripped) in {"paths", "paths-ignore"}:
+                filter_indent = indent
+                output.append(line)
+                continue
+            if filter_indent is not None:
+                if stripped.startswith("- ") and indent > filter_indent:
+                    output.append(RELATIVE_PATH_FILTER_RE.sub(r"\1\2\3", line))
+                    continue
+                filter_indent = None
+            output.append(line)
+        return ensure_trailing_newline("\n".join(output))
+
+
+    def patch_disk_artifact_names(self, workflow_text: str) -> str:
+        # The disk job is a matrix over disk-type, and its upload step names no
+        # artifact -- so both jobs upload as upload-artifact's default name,
+        # "artifact", with overwrite enabled. Whichever finishes second deletes
+        # the other format's successful output before uploading its own, and
+        # two jobs racing for one artifact name can also collide outright. A
+        # manually dispatched build with S3 upload off is meant to leave both
+        # downloadable formats in the completed run; it left one.
+        #
+        # matrix.disk-type alone is enough to make the name unique: artifacts
+        # are scoped to a workflow run, and the matrix is over disk types only
+        # -- the architecture is chosen once per run, not per job. The image
+        # name is prefixed because a downloaded archive should say what it is.
+        def patch_step(step_lines: list[str]) -> list[str]:
+            if not any(UPLOAD_ARTIFACT_ACTION in line for line in step_lines):
+                return step_lines
+            with_indent: int | None = None
+            # Always assigned before it is read: the `with:` line that sets
+            # with_indent sets this too, and nothing reads it until then.
+            insert_at = 0
+            for index, line in enumerate(step_lines):
+                stripped = line.strip()
+                indent = len(line) - len(line.lstrip())
+                if with_indent is None:
+                    if workflow_block_key(stripped) == "with":
+                        with_indent = indent
+                        insert_at = index + 1
+                    continue
+                if not stripped:
+                    # The bundled step ends on a whitespace-only line. Skipping
+                    # it rather than treating it as the end of the block keeps
+                    # the new key inside `with:` instead of after the blank.
+                    continue
+                if indent <= with_indent:
+                    break
+                if workflow_key(stripped) == "name":
+                    # Already named, by upstream or by an earlier run of this
+                    # patcher. Leave whatever is there alone.
+                    return step_lines
+                insert_at = index + 1
+            if with_indent is None:
+                return step_lines
+            named = f"{' ' * (with_indent + 2)}name: {DISK_ARTIFACT_NAME}"
+            return step_lines[:insert_at] + [named] + step_lines[insert_at:]
+
+        return ensure_trailing_newline("\n".join(patch_workflow_steps(workflow_text, patch_step)))
+
 
     def patch_disk_workflow_platform(self, workflow_text: str) -> str:
         # The image workflow builds one native x86_64 image: a single
@@ -5235,7 +5373,34 @@ class App:
         copr_repos = "\n".join(f"- `{repo}`" for repo in self.config.copr_repos) or "- None."
         services = "\n".join(f"- `{service}`" for service in self.config.services) or "- None."
         removed_packages = "\n".join(f"- `{pkg}`" for pkg in self.config.removed_packages) or "- None."
+        # A public repository does not make its packages public: visibility is
+        # a separate setting on the package that does not inherit repository
+        # access. Left at its default, the first build publishes an image that
+        # `bootc switch` cannot read on a host with no GHCR credentials -- so
+        # this belongs before the switch command, not as a troubleshooting
+        # note after it.
+        package_access_lines = [
+            "## Before The First Switch",
+            "",
+            "The first build publishes",
+            "",
+            f"    {image_ref}",
+            "",
+            "as a **private** package. That is GitHub's default for a newly published package,",
+            "and it does not change with the repository's own visibility, so `bootc switch` on a",
+            "machine with no registry credentials cannot read it yet.",
+            "",
+            "Make it readable once, from the package's own page:",
+            "",
+            f"1. Open <{ghcr_package_page_url(owner, self.config.repo_name)}>",
+            "2. **Package settings** -> **Change visibility** -> **Public**",
+            "",
+            "Keeping it private is fine too, but then the machine needs GHCR pull credentials for",
+            f"root before the switch below will work. See <{BOOTC_REGISTRY_DOCS_URL}>.",
+            "",
+        ]
         using_image_lines = [
+            *package_access_lines,
             "## Using The Image",
             "",
             "After the first successful GitHub Actions build finishes, switch to it with:",
@@ -5247,6 +5412,7 @@ class App:
         ]
         if self.carried_scan_customizations():
             using_image_lines = [
+                *package_access_lines,
                 "## Using The Image",
                 "",
                 "This repo carries over package changes scanned from your current system.",

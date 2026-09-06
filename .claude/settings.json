@@ -9,7 +9,21 @@
       "Bash(python3 maintenance_audit.py --skip-upstream:*)",
       "Bash(git status:*)",
       "Bash(git diff:*)",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(tests/test_contrib_aib.sh)",
+      "Bash(tests/test_entrypoint.sh)",
+      "Bash(actionlint:*)",
+      "Bash(python3 format_markdown_tables.py --check)",
+      "Bash(just --fmt --check:*)",
+      "Bash(skopeo inspect:*)",
+      "Bash(podman ps:*)",
+      "Bash(podman logs:*)",
+      "Bash(podman inspect:*)",
+      "Bash(podman images:*)",
+      "Bash(podman image exists:*)",
+      "Bash(gh label list:*)",
+      "Bash(gh search issues:*)",
+      "Bash(gh search prs:*)"
     ],
     "ask": [
       "Bash(git push:*)",
