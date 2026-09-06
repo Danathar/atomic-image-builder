@@ -4635,6 +4635,25 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("https://github.com/Example/my-image/pkgs/container/my-image", hints)
         self.assertIn(atomic_image_builder.BOOTC_REGISTRY_DOCS_URL, hints)
 
+    def test_build_status_probe_does_not_block_the_screen(self) -> None:
+        # ghcr_package_exists makes two sequential requests, so the default
+        # six-second timeout is twelve in the worst case. That is fine before
+        # creating a repo, where the answer gates an irreversible step; this
+        # screen is one people come back to and the answer is advisory.
+        app = self.make_app()
+        app.gum = GumStub()
+        runs = json.dumps([{"conclusion": "success", "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.ghcr_package_exists", return_value=True) as probe:
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+                with patch.object(app, "repo_carried_scan_customizations", return_value=False):
+                    with redirect_stdout(io.StringIO()):
+                        app.render_build_status("Example", "my-image")
+        self.assertEqual(
+            probe.call_args.kwargs.get("timeout"),
+            atomic_image_builder.GHCR_ADVISORY_TIMEOUT,
+        )
+        self.assertLess(atomic_image_builder.GHCR_ADVISORY_TIMEOUT, 6.0)
+
     def test_build_status_stops_saying_it_once_the_package_is_public(self) -> None:
         # Self-clearing: the check that reports the problem is the one that
         # confirms it is fixed, so nobody has to dismiss a stale warning.

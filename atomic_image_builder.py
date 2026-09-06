@@ -485,6 +485,13 @@ GHCR_TAGS_URL = "https://ghcr.io/v2/{path}/tags/list"
 # changing package visibility, so this can only be pointed at, which is also
 # what keeps it an explicit decision by the person who owns the package.
 BOOTC_REGISTRY_DOCS_URL = "https://bootc.dev/bootc/registries-and-offline.html"
+# ghcr_package_exists() makes two sequential requests, so its default timeout
+# is really twice that in the worst case. That is fine before creating a repo,
+# where the answer gates an irreversible step. The build-status screen is
+# somewhere people come back to repeatedly and the answer there is advisory --
+# an unreachable network reports the same thing a private package does -- so
+# it waits a good deal less.
+GHCR_ADVISORY_TIMEOUT = 2.5
 
 
 def ghcr_package_exists(owner: str, name: str, *, timeout: float = 6.0) -> bool:
@@ -3759,7 +3766,7 @@ class App:
         # with no credentials would make -- so it answers the question that
         # actually decides whether the command below works. It clears itself:
         # once the package is public the check passes and this stops appearing.
-        if latest_succeeded and not ghcr_package_exists(owner, repo):
+        if latest_succeeded and not ghcr_package_exists(owner, repo, timeout=GHCR_ADVISORY_TIMEOUT):
             print()
             self.menu_section(
                 "This Image Is Not Readable Yet",
