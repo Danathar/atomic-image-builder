@@ -370,7 +370,15 @@ test_custom_image_gets_no_credentials() {
     # unverified image leaks the same account by another route.
     assert_not_contains "$args" "aib-gh:/root/.config/gh" "custom image: gh config volume not mounted"
     assert_contains "$args" "run" "custom image: still runs, just logged out"
+    assert_contains "$out" "localhost/my-own-build:dev" "custom image: names the image it declined to trust"
+    assert_contains "$out" "Unset AIB_IMAGE" "custom image: leads with how to undo the likely mistake"
+    assert_contains "$out" "no GitHub login" "custom image: says plainly what was withheld"
     assert_contains "$out" "AIB_ALLOW_UNVERIFIED_AUTH=1" "custom image: names the opt-in"
+    # Order, not just presence. A reader who reaches this message because they
+    # pasted something a stranger gave them has to meet the way out before the
+    # way through; a search that lands on the override first is how this
+    # becomes cargo-culted advice.
+    assert_contains "${out%%AIB_ALLOW_UNVERIFIED_AUTH*}" "Unset AIB_IMAGE" "custom image: the fix is stated before the override"
     cleanup_stubs
 }
 
@@ -378,13 +386,32 @@ test_skip_verify_gets_no_credentials() {
     setup_stubs
     install_gh_stub
     rm -f "$stub_dir/cosign"
-    local args forwarded
-    PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN AIB_SKIP_VERIFY=1 "$aib" >/dev/null 2>&1
+    local out args forwarded
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN AIB_SKIP_VERIFY=1 "$aib" 2>&1)"
     args="$(cat "$podman_log")"
     forwarded="$(cat "$podman_env_log")"
     assert_not_contains "$args" "-e GH_TOKEN" "skip verify: GH_TOKEN not forwarded"
     assert_eq "$forwarded" "<unset>" "skip verify: no token in podman's environment"
     assert_not_contains "$args" "aib-gh:/root/.config/gh" "skip verify: gh config volume not mounted"
+    # A different cause needs a different remedy. Someone who set
+    # AIB_SKIP_VERIFY chose to; telling them to unset AIB_IMAGE, which they
+    # never set, sends them looking for a variable that is not there.
+    #
+    # Keyed on "no GitHub login", not on "AIB_SKIP_VERIFY": the warning printed
+    # further up already names that variable, so asserting it here would pass
+    # whether or not this message exists at all. A mutation collapsing both
+    # messages into one generic line was caught by the custom-image scenario
+    # and not by this one until the string narrowed.
+    assert_contains "$out" "no GitHub login" "skip verify: says plainly what was withheld"
+    assert_not_contains "$out" "Unset AIB_IMAGE" "skip verify: does not blame a variable that was never set"
+    # Said once, not twice. The warning above already tells the reader to unset
+    # AIB_SKIP_VERIFY; repeating it in the credential message put the same
+    # instruction on screen twice, which reads as two separate problems.
+    assert_eq "$(printf '%s' "$out" | grep -c "Unset AIB_SKIP_VERIFY")" "1" "skip verify: the remedy is stated once"
+    # Four lines total on this path, two of them the warning above. This is the
+    # only security UI a reader who does not open the docs will see, and a
+    # block long enough to skim is one that does not get read.
+    assert_eq "$(printf '%s\n' "$out" | wc -l)" "4" "skip verify: stays short enough to read"
     cleanup_stubs
 }
 
