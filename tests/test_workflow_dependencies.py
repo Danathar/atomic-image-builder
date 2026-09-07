@@ -96,6 +96,7 @@ def _downloads(path: Path) -> dict[str, dict[str, str]]:
         dest = match.group("dest").strip('"\'')
         found[url.group("repo")] = {
             "dest": dest,
+            "url": match.group("url"),
             "tag": url.group("tag"),
             "digest": verified.get(dest, ""),
         }
@@ -114,6 +115,27 @@ class ReleaseBinaryPinTests(unittest.TestCase):
     same shape as #112: a pinned dependency is not pinned if only some of it
     is.
     """
+
+    def test_every_release_url_is_in_a_recognised_download_form(self) -> None:
+        # Everything below keys on `curl ... -o <dest> <url>`. Written any
+        # other way -- the URL before the flag, or --output instead of -o --
+        # a download becomes invisible to the parser and passes by never
+        # being seen, which is precisely the failure this module exists to
+        # prevent. So the parser has to account for every release URL in the
+        # file and say so when it cannot, rather than quietly finding fewer
+        # downloads than there are.
+        unparsed = []
+        for path in _workflows():
+            parsed = {entry["url"] for entry in _downloads(path).values()}
+            for match in _RELEASE_URL.finditer(_joined(path)):
+                if match.group(0) not in parsed:
+                    unparsed.append(f"{path.name}: {match.group(0)}")
+        self.assertEqual(
+            unparsed,
+            [],
+            "release download not written as `curl ... -o <dest> <url>`, so the "
+            "checks in this class cannot see it",
+        )
 
     def test_every_release_download_is_checksum_verified(self) -> None:
         # Tied by destination path rather than by proximity, because the
@@ -149,7 +171,7 @@ class ReleaseBinaryPinTests(unittest.TestCase):
                 f"{repo} {entry['tag']}"
                 for path in _workflows()
                 for repo, entry in _downloads(path).items()
-                if entry["tag"].lstrip("v") not in contributing
+                if entry["tag"].removeprefix("v") not in contributing
             }
         )
         self.assertEqual(missing, [], "release versions absent from CONTRIBUTING.md")
