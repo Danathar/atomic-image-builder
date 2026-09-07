@@ -455,11 +455,16 @@ class BuilderTests(unittest.TestCase):
 
         patched = app.patch_container_workflow(workflow)
 
-        self.assertEqual(patched.count("env.COSIGN_PRIVATE_KEY != ''"), 2)
+        self.assertEqual(patched.count("env.SIGNING_ENABLED == 'true'"), 2)
         self.assertIn(ACTION_PINS["sigstore/cosign-installer"][0], patched)
 
     def test_patch_container_workflow_injects_job_env_even_when_step_env_matches(self) -> None:
-        """Step-level COSIGN_PRIVATE_KEY must not prevent job-level injection."""
+        """A step-level entry must not prevent the job-level one being added.
+
+        Six spaces is the job-level indent; matching a bare name would find
+        the signing step's own entry at eight and conclude the job already
+        had one.
+        """
         app = self.make_app()
         app.config.signing_enabled = True
         # This mirrors the template workflow: COSIGN_PRIVATE_KEY exists at the
@@ -500,8 +505,12 @@ class BuilderTests(unittest.TestCase):
                 job_env_lines.append(line.strip())
             elif in_job_env:
                 break
-        self.assertIn("COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", job_env_lines)
-        self.assertIn("COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}", job_env_lines)
+        # The boolean, and nothing that carries key material. A job-level
+        # entry is in the environment of every step in the job, third-party
+        # actions included, so what goes here is the whole point (#255).
+        self.assertIn("SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}", job_env_lines)
+        self.assertNotIn("COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", job_env_lines)
+        self.assertNotIn("COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}", job_env_lines)
 
     def test_patch_container_workflow_handles_inline_paths_ignore(self) -> None:
         app = self.make_app()
@@ -737,6 +746,150 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("--new-bundle-format=false", patched)
         self.assertNotIn("cosign sign -y \\", patched)
 
+    @staticmethod
+    def job_env_entries(workflow: str) -> list[str]:
+        """Job-level env entries only, compared by whole line.
+
+        Job env sits at six spaces and a step's at eight or ten, and
+        "      KEY:" is a substring of "          KEY:" -- so a containment
+        check for the job-level spelling is satisfied by a step-level entry.
+        An assertion meant to forbid a secret at job level would pass while
+        the secret sat there.
+        """
+        entries: list[str] = []
+        inside = False
+        for line in workflow.splitlines():
+            if line == "    env:":
+                inside = True
+                continue
+            if not inside:
+                continue
+            if line.startswith("      ") and ":" in line:
+                entries.append(line.strip())
+            else:
+                break
+        return entries
+
+    def test_job_env_never_carries_signing_key_material(self) -> None:
+        # Job-level env is set for every step in the job, `uses:` steps
+        # included, so anything here is handed to every third-party action the
+        # job runs -- checkout, remove-unwanted-software, setup-just,
+        # login-action, cosign-installer. The guard only needs to know whether
+        # a key exists, and `secrets` is available in job-level env even
+        # though it is not available in a step-level `if:`, so the job carries
+        # a boolean (#255).
+        app = self.make_app()
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        result = app.patch_container_workflow(snapshot)
+        self.assertEqual(
+            self.job_env_entries(result),
+            ["SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}"],
+        )
+        self.assertNotIn("secrets.SIGNING_SECRET }}", "\n".join(self.job_env_entries(result)))
+
+    def test_signing_step_carries_its_own_password(self) -> None:
+        # The generated key is password-protected, and the signing step used
+        # to read that password from the job environment. Once the job stops
+        # carrying it, the step has to -- otherwise cosign cannot decrypt the
+        # key, and the failure appears on someone else's first push rather
+        # than here.
+        app = self.make_app()
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        result = app.patch_container_workflow(snapshot)
+        self.assertIn("          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", result)
+        self.assertIn("          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}", result)
+        self.assertEqual(result.count("COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}"), 1)
+
+    def test_existing_repository_migrates_off_the_job_level_key(self) -> None:
+        # Managed repositories are patched in place, so this is the shape on
+        # disk in every repo generated before the fix. The stale clause is the
+        # trap: left in place it tests a job-level variable that no longer
+        # exists, so it is false forever and signing stops *silently* while
+        # the workflow still reads as though it signs.
+        app = self.make_app()
+        legacy = textwrap.dedent(
+            """\
+            name: Build container image
+            jobs:
+              build_push:
+                env:
+                  COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+                  COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+                steps:
+                  - name: Install Cosign
+                    uses: sigstore/cosign-installer@v3
+                    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.COSIGN_PRIVATE_KEY != ''
+                  - name: Sign container image
+                    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.COSIGN_PRIVATE_KEY != ''
+                    env:
+                      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+                    run: cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/example/test:latest
+            """
+        )
+        migrated = app.patch_container_workflow(legacy)
+        self.assertEqual(
+            self.job_env_entries(migrated),
+            ["SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}"],
+        )
+        self.assertNotIn("env.COSIGN_PRIVATE_KEY != ''", migrated)
+        self.assertEqual(migrated.count("env.SIGNING_ENABLED == 'true'"), 2)
+        self.assertIn(
+            "          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}",
+            migrated.splitlines(),
+        )
+        self.assertEqual(app.patch_container_workflow(migrated), migrated)
+
+    def test_strip_job_env_entries_leaves_step_level_entries_alone(self) -> None:
+        # Six spaces is the job level and eight or more is a step's. Matching
+        # the bare name would strip the signing step's own entry too, which is
+        # the one that has to survive.
+        workflow = (
+            "jobs:\n"
+            "  build:\n"
+            "    env:\n"
+            "      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}\n"
+            "      KEEP: yes\n"
+            "    steps:\n"
+            "      - name: Sign\n"
+            "        env:\n"
+            "          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}\n"
+        )
+        lines = atomic_image_builder.strip_job_env_entries(workflow, ["COSIGN_PRIVATE_KEY"]).splitlines()
+        # By line, not by substring: "      KEY:" is contained in
+        # "          KEY:", so a substring check here would pass on output
+        # that still had the job-level entry.
+        self.assertNotIn("      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", lines)
+        self.assertIn("          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", lines)
+        self.assertIn("      KEEP: yes", lines)
+
+    def test_both_workflow_paths_agree_on_the_signing_guard(self) -> None:
+        """The patched and from-scratch workflows must protect the key alike.
+
+        Two code paths produce a build workflow: patch_container_workflow()
+        adapts the bundled snapshot, and generate_container_workflow() writes
+        one from nothing when a managed repository has lost its file. Fixing
+        only the first is exactly what happened while writing #255 -- and the
+        path left behind is the one that runs for repositories where something
+        has already gone wrong.
+        """
+        app = self.make_app()
+        app.config.signing_enabled = True
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        for label, workflow in (
+            ("patched", app.patch_container_workflow(snapshot)),
+            ("from-scratch", app.generate_container_workflow()),
+        ):
+            with self.subTest(path=label):
+                self.assertEqual(
+                    self.job_env_entries(workflow),
+                    ["SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}"],
+                )
+                self.assertNotIn("env.COSIGN_PRIVATE_KEY != ''", workflow)
+                self.assertEqual(workflow.count("env.SIGNING_ENABLED == 'true'"), 2)
+                # The step that signs needs both, or cosign cannot decrypt.
+                self.assertIn("          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", workflow.splitlines())
+                self.assertIn("          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}", workflow.splitlines())
+
     def test_patch_container_workflow_golden(self) -> None:
         expected_path = Path(__file__).parent / "fixtures/workflows/container_expected.yml"
         input_path = Path(__file__).parent / "fixtures/workflows/container_input.yml"
@@ -764,15 +917,23 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("  push:\n    branches:\n      - master", result)
 
         self.assertEqual(
-            result.count("&& env.COSIGN_PRIVATE_KEY != ''"),
+            result.count("&& env.SIGNING_ENABLED == 'true'"),
             2,
             "expected both the cosign-installer and cosign-sign steps to gain the guard",
         )
         self.assertIn(
-            "    env:\n      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}\n"
-            "      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}\n    steps:\n",
+            "    env:\n      SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}\n    steps:\n",
             result,
         )
+        # The guard needs to know whether a key exists, not what it is. Job
+        # env reaches every step in the job, so a key here is a key handed to
+        # every third-party action the job runs (#255).
+        job_env = self.job_env_entries(result)
+        self.assertEqual(job_env, ["SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}"], job_env)
+        # ...and the signing step carries both itself, or cosign cannot
+        # decrypt the key it is given.
+        self.assertIn("          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", result)
+        self.assertIn("          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}", result)
 
         self.assertIn(f"actions/checkout@{ACTION_PINS['actions/checkout'][0]}", result)
         self.assertIn(f"docker/login-action@{ACTION_PINS['docker/login-action'][0]}", result)
@@ -7724,9 +7885,12 @@ class BuilderTests(unittest.TestCase):
             """
         )
         patched = app.patch_container_workflow(workflow)
-        self.assertIn("      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", patched)
-        self.assertIn("      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}", patched)
-        self.assertIn("      FOO: bar", patched)
+        job_env = self.job_env_entries(patched)
+        self.assertIn("SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}", job_env)
+        self.assertIn("FOO: bar", job_env)
+        # An unrelated job-level entry survives; key material never appears.
+        self.assertNotIn("COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", job_env)
+        self.assertNotIn("COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}", job_env)
 
     def test_generate_build_sh_cleans_dnf_metadata_after_package_changes(self) -> None:
         app = self.make_app()
@@ -7904,7 +8068,16 @@ class BuilderTests(unittest.TestCase):
         workflow = app.generate_container_workflow()
         self.assertIn("type=raw,value={{date 'YYYYMMDD'}}", workflow)
         self.assertIn("type=ref,event=pr", workflow)
-        self.assertIn("COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}", workflow)
+        # This used to assert COSIGN_PASSWORD appeared, which held only
+        # because it sat in the job environment unconditionally -- present
+        # even here, where signing is off and there is no step to use it.
+        # That is the exposure #255 removed, so the assertion is now that it
+        # is absent, and the signing paths assert their own env separately.
+        self.assertEqual(
+            self.job_env_entries(workflow),
+            ["SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}"],
+        )
+        self.assertNotIn("COSIGN_PASSWORD", workflow)
 
     def test_installer_profile_maps_kde_and_gnome_base_images_correctly(self) -> None:
         app = self.make_app()

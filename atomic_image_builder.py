@@ -686,6 +686,35 @@ def pinned_action(action: str) -> str:
     return f"{action}@{sha} # {label}"
 
 
+# Job-level env is set for every step in the job, `uses:` steps included, so a
+# secret placed there is handed to every third-party action the job runs. The
+# signing condition only needs to know *whether* a key exists, and the secrets
+# context is available in job-level env even though it is not available in a
+# step-level `if:` -- so the job carries this boolean and never the key itself.
+SIGNING_ENABLED_ENV = ("SIGNING_ENABLED", "${{ secrets.SIGNING_SECRET != '' }}")
+# What repositories generated before that carry. Their conditions test a
+# job-level variable this no longer defines, so the clause has to be removed
+# rather than left to evaluate false forever -- signing that silently stops is
+# worse than signing that fails.
+LEGACY_SIGNING_ENV_KEYS = ("COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
+LEGACY_SIGN_CONDITION = " && env.COSIGN_PRIVATE_KEY != ''"
+
+
+def strip_job_env_entries(workflow_text: str, names: Sequence[str]) -> str:
+    """Drop job-level env entries by name, leaving step-level ones alone.
+
+    Six spaces is the job-level indent (four for the job, two for the key).
+    Matching on it is what keeps the signing step's own `COSIGN_PRIVATE_KEY:`,
+    at eight, from being removed with it.
+    """
+    kept = [
+        line
+        for line in workflow_text.splitlines()
+        if not any(line.startswith(f"      {name}: ") for name in names)
+    ]
+    return ensure_trailing_newline("\n".join(kept))
+
+
 def patch_signing_step_block(step_lines: Sequence[str], *, branch_if: str, sign_if: str) -> list[str]:
     # Signing-related steps are identified by behavior rather than display
     # names so template renames do not silently bypass our signing guard.
@@ -693,6 +722,8 @@ def patch_signing_step_block(step_lines: Sequence[str], *, branch_if: str, sign_
     is_cosign_sign = any(re.search(r"\bcosign\s+sign\b", line) for line in step_lines)
     if not (is_cosign_install or is_cosign_sign):
         return list(step_lines)
+    if is_cosign_sign:
+        step_lines = add_signing_step_password(step_lines)
 
     patched: list[str] = []
     has_if = False
@@ -700,9 +731,16 @@ def patch_signing_step_block(step_lines: Sequence[str], *, branch_if: str, sign_
         stripped = line.lstrip()
         if stripped.startswith("if: "):
             has_if = True
-            if branch_if in stripped and sign_if not in stripped:
+            # Drop the legacy clause first. Rewriting around it would leave
+            # "... && env.SIGNING_ENABLED == 'true' && env.COSIGN_PRIVATE_KEY != ''",
+            # whose second half tests a job-level variable that no longer
+            # exists -- so every existing repository would quietly stop
+            # signing while its workflow still looked correct.
+            condition = stripped.replace(LEGACY_SIGN_CONDITION, "", 1)
+            if branch_if in condition and sign_if not in condition:
+                condition = condition.replace(branch_if, sign_if, 1)
+            if condition != stripped:
                 indent = line[: len(line) - len(stripped)]
-                condition = stripped.replace(branch_if, sign_if, 1)
                 patched.append(f"{indent}{condition}")
                 continue
         patched.append(line)
@@ -764,6 +802,28 @@ def patch_workflow_steps(workflow_text: str, patch_step: Callable[[list[str]], l
 
     flush_step()
     return output
+
+
+def add_signing_step_password(step_lines: Sequence[str]) -> list[str]:
+    """Give the signing step its own COSIGN_PASSWORD.
+
+    The key this tool generates is password-protected, and the step used to
+    read that password from the job environment. Once the job stops carrying
+    it, the step has to carry it, or `cosign sign` cannot decrypt the key --
+    a failure that would only appear on someone else's first push.
+    """
+    lines = list(step_lines)
+    if any(line.strip().startswith("COSIGN_PASSWORD:") for line in lines):
+        return lines
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("COSIGN_PRIVATE_KEY:"):
+            indent = line[: len(line) - len(line.lstrip())]
+            return lines[: index + 1] + [f"{indent}COSIGN_PASSWORD: ${{{{ secrets.COSIGN_PASSWORD }}}}"] + lines[index + 1 :]
+    # No key in this step's own env means the shape is not the one this
+    # understands. Leaving it alone is the same no-op convention every patcher
+    # here follows; the generated-workflow test is what makes that loud.
+    return lines
 
 
 def patch_workflow_signing_steps(workflow_text: str, *, branch_if: str, sign_if: str) -> str:
@@ -4472,7 +4532,7 @@ class App:
         # - keep our state file out of push triggers
         # - wire in image description and signing conditions safely
         branch_if = "github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
-        sign_if = f"{branch_if} && env.COSIGN_PRIVATE_KEY != ''"
+        sign_if = f"{branch_if} && env.{SIGNING_ENABLED_ENV[0]} == 'true'"
         lines = existing_text.splitlines()
         output: list[str] = []
         state_ignore_present = any(STATE_FILE in line for line in lines)
@@ -4512,13 +4572,11 @@ class App:
         text = patch_workflow_signing_steps("\n".join(output), branch_if=branch_if, sign_if=sign_if)
         text = patch_cosign_compatibility(text)
         text = self.patch_workflow_branch_filters(text, default_branch)
-        text = ensure_workflow_job_env_entries(
-            text,
-            [
-                ("COSIGN_PRIVATE_KEY", "${{ secrets.SIGNING_SECRET }}"),
-                ("COSIGN_PASSWORD", "${{ secrets.COSIGN_PASSWORD }}"),
-            ],
-        )
+        # Remove before adding: a repository generated earlier has the key and
+        # password at job level, and they have to go, not merely be joined by
+        # the boolean.
+        text = strip_job_env_entries(text, LEGACY_SIGNING_ENV_KEYS)
+        text = ensure_workflow_job_env_entries(text, [SIGNING_ENABLED_ENV])
         text = self.patch_container_rechunk_step(text)
         return ensure_trailing_newline(text)
 
@@ -5275,7 +5333,13 @@ class App:
     def generate_container_workflow(self, *, default_branch: str = "main") -> str:
         # This is the GitHub Actions workflow for repos generated from scratch
         # instead of patched from an existing template copy.
-        sign_if = "github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.COSIGN_PRIVATE_KEY != ''"
+        # Same guard the patched path uses, and for the same reason: the job
+        # environment reaches every step, so it carries whether a key exists
+        # rather than the key. Keeping the two spellings identical matters --
+        # this generator runs when a managed repository has lost its workflow,
+        # so a divergence here would quietly reintroduce #255 on exactly the
+        # repositories that already had something go wrong.
+        sign_if = f"github.event_name != 'pull_request' && github.ref == format('refs/heads/{{0}}', github.event.repository.default_branch) && env.{SIGNING_ENABLED_ENV[0]} == 'true'"
         lines = [
             "---",
             "name: Build container image",
@@ -5309,8 +5373,7 @@ class App:
             "      packages: write",
             "      id-token: write",
             "    env:",
-            "      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}",
-            "      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}",
+            f"      {SIGNING_ENABLED_ENV[0]}: {SIGNING_ENABLED_ENV[1]}",
             "    steps:",
             "      - name: Prepare environment",
             "        run: |",
@@ -5384,6 +5447,9 @@ class App:
                     "",
                     "      - name: Sign container image",
                     f"        if: {sign_if}",
+                    "        env:",
+                    "          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}",
+                    "          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}",
                     "        run: |",
                     '          IMAGE_FULL="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"',
                     "          for tag in ${{ steps.metadata.outputs.tags }}; do",

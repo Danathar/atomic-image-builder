@@ -145,6 +145,43 @@ generated repo (not a test) showed the leftover block and it was genuinely
 confusing to read, even though the build itself was unaffected — the active
 step was already correct.
 
+Signing Guard: A Boolean At Job Level, Never The Key
+----------------------------------------------------
+The generated Containerfile workflow gates its two cosign steps on
+`env.SIGNING_ENABLED == 'true'`, and the job-level env holds
+
+    SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}
+
+The guard has to read a job-level env var because the `secrets` context is not
+available in a step-level `if:` -- actionlint will tell you so. What it does
+not have to read is the key. Job-level env is set for every step in the job,
+`uses:` steps included, so the earlier shape (COSIGN_PRIVATE_KEY and
+COSIGN_PASSWORD at job level) handed the signing key to actions/checkout,
+remove-unwanted-software, setup-just, login-action and cosign-installer, none
+of which want it. See #255. The vendored snapshot never did this; the widening
+was ours.
+
+Two things will break signing if they are changed independently, and both fail
+in ways that are quiet rather than loud:
+
+- The signing step needs COSIGN_PASSWORD in its *own* env. It used to inherit
+  it from the job. add_signing_step_password() puts it there, keyed on the
+  step's own COSIGN_PRIVATE_KEY line; if a snapshot refresh moves or renames
+  that line the patcher no-ops and cosign cannot decrypt the key -- a failure
+  that first appears on someone else's push, not here.
+
+- Existing repositories carry `&& env.COSIGN_PRIVATE_KEY != ''` in both
+  conditions. LEGACY_SIGN_CONDITION strips it. Left in place it would test a
+  job-level variable that no longer exists, evaluate false forever, and stop
+  signing *silently* while the workflow still read as though it signed. That
+  is the failure mode patch_cosign_compatibility() already fails closed
+  against, arriving from a different direction.
+
+test_existing_repository_migrates_off_the_job_level_key covers the second, and
+test_signing_step_carries_its_own_password the first. Both run against text
+shaped like what is really on disk in a managed repository, because that is
+the input that matters here -- new repositories would look correct either way.
+
 Rootless CI and What Existing Repositories Inherit
 --------------------------------------------------
 Since the b9783f6 snapshot refresh, generated Containerfile-method repositories
