@@ -7451,6 +7451,29 @@ class BuilderTests(unittest.TestCase):
         )
         self.assertIn("bleeding edge", installing)
 
+    def test_contrib_wrapper_header_and_docs_agree_on_the_install(self) -> None:
+        # The wrapper's own header is install instructions that ship inside the
+        # file being installed, so it is the copy a reader is most likely to
+        # follow -- and the copy nothing pointed at when the documented install
+        # moved to a release. It went stale exactly that way once already:
+        # README.md and installing.md were updated together and this was not,
+        # leaving the file recommending the `main` URL that the change existed
+        # to move people off.
+        root = Path(__file__).resolve().parents[1]
+        wrapper = (root / "contrib/aib").read_text()
+        header = wrapper.split("set -euo pipefail", 1)[0]
+        release = "https://github.com/Danathar/atomic-image-builder/releases/latest/download"
+        for source, name in ((header, "contrib/aib header"), ((root / "README.md").read_text(), "README.md")):
+            self.assertIn(f"{release}/aib", source, name)
+            self.assertIn(f"{release}/aib.sha256", source, name)
+            self.assertIn("sha256sum -c -", source, name)
+            self.assertNotIn("main/contrib/aib", source, name)
+        # installing.md is the one place that keeps the `main` URL, under its
+        # bleeding-edge heading, and the header points there rather than
+        # repeating it.
+        self.assertIn("main/contrib/aib", (root / "docs/installing.md").read_text())
+        self.assertIn("docs/installing.md", header)
+
     def test_docs_document_pulling_a_newer_image_for_container_runs(self) -> None:
         root = Path(__file__).resolve().parents[1]
         installing = (root / "docs/installing.md").read_text()
