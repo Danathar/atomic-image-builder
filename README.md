@@ -31,10 +31,18 @@ aib-tool
 **Have Podman?**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Danathar/atomic-image-builder/main/contrib/aib -o ~/.local/bin/aib
-chmod +x ~/.local/bin/aib
+curl -fsSLO https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib
+curl -fsSL  https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib.sha256 | sha256sum -c -
+install -m 755 aib ~/.local/bin/aib && rm aib
 aib
 ```
+
+The wrapper verifies the container image's signature before running it and then
+forwards your GitHub credential into it, so it is worth having checked the
+wrapper too. The `sha256sum -c -` line above is that check, and it is why the
+recommended install comes from a release rather than from `main`. See
+[Installing](docs/installing.md#installing-the-wrapper) for the `main` version,
+which is the bleeding edge and unverified.
 
 Either one launches the guided menu. **YOU WILL NEED A GITHUB ACCOUNT** — if you are not already logged in, the tool walks you through `gh auth login` on first run.
 
