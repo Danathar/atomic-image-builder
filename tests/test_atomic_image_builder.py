@@ -40,6 +40,7 @@ from atomic_image_builder import (
     SCAN_OK,
     SCAN_UNAVAILABLE,
     SCAN_UNSUPPORTED_BASE,
+    SIGNING_ENABLED_ENV,
     STATE_FILE,
     TOOL_NAME,
     TOOL_SLUG,
@@ -60,6 +61,7 @@ from atomic_image_builder import (
     patch_cosign_compatibility,
     patch_workflow_steps,
     pin_action_uses_line,
+    pinned_action,
     read_os_release_fields,
     string_list,
 )
@@ -12505,6 +12507,276 @@ class BuilderTests(unittest.TestCase):
         app = self.make_app()
         app.gum = GumStub()
         self.assertEqual(app.software_status(), "No software changes yet")
+
+    # ------------------------------------------------------------------
+    # generate_container_workflow, asserted as a parsed document.
+    #
+    # Every existing assertion on this generator is substring membership on
+    # the joined text, and the text is one flat string: `assertIn("    if: ...")`
+    # cannot tell which step the guard is attached to, `assertIn("id-token:
+    # write")` cannot tell `contents: read` from `contents: write` further up,
+    # and no containment check sees ordering at all. That is not hypothetical
+    # for this file -- it generates the workflow for a *managed repository
+    # that has lost its own*, so a step guard sliding onto the neighbouring
+    # step publishes from pull requests on exactly the repositories something
+    # already went wrong on. These parse the document and assert its shape.
+    # ------------------------------------------------------------------
+
+    def workflow_document(self, *, signing: bool = False, default_branch: str = "main") -> dict:
+        app = self.make_app()
+        app.config.signing_enabled = signing
+        return parse_block_yaml(app.generate_container_workflow(default_branch=default_branch))
+
+    @staticmethod
+    def workflow_steps(document: dict) -> list[dict]:
+        return document["jobs"]["build_push"]["steps"]
+
+    PUSH_ONLY_GUARD = (
+        "github.event_name != 'pull_request' && github.ref == "
+        "format('refs/heads/{0}', github.event.repository.default_branch)"
+    )
+
+    def test_generated_workflow_triggers_are_exactly_the_four_documented_ones(self) -> None:
+        document = self.workflow_document(default_branch="master")
+        self.assertEqual(
+            list(document["on"]),
+            ["pull_request", "schedule", "push", "workflow_dispatch"],
+        )
+        self.assertEqual(document["on"]["pull_request"], {"branches": ["master"]})
+        self.assertEqual(document["on"]["schedule"], [{"cron": DEFAULT_GITHUB_BUILD_CRON}])
+        self.assertEqual(
+            document["on"]["push"],
+            {"branches": ["master"], "paths-ignore": ["**/README.md", STATE_FILE]},
+        )
+        # `workflow_dispatch:` with no body is a null value, not an empty
+        # mapping and not the absent key that would drop manual runs.
+        self.assertIn("workflow_dispatch", document["on"])
+        self.assertIsNone(document["on"]["workflow_dispatch"])
+
+    def test_generated_workflow_paths_ignore_stays_a_list_of_two_paths(self) -> None:
+        # Emitted as an inline flow sequence, which is the one place in this
+        # document where a missing quote or a stray bracket turns a two-item
+        # list into a single string -- and Actions would then ignore no path
+        # at all, rebuilding the image on every README edit.
+        push = self.workflow_document()["on"]["push"]
+        self.assertIsInstance(push["paths-ignore"], list)
+        self.assertEqual(len(push["paths-ignore"]), 2)
+
+    def test_generated_workflow_job_permissions_are_read_plus_publish_only(self) -> None:
+        # Equality, not membership: `contents: write` contains the substring
+        # "contents:" just as `contents: read` does, so a widened token scope
+        # is invisible to an assertIn.
+        job = self.workflow_document()["jobs"]["build_push"]
+        self.assertEqual(
+            job["permissions"],
+            {"contents": "read", "packages": "write", "id-token": "write"},
+        )
+        self.assertEqual(job["runs-on"], "ubuntu-26.04")
+
+    def test_generated_workflow_runs_its_steps_in_the_only_order_that_works(self) -> None:
+        # Login before Push, Build before both, and the date step before the
+        # metadata step that reads its output. Substring assertions see none
+        # of this: every one of these names is present in any order.
+        self.assertEqual(
+            [step["name"] for step in self.workflow_steps(self.workflow_document())],
+            [
+                "Prepare environment",
+                "Checkout",
+                "Maximize build space",
+                "Get current date",
+                "Image Metadata",
+                "Build Image",
+                "Login to GHCR",
+                "Push to GHCR",
+            ],
+        )
+
+    def test_generated_workflow_appends_the_signing_steps_after_the_push(self) -> None:
+        names = [step["name"] for step in self.workflow_steps(self.workflow_document(signing=True))]
+        self.assertEqual(names[-3:], ["Push to GHCR", "Install Cosign", "Sign container image"])
+        self.assertEqual(len(names), 10)
+
+    def test_generated_workflow_guards_only_the_steps_that_publish(self) -> None:
+        # The claim an assertIn on the guard string cannot make: that it is
+        # attached to these steps and no others. A guard that slid onto
+        # "Build Image" instead would leave Push unguarded and publish from
+        # every pull request.
+        guards = {
+            step["name"]: step.get("if") for step in self.workflow_steps(self.workflow_document())
+        }
+        self.assertEqual(
+            {name: guard for name, guard in guards.items() if guard is not None},
+            {
+                "Login to GHCR": self.PUSH_ONLY_GUARD,
+                "Push to GHCR": self.PUSH_ONLY_GUARD,
+            },
+        )
+
+    def test_generated_workflow_signing_steps_also_require_the_secret_to_exist(self) -> None:
+        # Both signing steps carry the stricter guard -- the push-only guard
+        # plus the job-level boolean. Installing cosign without it, or signing
+        # without it, fails the run on any fork that has no signing secret.
+        signing_guard = f"{self.PUSH_ONLY_GUARD} && env.{SIGNING_ENABLED_ENV[0]} == 'true'"
+        guards = {
+            step["name"]: step.get("if")
+            for step in self.workflow_steps(self.workflow_document(signing=True))
+        }
+        self.assertEqual(guards["Install Cosign"], signing_guard)
+        self.assertEqual(guards["Sign container image"], signing_guard)
+        self.assertNotEqual(guards["Install Cosign"], self.PUSH_ONLY_GUARD)
+
+    def test_generated_workflow_keeps_key_material_in_the_signing_step_alone(self) -> None:
+        # #255 structurally: the job env carries a boolean, and the private
+        # key and its password exist only on the step that runs cosign. A
+        # step-level `env:` anywhere else hands the key to a third-party
+        # action, and every substring form of this assertion is defeated by
+        # the same text appearing at a different indent.
+        document = self.workflow_document(signing=True)
+        self.assertEqual(
+            document["jobs"]["build_push"]["env"],
+            {SIGNING_ENABLED_ENV[0]: SIGNING_ENABLED_ENV[1]},
+        )
+        self.assertEqual(
+            {
+                step["name"]: step["env"]
+                for step in self.workflow_steps(document)
+                if "env" in step
+            },
+            {
+                "Sign container image": {
+                    "COSIGN_PRIVATE_KEY": "${{ secrets.SIGNING_SECRET }}",
+                    "COSIGN_PASSWORD": "${{ secrets.COSIGN_PASSWORD }}",
+                }
+            },
+        )
+
+    def test_generated_workflow_has_no_step_env_at_all_without_signing(self) -> None:
+        self.assertEqual(
+            [step["name"] for step in self.workflow_steps(self.workflow_document()) if "env" in step],
+            [],
+        )
+
+    def test_generated_workflow_pins_every_action_it_uses(self) -> None:
+        # Each `uses:` is compared against pinned_action's own output, so an
+        # action that lost its pin -- or gained a different one -- fails here
+        # rather than at whatever the tag happens to point at on the day.
+        used = {
+            step["name"]: step["uses"]
+            for step in self.workflow_steps(self.workflow_document(signing=True))
+            if "uses" in step
+        }
+        self.assertEqual(
+            used,
+            {
+                "Checkout": pinned_action("actions/checkout"),
+                "Maximize build space": pinned_action("ublue-os/remove-unwanted-software"),
+                "Image Metadata": pinned_action("docker/metadata-action"),
+                "Build Image": pinned_action("redhat-actions/buildah-build"),
+                "Login to GHCR": pinned_action("docker/login-action"),
+                "Push to GHCR": pinned_action("redhat-actions/push-to-registry"),
+                "Install Cosign": pinned_action("sigstore/cosign-installer"),
+            },
+        )
+        for name, uses in used.items():
+            with self.subTest(step=name):
+                self.assertRegex(uses, r"^[^@]+@[0-9a-f]{40} # \S")
+
+    def test_generated_workflow_metadata_step_emits_every_tag_and_label(self) -> None:
+        # `tags:` and `labels:` are literal blocks, so each is one scalar with
+        # newlines in it. Splitting it back gives the list docker/metadata-action
+        # actually receives -- a dropped daily tag reads as an unchanged
+        # substring match on any of the others.
+        step = next(
+            s for s in self.workflow_steps(self.workflow_document()) if s["name"] == "Image Metadata"
+        )
+        self.assertEqual(step["id"], "metadata")
+        self.assertEqual(
+            step["with"]["tags"].split("\n"),
+            [
+                "type=raw,value=${{ env.DEFAULT_TAG }}",
+                "type=raw,value=${{ env.DEFAULT_TAG }}.{{date 'YYYYMMDD'}}",
+                "type=raw,value={{date 'YYYYMMDD'}}",
+                "type=sha,enable=${{ github.event_name == 'pull_request' }}",
+                "type=ref,event=pr",
+            ],
+        )
+        self.assertEqual(
+            step["with"]["labels"].split("\n"),
+            [
+                "org.opencontainers.image.created=${{ steps.date.outputs.date }}",
+                "org.opencontainers.image.description=${{ env.IMAGE_DESC }}",
+                "org.opencontainers.image.title=${{ env.IMAGE_NAME }}",
+                "containers.bootc=1",
+            ],
+        )
+        # A space, quoted so YAML keeps it; unquoted it would be dropped and
+        # the tags would arrive joined by the action's default separator.
+        self.assertEqual(step["with"]["sep-tags"], " ")
+
+    def test_generated_workflow_build_flags_stay_booleans(self) -> None:
+        # `oci: false` is a boolean and `oci: "false"` is a string; buildah-build
+        # reads the second as truthy. Only a parser that resolves plain scalars
+        # by spelling can tell them apart.
+        step = next(
+            s for s in self.workflow_steps(self.workflow_document()) if s["name"] == "Build Image"
+        )
+        self.assertIs(step["with"]["oci"], False)
+        self.assertIs(step["with"]["squash"], False)
+        self.assertEqual(step["with"]["containerfiles"], "./Containerfile")
+
+    def test_generated_workflow_push_step_targets_the_lowercased_registry(self) -> None:
+        # The Prepare environment step lowercases IMAGE_REGISTRY and IMAGE_NAME
+        # into $GITHUB_ENV because GHCR rejects an uppercase path, and the push
+        # step is what consumes them.
+        steps = self.workflow_steps(self.workflow_document())
+        prepare = steps[0]
+        self.assertEqual(
+            prepare["run"].split("\n"),
+            [
+                'echo "IMAGE_REGISTRY=${IMAGE_REGISTRY,,}" >> $GITHUB_ENV',
+                'echo "IMAGE_NAME=${IMAGE_NAME,,}" >> $GITHUB_ENV',
+            ],
+        )
+        push = next(s for s in steps if s["name"] == "Push to GHCR")
+        self.assertEqual(push["with"]["registry"], "${{ env.IMAGE_REGISTRY }}")
+        self.assertEqual(push["with"]["image"], "${{ env.IMAGE_NAME }}")
+        self.assertEqual(push["with"]["tags"], "${{ steps.metadata.outputs.tags }}")
+
+    def test_generated_workflow_top_level_env_carries_the_image_description(self) -> None:
+        app = self.make_app()
+        app.config.image_desc = 'A "quoted" description: with punctuation'
+        document = parse_block_yaml(app.generate_container_workflow())
+        self.assertEqual(document["env"]["IMAGE_DESC"], 'A "quoted" description: with punctuation')
+        self.assertEqual(document["env"]["DEFAULT_TAG"], "latest")
+        self.assertEqual(document["concurrency"]["cancel-in-progress"], True)
+
+    def test_generated_workflow_signing_step_runs_cosign_over_every_tag(self) -> None:
+        step = next(
+            s
+            for s in self.workflow_steps(self.workflow_document(signing=True))
+            if s["name"] == "Sign container image"
+        )
+        self.assertEqual(
+            step["run"].split("\n"),
+            [
+                'IMAGE_FULL="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"',
+                "for tag in ${{ steps.metadata.outputs.tags }}; do",
+                "  cosign sign -y --new-bundle-format=false --use-signing-config=false "
+                "--key env://COSIGN_PRIVATE_KEY $IMAGE_FULL:$tag",
+                "done",
+            ],
+        )
+
+    def test_generated_workflow_cosign_release_stays_a_quoted_version(self) -> None:
+        # Single-quoted in the source: unquoted, `v3.1.2` is still a string,
+        # but a release spelled `3.1` would resolve to the float 3.1 and
+        # cosign-installer would be handed the wrong version.
+        step = next(
+            s
+            for s in self.workflow_steps(self.workflow_document(signing=True))
+            if s["name"] == "Install Cosign"
+        )
+        self.assertEqual(step["with"], {"cosign-release": "v3.1.2"})
 
 
 if __name__ == "__main__":
