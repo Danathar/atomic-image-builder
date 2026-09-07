@@ -773,6 +773,41 @@ class BuilderTests(unittest.TestCase):
                 break
         return entries
 
+    @staticmethod
+    def permission_blocks(workflow: str) -> list[dict[str, str]]:
+        """Every `permissions:` mapping in the file, as key -> value.
+
+        A whole-document parse is not available here: tests/_block_yaml.py is
+        strict by design and the bundled snapshots' shell bodies defeat it. So
+        the one block under test is read out directly -- structurally, by
+        indentation under the key, rather than by grepping for the strings a
+        scope happens to be spelled with.
+
+        An inline `permissions: read-all` yields no block, which is correct:
+        it has no entries.
+        """
+        blocks: list[dict[str, str]] = []
+        current: dict[str, str] | None = None
+        block_indent = 0
+        for line in workflow.splitlines():
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            if current is not None:
+                if not stripped:
+                    continue
+                if indent > block_indent and ":" in stripped:
+                    key, _, value = stripped.partition(":")
+                    current[key.strip()] = value.strip()
+                    continue
+                blocks.append(current)
+                current = None
+            if stripped == "permissions:":
+                current = {}
+                block_indent = indent
+        if current is not None:
+            blocks.append(current)
+        return blocks
+
     def test_job_env_never_carries_signing_key_material(self) -> None:
         # Job-level env is set for every step in the job, `uses:` steps
         # included, so anything here is handed to every third-party action the
@@ -892,6 +927,127 @@ class BuilderTests(unittest.TestCase):
                 # The step that signs needs both, or cosign cannot decrypt.
                 self.assertIn("          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", workflow.splitlines())
                 self.assertIn("          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}", workflow.splitlines())
+
+    def test_patched_container_workflow_drops_the_unused_oidc_scope(self) -> None:
+        # The bundled snapshot grants id-token: write, and the job it grants it
+        # to is the same job pull_request events run -- where the workflow file
+        # comes from the pull request's head. Nothing in that file asks for an
+        # OIDC token (signing is `--key env://COSIGN_PRIVATE_KEY`, with
+        # COSIGN_EXPERIMENTAL false), so the scope is granted and never spent.
+        app = self.make_app()
+        snapshot = CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml"
+        patched = app.patch_container_workflow(snapshot.read_text())
+
+        # The two scopes that are used are still there: dropping
+        # packages: write would stop the push this workflow exists to perform.
+        self.assertEqual(
+            self.permission_blocks(patched),
+            [{"contents": "read", "packages": "write"}],
+        )
+        # And it really was there to begin with, so this test cannot pass by
+        # asserting about a block the snapshot never had.
+        self.assertIn(
+            {"contents": "read", "packages": "write", "id-token": "write"},
+            self.permission_blocks(snapshot.read_text()),
+        )
+
+    def test_patched_disk_workflow_drops_the_unused_oidc_scope(self) -> None:
+        # Same finding in the disk workflow, whose only non-trivial action is
+        # osbuild/bootc-image-builder-action -- a node action whose bundled
+        # entrypoint contains no OIDC call at the pinned SHA.
+        app = self.make_app()
+        snapshot = CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build-disk.yml"
+        patched = app.patch_container_disk_workflow(snapshot.read_text())
+
+        self.assertEqual(
+            self.permission_blocks(patched),
+            [{"contents": "read", "packages": "read"}],
+        )
+        self.assertIn(
+            {"contents": "read", "packages": "read", "id-token": "write"},
+            self.permission_blocks(snapshot.read_text()),
+        )
+
+    def test_patched_bluebuild_workflow_keeps_its_oidc_scope(self) -> None:
+        # Deliberately untouched. blue-build/github-action hands the recipe to
+        # the BlueBuild CLI, which knows how to sign keylessly -- so unlike the
+        # Containerfile path there is a plausible consumer, and removing the
+        # scope there needs evidence this change does not have.
+        app = self.make_app()
+        snapshot = BLUEBUILD_TEMPLATE_DIR / ".github/workflows/build.yml"
+        patched = app.patch_bluebuild_workflow(snapshot.read_text())
+
+        self.assertEqual(
+            self.permission_blocks(patched),
+            [{"contents": "read", "packages": "write", "id-token": "write"}],
+        )
+
+    def test_patching_a_workflow_twice_changes_nothing_further(self) -> None:
+        # Managed repositories are patched in place on every update, so a
+        # patcher that is not idempotent rewrites the same file forever.
+        app = self.make_app()
+        for name, patcher in (
+            ("build.yml", app.patch_container_workflow),
+            ("build-disk.yml", app.patch_container_disk_workflow),
+        ):
+            with self.subTest(workflow=name):
+                snapshot = CONTAINERFILE_TEMPLATE_DIR / ".github/workflows" / name
+                once = patcher(snapshot.read_text())
+                self.assertEqual(patcher(once), once)
+
+    def test_strip_permission_entries_only_reads_a_permissions_block(self) -> None:
+        # `id-token` is a legal input name, and an action input spelled that
+        # way is not a token scope. Matching on the six-space indent alone
+        # would remove the `with:` entry below and change what the step does.
+        workflow = (
+            "jobs:\n"
+            "  build:\n"
+            "    permissions:\n"
+            "      contents: read\n"
+            "      id-token: write\n"
+            "\n"
+            "    steps:\n"
+            "      - uses: example/action@v1\n"
+            "        with:\n"
+            "          id-token: keep-me\n"
+        )
+
+        result = atomic_image_builder.strip_permission_entries(workflow, ["id-token"])
+
+        self.assertNotIn("      id-token: write", result)
+        self.assertIn("          id-token: keep-me", result)
+        self.assertIn("      contents: read", result)
+
+    def test_strip_permission_entries_leaves_a_valid_block_when_it_empties(self) -> None:
+        # A bare `permissions:` key parses as null, which Actions rejects, so
+        # removing the last entry has to leave a mapping rather than nothing.
+        workflow = "jobs:\n  build:\n    permissions:\n      id-token: write\n    steps: []\n"
+
+        result = atomic_image_builder.strip_permission_entries(workflow, ["id-token"])
+
+        # Asserted on the text: tests/_block_yaml.py is deliberately strict and
+        # has no flow-mapping support, which is the right trade for a parser
+        # used as an oracle but means it cannot read the line under test.
+        self.assertIn("    permissions: {}", result.splitlines())
+        self.assertNotIn("    permissions:", result.splitlines())
+
+    def test_strip_permission_entries_closes_a_block_at_end_of_file(self) -> None:
+        # A permissions block with nothing after it has no following line to
+        # end it, so the collapse to `permissions: {}` has to happen when the
+        # input runs out as well as when the block does.
+        workflow = "jobs:\n  build:\n    permissions:\n      id-token: write\n"
+
+        result = atomic_image_builder.strip_permission_entries(workflow, ["id-token"])
+
+        self.assertIn("    permissions: {}", result.splitlines())
+        self.assertNotIn("      id-token: write", result.splitlines())
+
+    def test_strip_permission_entries_leaves_an_inline_value_alone(self) -> None:
+        # `permissions: read-all` is a value, not a mapping with entries to
+        # remove; rewriting it would be a guess about what the author meant.
+        workflow = "jobs:\n  build:\n    permissions: read-all\n    steps: []\n"
+
+        self.assertEqual(atomic_image_builder.strip_permission_entries(workflow, ["id-token"]), workflow)
 
     def test_patch_container_workflow_golden(self) -> None:
         expected_path = Path(__file__).parent / "fixtures/workflows/container_expected.yml"
@@ -12751,12 +12907,32 @@ class BuilderTests(unittest.TestCase):
         # Equality, not membership: `contents: write` contains the substring
         # "contents:" just as `contents: read` does, so a widened token scope
         # is invisible to an assertIn.
+        #
+        # No id-token. One job serves pull_request, push and schedule alike,
+        # and on a pull_request event the workflow file is the pull request's
+        # own -- so every scope this block names is a scope a proposed change
+        # can spend. Signing here is key-based and nothing asks GitHub for an
+        # OIDC token, so granting one only widens what a pull request holds.
         job = self.workflow_document()["jobs"]["build_push"]
         self.assertEqual(
             job["permissions"],
-            {"contents": "read", "packages": "write", "id-token": "write"},
+            {"contents": "read", "packages": "write"},
         )
         self.assertEqual(job["runs-on"], "ubuntu-26.04")
+
+    def test_generated_and_patched_workflows_grant_the_same_scopes(self) -> None:
+        # #255 was a divergence between these two generators, and the sign_if
+        # comment in generate_container_workflow says to keep them identical
+        # for exactly this reason: the from-scratch path runs when a managed
+        # repository has lost its workflow, so a repository that already had
+        # something go wrong is the one that would get the weaker file.
+        app = self.make_app()
+        snapshot = CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml"
+        patched = self.permission_blocks(app.patch_container_workflow(snapshot.read_text()))
+        generated = self.permission_blocks(app.generate_container_workflow())
+
+        self.assertEqual(patched, generated)
+        self.assertEqual(generated, [{"contents": "read", "packages": "write"}])
 
     def test_generated_workflow_runs_its_steps_in_the_only_order_that_works(self) -> None:
         # Login before Push, Build before both, and the date step before the

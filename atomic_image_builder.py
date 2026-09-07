@@ -715,6 +715,76 @@ def strip_job_env_entries(workflow_text: str, names: Sequence[str]) -> str:
     return ensure_trailing_newline("\n".join(kept))
 
 
+# Nothing in the Containerfile path asks GitHub for an OIDC token. Signing
+# there is key-based -- `cosign sign --key env://COSIGN_PRIVATE_KEY`, with
+# COSIGN_EXPERIMENTAL explicitly false -- and none of the actions those
+# workflows run requests one: checked at the pinned SHAs of actions/checkout,
+# ublue-os/remove-unwanted-software, extractions/setup-just,
+# docker/login-action, sigstore/cosign-installer, actions/upload-artifact and
+# osbuild/bootc-image-builder-action. Several of them bundle @actions/core,
+# which *exports* getIDToken, but none of them calls it.
+#
+# So the scope is granted and never used, and a pull_request run carries it in
+# a workflow file that comes from the pull request's own head. Removing it is
+# the whole of the mitigation; see maintenance_notes.txt, "OIDC Token Scope on
+# Generated Builds", for when it has to come back.
+UNUSED_WORKFLOW_PERMISSIONS = ("id-token",)
+
+
+def strip_permission_entries(workflow_text: str, names: Sequence[str]) -> str:
+    """Drop named entries from every `permissions:` block in a workflow.
+
+    Scoped to the block rather than matched on indentation alone, the way the
+    path-filter patcher is: `id-token` is a perfectly good `with:` input name,
+    and an action input spelled that way is not a token scope. Only a line
+    that opens a block counts, so `permissions: read-all` and
+    `permissions: {}` are left as they are -- they are values, not mappings
+    with entries to remove.
+
+    Removing the last entry would leave a bare `permissions:` key, which YAML
+    reads as null and Actions rejects. The block collapses to
+    `permissions: {}` instead, which is the same thing the caller asked for --
+    a job granted nothing -- and is valid.
+    """
+    entry_re = re.compile(r"^\s*([A-Za-z0-9_-]+):\s*\S")
+    lines = workflow_text.splitlines()
+    output: list[str] = []
+    block_indent: int | None = None
+    header_index = 0
+    kept_any = False
+
+    def close_block() -> None:
+        if not kept_any:
+            output[header_index] = f"{' ' * block_indent}permissions: {{}}"
+
+    for line in lines:
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if block_indent is not None:
+            # A blank line inside the block neither ends it nor is an entry;
+            # the next line with content decides.
+            if not stripped:
+                output.append(line)
+                continue
+            if indent > block_indent:
+                match = entry_re.match(line)
+                if match and match.group(1) in names:
+                    continue
+                kept_any = True
+                output.append(line)
+                continue
+            close_block()
+            block_indent = None
+        if workflow_block_key(stripped) == "permissions":
+            block_indent = indent
+            header_index = len(output)
+            kept_any = False
+        output.append(line)
+    if block_indent is not None:
+        close_block()
+    return ensure_trailing_newline("\n".join(output))
+
+
 def patch_signing_step_block(step_lines: Sequence[str], *, branch_if: str, sign_if: str) -> list[str]:
     # Signing-related steps are identified by behavior rather than display
     # names so template renames do not silently bypass our signing guard.
@@ -4617,6 +4687,7 @@ class App:
         text = strip_job_env_entries(text, LEGACY_SIGNING_ENV_KEYS)
         text = ensure_workflow_job_env_entries(text, [SIGNING_ENABLED_ENV])
         text = self.patch_container_rechunk_step(text)
+        text = strip_permission_entries(text, UNUSED_WORKFLOW_PERMISSIONS)
         return ensure_trailing_newline(text)
 
     def patch_container_rechunk_step(self, workflow_text: str) -> str:
@@ -4676,6 +4747,7 @@ class App:
         text = self.patch_workflow_path_filters("\n".join(lines))
         text = self.patch_disk_artifact_names(text)
         text = self.patch_disk_workflow_platform(text)
+        text = strip_permission_entries(text, UNUSED_WORKFLOW_PERMISSIONS)
         return self.patch_workflow_branch_filters(text, default_branch)
 
     def patch_workflow_path_filters(self, workflow_text: str) -> str:
@@ -5409,8 +5481,12 @@ class App:
             "    runs-on: ubuntu-26.04",
             "    permissions:",
             "      contents: read",
+            # No id-token: this job signs with a key, not keylessly, and no
+            # action it runs asks for an OIDC token. The patched path drops the
+            # same scope from the bundled snapshot, and the two must not
+            # diverge -- see the sign_if note above for why that matters here
+            # in particular.
             "      packages: write",
-            "      id-token: write",
             "    env:",
             f"      {SIGNING_ENABLED_ENV[0]}: {SIGNING_ENABLED_ENV[1]}",
             "    steps:",
