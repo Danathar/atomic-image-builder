@@ -105,9 +105,18 @@ otherwise.
 
 ### Verifying the image
 
+**What a signature answers here.** Anyone can publish a container image under
+any name, and the name alone proves nothing about who built it. A signature is
+what makes that claim checkable: it lets your machine confirm the image came
+out of *this project's own GitHub Actions workflow* before running it. That is
+the whole question — not whether the image is good software, but whether it is
+the one this project published or somebody else's standing where it should be.
+
 Every published image is signed with keyless (OIDC) cosign at publish time — the
 identity being verified is the publishing workflow itself, not a key anyone
-holds.
+holds. That is why the check below constrains a workflow path and an OIDC
+issuer rather than naming a key: there is no key to steal, and no key for you
+to have to trust.
 
 **The `aib` wrapper does this for you, on every run.** It is the path where
 nobody thinks about pulling: it fetches a mutable tag each time, runs it as root
@@ -142,9 +151,11 @@ live credential for your GitHub account, which is a much larger thing to agree
 to than "skip a check". The tool still starts; the steps that reach GitHub are
 the ones that stop working.
 
-When that happens the wrapper prints the exact command that undoes it —
-`env -u AIB_IMAGE aib`, or `env -u AIB_SKIP_VERIFY aib` — rather than telling
-you to unset a variable. The usual way to arrive here is pasting a command with
+The wrapper's own messages avoid the word "signature" and say "no way to check
+who built it" instead, because that is the part that makes withholding a GitHub
+login follow rather than seem arbitrary. When it declines, it prints the exact
+command that undoes it — `env -u AIB_IMAGE aib`, or `env -u AIB_SKIP_VERIFY aib`
+— rather than telling you to unset a variable. The usual way to arrive here is pasting a command with
 the variable written in front of it, and there is then nothing left set to
 unset; the command above works either way.
 

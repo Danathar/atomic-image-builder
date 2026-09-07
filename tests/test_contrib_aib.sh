@@ -372,6 +372,14 @@ test_custom_image_gets_no_credentials() {
     assert_contains "$args" "run" "custom image: still runs, just logged out"
     assert_contains "$out" "localhost/my-own-build:dev" "custom image: names the image it declined to trust"
     assert_contains "$out" "no GitHub login" "custom image: says plainly what was withheld"
+    # The explanation, not the mechanism. A reader who has just pasted somebody
+    # else's command needs to know what a signature check would have bought
+    # them -- whether this image came from this project -- not the name of the
+    # thing that did not happen. "AIB_ALLOW_UNVERIFIED_AUTH" is the variable
+    # name and is exempt; the prose around it is what is being held to this.
+    assert_contains "$out" "who built it" "custom image: explains what the check would have told them"
+    assert_not_contains "$out" "signature" "custom image: no unexplained jargon"
+    assert_not_contains "$out" "unverified image" "custom image: no unexplained jargon"
     # A command to copy, not an operation to perform. "Unset AIB_IMAGE" needs a
     # reader who knows what an environment variable is, and is also wrong for
     # the likeliest arrival: someone who pasted `AIB_IMAGE=... aib` has nothing
@@ -408,6 +416,9 @@ test_skip_verify_gets_no_credentials() {
     # messages into one generic line was caught by the custom-image scenario
     # and not by this one until the string narrowed.
     assert_contains "$out" "no GitHub login" "skip verify: says plainly what was withheld"
+    assert_contains "$out" "who built it" "skip verify: explains what the check would have told them"
+    assert_not_contains "$out" "signature" "skip verify: no unexplained jargon"
+    assert_not_contains "$out" "unverified image" "skip verify: no unexplained jargon"
     assert_contains "$out" "env -u AIB_SKIP_VERIFY aib" "skip verify: the fix is a runnable command"
     assert_not_contains "$out" "AIB_IMAGE" "skip verify: does not blame a variable that was never set"
     # Said once, not twice. The warning above already carries the command that

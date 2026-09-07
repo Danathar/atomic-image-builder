@@ -134,8 +134,8 @@ esac
 verify_image="$publishes_this_image"
 
 if [ -n "${AIB_SKIP_VERIFY:-}" ] && [ "$verify_image" = yes ]; then
-    echo "aib: WARNING - AIB_SKIP_VERIFY is set. Running $AIB_IMAGE without" >&2
-    echo "aib: checking its signature. For the checked version, run:  env -u AIB_SKIP_VERIFY aib" >&2
+    echo "aib: WARNING - AIB_SKIP_VERIFY is set. Running $AIB_IMAGE without checking" >&2
+    echo "aib: who built it. To check first, run:  env -u AIB_SKIP_VERIFY aib" >&2
     verify_image=no
 fi
 
@@ -240,6 +240,16 @@ if [ "$forward_auth" = no ]; then
     # ordinary path sees either message: a verified image forwards the login
     # exactly as before, with nothing printed.
     #
+    # No "signature", "verified" or "unverified" in either message, for the same
+    # reason there is no "unset": they name a mechanism the reader is assumed
+    # to already understand. What a signature check buys is one plain sentence
+    # -- whether this image was built by this project or by somebody else --
+    # and that sentence is what makes the consequence follow. "Its signature
+    # was not checked" is a fact about cosign; "there is no way to check who
+    # built it" is the same fact in the terms that make withholding a GitHub
+    # login look obvious rather than arbitrary. The word survives in
+    # docs/installing.md, where a reader has gone looking for the mechanism.
+    #
     # Every remedy is a command to copy, never an operation to perform. "Unset
     # AIB_IMAGE" asks a reader to know what an environment variable is, what
     # unsetting one means, and how to do it -- and for the likeliest way of
@@ -256,11 +266,11 @@ if [ "$forward_auth" = no ]; then
         # already named the cause and given the command that undoes it.
         # Repeating that command here would put it on screen twice, which reads
         # as two separate problems.
-        echo "aib: An unverified image also gets no GitHub login, so the steps that reach" >&2
+        echo "aib: An unchecked image also gets no GitHub login, so the steps that reach" >&2
         echo "aib: GitHub will fail. To send it anyway, add:  AIB_ALLOW_UNVERIFIED_AUTH=1" >&2
     else
-        echo "aib: $AIB_IMAGE is not published by this project, so its signature" >&2
-        echo "aib: was not checked -- and an unverified image gets no GitHub login." >&2
+        echo "aib: $AIB_IMAGE is not published by this project, so there is no way" >&2
+        echo "aib: to check who built it. Images nobody can vouch for get no GitHub login." >&2
         echo "aib: For the official image instead, run:  env -u AIB_IMAGE aib" >&2
         echo "aib: To keep this image and send the login, add:  AIB_ALLOW_UNVERIFIED_AUTH=1" >&2
     fi
