@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import atomic_image_builder
 from _block_yaml import parse as parse_block_yaml
+from _containerfile import parse as parse_containerfile
 from atomic_image_builder import (
     ACCENT_COLOR,
     ACTION_PINS,
@@ -8190,6 +8191,75 @@ class BuilderTests(unittest.TestCase):
         cf = app.generate_containerfile()
         self.assertNotIn("brew", cf.lower())
         self.assertNotIn("system_files", cf)
+
+    def test_generate_containerfile_builds_the_image_from_the_ctx_stage(self) -> None:
+        # The Containerfile is the build contract, and the two assertions above
+        # only look at the Homebrew block: everything that makes the file build
+        # an image at all -- the ctx stage, what fills it, the base image the
+        # result is layered on, the bind mount that exposes ctx, and the
+        # command run through it -- was unasserted. Parse it rather than
+        # grepping, so a stage renamed on one side only, a build.sh moved out
+        # from under the mount, or a lost `COPY build_files` is a failure.
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.brew_enabled = False
+        instructions = parse_containerfile(app.generate_containerfile())
+        self.assertEqual([item.keyword for item in instructions], ["FROM", "COPY", "FROM", "RUN", "RUN"])
+        ctx, fill, base, build, lint = instructions
+        self.assertEqual(ctx.image, "scratch")
+        self.assertEqual(ctx.stage, "ctx")
+        # The context stage carries build_files, which is what /ctx/build.sh is.
+        self.assertEqual(fill.sources, ("build_files",))
+        self.assertEqual(fill.destination, "/")
+        self.assertEqual(base.image, "quay.io/fedora-ostree-desktops/silverblue:43")
+        self.assertIsNone(base.stage, "the base stage is the final image, so it is unnamed")
+        bind, *caches = build.mounts()
+        self.assertEqual(
+            bind,
+            {"type": "bind", "from": ctx.stage, "source": "/", "target": "/ctx"},
+            "build.sh is only reachable if ctx is bind-mounted at /ctx",
+        )
+        self.assertEqual(
+            caches,
+            [
+                {"type": "cache", "dst": "/var/cache"},
+                {"type": "cache", "dst": "/var/log"},
+                {"type": "tmpfs", "dst": "/tmp"},
+            ],
+        )
+        self.assertEqual(build.argument, f"{bind['target']}/build.sh")
+        # bootc's own lint is the last thing the build does, so a layer that
+        # would not boot fails here instead of being published.
+        self.assertEqual(lint.argument, "bootc container lint")
+        self.assertEqual(lint.flags, ())
+
+    def test_generate_containerfile_presets_the_brew_units_it_copies_in(self) -> None:
+        # With Homebrew on, the block sits between the base image and the
+        # build, and its two halves have to agree: the preset RUN is only
+        # meaningful for units the COPY above it actually installs.
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.brew_enabled = True
+        instructions = parse_containerfile(app.generate_containerfile())
+        self.assertEqual(
+            [item.keyword for item in instructions],
+            ["FROM", "COPY", "FROM", "COPY", "RUN", "RUN", "RUN"],
+        )
+        brew_copy, brew_preset = instructions[3], instructions[4]
+        self.assertEqual(brew_copy.flag("from"), UNIVERSAL_BLUE_BREW_IMAGE)
+        self.assertEqual(brew_copy.sources, ("/system_files",))
+        self.assertEqual(brew_copy.destination, "/")
+        self.assertEqual(
+            brew_preset.argument.split(" && "),
+            [
+                "/usr/bin/systemctl preset brew-setup.service",
+                "/usr/bin/systemctl preset brew-update.timer",
+                "/usr/bin/systemctl preset brew-upgrade.timer",
+            ],
+        )
+        # Presetting runs before the user's build.sh, not after it.
+        self.assertEqual(instructions[5].argument, "/ctx/build.sh")
+        self.assertEqual(instructions[6].argument, "bootc container lint")
 
     def test_render_containerfile_injects_brew_block_into_existing(self) -> None:
         app = self.make_app()
