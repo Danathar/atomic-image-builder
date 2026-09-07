@@ -123,6 +123,15 @@ DISK_RUNNER_CHOICE_RE = re.compile(
 # always true, so only the condition goes.
 DISK_ARM_ONLY_IF = "if: inputs.platform == 'arm64'"
 DISK_NON_ARM_IF = "if: inputs.platform != 'arm64'"
+# The bundled Justfile's spawn-vm rebuild dispatch, and what it should say.
+# "the ISO" in upstream's message is wrong for every type but one, so it goes
+# with the arguments.
+SPAWN_VM_REBUILD_LINE = (
+    '    [ "{{ rebuild }}" -eq 1 ] && echo "Rebuilding the ISO" && just build-vm {{ rebuild }} {{ type }}'
+)
+SPAWN_VM_REBUILD_FIXED = (
+    '    [ "{{ rebuild }}" -eq 1 ] && echo "Rebuilding the {{ type }} image" && just rebuild-{{ type }}'
+)
 FROM_LINE_RE = re.compile(r"^(\s*FROM(?:\s+--platform=\S+)?\s+)(\S+)(.*)$", flags=re.IGNORECASE)
 INSTALLER_SWITCH_RE = re.compile(r"^(\s*bootc switch --mutate-in-place --transport registry )(\S+)(.*)$")
 # dnf5 prints this when -C (cache-only) is used and no repository metadata has
@@ -4320,7 +4329,29 @@ class App:
             flags=re.MULTILINE,
         )
         updated = self.patch_container_rechunk_config_arg(updated)
+        updated = self.patch_spawn_vm_rebuild(updated)
         return ensure_trailing_newline(updated)
+
+    def patch_spawn_vm_rebuild(self, justfile_text: str) -> str:
+        # `spawn-vm`'s rebuild option forwards its own arguments to the wrong
+        # recipe. build-vm is an alias for build-qcow2, whose parameters are
+        # target_image and tag -- so `just spawn-vm 1 qcow2` asks for the
+        # container image "1" at tag "qcow2" instead of rebuilding the
+        # configured one, and the selected disk type is consumed as that tag
+        # rather than choosing anything. Verified by running the real recipe
+        # with a `just` stub first on PATH for the nested call: the command it
+        # issues is `just build-vm 1 qcow2`.
+        #
+        # build-vm is also the wrong family. It converts an existing container
+        # to a disk; rebuild-<type> is the helper that rebuilds the container
+        # first, which is what "rebuild" asked for. rebuild-qcow2, rebuild-raw
+        # and rebuild-iso all exist and default target_image and tag correctly,
+        # so dispatching by type needs no arguments at all -- and the output
+        # path systemd-vmspawn reads below then matches the type just built.
+        #
+        # Matched on upstream's exact line, so it no-ops if that recipe is
+        # rewritten, like every other patcher here.
+        return justfile_text.replace(SPAWN_VM_REBUILD_LINE, SPAWN_VM_REBUILD_FIXED, 1)
 
     def patch_container_rechunk_config_arg(self, justfile_text: str) -> str:
         # Existing managed repositories may still have either of two unsafe
