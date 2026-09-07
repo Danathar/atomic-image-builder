@@ -39,6 +39,10 @@ setup_stubs() {
     # forward from one that passes an empty value; this records the value the
     # stub actually received.
     podman_env_log="$stub_dir/podman-env.log"
+    cosign_log="$stub_dir/cosign.log"
+    # A fixed, well-formed digest so scenarios can assert the exact reference
+    # that reaches podman run rather than merely that one is present.
+    test_digest="sha256:1111111111111111111111111111111111111111111111111111111111111111"
 
     local tool src
     for tool in bash env mktemp rm; do
@@ -46,13 +50,35 @@ setup_stubs() {
         ln -s "$src" "$stub_dir/$tool"
     done
 
+    # aib now calls podman three times on the verified path -- pull, image
+    # inspect, run -- so only `run` is logged; the others would overwrite it.
+    # The digest answered here is what the cosign stub is expected to be asked
+    # about, which is how the "runs the digest it verified" scenario can tell
+    # a real hand-off from a coincidence.
     cat >"$stub_dir/podman" <<PODMAN
 #!/usr/bin/env bash
+if [ "\$1" = "pull" ]; then
+    exit \${AIB_TEST_PULL_STATUS:-0}
+fi
+if [ "\$1" = "image" ] && [ "\$2" = "inspect" ]; then
+    printf '%s' "\${AIB_TEST_DIGEST-$test_digest}"
+    exit 0
+fi
 printf '%s ' "\$@" > "$podman_log"
 printf '%s' "\${GH_TOKEN-<unset>}" > "$podman_env_log"
 exit 0
 PODMAN
     chmod +x "$stub_dir/podman"
+
+    # A cosign that verifies anything, and records what it was asked to
+    # verify. Absent by definition on a host without cosign, which is its own
+    # scenario below.
+    cat >"$stub_dir/cosign" <<COSIGN
+#!/usr/bin/env bash
+printf '%s ' "\$@" > "$cosign_log"
+exit \${AIB_TEST_COSIGN_STATUS:-0}
+COSIGN
+    chmod +x "$stub_dir/cosign"
 }
 
 cleanup_stubs() {
@@ -96,6 +122,147 @@ assert_eq() {
 }
 
 # --- podman missing: exit 1, no podman invocation attempted ---------------
+# --- signature verification ------------------------------------------------
+# The wrapper pulls and executes a mutable tag on every run, as root in the
+# container, with the host's GitHub token forwarded in. The published image is
+# signed, but until #243 nothing on this path checked the signature, so it
+# protected nobody. These assert the check exists, that it is tied to the
+# digest actually run, and that every way of not verifying is deliberate.
+
+# --- the digest cosign verified is the digest podman runs ------------------
+# The substitution is the whole fix. Verifying the tag and then letting podman
+# resolve it again leaves a window for the tag to move in between, so this
+# asserts cosign and podman were handed the same reference rather than merely
+# that both were called.
+test_verify_runs_the_digest_it_verified() {
+    setup_stubs
+    PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1
+    local verified ran
+    verified="$(cat "$cosign_log")"
+    ran="$(cat "$podman_log")"
+    assert_contains "$verified" "ghcr.io/danathar/atomic-image-builder@$test_digest" "verify: cosign is given the resolved digest"
+    assert_contains "$ran" "ghcr.io/danathar/atomic-image-builder@$test_digest" "verify: podman runs the digest that was verified"
+    assert_not_contains "$ran" "atomic-image-builder:latest" "verify: the mutable tag is not what gets run"
+    cleanup_stubs
+}
+
+# --- the identity constraints are the ones the image is signed with --------
+# A cosign verify with no identity constraints accepts any valid Sigstore
+# signature from anyone, which looks like verification and is not.
+test_verify_uses_the_publisher_identity() {
+    setup_stubs
+    PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1
+    local verified
+    verified="$(cat "$cosign_log")"
+    assert_contains "$verified" "--certificate-identity-regexp" "verify: constrains the certificate identity"
+    assert_contains "$verified" "publish-image" "verify: identity names the publishing workflow"
+    assert_contains "$verified" "refs/(heads/main|tags/.+)" "verify: identity accepts main and release tags"
+    assert_contains "$verified" "--certificate-oidc-issuer" "verify: constrains the OIDC issuer"
+    assert_contains "$verified" "https://token.actions.githubusercontent.com" "verify: issuer is GitHub Actions"
+    cleanup_stubs
+}
+
+# --- a failed verification aborts, and runs nothing ------------------------
+# The one case where continuing is the wrong default: a signature that does
+# not check out is exactly when the image should not execute with the user's
+# GitHub token.
+test_verify_failure_refuses_to_run() {
+    setup_stubs
+    local out status
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_TEST_COSIGN_STATUS=1 "$aib" 2>&1)"
+    status=$?
+    assert_eq "$status" "1" "verify failure: exit status"
+    assert_contains "$out" "SIGNATURE VERIFICATION FAILED" "verify failure: says so plainly"
+    assert_contains "$out" "refusing to run" "verify failure: refuses rather than warns"
+    assert_eq "$(cat "$podman_log" 2>/dev/null)" "" "verify failure: podman run never happens"
+    cleanup_stubs
+}
+
+# --- cosign missing: fail closed, and say how to proceed -------------------
+test_verify_requires_cosign() {
+    setup_stubs
+    rm -f "$stub_dir/cosign"
+    local out status
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" "$aib" 2>&1)"
+    status=$?
+    assert_eq "$status" "1" "cosign missing: exit status"
+    assert_contains "$out" "cosign is required" "cosign missing: names what is missing"
+    assert_contains "$out" "AIB_SKIP_VERIFY=1" "cosign missing: names the escape hatch"
+    assert_eq "$(cat "$podman_log" 2>/dev/null)" "" "cosign missing: podman run never happens"
+    cleanup_stubs
+}
+
+# --- AIB_SKIP_VERIFY: runs, but says loudly that it did not verify ---------
+# The escape hatch exists for offline runs and hosts without cosign. Silence
+# would make it the path of least resistance; the warning is what keeps it a
+# decision.
+test_skip_verify_warns_and_runs() {
+    setup_stubs
+    rm -f "$stub_dir/cosign"
+    local out args
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_SKIP_VERIFY=1 "$aib" 2>&1)"
+    args="$(cat "$podman_log")"
+    assert_contains "$out" "WARNING" "skip verify: warns"
+    assert_contains "$out" "without" "skip verify: says verification did not happen"
+    assert_contains "$args" "run" "skip verify: still runs the image"
+    assert_eq "$(cat "$cosign_log" 2>/dev/null)" "" "skip verify: cosign is not consulted"
+    cleanup_stubs
+}
+
+# --- a pull failure is a verification failure, not a fallback --------------
+# This is also how an offline run arrives. Failing closed and naming the
+# escape hatch is the chosen behaviour; degrading to an unverified run would
+# make the check disappear exactly when the registry is unreachable.
+test_pull_failure_refuses_to_run() {
+    setup_stubs
+    local out status
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_TEST_PULL_STATUS=1 "$aib" 2>&1)"
+    status=$?
+    assert_eq "$status" "1" "pull failure: exit status"
+    assert_contains "$out" "could not pull" "pull failure: says what failed"
+    assert_contains "$out" "AIB_SKIP_VERIFY=1" "pull failure: names the offline escape hatch"
+    assert_eq "$(cat "$podman_log" 2>/dev/null)" "" "pull failure: podman run never happens"
+    cleanup_stubs
+}
+
+# --- a user's own image is not forced through our identity -----------------
+# Someone running their own build cannot satisfy this repository's certificate
+# identity, so verifying theirs would fail every time and the only way out
+# would be to disable verification entirely.
+test_custom_image_is_not_verified() {
+    setup_stubs
+    local args
+    args="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_IMAGE="localhost/my-own-build:dev" "$aib" >/dev/null 2>&1; cat "$podman_log")"
+    assert_contains "$args" "localhost/my-own-build:dev" "custom image: run as given"
+    assert_eq "$(cat "$cosign_log" 2>/dev/null)" "" "custom image: cosign is not consulted"
+    cleanup_stubs
+}
+
+# --- a release tag of the published repo IS verified ----------------------
+# The identity regexp covers refs/tags/, so pinning to a release is a
+# supported, verified way to run -- not a way around the check.
+test_published_release_tag_is_verified() {
+    setup_stubs
+    PATH="$stub_dir" HOME="$stub_dir/home" AIB_IMAGE="ghcr.io/danathar/atomic-image-builder:v0.9.5" "$aib" >/dev/null 2>&1
+    assert_contains "$(cat "$cosign_log")" "ghcr.io/danathar/atomic-image-builder@$test_digest" "release tag: verified like latest"
+    cleanup_stubs
+}
+
+# --- a digest that is not a digest is refused ------------------------------
+# The digest is interpolated into the reference cosign and podman are given.
+# Anything that is not a sha256 digest must stop the run rather than be
+# concatenated into a reference.
+test_unparseable_digest_refuses_to_run() {
+    setup_stubs
+    local out status
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_TEST_DIGEST="" "$aib" 2>&1)"
+    status=$?
+    assert_eq "$status" "1" "bad digest: exit status"
+    assert_contains "$out" "could not determine the digest" "bad digest: says what failed"
+    assert_eq "$(cat "$podman_log" 2>/dev/null)" "" "bad digest: podman run never happens"
+    cleanup_stubs
+}
+
 test_podman_missing() {
     setup_stubs
     rm -f "$stub_dir/podman"
@@ -250,19 +417,32 @@ test_always_present_args() {
 }
 
 # --- default AIB_IMAGE when unset -------------------------------------------
+# The default resolves to the published repo, and reaches podman as the digest
+# cosign verified rather than as the mutable tag -- see the verification
+# scenarios below for why that substitution is the point rather than a detail.
 test_default_image() {
     setup_stubs
     local args
     args="$(PATH="$stub_dir" HOME="$stub_dir/home" env -u AIB_IMAGE "$aib" >/dev/null 2>&1; cat "$podman_log")"
-    assert_contains "$args" "ghcr.io/danathar/atomic-image-builder:latest" "default image: used when AIB_IMAGE unset"
+    assert_contains "$args" "ghcr.io/danathar/atomic-image-builder@$test_digest" "default image: used when AIB_IMAGE unset"
     cleanup_stubs
 }
 
 # --- exit code from podman is preserved ------------------------------------
 test_exit_code_preserved() {
     setup_stubs
-    cat >"$stub_dir/podman" <<'PODMAN'
+    # Only `run` fails. A stub that failed every subcommand would abort aib at
+    # the pull step instead, and the 42 would never come from where this
+    # scenario claims it does.
+    cat >"$stub_dir/podman" <<PODMAN
 #!/usr/bin/env bash
+if [ "\$1" = "pull" ]; then
+    exit 0
+fi
+if [ "\$1" = "image" ] && [ "\$2" = "inspect" ]; then
+    printf '%s' "$test_digest"
+    exit 0
+fi
 exit 42
 PODMAN
     chmod +x "$stub_dir/podman"
@@ -274,17 +454,52 @@ PODMAN
 }
 
 # --- base podman flags are on every invocation ----------------------------
-# --pull=newer is the one with teeth: podman's default (--pull=missing) runs
-# whatever copy was fetched first, forever, and the image bakes in action pins
-# and template snapshots, so a stale image quietly generates repos from stale
-# pins. Dropping the flag is a silent regression, not a visible one.
 test_base_podman_flags() {
     setup_stubs
     local args
     args="$(PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1; cat "$podman_log")"
-    assert_contains "$args" "--pull=newer" "base flags: --pull=newer, so a stale image cannot run forever"
     assert_contains "$args" "--rm" "base flags: --rm, so the container is not left behind"
     assert_contains "$args" "-it" "base flags: -it, since the tool is an interactive TUI"
+    cleanup_stubs
+}
+
+# --- staleness: the verified path pulls explicitly instead of --pull=newer --
+# --pull=newer is the flag with teeth on the unverified paths: podman's
+# default (--pull=missing) runs whatever copy was fetched first, forever, and
+# the image bakes in action pins and template snapshots, so a stale image
+# quietly generates repos from stale pins. The verified path cannot use it --
+# it has to resolve a digest before running -- so it pulls itself, and this
+# asserts the staleness protection survived the change rather than being
+# dropped along with the flag.
+test_verified_path_pulls_before_running() {
+    setup_stubs
+    local pull_log="$stub_dir/pull.log"
+    cat >"$stub_dir/podman" <<PODMAN
+#!/usr/bin/env bash
+if [ "\$1" = "pull" ]; then
+    printf '%s ' "\$@" >> "$pull_log"
+    exit 0
+fi
+if [ "\$1" = "image" ] && [ "\$2" = "inspect" ]; then
+    printf '%s' "$test_digest"
+    exit 0
+fi
+printf '%s ' "\$@" > "$podman_log"
+exit 0
+PODMAN
+    chmod +x "$stub_dir/podman"
+    PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1
+    assert_contains "$(cat "$pull_log" 2>/dev/null)" "pull" "verified path: pulls before running"
+    assert_contains "$(cat "$pull_log" 2>/dev/null)" "ghcr.io/danathar/atomic-image-builder:latest" "verified path: pulls the configured tag"
+    cleanup_stubs
+}
+
+# --- an unverified path keeps --pull=newer --------------------------------
+test_unverified_path_keeps_pull_newer() {
+    setup_stubs
+    local args
+    args="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_IMAGE="localhost/my-own-build:dev" "$aib" >/dev/null 2>&1; cat "$podman_log")"
+    assert_contains "$args" "--pull=newer" "custom image: --pull=newer still applies"
     cleanup_stubs
 }
 
@@ -411,6 +626,17 @@ test_localtime_absent
 test_always_present_args
 test_default_image
 test_exit_code_preserved
+test_verified_path_pulls_before_running
+test_unverified_path_keeps_pull_newer
+test_verify_runs_the_digest_it_verified
+test_verify_uses_the_publisher_identity
+test_verify_failure_refuses_to_run
+test_verify_requires_cosign
+test_skip_verify_warns_and_runs
+test_pull_failure_refuses_to_run
+test_custom_image_is_not_verified
+test_published_release_tag_is_verified
+test_unparseable_digest_refuses_to_run
 
 echo
 if [ "$skip" -gt 0 ]; then

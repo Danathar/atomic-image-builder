@@ -11,8 +11,9 @@ Three ways to run Atomic Image Builder. Pick one; they are the same tool.
 The tool needs `dnf5` and `rpm-ostree`. Where they come from depends on how you
 run it. With Homebrew or a source checkout they come from the host — which is
 why those paths target Fedora Atomic and Universal Blue desktops, where both are
-already present. The container image bundles its own, so Podman really is the
-only prerequisite there.
+already present. The container image bundles its own, so Podman is
+almost the whole prerequisite there — the `aib` wrapper also wants `cosign`, to
+verify the image's signature before running it.
 
 What the container cannot bundle is your host's rpm-ostree *state*: it has no
 access to the host's system D-Bus, so the system scan depends on the `aib`
@@ -63,7 +64,9 @@ use the container; if you want stable versions, use Homebrew.
 
 Run the tool as a container — no local clone or dependency install needed, with
 `gum`, `git`, `gh`, `cosign`, and the `rpm-ostree` client all bundled in. Podman
-is the only prerequisite.
+is the only prerequisite for a bare `podman run`; the `aib` wrapper additionally
+needs `cosign` on the host, because it verifies the image's signature before
+running it. See [Verifying the image](#verifying-the-image).
 
 ### Using the wrapper script
 
@@ -89,20 +92,41 @@ podman run --rm -it --pull=newer \
   ghcr.io/danathar/atomic-image-builder:latest
 ```
 
-`--pull=newer` matters more than it looks. Podman's default is `--pull=missing`,
-which pulls only when the image is absent locally — so once you have pulled
-`latest` you would keep running that copy indefinitely, however far the published
-image moves on. The tool bakes in its own action pins and template snapshots, so
-an old image quietly generates repos from old pins. `--pull=newer` fetches only
-when the registry digest differs, and podman suppresses pull errors when a local
-image exists, so it still works offline.
+Staying current matters more than it looks. Podman's default is
+`--pull=missing`, which pulls only when the image is absent locally — so once you
+have pulled `latest` you would keep running that copy indefinitely, however far
+the published image moves on. The tool bakes in its own action pins and template
+snapshots, so an old image quietly generates repos from old pins. The `aib`
+wrapper pulls on every run: explicitly on the verified path, since it has to
+resolve a digest before it can check a signature, and with `--pull=newer`
+otherwise.
 
 ### Verifying the image
 
-Every published image is signed with keyless (OIDC) cosign at publish time, so
-you can check that what you pulled was really built by this repository's
-workflow before running it. The signature is keyless — the identity being
-verified is the publishing workflow itself, not a key anyone holds:
+Every published image is signed with keyless (OIDC) cosign at publish time — the
+identity being verified is the publishing workflow itself, not a key anyone
+holds.
+
+**The `aib` wrapper does this for you, on every run.** It is the path where
+nobody thinks about pulling: it fetches a mutable tag each time, runs it as root
+in the container, and forwards your GitHub token into it. A signature that is
+only checked once, by hand, at install time protects none of that — so the
+wrapper verifies before it runs, and runs the exact digest it verified rather
+than re-resolving the tag afterwards. A failed check aborts; it does not warn
+and continue.
+
+Two things follow from that, both deliberate:
+
+| Situation                            | What happens                                                                     |
+| ------------------------------------ | -------------------------------------------------------------------------------- |
+| `cosign` not installed               | The wrapper refuses to run and says so. Install cosign, or opt out explicitly.   |
+| Offline, or you want to opt out      | `AIB_SKIP_VERIFY=1 aib` runs the image unverified, and warns loudly that it did. |
+| `AIB_IMAGE` points at your own build | Not verified — your build cannot satisfy this repository's certificate identity. |
+
+A release tag of the published image (`ghcr.io/danathar/atomic-image-builder:v1.2.3`)
+*is* verified, because the identity below accepts tag refs as well as `main`.
+
+To run the same check by hand — against a bare `podman run`, say:
 
 ```bash
 cosign verify \
@@ -114,7 +138,8 @@ cosign verify \
 The `refs/(heads/main|tags/.+)` alternation matters: `latest` is signed from a
 push to `main`, but a release publishes from a tag ref, so its certificate
 identity ends `@refs/tags/<tag>` instead — a regexp that only matches `main`
-would reject a perfectly good release digest.
+would reject a perfectly good release digest. It is the same regexp the wrapper
+uses, so the two cannot disagree about what counts as a genuine image.
 
 ### Distrobox
 
