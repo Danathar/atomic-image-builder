@@ -11660,6 +11660,11 @@ class BuilderTests(unittest.TestCase):
     def test_spawn_vm_without_rebuild_runs_nothing_first(self) -> None:
         # The guard is an AND list under `set -e`. A failing first command
         # there must not abort the recipe, or spawn-vm would never spawn.
+        #
+        # This assertion is a negative one, so on its own it cannot tell "the
+        # recipe ran and correctly skipped the rebuild" apart from "the recipe
+        # never ran a single line". run_spawn_vm now proves the recipe reached
+        # its end before this comparison is trusted -- see the assertion there.
         self.assertEqual(self.run_spawn_vm("0", "qcow2"), [])
 
     def run_spawn_vm(self, rebuild: str, disk_type: str) -> list[str]:
@@ -11685,7 +11690,7 @@ class BuilderTests(unittest.TestCase):
                     "exit 0\n"
                 )
                 stub.chmod(0o755)
-            subprocess.run(
+            proc = subprocess.run(
                 [shutil.which("just"), "spawn-vm", rebuild, disk_type],
                 cwd=repo_dir,
                 env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"},
@@ -11694,7 +11699,25 @@ class BuilderTests(unittest.TestCase):
                 check=False,
             )
             recorded = log.read_text().splitlines() if log.exists() else []
-        # systemd-vmspawn always runs; only the nested rebuild is in question.
+        # systemd-vmspawn always runs -- it is the recipe's tail, past the
+        # rebuild guard -- so seeing it is what proves the recipe body actually
+        # executed. Nothing checked that, and `check=False` above discarded
+        # just's exit status, so any failure that stops just before the body
+        # ran turned test_spawn_vm_without_rebuild_runs_nothing_first green:
+        # a parse error in the generated Justfile, a recipe rename, or a
+        # required `export ... := env_var(...)` left unsubstituted by
+        # write_project_files (the bundled snapshot has one, BIB_IMAGE, and
+        # just resolves it at parse time before any recipe runs). An empty
+        # nested.log then reads identically to "the guard correctly skipped
+        # the rebuild". Assert the tail so that comparison means something,
+        # and surface just's own diagnostics when it does not.
+        self.assertTrue(
+            any(line.startswith("systemd-vmspawn ") for line in recorded),
+            "spawn-vm never reached its systemd-vmspawn tail, so its nested-`just` "
+            f"log proves nothing. just exited {proc.returncode}.\n"
+            f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+        )
+        # Only the nested rebuild is in question.
         return [line for line in recorded if line.startswith("just ")]
 
     # actionlint diagnostics a generated project carries that this repo
