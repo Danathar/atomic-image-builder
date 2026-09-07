@@ -146,13 +146,14 @@ else
     if ! digest="$(podman image inspect --format '{{.Digest}}' "$AIB_IMAGE" 2>/dev/null)"; then
         digest=""
     fi
-    case "$digest" in
-        sha256:*) ;;
-        *)
-            echo "aib: could not determine the digest of $AIB_IMAGE; refusing to run unverified." >&2
-            exit 1
-            ;;
-    esac
+    # Exactly a sha256 digest, not merely something starting "sha256:". This
+    # value is interpolated into the reference both cosign and podman are
+    # given, and a truncated or padded one could resolve differently for each
+    # -- which would mean verifying one image and running another.
+    if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        echo "aib: could not determine the digest of $AIB_IMAGE; refusing to run unverified." >&2
+        exit 1
+    fi
 
     verified_ref="$AIB_PUBLISHED_REPO@$digest"
     if ! cosign_output="$(cosign verify \

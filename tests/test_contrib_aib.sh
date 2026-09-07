@@ -122,6 +122,23 @@ assert_eq() {
 }
 
 # --- podman missing: exit 1, no podman invocation attempted ---------------
+# --- a digest-shaped value that is not a digest is refused -----------------
+# The check is "exactly a sha256 digest", not "starts with sha256:". A
+# truncated or padded value could resolve differently for cosign and for
+# podman, which would mean verifying one image and running another.
+test_malformed_digest_refuses_to_run() {
+    setup_stubs
+    local out status
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_TEST_DIGEST="sha256:abc" "$aib" 2>&1)"
+    status=$?
+    assert_eq "$status" "1" "short digest: exit status"
+    assert_contains "$out" "could not determine the digest" "short digest: says what failed"
+    assert_eq "$(cat "$podman_log" 2>/dev/null)" "" "short digest: podman run never happens"
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_TEST_DIGEST="${test_digest}extra" "$aib" 2>&1)"
+    assert_contains "$out" "could not determine the digest" "over-long digest: refused too"
+    cleanup_stubs
+}
+
 # --- signature verification ------------------------------------------------
 # The wrapper pulls and executes a mutable tag on every run, as root in the
 # container, with the host's GitHub token forwarded in. The published image is
@@ -637,6 +654,7 @@ test_pull_failure_refuses_to_run
 test_custom_image_is_not_verified
 test_published_release_tag_is_verified
 test_unparseable_digest_refuses_to_run
+test_malformed_digest_refuses_to_run
 
 echo
 if [ "$skip" -gt 0 ]; then
