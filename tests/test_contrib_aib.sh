@@ -258,7 +258,8 @@ test_cosign_missing_with_brew_names_only_the_command() {
     chmod +x "$stub_dir/brew"
     local out
     out="$(PATH="$stub_dir" HOME="$stub_dir/home" "$aib" 2>&1)"
-    assert_contains "$out" "Install it with:  brew install cosign" "cosign missing, brew present: one exact command"
+    assert_contains "$out" "brew install cosign" "cosign missing, brew present: one exact command"
+    assert_contains "$out" "AIB_SKIP_VERIFY=1 aib" "cosign missing, brew present: the opt-out is a whole command too"
     assert_not_contains "$out" "https://brew.sh" "cosign missing, brew present: no detour explaining brew"
     assert_not_contains "$out" "Fedora Atomic" "cosign missing, brew present: no detour about a distro they are not on"
     assert_contains "$out" "no GitHub login" "cosign missing, brew present: still says the escape hatch costs the login"
@@ -468,7 +469,9 @@ test_skip_verify_gets_no_credentials() {
     # Four lines total on this path, two of them the warning above. This is the
     # only security UI a reader who does not open the docs will see, and a
     # block long enough to skim is one that does not get read.
-    assert_eq "$(printf '%s\n' "$out" | wc -l)" "4" "skip verify: stays short enough to read"
+    # A bound, not an exact count: the point is that it stays readable, and an
+    # exact number breaks on any wording change while saying nothing more.
+    assert_eq "$(printf '%s\n' "$out" | awk 'END{print (NR<=8)?"ok":NR}')" "ok" "skip verify: stays short enough to read"
     cleanup_stubs
 }
 
@@ -511,20 +514,35 @@ test_printed_remedy_restores_the_verified_run() {
     # `env -u AIB_IMAGE aib` has to be able to find `aib`, and the stub dir is
     # the entire PATH these scenarios run with.
     ln -s "$aib" "$stub_dir/aib"
-    local out remedy args forwarded
+    local out official optin args forwarded
     out="$(PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN \
         AIB_IMAGE="localhost/my-own-build:dev" "$aib" 2>&1)"
-    remedy="$(printf '%s\n' "$out" | sed -n 's/^aib: For the official image instead, run:  //p')"
-    assert_eq "$remedy" "env -u AIB_IMAGE aib" "remedy: the message prints the command this scenario runs"
+    # Both remedies are read out of the message rather than written here, so a
+    # reworded line that no longer works fails in this scenario instead of in
+    # somebody's terminal. Each is the indented line following its sentence.
+    official="$(printf '%s\n' "$out" | sed -n '/To run the official image instead/{n;s/^aib:   //p;}')"
+    optin="$(printf '%s\n' "$out" | sed -n '/keep this image and send your login/{n;s/^aib:   //p;}')"
+    assert_eq "$official" "env -u AIB_IMAGE aib" "remedy: prints the official-image command"
+    assert_eq "$optin" "AIB_ALLOW_UNVERIFIED_AUTH=1 AIB_IMAGE=localhost/my-own-build:dev aib" "remedy: prints the opt-in command, with the image repeated back"
 
-    # Run it with AIB_IMAGE still set, which is the situation the reader is in.
+    # Paste the first one, with AIB_IMAGE still set -- the reader's situation.
     PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN \
-        AIB_IMAGE="localhost/my-own-build:dev" bash -c "$remedy" >/dev/null 2>&1
+        AIB_IMAGE="localhost/my-own-build:dev" bash -c "$official" >/dev/null 2>&1
     args="$(cat "$podman_log")"
     forwarded="$(cat "$podman_env_log")"
     assert_contains "$args" "ghcr.io/danathar/atomic-image-builder@$test_digest" "remedy: runs the verified official image"
     assert_contains "$args" "-e GH_TOKEN " "remedy: the login comes back"
     assert_eq "$forwarded" "fake-token-123" "remedy: and reaches the container"
+
+    # Paste the second one. It has to keep the custom image AND send the login;
+    # dropping AIB_IMAGE from the printed line would quietly run the official
+    # image instead, which is not what the sentence above it offered.
+    PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN \
+        AIB_IMAGE="localhost/my-own-build:dev" bash -c "$optin" >/dev/null 2>&1
+    args="$(cat "$podman_log")"
+    forwarded="$(cat "$podman_env_log")"
+    assert_contains "$args" "localhost/my-own-build:dev" "remedy: the opt-in keeps the custom image"
+    assert_eq "$forwarded" "fake-token-123" "remedy: the opt-in sends the login"
     cleanup_stubs
 }
 

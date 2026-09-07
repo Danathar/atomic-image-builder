@@ -135,7 +135,8 @@ verify_image="$publishes_this_image"
 
 if [ -n "${AIB_SKIP_VERIFY:-}" ] && [ "$verify_image" = yes ]; then
     echo "aib: WARNING - AIB_SKIP_VERIFY is set, so who built this image is not" >&2
-    echo "aib: being checked. To check first, run:  env -u AIB_SKIP_VERIFY aib" >&2
+    echo "aib: being checked. To check it first, copy this:" >&2
+    echo "aib:   env -u AIB_SKIP_VERIFY aib" >&2
     verify_image=no
 fi
 
@@ -168,16 +169,15 @@ else
         # layering a package onto the OS image and rebooting to get one CLI
         # command is the wrong mechanism on an atomic desktop.
         echo "aib: cosign is needed to check who built this image before running it," >&2
-        echo "aib: and it is not installed." >&2
         if command -v brew >/dev/null 2>&1; then
-            echo "aib: Install it with:  brew install cosign" >&2
+            echo "aib: and it is not installed. Copy this:" >&2
         else
-            echo "aib: Universal Blue images ship Homebrew; on Fedora Atomic, install it" >&2
-            echo "aib: from https://brew.sh first. Then:" >&2
-            echo "aib:   brew install cosign" >&2
+            echo "aib: and it is not installed. Universal Blue images ship Homebrew; on" >&2
+            echo "aib: Fedora Atomic, install it from https://brew.sh first. Then copy this:" >&2
         fi
-        echo "aib: Or skip the check with AIB_SKIP_VERIFY=1 -- an unchecked image" >&2
-        echo "aib: gets no GitHub login." >&2
+        echo "aib:   brew install cosign" >&2
+        echo "aib: Or skip the check -- an unchecked image gets no GitHub login:" >&2
+        echo "aib:   AIB_SKIP_VERIFY=1 aib" >&2
         exit 1
     fi
 
@@ -188,8 +188,8 @@ else
     if ! podman pull --quiet "$AIB_IMAGE" >/dev/null; then
         echo "aib: could not download this image, so there is no way to check who built it:" >&2
         echo "aib:   $AIB_IMAGE" >&2
-        echo "aib: Offline? Run an already-downloaded copy with:  AIB_SKIP_VERIFY=1 aib" >&2
-        echo "aib: That copy gets no GitHub login." >&2
+        echo "aib: Offline? Run an already-downloaded copy -- it gets no GitHub login:" >&2
+        echo "aib:   AIB_SKIP_VERIFY=1 aib" >&2
         exit 1
     fi
 
@@ -284,6 +284,14 @@ if [ "$forward_auth" = no ]; then
     # login look obvious rather than arbitrary. The word survives in
     # docs/installing.md, where a reader has gone looking for the mechanism.
     #
+    # Every remedy is a whole command on a line of its own, not a fragment to
+    # splice in. "add: AIB_ALLOW_UNVERIFIED_AUTH=1" still asks the reader to
+    # know where it goes and to reconstruct the rest of what they typed, which
+    # is the same demand "unset AIB_IMAGE" made in different clothes. A line
+    # that can be selected and pasted asks nothing. That is why the custom-image
+    # remedy repeats AIB_IMAGE back: without it the pasted line silently runs
+    # the official image, which is the opposite of what the sentence offered.
+    #
     # Every remedy is a command to copy, never an operation to perform. "Unset
     # AIB_IMAGE" asks a reader to know what an environment variable is, what
     # unsetting one means, and how to do it -- and for the likeliest way of
@@ -301,13 +309,16 @@ if [ "$forward_auth" = no ]; then
         # Repeating that command here would put it on screen twice, which reads
         # as two separate problems.
         echo "aib: An unchecked image also gets no GitHub login, so the steps that reach" >&2
-        echo "aib: GitHub will fail. To send it anyway, add:  AIB_ALLOW_UNVERIFIED_AUTH=1" >&2
+        echo "aib: GitHub will fail. To run it unchecked and send your login anyway:" >&2
+        echo "aib:   AIB_ALLOW_UNVERIFIED_AUTH=1 AIB_SKIP_VERIFY=1 aib" >&2
     else
         echo "aib: This image is not published by this project, so there is no way" >&2
         echo "aib: to check who built it, and it gets no GitHub login:" >&2
         echo "aib:   $AIB_IMAGE" >&2
-        echo "aib: For the official image instead, run:  env -u AIB_IMAGE aib" >&2
-        echo "aib: To keep this image and send the login, add:  AIB_ALLOW_UNVERIFIED_AUTH=1" >&2
+        echo "aib: To run the official image instead, copy this:" >&2
+        echo "aib:   env -u AIB_IMAGE aib" >&2
+        echo "aib: Or to keep this image and send your login anyway, copy this:" >&2
+        echo "aib:   AIB_ALLOW_UNVERIFIED_AUTH=1 AIB_IMAGE=$AIB_IMAGE aib" >&2
     fi
 elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     GH_TOKEN="$(gh auth token)"
