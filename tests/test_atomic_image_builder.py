@@ -12669,6 +12669,7 @@ class BuilderTests(unittest.TestCase):
                 "Sign container image": {
                     "COSIGN_PRIVATE_KEY": "${{ secrets.SIGNING_SECRET }}",
                     "COSIGN_PASSWORD": "${{ secrets.COSIGN_PASSWORD }}",
+                    "DIGEST": "${{ steps.push-to-ghcr.outputs.digest }}",
                 }
             },
         )
@@ -12764,6 +12765,10 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(push["with"]["registry"], "${{ env.IMAGE_REGISTRY }}")
         self.assertEqual(push["with"]["image"], "${{ env.IMAGE_NAME }}")
         self.assertEqual(push["with"]["tags"], "${{ steps.metadata.outputs.tags }}")
+        # The signing step names this id to read the pushed digest. An id that
+        # is renamed here and not there resolves to the empty string, which is
+        # exactly the case the signing step refuses to sign.
+        self.assertEqual(push["id"], "push-to-ghcr")
 
     def test_generated_workflow_top_level_env_carries_the_image_description(self) -> None:
         app = self.make_app()
@@ -12773,22 +12778,32 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(document["env"]["DEFAULT_TAG"], "latest")
         self.assertEqual(document["concurrency"]["cancel-in-progress"], True)
 
-    def test_generated_workflow_signing_step_runs_cosign_over_every_tag(self) -> None:
+    def test_generated_workflow_signing_step_signs_the_pushed_digest(self) -> None:
+        # The digest, not a tag. `latest` is rewritten by the daily rebuild, so
+        # a tag resolved again in this step can name an image other than the
+        # one the push above produced -- signing what this run did not build
+        # and leaving what it did build unsigned. The bundled template and this
+        # repository's own publish workflow both sign the digest for that
+        # reason; the two generated paths have to agree.
         step = next(
             s
             for s in self.workflow_steps(self.workflow_document(signing=True))
             if s["name"] == "Sign container image"
         )
+        self.assertEqual(step["env"]["DIGEST"], "${{ steps.push-to-ghcr.outputs.digest }}")
         self.assertEqual(
             step["run"].split("\n"),
             [
-                'IMAGE_FULL="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"',
-                "for tag in ${{ steps.metadata.outputs.tags }}; do",
-                "  cosign sign -y --new-bundle-format=false --use-signing-config=false "
-                "--key env://COSIGN_PRIVATE_KEY $IMAGE_FULL:$tag",
-                "done",
+                "set -euo pipefail",
+                'if [ -z "${DIGEST}" ]; then',
+                '  echo "The push step reported no digest, so there is nothing to sign." >&2',
+                "  exit 1",
+                "fi",
+                "cosign sign -y --new-bundle-format=false --use-signing-config=false "
+                '--key env://COSIGN_PRIVATE_KEY "${IMAGE_REGISTRY}/${IMAGE_NAME}@${DIGEST}"',
             ],
         )
+        self.assertNotIn("steps.metadata.outputs.tags", step["run"])
 
     def test_generated_workflow_cosign_release_stays_a_quoted_version(self) -> None:
         # Single-quoted in the source: unquoted, `v3.1.2` is still a string,
