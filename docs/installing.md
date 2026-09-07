@@ -142,6 +142,12 @@ live credential for your GitHub account, which is a much larger thing to agree
 to than "skip a check". The tool still starts; the steps that reach GitHub are
 the ones that stop working.
 
+When that happens the wrapper prints the exact command that undoes it —
+`env -u AIB_IMAGE aib`, or `env -u AIB_SKIP_VERIFY aib` — rather than telling
+you to unset a variable. The usual way to arrive here is pasting a command with
+the variable written in front of it, and there is then nothing left set to
+unset; the command above works either way.
+
 To forward credentials anyway — iterating on your own build of this image is
 the case that needs it — say so explicitly:
 

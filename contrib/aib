@@ -135,7 +135,7 @@ verify_image="$publishes_this_image"
 
 if [ -n "${AIB_SKIP_VERIFY:-}" ] && [ "$verify_image" = yes ]; then
     echo "aib: WARNING - AIB_SKIP_VERIFY is set. Running $AIB_IMAGE without" >&2
-    echo "aib: verifying its signature. Unset AIB_SKIP_VERIFY to restore the check." >&2
+    echo "aib: checking its signature. For the checked version, run:  env -u AIB_SKIP_VERIFY aib" >&2
     verify_image=no
 fi
 
@@ -239,18 +239,30 @@ if [ "$forward_auth" = no ]; then
     # someone is already confused gets skimmed rather than read. Nobody on the
     # ordinary path sees either message: a verified image forwards the login
     # exactly as before, with nothing printed.
+    #
+    # Every remedy is a command to copy, never an operation to perform. "Unset
+    # AIB_IMAGE" asks a reader to know what an environment variable is, what
+    # unsetting one means, and how to do it -- and for the likeliest way of
+    # getting here it is also wrong. Someone who pasted
+    #
+    #     AIB_IMAGE=evil.example/evil/image aib
+    #
+    # has nothing to unset: the assignment lasted exactly as long as that
+    # command. `env -u AIB_IMAGE aib` is one line that works whether the
+    # variable came from a paste or from their shell profile, and it needs no
+    # model of what it is doing to be typed correctly.
     if [ "$publishes_this_image" = yes ]; then
         # Two lines, because the AIB_SKIP_VERIFY warning printed further up has
-        # already named the cause and how to undo it. Repeating "unset
-        # AIB_SKIP_VERIFY" here would say it twice in one screen, which reads
+        # already named the cause and given the command that undoes it.
+        # Repeating that command here would put it on screen twice, which reads
         # as two separate problems.
-        echo "aib: An unverified image also gets no GitHub login, so the steps that" >&2
-        echo "aib: reach GitHub will fail. AIB_ALLOW_UNVERIFIED_AUTH=1 sends it anyway." >&2
+        echo "aib: An unverified image also gets no GitHub login, so the steps that reach" >&2
+        echo "aib: GitHub will fail. To send it anyway, add:  AIB_ALLOW_UNVERIFIED_AUTH=1" >&2
     else
         echo "aib: $AIB_IMAGE is not published by this project, so its signature" >&2
         echo "aib: was not checked -- and an unverified image gets no GitHub login." >&2
-        echo "aib: Not what you wanted? Unset AIB_IMAGE." >&2
-        echo "aib: Your own build? Set AIB_ALLOW_UNVERIFIED_AUTH=1." >&2
+        echo "aib: For the official image instead, run:  env -u AIB_IMAGE aib" >&2
+        echo "aib: To keep this image and send the login, add:  AIB_ALLOW_UNVERIFIED_AUTH=1" >&2
     fi
 elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     GH_TOKEN="$(gh auth token)"

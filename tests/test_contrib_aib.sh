@@ -371,14 +371,19 @@ test_custom_image_gets_no_credentials() {
     assert_not_contains "$args" "aib-gh:/root/.config/gh" "custom image: gh config volume not mounted"
     assert_contains "$args" "run" "custom image: still runs, just logged out"
     assert_contains "$out" "localhost/my-own-build:dev" "custom image: names the image it declined to trust"
-    assert_contains "$out" "Unset AIB_IMAGE" "custom image: leads with how to undo the likely mistake"
     assert_contains "$out" "no GitHub login" "custom image: says plainly what was withheld"
+    # A command to copy, not an operation to perform. "Unset AIB_IMAGE" needs a
+    # reader who knows what an environment variable is, and is also wrong for
+    # the likeliest arrival: someone who pasted `AIB_IMAGE=... aib` has nothing
+    # to unset. `env -u` works either way and needs no model of itself.
+    assert_contains "$out" "env -u AIB_IMAGE aib" "custom image: the fix is a runnable command"
+    assert_not_contains "$out" "Unset AIB_IMAGE" "custom image: does not ask the reader to unset a variable"
     assert_contains "$out" "AIB_ALLOW_UNVERIFIED_AUTH=1" "custom image: names the opt-in"
     # Order, not just presence. A reader who reaches this message because they
     # pasted something a stranger gave them has to meet the way out before the
     # way through; a search that lands on the override first is how this
     # becomes cargo-culted advice.
-    assert_contains "${out%%AIB_ALLOW_UNVERIFIED_AUTH*}" "Unset AIB_IMAGE" "custom image: the fix is stated before the override"
+    assert_contains "${out%%AIB_ALLOW_UNVERIFIED_AUTH*}" "env -u AIB_IMAGE aib" "custom image: the fix is stated before the override"
     cleanup_stubs
 }
 
@@ -403,11 +408,12 @@ test_skip_verify_gets_no_credentials() {
     # messages into one generic line was caught by the custom-image scenario
     # and not by this one until the string narrowed.
     assert_contains "$out" "no GitHub login" "skip verify: says plainly what was withheld"
-    assert_not_contains "$out" "Unset AIB_IMAGE" "skip verify: does not blame a variable that was never set"
-    # Said once, not twice. The warning above already tells the reader to unset
-    # AIB_SKIP_VERIFY; repeating it in the credential message put the same
-    # instruction on screen twice, which reads as two separate problems.
-    assert_eq "$(printf '%s' "$out" | grep -c "Unset AIB_SKIP_VERIFY")" "1" "skip verify: the remedy is stated once"
+    assert_contains "$out" "env -u AIB_SKIP_VERIFY aib" "skip verify: the fix is a runnable command"
+    assert_not_contains "$out" "AIB_IMAGE" "skip verify: does not blame a variable that was never set"
+    # Said once, not twice. The warning above already carries the command that
+    # undoes this; repeating it in the credential message put the same line on
+    # screen twice, which reads as two separate problems.
+    assert_eq "$(printf '%s' "$out" | grep -c "env -u AIB_SKIP_VERIFY aib")" "1" "skip verify: the remedy is stated once"
     # Four lines total on this path, two of them the warning above. This is the
     # only security UI a reader who does not open the docs will see, and a
     # block long enough to skim is one that does not get read.
@@ -440,6 +446,34 @@ test_unverified_auth_opt_in_mounts_gh_volume() {
     args="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_IMAGE="localhost/my-own-build:dev" \
         AIB_ALLOW_UNVERIFIED_AUTH=1 "$aib" >/dev/null 2>&1; cat "$podman_log")"
     assert_contains "$args" "aib-gh:/root/.config/gh" "opt-in, no gh: config volume mounted"
+    cleanup_stubs
+}
+
+# --- the remedy the message prints actually works --------------------------
+# Asserting that a message contains a command says nothing about whether the
+# command does what the sentence around it claims. This takes the string out
+# of the message rather than hard-coding it, then runs it, so a reworded
+# remedy that no longer works fails here instead of in someone's terminal.
+test_printed_remedy_restores_the_verified_run() {
+    setup_stubs
+    install_gh_stub
+    # `env -u AIB_IMAGE aib` has to be able to find `aib`, and the stub dir is
+    # the entire PATH these scenarios run with.
+    ln -s "$aib" "$stub_dir/aib"
+    local out remedy args forwarded
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN \
+        AIB_IMAGE="localhost/my-own-build:dev" "$aib" 2>&1)"
+    remedy="$(printf '%s\n' "$out" | sed -n 's/^aib: For the official image instead, run:  //p')"
+    assert_eq "$remedy" "env -u AIB_IMAGE aib" "remedy: the message prints the command this scenario runs"
+
+    # Run it with AIB_IMAGE still set, which is the situation the reader is in.
+    PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN \
+        AIB_IMAGE="localhost/my-own-build:dev" bash -c "$remedy" >/dev/null 2>&1
+    args="$(cat "$podman_log")"
+    forwarded="$(cat "$podman_env_log")"
+    assert_contains "$args" "ghcr.io/danathar/atomic-image-builder@$test_digest" "remedy: runs the verified official image"
+    assert_contains "$args" "-e GH_TOKEN " "remedy: the login comes back"
+    assert_eq "$forwarded" "fake-token-123" "remedy: and reaches the container"
     cleanup_stubs
 }
 
@@ -724,6 +758,7 @@ test_custom_image_gets_no_credentials
 test_skip_verify_gets_no_credentials
 test_unverified_auth_opt_in_forwards_token
 test_unverified_auth_opt_in_mounts_gh_volume
+test_printed_remedy_restores_the_verified_run
 test_gh_missing
 test_gh_not_logged_in
 test_rpm_ostree_success
