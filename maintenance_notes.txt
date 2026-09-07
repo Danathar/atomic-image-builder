@@ -182,6 +182,27 @@ test_signing_step_carries_its_own_password the first. Both run against text
 shaped like what is really on disk in a managed repository, because that is
 the input that matters here -- new repositories would look correct either way.
 
+Sign The Digest, Not The Tag
+-----------------------------
+Both generated paths sign `<registry>/<image>@<digest>`. The bundled snapshot
+reads the digest from `podman push --digestfile`; generate_container_workflow()
+reads it from the push-to-registry step's `digest` output, which is why that
+step carries `id: push-to-ghcr`. publish-image.yml signs this repository's own
+image the same way.
+
+The from-scratch path used to loop over `steps.metadata.outputs.tags` and sign
+each tag. Every tag that workflow writes is mutable and `latest` is rewritten
+by the daily rebuild, so cosign resolving a tag a second time in the signing
+step can land on an image the run did not build -- signing that one and leaving
+the built one unsigned, while a `cosign verify` against the tag still passes.
+One signature on the digest covers every tag pointing at it.
+
+The step fails closed on an empty DIGEST rather than signing `<image>@`,
+because the alternative failure is an unsigned image and a green run.
+test_generated_workflow_signing_step_signs_the_pushed_digest asserts the step's
+body, and the push step's id is asserted next to the registry inputs it must
+stay in step with.
+
 Rootless CI and What Existing Repositories Inherit
 --------------------------------------------------
 Since the b9783f6 snapshot refresh, generated Containerfile-method repositories

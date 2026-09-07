@@ -5426,6 +5426,10 @@ class App:
             "          password: ${{ secrets.GITHUB_TOKEN }}",
             "",
             "      - name: Push to GHCR",
+            # Identified so the signing step below can read the digest this
+            # push produced. Without the id there is no digest to sign and the
+            # only thing left to name the image by is a tag.
+            "        id: push-to-ghcr",
             f"        uses: {pinned_action('redhat-actions/push-to-registry')}",
             "        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)",
             "        with:",
@@ -5445,16 +5449,34 @@ class App:
                     "        with:",
                     "          cosign-release: 'v3.1.2'",
                     "",
+                    # Sign the digest this run pushed, not the tags pointing at
+                    # it. The bundled template signs `@${DIGEST}` and so does
+                    # this repository's own publish workflow, for the reason
+                    # that applies here too: every tag this workflow writes is
+                    # mutable and `latest` is rewritten by the daily rebuild,
+                    # so a tag resolved a second time in the signing step can
+                    # name a different image than the one just built -- which
+                    # signs an image this run did not produce and leaves the
+                    # one it did produce unsigned. One signature on the digest
+                    # covers every tag pointing at it, so the loop is not
+                    # needed either.
                     "      - name: Sign container image",
                     f"        if: {sign_if}",
                     "        env:",
                     "          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}",
                     "          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}",
+                    "          DIGEST: ${{ steps.push-to-ghcr.outputs.digest }}",
                     "        run: |",
-                    '          IMAGE_FULL="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"',
-                    "          for tag in ${{ steps.metadata.outputs.tags }}; do",
-                    "            cosign sign -y --new-bundle-format=false --use-signing-config=false --key env://COSIGN_PRIVATE_KEY $IMAGE_FULL:$tag",
-                    "          done",
+                    "          set -euo pipefail",
+                    # Fails closed. An empty digest would otherwise be signed
+                    # as "<image>@", and the shape of that failure is a red run
+                    # rather than an unsigned image only noticed by whoever
+                    # verifies it later.
+                    '          if [ -z "${DIGEST}" ]; then',
+                    '            echo "The push step reported no digest, so there is nothing to sign." >&2',
+                    "            exit 1",
+                    "          fi",
+                    '          cosign sign -y --new-bundle-format=false --use-signing-config=false --key env://COSIGN_PRIVATE_KEY "${IMAGE_REGISTRY}/${IMAGE_NAME}@${DIGEST}"',
                 ]
             )
         return "\n".join(lines).rstrip() + "\n"
