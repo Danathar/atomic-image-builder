@@ -3519,6 +3519,11 @@ class BuilderTests(unittest.TestCase):
 
         self.assertIn("Scheduled rebuilds also run daily at about", output.getvalue())
         self.assertNotIn("sudo rpm-ostree reset", output.getvalue())
+        # The completion panel is where someone is told the build has started,
+        # so it is where the step between a green build and a working switch
+        # belongs -- there is no package to check yet at this point.
+        self.assertIn("Make it public before switching", output.getvalue())
+        self.assertIn("pkgs/container/test-image", output.getvalue())
 
     def test_do_build_summary_uses_lowercase_ghcr_owner(self) -> None:
         app = self.make_app()
@@ -4608,6 +4613,72 @@ class BuilderTests(unittest.TestCase):
         # Built from the arguments, since the picker does not load the config.
         self.assertIn("ghcr.io/example/my-image:latest", hints)
         self.assertIn("do not reboot in between", hints.lower())
+
+    def test_build_status_says_a_green_build_is_not_yet_readable(self) -> None:
+        # A green build is not a switchable image: the package it published is
+        # private, and `gh repo create --public` does not change that -- package
+        # visibility is a separate setting that does not inherit repository
+        # access. ghcr_package_exists is the same anonymous pull a host without
+        # credentials would make, so it answers the question that decides
+        # whether the switch command works. It is patched to False for every
+        # test in setUp, which is the private-or-unreachable case.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        runs = json.dumps([{"conclusion": "success", "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+            with patch.object(app, "repo_carried_scan_customizations", return_value=False):
+                with redirect_stdout(io.StringIO()):
+                    app.render_build_status("Example", "my-image")
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertIn("could not pull ghcr.io/example/my-image anonymously", hints)
+        self.assertIn("https://github.com/Example/my-image/pkgs/container/my-image", hints)
+        self.assertIn(atomic_image_builder.BOOTC_REGISTRY_DOCS_URL, hints)
+
+    def test_build_status_probe_does_not_block_the_screen(self) -> None:
+        # ghcr_package_exists makes two sequential requests, so the default
+        # six-second timeout is twelve in the worst case. That is fine before
+        # creating a repo, where the answer gates an irreversible step; this
+        # screen is one people come back to and the answer is advisory.
+        app = self.make_app()
+        app.gum = GumStub()
+        runs = json.dumps([{"conclusion": "success", "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.ghcr_package_exists", return_value=True) as probe:
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+                with patch.object(app, "repo_carried_scan_customizations", return_value=False):
+                    with redirect_stdout(io.StringIO()):
+                        app.render_build_status("Example", "my-image")
+        self.assertEqual(
+            probe.call_args.kwargs.get("timeout"),
+            atomic_image_builder.GHCR_ADVISORY_TIMEOUT,
+        )
+        self.assertLess(atomic_image_builder.GHCR_ADVISORY_TIMEOUT, 6.0)
+
+    def test_build_status_stops_saying_it_once_the_package_is_public(self) -> None:
+        # Self-clearing: the check that reports the problem is the one that
+        # confirms it is fixed, so nobody has to dismiss a stale warning.
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        runs = json.dumps([{"conclusion": "success", "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.ghcr_package_exists", return_value=True):
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+                with patch.object(app, "repo_carried_scan_customizations", return_value=False):
+                    with redirect_stdout(io.StringIO()):
+                        app.render_build_status("Example", "my-image")
+        self.assertNotIn("anonymously", " ".join(m for _l, m in stub.messages))
+
+    def test_build_status_does_not_probe_before_a_build_has_succeeded(self) -> None:
+        # There is no package to be private about until a build has published
+        # one, and reporting one as unreadable then would be noise.
+        app = self.make_app()
+        app.gum = GumStub()
+        runs = json.dumps([{"conclusion": None, "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.ghcr_package_exists") as probe:
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+                with redirect_stdout(io.StringIO()):
+                    app.render_build_status("Example", "my-image")
+        probe.assert_not_called()
 
     def test_build_status_stays_quiet_when_nothing_was_scanned(self) -> None:
         app = self.make_app()
@@ -6022,7 +6093,10 @@ class BuilderTests(unittest.TestCase):
             iso_kde = (repo_dir / "disk_config/iso-kde.toml").read_text()
 
         self.assertIn("  pull_request:\n    branches:\n      - master", disk_workflow)
-        self.assertIn("'ubuntu-26.04' || 'ubuntu-26.04-arm'", disk_workflow)
+        # The runner is now fixed rather than chosen from an input, and it
+        # keeps whichever label the snapshot uses for x86_64.
+        self.assertIn("    runs-on: ubuntu-26.04\n", disk_workflow)
+        self.assertNotIn("ubuntu-26.04-arm", disk_workflow)
         self.assertNotIn("ubuntu-24.04", disk_workflow)
         self.assertIn(ACTION_REF_PINS["osbuild/bootc-image-builder-action@main"][0], disk_workflow)
         self.assertNotIn("osbuild/bootc-image-builder-action@main", disk_workflow)
@@ -8182,6 +8256,28 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("scanned_packages", rewritten)
         self.assertNotIn("scanned_removed", rewritten)
         self.assertNotIn("steam", json.dumps(rewritten))
+
+    def test_generate_readme_says_the_package_is_private_before_the_switch(self) -> None:
+        # The switch command was presented as ready to run the moment the build
+        # went green. It is not: the package is private by default, and a
+        # public repository does not change that. This has to come before the
+        # command, not as a troubleshooting note after it.
+        app = self.make_app()
+        readme = app.generate_readme()
+        access_at = readme.index("## Before The First Switch")
+        switch_at = readme.index("sudo bootc switch")
+        self.assertLess(access_at, switch_at)
+        self.assertIn("**private** package", readme)
+        self.assertIn("https://github.com/example/test-image/pkgs/container/test-image", readme)
+        self.assertIn(atomic_image_builder.BOOTC_REGISTRY_DOCS_URL, readme)
+
+    def test_generate_readme_keeps_the_access_step_on_the_scanned_path(self) -> None:
+        # The scanned README replaces the whole "Using The Image" block, which
+        # is how the access step could have been dropped from exactly the path
+        # that has the most to go wrong.
+        readme = self.scanned_app().generate_readme()
+        self.assertIn("## Before The First Switch", readme)
+        self.assertIn("sudo rpm-ostree reset", readme)
 
     def test_generate_readme_notes_carried_scan_customizations(self) -> None:
         readme = self.scanned_app().generate_readme()
@@ -10859,6 +10955,445 @@ class BuilderTests(unittest.TestCase):
         )
         result = app.patch_container_disk_workflow(workflow_text, default_branch="develop")
         self.assertIn("- develop", result)
+
+    def test_patch_container_disk_workflow_removes_dot_slash_from_path_filters(self) -> None:
+        # GitHub matches a path filter against the complete path from the
+        # repository root and rejects "." and ".." in a glob, so the bundled
+        # './disk_config/disk.toml' matches nothing: the pull-request
+        # validation those filters configure never ran.
+        app = self.make_app()
+        workflow_text = (
+            "name: Build Disk\n"
+            "on:\n"
+            "  pull_request:\n"
+            "    branches:\n"
+            "      - main\n"
+            "    paths:\n"
+            "      - './disk_config/disk.toml'\n"
+            '      - "./disk_config/iso.toml"\n'
+            "      - ./.github/workflows/build-disk.yml\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+        )
+        result = app.patch_container_disk_workflow(workflow_text)
+        self.assertIn("      - 'disk_config/disk.toml'\n", result)
+        self.assertIn('      - "disk_config/iso.toml"\n', result)
+        self.assertIn("      - .github/workflows/build-disk.yml\n", result)
+        self.assertNotIn("'./", result)
+
+    def test_patch_workflow_path_filters_leaves_relative_paths_elsewhere_alone(self) -> None:
+        # './disk_config/iso.toml' appears again as an input to the builder
+        # action, where it is an ordinary relative path and correct. A
+        # file-wide substitution would have broken the build to fix the filter.
+        app = self.make_app()
+        workflow_text = (
+            "on:\n"
+            "  pull_request:\n"
+            "    paths:\n"
+            "      - './disk_config/disk.toml'\n"
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - with:\n"
+            "          config-file: ./disk_config/iso.toml\n"
+        )
+        result = app.patch_workflow_path_filters(workflow_text)
+        self.assertIn("      - 'disk_config/disk.toml'\n", result)
+        self.assertIn("          config-file: ./disk_config/iso.toml\n", result)
+
+    def test_patch_workflow_path_filters_only_touches_the_trigger_block(self) -> None:
+        # An action input can be called "paths" too, and its values are not
+        # GitHub filter patterns -- a relative path there is correct, the same
+        # way config-file's is. Scoping to the key name alone rewrote both.
+        app = self.make_app()
+        workflow_text = (
+            "on:\n"
+            "  pull_request:\n"
+            "    paths:\n"
+            "      - './disk_config/disk.toml'\n"
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - uses: some/action@v1\n"
+            "        with:\n"
+            "          paths:\n"
+            "            - ./scripts/build.sh\n"
+        )
+        result = app.patch_workflow_path_filters(workflow_text)
+        self.assertIn("      - 'disk_config/disk.toml'\n", result)
+        self.assertIn("            - ./scripts/build.sh\n", result)
+
+    def test_patch_workflow_path_filters_is_idempotent(self) -> None:
+        app = self.make_app()
+        workflow_text = (
+            "on:\n"
+            "  pull_request:\n"
+            "    paths:\n"
+            "      - './a.toml'\n"
+            "      - './/b.toml'\n"
+        )
+        once = app.patch_workflow_path_filters(workflow_text)
+        self.assertEqual(app.patch_workflow_path_filters(once), once)
+        self.assertNotIn("./", once)
+
+    def test_patch_workflow_path_filters_handles_paths_ignore_too(self) -> None:
+        app = self.make_app()
+        result = app.patch_workflow_path_filters(
+            "on:\n  push:\n    paths-ignore:\n      - './README.md'\n"
+        )
+        self.assertIn("      - 'README.md'\n", result)
+
+    def test_generated_disk_workflow_filters_name_files_that_exist(self) -> None:
+        # The filters are only worth fixing if they point at something. Every
+        # non-glob entry must name a file the generator actually writes --
+        # which is the half actionlint cannot check, since it never sees the
+        # rest of the project.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            workflow = (repo_dir / ".github/workflows/build-disk.yml").read_text()
+            filters = self.workflow_path_filters(workflow)
+            self.assertTrue(filters, workflow)
+            missing = [
+                entry
+                for entry in filters
+                if "*" not in entry and not (repo_dir / entry).is_file()
+            ]
+        self.assertEqual(missing, [])
+        # A leading dot is fine -- ".github/workflows/..." is a real path.
+        # What GitHub rejects is a "." or ".." segment.
+        self.assertFalse(
+            [entry for entry in filters if {".", ".."} & set(entry.split("/"))],
+            filters,
+        )
+
+    @staticmethod
+    def workflow_path_filters(workflow: str) -> list[str]:
+        """Every entry under a paths:/paths-ignore: key, unquoted."""
+        entries: list[str] = []
+        filter_indent: int | None = None
+        for line in workflow.splitlines():
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            if stripped in {"paths:", "paths-ignore:"}:
+                filter_indent = indent
+                continue
+            if filter_indent is None:
+                continue
+            if stripped.startswith("- ") and indent > filter_indent:
+                entries.append(stripped[2:].strip().strip("'\""))
+                continue
+            filter_indent = None
+        return entries
+
+    def test_generated_disk_workflow_patching_is_idempotent(self) -> None:
+        # Managed repositories are patched in place on every update, so a
+        # patcher that changed its own output would rewrite the file forever.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            once = (repo_dir / ".github/workflows/build-disk.yml").read_text()
+        self.assertEqual(app.patch_container_disk_workflow(once), once)
+
+    def test_patch_container_disk_workflow_names_the_uploaded_artifact(self) -> None:
+        # Without a name, upload-artifact uses its default, "artifact". The
+        # disk job is a matrix over disk-type, so both jobs uploaded under that
+        # one name with overwrite enabled: whichever finished second deleted
+        # the other format's successful output.
+        app = self.make_app()
+        workflow_text = (
+            "jobs:\n"
+            "  build:\n"
+            "    strategy:\n"
+            "      matrix:\n"
+            '        disk-type: ["qcow2", "anaconda-iso"]\n'
+            "    steps:\n"
+            "      - name: Upload disk images and Checksum to Job Artifacts\n"
+            "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
+            "        with:\n"
+            "          path: ${{ steps.build.outputs.output-directory }}\n"
+            "          overwrite: true\n"
+        )
+        result = app.patch_disk_artifact_names(workflow_text)
+        self.assertIn("          name: ${{ env.IMAGE_NAME }}-${{ matrix.disk-type }}\n", result)
+        # Inside `with:`, not after it, and the existing inputs are untouched.
+        self.assertIn("          overwrite: true\n          name: ", result)
+        self.assertIn("          path: ${{ steps.build.outputs.output-directory }}\n", result)
+
+    def test_patch_disk_artifact_names_keeps_an_existing_name(self) -> None:
+        # A managed repository is patched in place, so a name the user chose
+        # has to survive the next update.
+        app = self.make_app()
+        workflow_text = (
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - name: Upload\n"
+            "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
+            "        with:\n"
+            "          name: my-own-name\n"
+            "          path: output\n"
+        )
+        self.assertEqual(app.patch_disk_artifact_names(workflow_text), workflow_text)
+
+    def test_patch_disk_artifact_names_ignores_other_steps(self) -> None:
+        # The step's own "- name:" is not the artifact name, and a step that
+        # does not upload must not gain one.
+        app = self.make_app()
+        workflow_text = (
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - name: Checkout\n"
+            "        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6\n"
+            "        with:\n"
+            "          fetch-depth: 0\n"
+        )
+        self.assertEqual(app.patch_disk_artifact_names(workflow_text), workflow_text)
+
+    def test_patch_disk_artifact_names_stops_at_the_end_of_the_with_block(self) -> None:
+        # A key after `with:` in the same step ends the inputs. Writing the
+        # artifact name past it would put a `with:` input where it does not
+        # belong -- and worse, indent it under whatever key came next.
+        app = self.make_app()
+        workflow_text = (
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - name: Upload\n"
+            "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
+            "        with:\n"
+            "          path: output\n"
+            "        continue-on-error: true\n"
+        )
+        self.assertIn(
+            "          path: output\n          name: ${{ env.IMAGE_NAME }}-${{ matrix.disk-type }}\n        continue-on-error: true\n",
+            app.patch_disk_artifact_names(workflow_text),
+        )
+
+    def test_patch_disk_artifact_names_leaves_a_step_with_no_inputs_alone(self) -> None:
+        # No `with:` block to add an input to. Guessing where one should go is
+        # exactly the silent-corruption failure the patchers here avoid.
+        app = self.make_app()
+        workflow_text = (
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - name: Upload\n"
+            "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
+        )
+        self.assertEqual(app.patch_disk_artifact_names(workflow_text), workflow_text)
+
+    def test_patch_disk_artifact_names_is_idempotent(self) -> None:
+        app = self.make_app()
+        workflow_text = (
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - name: Upload\n"
+            "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
+            "        with:\n"
+            "          path: output\n"
+        )
+        once = app.patch_disk_artifact_names(workflow_text)
+        self.assertEqual(app.patch_disk_artifact_names(once), once)
+
+    def test_generated_disk_workflow_gives_each_matrix_job_its_own_artifact(self) -> None:
+        # Expanded over the real matrix from the real generated project: the
+        # property that matters is that no two jobs in one run resolve to the
+        # same artifact name, not that any particular string appears.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            workflow = (repo_dir / ".github/workflows/build-disk.yml").read_text()
+
+        disk_types = self.workflow_matrix_disk_types(workflow)
+        self.assertGreater(len(disk_types), 1, workflow)
+        name = self.upload_artifact_input(workflow, "name")
+        self.assertIsNotNone(name, workflow)
+        resolved = {name.replace("${{ matrix.disk-type }}", disk_type) for disk_type in disk_types}
+        self.assertEqual(len(resolved), len(disk_types), resolved)
+        # Overwrite stays on -- with unique names it makes a re-run replace its
+        # own artifact, which is what it is for.
+        self.assertEqual(self.upload_artifact_input(workflow, "overwrite"), "true")
+
+    @staticmethod
+    def workflow_matrix_disk_types(workflow: str) -> list[str]:
+        for line in workflow.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("disk-type:"):
+                inline = stripped.split(":", 1)[1].strip()
+                return [item.strip().strip("\"'") for item in inline.strip("[]").split(",")]
+        return []
+
+    @staticmethod
+    def upload_artifact_input(workflow: str, key: str) -> str | None:
+        in_step = False
+        in_with = False
+        for line in workflow.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("- name:"):
+                in_step = False
+                in_with = False
+            if "actions/upload-artifact@" in stripped:
+                in_step = True
+                continue
+            if in_step and stripped == "with:":
+                in_with = True
+                continue
+            if in_with and stripped.startswith(f"{key}:"):
+                return stripped.split(":", 1)[1].strip()
+        return None
+
+    def test_generated_disk_workflow_only_offers_the_published_architecture(self) -> None:
+        # The image workflow builds one native x86_64 image -- a single job, a
+        # plain `just build`, no --platform, no manifest -- while the disk
+        # workflow offered arm64 and ran a native ARM builder against that same
+        # tag. bootc-image-builder requires the builder and the bootc image to
+        # agree on architecture and the pinned action does not synthesize the
+        # missing variant, so choosing ARM could not produce a matching image.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            build_workflow = (repo_dir / ".github/workflows/build.yml").read_text()
+            disk_workflow = (repo_dir / ".github/workflows/build-disk.yml").read_text()
+
+        # The premise: the image workflow really does publish one architecture.
+        self.assertNotIn("--platform", build_workflow)
+        self.assertNotIn("matrix", build_workflow)
+        # No dispatch option, no runner choice, and no condition anywhere is
+        # left reading an input that no longer exists. Asserting the absence of
+        # every reference is what turns a future upstream condition this
+        # patcher does not know about into a failure rather than a silent
+        # no-op that ships an unresolvable expression.
+        self.assertNotIn("inputs.platform", disk_workflow)
+        self.assertNotIn("arm64", disk_workflow)
+        self.assertIn("    runs-on: ubuntu-26.04\n", disk_workflow)
+
+    def test_generated_disk_workflow_has_no_unset_input_on_a_pull_request(self) -> None:
+        # The pull-request case was the sharper half: inputs.platform is unset
+        # there, so the ternary selected the ARM runner while the two step
+        # conditions read the same unset input in opposite directions. With the
+        # input gone there is nothing left to default.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            disk_workflow = (repo_dir / ".github/workflows/build-disk.yml").read_text()
+
+        runs_on = [line.strip() for line in disk_workflow.splitlines() if line.strip().startswith("runs-on:")]
+        self.assertEqual(runs_on, ["runs-on: ubuntu-26.04"])
+        self.assertNotIn("platform:", disk_workflow)
+        # The other dispatch input is untouched.
+        self.assertIn("      upload-to-s3:\n", disk_workflow)
+        self.assertIn("inputs.upload-to-s3", disk_workflow)
+
+    def test_patch_disk_workflow_platform_keeps_the_snapshots_amd64_runner(self) -> None:
+        # The label comes out of the ternary rather than being written here, so
+        # a snapshot refresh that bumps the runner image is followed instead of
+        # being pinned to whatever was current when the patcher was written.
+        app = self.make_app()
+        result = app.patch_disk_workflow_platform(
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ${{ inputs.platform == 'amd64' && 'ubuntu-99.04' || 'ubuntu-99.04-arm' }}\n"
+        )
+        self.assertIn("    runs-on: ubuntu-99.04\n", result)
+        self.assertNotIn("ubuntu-99.04-arm", result)
+
+    def test_patch_disk_workflow_platform_drops_an_arm_only_step(self) -> None:
+        app = self.make_app()
+        result = app.patch_disk_workflow_platform(
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - name: Install dependencies\n"
+            "        if: inputs.platform == 'arm64'\n"
+            "        run: sudo apt install -y podman\n"
+            "      - name: Checkout\n"
+            "        uses: actions/checkout@v6\n"
+        )
+        self.assertNotIn("Install dependencies", result)
+        self.assertIn("      - name: Checkout\n", result)
+
+    def test_patch_disk_workflow_platform_unconditions_a_non_arm_step(self) -> None:
+        # Always true once ARM is gone, so the step stays and the condition
+        # goes -- dropping the step instead would remove the space cleanup
+        # that x86_64 builds actually need.
+        app = self.make_app()
+        result = app.patch_disk_workflow_platform(
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - name: Maximize build space\n"
+            "        if: inputs.platform != 'arm64'\n"
+            "        uses: ublue-os/remove-unwanted-software@v8\n"
+        )
+        self.assertIn("      - name: Maximize build space\n", result)
+        self.assertIn("        uses: ublue-os/remove-unwanted-software@v8\n", result)
+        self.assertNotIn("inputs.platform", result)
+
+    def test_patch_disk_workflow_platform_leaves_other_conditions_alone(self) -> None:
+        # Unrecognised text is a no-op here, the way it is in every patcher in
+        # this file. The generated-project test above is what makes that loud.
+        app = self.make_app()
+        workflow_text = (
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - name: Upload\n"
+            "        if: inputs.upload-to-s3 != true\n"
+            "        uses: actions/upload-artifact@v7\n"
+        )
+        self.assertEqual(app.patch_disk_workflow_platform(workflow_text), workflow_text)
+
+    def test_patch_disk_workflow_platform_only_drops_the_dispatch_input(self) -> None:
+        # Scoped to workflow_dispatch inputs: a key called "platform" anywhere
+        # else in the workflow is not this input and must survive.
+        app = self.make_app()
+        result = app.patch_disk_workflow_platform(
+            "on:\n"
+            "  workflow_dispatch:\n"
+            "    inputs:\n"
+            "      upload-to-s3:\n"
+            "        type: boolean\n"
+            "      platform:\n"
+            "        required: true\n"
+            "        type: choice\n"
+            "        options:\n"
+            "          - amd64\n"
+            "          - arm64\n"
+            "  pull_request:\n"
+            "    branches:\n"
+            "      - main\n"
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - with:\n"
+            "          platform: linux/amd64\n"
+        )
+        self.assertNotIn("      platform:\n", result)
+        self.assertNotIn("arm64", result)
+        self.assertIn("      upload-to-s3:\n", result)
+        self.assertIn("  pull_request:\n", result)
+        self.assertIn("          platform: linux/amd64\n", result)
+
+    def test_patch_disk_workflow_platform_is_idempotent(self) -> None:
+        app = self.make_app()
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build-disk.yml").read_text()
+        once = app.patch_disk_workflow_platform(snapshot)
+        self.assertEqual(app.patch_disk_workflow_platform(once), once)
+        self.assertNotIn("inputs.platform", once)
 
     def test_generated_justfile_spawn_vm_dispatches_by_disk_type(self) -> None:
         # `just spawn-vm 1 qcow2` forwarded its own arguments to build-vm,
