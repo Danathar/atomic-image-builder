@@ -43,6 +43,16 @@ run agrees with CI instead of disagreeing in either direction:
 pip install coverage==7.16.0 ruff==0.16.5
 ```
 
+One test also needs [`just`](https://github.com/casey/just) — CI pins v1.57.0
+by sha256, the same way it pins hadolint and actionlint. It runs the generated
+Justfile's `spawn-vm` recipe with command stubs, because that recipe forwards
+arguments to another recipe and neither `just --fmt --check` nor a dry run
+notices a wrong binding; only running it does (see
+[#239](https://github.com/Danathar/atomic-image-builder/issues/239)). Without
+`just` installed that test skips, so a local run can pass over the one defect
+it exists to catch. Nothing is built and no VM starts: both the nested `just`
+and `systemd-vmspawn` are stubbed.
+
 Run the test suite with `unittest`:
 
 ```bash
