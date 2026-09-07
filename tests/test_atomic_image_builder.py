@@ -862,6 +862,34 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", lines)
         self.assertIn("      KEEP: yes", lines)
 
+    def test_both_workflow_paths_agree_on_the_signing_guard(self) -> None:
+        """The patched and from-scratch workflows must protect the key alike.
+
+        Two code paths produce a build workflow: patch_container_workflow()
+        adapts the bundled snapshot, and generate_container_workflow() writes
+        one from nothing when a managed repository has lost its file. Fixing
+        only the first is exactly what happened while writing #255 -- and the
+        path left behind is the one that runs for repositories where something
+        has already gone wrong.
+        """
+        app = self.make_app()
+        app.config.signing_enabled = True
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        for label, workflow in (
+            ("patched", app.patch_container_workflow(snapshot)),
+            ("from-scratch", app.generate_container_workflow()),
+        ):
+            with self.subTest(path=label):
+                self.assertEqual(
+                    self.job_env_entries(workflow),
+                    ["SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}"],
+                )
+                self.assertNotIn("env.COSIGN_PRIVATE_KEY != ''", workflow)
+                self.assertEqual(workflow.count("env.SIGNING_ENABLED == 'true'"), 2)
+                # The step that signs needs both, or cosign cannot decrypt.
+                self.assertIn("          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", workflow.splitlines())
+                self.assertIn("          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}", workflow.splitlines())
+
     def test_patch_container_workflow_golden(self) -> None:
         expected_path = Path(__file__).parent / "fixtures/workflows/container_expected.yml"
         input_path = Path(__file__).parent / "fixtures/workflows/container_input.yml"
@@ -8040,7 +8068,16 @@ class BuilderTests(unittest.TestCase):
         workflow = app.generate_container_workflow()
         self.assertIn("type=raw,value={{date 'YYYYMMDD'}}", workflow)
         self.assertIn("type=ref,event=pr", workflow)
-        self.assertIn("COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}", workflow)
+        # This used to assert COSIGN_PASSWORD appeared, which held only
+        # because it sat in the job environment unconditionally -- present
+        # even here, where signing is off and there is no step to use it.
+        # That is the exposure #255 removed, so the assertion is now that it
+        # is absent, and the signing paths assert their own env separately.
+        self.assertEqual(
+            self.job_env_entries(workflow),
+            ["SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}"],
+        )
+        self.assertNotIn("COSIGN_PASSWORD", workflow)
 
     def test_installer_profile_maps_kde_and_gnome_base_images_correctly(self) -> None:
         app = self.make_app()

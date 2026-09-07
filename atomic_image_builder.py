@@ -5333,7 +5333,13 @@ class App:
     def generate_container_workflow(self, *, default_branch: str = "main") -> str:
         # This is the GitHub Actions workflow for repos generated from scratch
         # instead of patched from an existing template copy.
-        sign_if = "github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.COSIGN_PRIVATE_KEY != ''"
+        # Same guard the patched path uses, and for the same reason: the job
+        # environment reaches every step, so it carries whether a key exists
+        # rather than the key. Keeping the two spellings identical matters --
+        # this generator runs when a managed repository has lost its workflow,
+        # so a divergence here would quietly reintroduce #255 on exactly the
+        # repositories that already had something go wrong.
+        sign_if = f"github.event_name != 'pull_request' && github.ref == format('refs/heads/{{0}}', github.event.repository.default_branch) && env.{SIGNING_ENABLED_ENV[0]} == 'true'"
         lines = [
             "---",
             "name: Build container image",
@@ -5367,8 +5373,7 @@ class App:
             "      packages: write",
             "      id-token: write",
             "    env:",
-            "      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}",
-            "      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}",
+            f"      {SIGNING_ENABLED_ENV[0]}: {SIGNING_ENABLED_ENV[1]}",
             "    steps:",
             "      - name: Prepare environment",
             "        run: |",
@@ -5442,6 +5447,9 @@ class App:
                     "",
                     "      - name: Sign container image",
                     f"        if: {sign_if}",
+                    "        env:",
+                    "          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}",
+                    "          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}",
                     "        run: |",
                     '          IMAGE_FULL="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"',
                     "          for tag in ${{ steps.metadata.outputs.tags }}; do",
