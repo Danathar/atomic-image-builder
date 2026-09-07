@@ -81,6 +81,24 @@ COSIGN
     chmod +x "$stub_dir/cosign"
 }
 
+# A logged-in `gh`. Six scenarios need one, and they need the same one: the
+# token's value is asserted by several of them, so a per-scenario copy that
+# drifted would weaken the assertion rather than fail it.
+install_gh_stub() {
+    cat >"$stub_dir/gh" <<'GH'
+#!/usr/bin/env bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+    exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
+    echo "fake-token-123"
+    exit 0
+fi
+exit 1
+GH
+    chmod +x "$stub_dir/gh"
+}
+
 cleanup_stubs() {
     rm -rf "$stub_dir"
 }
@@ -294,18 +312,7 @@ test_podman_missing() {
 # --- gh authenticated: GH_TOKEN forwarded, no aib-gh volume ----------------
 test_gh_authenticated() {
     setup_stubs
-    cat >"$stub_dir/gh" <<'GH'
-#!/usr/bin/env bash
-if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-    exit 0
-fi
-if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
-    echo "fake-token-123"
-    exit 0
-fi
-exit 1
-GH
-    chmod +x "$stub_dir/gh"
+    install_gh_stub
     PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1
     local args
     args="$(cat "$podman_log")"
@@ -327,18 +334,7 @@ GH
 # unset variable and silently falls back to no GitHub auth at all.
 test_gh_token_forwarded_by_environment_not_argv() {
     setup_stubs
-    cat >"$stub_dir/gh" <<'GH'
-#!/usr/bin/env bash
-if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-    exit 0
-fi
-if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
-    echo "fake-token-123"
-    exit 0
-fi
-exit 1
-GH
-    chmod +x "$stub_dir/gh"
+    install_gh_stub
     # `env -u` rather than relying on the unset at the top of the file: this
     # scenario is the one that breaks silently if GH_TOKEN is in the
     # environment, so it states the precondition itself rather than
@@ -350,6 +346,73 @@ GH
     assert_contains "$args" "-e GH_TOKEN " "gh token: forwarded as a bare -e GH_TOKEN, with no value attached"
     assert_not_contains "$args" "fake-token-123" "gh token: the value never reaches podman's command line"
     assert_eq "$forwarded" "fake-token-123" "gh token: the value reaches podman through the exported environment"
+    cleanup_stubs
+}
+
+# --- an unverified image gets no GitHub credentials ------------------------
+# The credential is the part of this wrapper worth stealing. Verification and
+# forwarding used to be independent decisions, so `AIB_IMAGE=<anything> aib`
+# on a host with `gh` logged in ran an unchecked image *and* handed it a live
+# token. These three scenarios pin the two decisions together: the token
+# reaches podman's environment only where cosign said what the image is.
+test_custom_image_gets_no_credentials() {
+    setup_stubs
+    install_gh_stub
+    local out args forwarded
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN AIB_IMAGE="localhost/my-own-build:dev" "$aib" 2>&1)"
+    args="$(cat "$podman_log")"
+    forwarded="$(cat "$podman_env_log")"
+    assert_not_contains "$args" "-e GH_TOKEN" "custom image: GH_TOKEN not forwarded"
+    assert_not_contains "$args" "fake-token-123" "custom image: no token value in podman's argv"
+    assert_eq "$forwarded" "<unset>" "custom image: no token in podman's environment either"
+    # The named volume is a stored credential too: an earlier verified run's
+    # in-container `gh auth login` lives in it, so mounting it into an
+    # unverified image leaks the same account by another route.
+    assert_not_contains "$args" "aib-gh:/root/.config/gh" "custom image: gh config volume not mounted"
+    assert_contains "$args" "run" "custom image: still runs, just logged out"
+    assert_contains "$out" "AIB_ALLOW_UNVERIFIED_AUTH=1" "custom image: names the opt-in"
+    cleanup_stubs
+}
+
+test_skip_verify_gets_no_credentials() {
+    setup_stubs
+    install_gh_stub
+    rm -f "$stub_dir/cosign"
+    local args forwarded
+    PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN AIB_SKIP_VERIFY=1 "$aib" >/dev/null 2>&1
+    args="$(cat "$podman_log")"
+    forwarded="$(cat "$podman_env_log")"
+    assert_not_contains "$args" "-e GH_TOKEN" "skip verify: GH_TOKEN not forwarded"
+    assert_eq "$forwarded" "<unset>" "skip verify: no token in podman's environment"
+    assert_not_contains "$args" "aib-gh:/root/.config/gh" "skip verify: gh config volume not mounted"
+    cleanup_stubs
+}
+
+# --- the opt-in restores both credential paths, loudly ---------------------
+# Someone iterating on their own build of this image needs the credential back
+# or the tool cannot do the thing it exists to do. That is a decision the user
+# states, not one the wrapper infers from AIB_IMAGE being set.
+test_unverified_auth_opt_in_forwards_token() {
+    setup_stubs
+    install_gh_stub
+    local out args forwarded
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN \
+        AIB_IMAGE="localhost/my-own-build:dev" AIB_ALLOW_UNVERIFIED_AUTH=1 "$aib" 2>&1)"
+    args="$(cat "$podman_log")"
+    forwarded="$(cat "$podman_env_log")"
+    assert_contains "$args" "-e GH_TOKEN " "opt-in: forwarded as a bare -e GH_TOKEN"
+    assert_not_contains "$args" "fake-token-123" "opt-in: the value still never reaches podman's argv"
+    assert_eq "$forwarded" "fake-token-123" "opt-in: the value reaches podman's environment"
+    assert_contains "$out" "WARNING" "opt-in: warns that credentials went to an unverified image"
+    cleanup_stubs
+}
+
+test_unverified_auth_opt_in_mounts_gh_volume() {
+    setup_stubs
+    local args
+    args="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_IMAGE="localhost/my-own-build:dev" \
+        AIB_ALLOW_UNVERIFIED_AUTH=1 "$aib" >/dev/null 2>&1; cat "$podman_log")"
+    assert_contains "$args" "aib-gh:/root/.config/gh" "opt-in, no gh: config volume mounted"
     cleanup_stubs
 }
 
@@ -630,6 +693,10 @@ RPMOSTREE
 test_podman_missing
 test_gh_authenticated
 test_gh_token_forwarded_by_environment_not_argv
+test_custom_image_gets_no_credentials
+test_skip_verify_gets_no_credentials
+test_unverified_auth_opt_in_forwards_token
+test_unverified_auth_opt_in_mounts_gh_volume
 test_gh_missing
 test_gh_not_logged_in
 test_rpm_ostree_success

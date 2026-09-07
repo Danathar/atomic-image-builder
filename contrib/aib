@@ -17,7 +17,13 @@
 #                     ghcr.io/danathar/atomic-image-builder:latest
 #   AIB_SKIP_VERIFY   Set to any value to skip signature verification. Needed
 #                     for an offline run, or on a host without cosign. This
-#                     runs an unverified image, so the wrapper says so loudly.
+#                     runs an unverified image, so the wrapper says so loudly,
+#                     and the image gets no GitHub credentials.
+#   AIB_ALLOW_UNVERIFIED_AUTH
+#                     Set to any value to forward GitHub credentials to an
+#                     image that was not verified -- a custom AIB_IMAGE, or a
+#                     run with AIB_SKIP_VERIFY set. Off by default, because
+#                     nothing has established what that image is.
 #
 # What this script mounts or passes into the container, and why:
 #
@@ -33,7 +39,9 @@
 #
 #       Verification applies only to images this project publishes. Point
 #       AIB_IMAGE at your own build and it is left alone -- being forced
-#       through this repository's certificate identity would just fail.
+#       through this repository's certificate identity would just fail. What
+#       it does not get is the GitHub credential; that is the difference
+#       between "you are on your own" and "here are the user's keys".
 #
 #   --pull=newer  (unverified paths only)
 #       Checks the registry for a newer image on every run and pulls only when
@@ -41,17 +49,23 @@
 #       not left at podman's default. The verified path does its own explicit
 #       pull instead, because it has to resolve a digest before running.
 #
-#   -e GH_TOKEN
+#   -e GH_TOKEN  (verified images only)
 #       When the host has `gh` logged in, forwards a token so the container
 #       does not need its own login. The value is exported in this wrapper's
 #       environment and is never placed in the Podman command line or written
 #       to disk by this script.
 #
-#   -v aib-gh:/root/.config/gh
+#   -v aib-gh:/root/.config/gh  (verified images only)
 #       Used instead of GH_TOKEN when the host has no working `gh` login.
 #       This is a podman-managed named volume, not a bind mount, so an
 #       in-container `gh auth login` (device-code flow) persists across runs
-#       without ever touching the host's own ~/.config/gh.
+#       without ever touching the host's own ~/.config/gh. It is a stored
+#       credential all the same, which is why it is withheld on the same
+#       terms as the token rather than being treated as the safe fallback.
+#
+#       Both are gated on the signature check above having actually run and
+#       passed. See the GitHub auth section below for why, and for the
+#       AIB_ALLOW_UNVERIFIED_AUTH opt-out.
 #
 #   -v aib-dnf-cache:/var/cache/libdnf5
 #       Persists the DNF metadata the tool's package search reads. The image
@@ -172,7 +186,34 @@ else
 fi
 
 # --- GitHub auth -------------------------------------------------------
-if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+# Credentials follow verification, not the run. Both branches below hand the
+# container a GitHub credential -- a token minted from the host's `gh` login,
+# or the volume holding whatever an earlier in-container `gh auth login`
+# stored -- and an image whose signature nothing checked has not earned
+# either. Forwarding them regardless would make
+#
+#     AIB_IMAGE=evil.example/evil/image aib
+#
+# not merely "run an unverified image" but "give an attacker's image the
+# user's GitHub account", which is a far larger step than the wording of
+# either escape hatch suggests. Offline runs lose nothing they could have
+# used: AIB_SKIP_VERIFY exists for a host that cannot reach the registry, and
+# a GitHub credential is no use to a container that cannot reach GitHub.
+forward_auth="$verify_image"
+if [ "$verify_image" = no ] && [ -n "${AIB_ALLOW_UNVERIFIED_AUTH:-}" ]; then
+    echo "aib: WARNING - AIB_ALLOW_UNVERIFIED_AUTH is set. Passing GitHub" >&2
+    echo "aib: credentials to $AIB_IMAGE, which was not verified." >&2
+    forward_auth=yes
+fi
+
+if [ "$forward_auth" = no ]; then
+    # Not fatal: an unverified image is still worth running for the parts of
+    # the tool that touch no remote -- reviewing a scan, generating files to
+    # inspect. It is the credential that is withheld, not the run.
+    echo "aib: not passing GitHub credentials to an unverified image. The tool" >&2
+    echo "aib: will start, but every step that reaches GitHub will be logged out." >&2
+    echo "aib: Set AIB_ALLOW_UNVERIFIED_AUTH=1 to forward them anyway." >&2
+elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     GH_TOKEN="$(gh auth token)"
     export GH_TOKEN
     podman_args+=(-e GH_TOKEN)

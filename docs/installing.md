@@ -79,8 +79,10 @@ aib
 The wrapper forwards your host's `gh` login when there is one (otherwise it
 persists an in-container login across runs in a podman-managed volume), makes
 your host's `rpm-ostree` state available to the system scan, and mounts your
-local timezone. See the comments at the top of [`contrib/aib`](../contrib/aib)
-for exactly what it mounts and why.
+local timezone. Either GitHub credential is forwarded only to an image whose
+signature was verified — see [Verifying the image](#verifying-the-image). See
+the comments at the top of [`contrib/aib`](../contrib/aib) for exactly what it
+mounts and why.
 
 ### Plain `podman run`
 
@@ -122,6 +124,32 @@ Two things follow from that, both deliberate:
 | `cosign` not installed               | The wrapper refuses to run and says so. Install cosign, or opt out explicitly.   |
 | Offline, or you want to opt out      | `AIB_SKIP_VERIFY=1 aib` runs the image unverified, and warns loudly that it did. |
 | `AIB_IMAGE` points at your own build | Not verified — your build cannot satisfy this repository's certificate identity. |
+
+### Credentials follow the signature
+
+An image the wrapper did not verify gets no GitHub credentials: neither a token
+from your host's `gh` login nor the `aib-gh` volume holding an in-container one.
+Both of the rows above are unverified runs, so both of them are logged out.
+
+That pairing is the point. Without it,
+
+```bash
+AIB_IMAGE=evil.example/evil/image aib
+```
+
+would not only run someone else's image as root — it would hand that image a
+live credential for your GitHub account, which is a much larger thing to agree
+to than "skip a check". The tool still starts; the steps that reach GitHub are
+the ones that stop working.
+
+To forward credentials anyway — iterating on your own build of this image is
+the case that needs it — say so explicitly:
+
+```bash
+AIB_ALLOW_UNVERIFIED_AUTH=1 AIB_IMAGE=localhost/my-own-build:dev aib
+```
+
+It warns each time. Set it only for an image you built yourself.
 
 A release tag of the published image (`ghcr.io/danathar/atomic-image-builder:v1.2.3`)
 *is* verified, because the identity below accepts tag refs as well as `main`.
