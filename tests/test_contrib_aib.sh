@@ -221,7 +221,13 @@ test_verify_requires_cosign() {
     out="$(PATH="$stub_dir" HOME="$stub_dir/home" "$aib" 2>&1)"
     status=$?
     assert_eq "$status" "1" "cosign missing: exit status"
-    assert_contains "$out" "cosign is required" "cosign missing: names what is missing"
+    assert_contains "$out" "cosign is needed" "cosign missing: names what is missing"
+    assert_contains "$out" "who built" "cosign missing: says what cosign is for"
+    assert_not_contains "$out" "signature" "cosign missing: no unexplained jargon"
+    # The escape hatch stopped being free when credentials started following
+    # verification. Naming it without saying that leaves the reader to find out
+    # by having the tool silently fail to reach GitHub.
+    assert_contains "$out" "no GitHub login" "cosign missing: says the escape hatch costs the login"
     assert_contains "$out" "AIB_SKIP_VERIFY=1" "cosign missing: names the escape hatch"
     assert_eq "$(cat "$podman_log" 2>/dev/null)" "" "cosign missing: podman run never happens"
     cleanup_stubs
@@ -238,7 +244,7 @@ test_skip_verify_warns_and_runs() {
     out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_SKIP_VERIFY=1 "$aib" 2>&1)"
     args="$(cat "$podman_log")"
     assert_contains "$out" "WARNING" "skip verify: warns"
-    assert_contains "$out" "without" "skip verify: says verification did not happen"
+    assert_contains "$out" "is not" "skip verify: says the check did not happen"
     assert_contains "$args" "run" "skip verify: still runs the image"
     assert_eq "$(cat "$cosign_log" 2>/dev/null)" "" "skip verify: cosign is not consulted"
     cleanup_stubs
@@ -254,7 +260,9 @@ test_pull_failure_refuses_to_run() {
     out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_TEST_PULL_STATUS=1 "$aib" 2>&1)"
     status=$?
     assert_eq "$status" "1" "pull failure: exit status"
-    assert_contains "$out" "could not pull" "pull failure: says what failed"
+    assert_contains "$out" "could not download" "pull failure: says what failed"
+    assert_contains "$out" "no GitHub login" "pull failure: says the offline copy costs the login"
+    assert_not_contains "$out" "signature" "pull failure: no unexplained jargon"
     assert_contains "$out" "AIB_SKIP_VERIFY=1" "pull failure: names the offline escape hatch"
     assert_eq "$(cat "$podman_log" 2>/dev/null)" "" "pull failure: podman run never happens"
     cleanup_stubs
@@ -377,7 +385,7 @@ test_custom_image_gets_no_credentials() {
     # them -- whether this image came from this project -- not the name of the
     # thing that did not happen. "AIB_ALLOW_UNVERIFIED_AUTH" is the variable
     # name and is exempt; the prose around it is what is being held to this.
-    assert_contains "$out" "who built it" "custom image: explains what the check would have told them"
+    assert_contains "$out" "who built" "custom image: explains what the check would have told them"
     assert_not_contains "$out" "signature" "custom image: no unexplained jargon"
     assert_not_contains "$out" "unverified image" "custom image: no unexplained jargon"
     # A command to copy, not an operation to perform. "Unset AIB_IMAGE" needs a
@@ -416,7 +424,7 @@ test_skip_verify_gets_no_credentials() {
     # messages into one generic line was caught by the custom-image scenario
     # and not by this one until the string narrowed.
     assert_contains "$out" "no GitHub login" "skip verify: says plainly what was withheld"
-    assert_contains "$out" "who built it" "skip verify: explains what the check would have told them"
+    assert_contains "$out" "who built" "skip verify: explains what the check would have told them"
     assert_not_contains "$out" "signature" "skip verify: no unexplained jargon"
     assert_not_contains "$out" "unverified image" "skip verify: no unexplained jargon"
     assert_contains "$out" "env -u AIB_SKIP_VERIFY aib" "skip verify: the fix is a runnable command"

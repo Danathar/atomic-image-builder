@@ -134,8 +134,8 @@ esac
 verify_image="$publishes_this_image"
 
 if [ -n "${AIB_SKIP_VERIFY:-}" ] && [ "$verify_image" = yes ]; then
-    echo "aib: WARNING - AIB_SKIP_VERIFY is set. Running $AIB_IMAGE without checking" >&2
-    echo "aib: who built it. To check first, run:  env -u AIB_SKIP_VERIFY aib" >&2
+    echo "aib: WARNING - AIB_SKIP_VERIFY is set, so who built this image is not" >&2
+    echo "aib: being checked. To check first, run:  env -u AIB_SKIP_VERIFY aib" >&2
     verify_image=no
 fi
 
@@ -153,9 +153,11 @@ if [ "$verify_image" = no ]; then
     podman_args+=(--pull=newer)
 else
     if ! command -v cosign >/dev/null 2>&1; then
-        echo "aib: cosign is required to verify $AIB_IMAGE before running it." >&2
-        echo "aib: install cosign from https://docs.sigstore.dev/cosign/system_config/installation/," >&2
-        echo "aib: or set AIB_SKIP_VERIFY=1 to run without verifying the signature." >&2
+        echo "aib: cosign is needed to check who built this image before running it," >&2
+        echo "aib: and it is not installed. Install it from:" >&2
+        echo "aib:   https://docs.sigstore.dev/cosign/system_config/installation/" >&2
+        echo "aib: Or skip the check with AIB_SKIP_VERIFY=1 -- an unchecked image" >&2
+        echo "aib: gets no GitHub login." >&2
         exit 1
     fi
 
@@ -164,8 +166,10 @@ else
     # offline run arrives, and running an unverified image is not the right
     # default for either.
     if ! podman pull --quiet "$AIB_IMAGE" >/dev/null; then
-        echo "aib: could not pull $AIB_IMAGE, so its signature cannot be verified." >&2
-        echo "aib: set AIB_SKIP_VERIFY=1 to run an already-pulled copy offline." >&2
+        echo "aib: could not download this image, so there is no way to check who built it:" >&2
+        echo "aib:   $AIB_IMAGE" >&2
+        echo "aib: Offline? Run an already-downloaded copy with:  AIB_SKIP_VERIFY=1 aib" >&2
+        echo "aib: That copy gets no GitHub login." >&2
         exit 1
     fi
 
@@ -178,7 +182,8 @@ else
     # given, and a truncated or padded one could resolve differently for each
     # -- which would mean verifying one image and running another.
     if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-        echo "aib: could not determine the digest of $AIB_IMAGE; refusing to run unverified." >&2
+        echo "aib: could not determine the digest of this image, so it will not be run:" >&2
+        echo "aib:   $AIB_IMAGE" >&2
         exit 1
     fi
 
@@ -187,9 +192,17 @@ else
         --certificate-identity-regexp "$AIB_CERT_IDENTITY" \
         --certificate-oidc-issuer "$AIB_CERT_ISSUER" \
         "$verified_ref" 2>&1)"; then
-        echo "aib: SIGNATURE VERIFICATION FAILED for $verified_ref" >&2
-        echo "aib: refusing to run it. This image is not one this project published," >&2
-        echo "aib: or its signature could not be checked. cosign said:" >&2
+        # The one message that keeps its shout. Everything else here was made
+        # calmer and plainer; this is the case where looking unlike a normal
+        # error is the point, and the exact phrase stays on its own short line
+        # because it is what someone will paste into a search. The sentence
+        # under it is what a reader who has never met cosign needs.
+        echo "aib: SIGNATURE VERIFICATION FAILED" >&2
+        echo "aib: This is not the image this project published. aib is refusing to run" >&2
+        echo "aib: it. Either something tampered with it, or the check could not be" >&2
+        echo "aib: completed. The image was:" >&2
+        echo "aib:   $verified_ref" >&2
+        echo "aib: cosign said:" >&2
         printf '%s\n' "$cosign_output" >&2
         exit 1
     fi
@@ -214,8 +227,9 @@ fi
 # a GitHub credential is no use to a container that cannot reach GitHub.
 forward_auth="$verify_image"
 if [ "$verify_image" = no ] && [ -n "${AIB_ALLOW_UNVERIFIED_AUTH:-}" ]; then
-    echo "aib: WARNING - AIB_ALLOW_UNVERIFIED_AUTH is set. Passing GitHub" >&2
-    echo "aib: credentials to $AIB_IMAGE, which was not verified." >&2
+    echo "aib: WARNING - AIB_ALLOW_UNVERIFIED_AUTH is set, so your GitHub login is" >&2
+    echo "aib: being sent to an image nobody has vouched for:" >&2
+    echo "aib:   $AIB_IMAGE" >&2
     forward_auth=yes
 fi
 
@@ -269,8 +283,9 @@ if [ "$forward_auth" = no ]; then
         echo "aib: An unchecked image also gets no GitHub login, so the steps that reach" >&2
         echo "aib: GitHub will fail. To send it anyway, add:  AIB_ALLOW_UNVERIFIED_AUTH=1" >&2
     else
-        echo "aib: $AIB_IMAGE is not published by this project, so there is no way" >&2
-        echo "aib: to check who built it. Images nobody can vouch for get no GitHub login." >&2
+        echo "aib: This image is not published by this project, so there is no way" >&2
+        echo "aib: to check who built it, and it gets no GitHub login:" >&2
+        echo "aib:   $AIB_IMAGE" >&2
         echo "aib: For the official image instead, run:  env -u AIB_IMAGE aib" >&2
         echo "aib: To keep this image and send the login, add:  AIB_ALLOW_UNVERIFIED_AUTH=1" >&2
     fi
