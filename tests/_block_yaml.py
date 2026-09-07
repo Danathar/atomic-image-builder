@@ -1,4 +1,4 @@
-"""A strict parser for the block-YAML subset ``App.generate_recipe`` emits.
+"""A strict parser for the block-YAML subset the YAML generators emit.
 
 ``generate_recipe`` builds the BlueBuild recipe by joining string literals --
 deliberately, so the tool needs no PyYAML at runtime -- and the tests for it
@@ -7,14 +7,24 @@ unasserted: a package list emitted under ``remove:`` instead of ``install:``,
 a service list under ``masked:`` instead of ``enabled:``, or an indentation
 slip that makes the file unparseable all keep every ``assertIn`` passing.
 
+``generate_container_workflow`` has the same shape and the same exposure, so
+the supported subset covers what it emits too: single-quoted scalars (the
+cron expression, ``cosign-release``), flow sequences (``paths-ignore``), and
+plain scalars that carry a quote inside them rather than around them (every
+``if:`` guard, which spells its literals ``'pull_request'``). Quoting style
+is not cosmetic here -- ``on: {schedule: [...]}`` and ``cosign-release: v3.1.2``
+mean different things to Actions than the quoted spellings do -- so each
+style is parsed as YAML resolves it instead of being normalised away.
+
 CI installs no third-party packages for the unit suite (``coverage`` and
 ``ruff``, pinned in CONTRIBUTING.md), so this parses the document instead of
-importing yaml. It handles only what the recipe generator can produce --
-block mappings, block sequences, plain and double-quoted scalars, and ``|``
-literal blocks -- and raises :class:`BlockYamlError` on anything else,
-including the inconsistent indentation, duplicate keys, and flow collections
-a real parser would reject or silently reinterpret. Being narrow is the
-point: an unsupported construct is a failure, never a guess.
+importing yaml. It handles only what the generators can produce -- block
+mappings, block sequences, flow sequences of scalars, plain, single- and
+double-quoted scalars, and ``|`` literal blocks -- and raises
+:class:`BlockYamlError` on anything else, including the inconsistent
+indentation, duplicate keys, and flow mappings a real parser would reject or
+silently reinterpret. Being narrow is the point: an unsupported construct is
+a failure, never a guess.
 
 Not collected as a test module (name doesn't start with ``test``), but
 importable by files under tests/ once ``unittest discover -s tests`` puts
@@ -158,17 +168,77 @@ def _parse_literal_block(lines: list[str], index: int, indent: int) -> tuple[str
 
 
 def _scalar(raw: str) -> object:
-    if raw[:1] in {"[", "{", "&", "*", "!"}:
+    if raw[:1] == "[":
+        return _flow_sequence(raw)
+    if raw[:1] in {"{", "&", "*", "!"}:
         raise BlockYamlError(f"unsupported YAML construct: {raw!r}")
-    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+    if raw[:1] == '"':
+        if len(raw) < 2 or raw[-1] != '"':
+            raise BlockYamlError(f"unbalanced quoting: {raw!r}")
         inner = raw[1:-1]
         if '"' in inner.replace('\\"', ""):
             raise BlockYamlError(f"unbalanced quoting: {raw!r}")
         # Quoted, so it is a string whatever it spells.
         return inner.replace('\\"', '"')
-    if '"' in raw or raw.endswith(":"):
+    if raw[:1] == "'":
+        if len(raw) < 2 or raw[-1] != "'":
+            raise BlockYamlError(f"unbalanced quoting: {raw!r}")
+        inner = raw[1:-1]
+        # A single-quoted scalar escapes its own quote by doubling it, and
+        # has no other escape at all -- backslashes stay literal.
+        if "'" in inner.replace("''", ""):
+            raise BlockYamlError(f"unbalanced quoting: {raw!r}")
+        return inner.replace("''", "'")
+    # A quote only opens a quoted scalar at the start of the value. Inside a
+    # plain scalar it is an ordinary character, which is what every Actions
+    # `if:` expression relies on, so only a leading quote is checked above.
+    if raw.endswith(":"):
         raise BlockYamlError(f"scalar needs quoting: {raw!r}")
     return _resolve_plain(raw)
+
+
+def _flow_sequence(raw: str) -> list[object]:
+    """Parse ``[a, b]``: a flow sequence whose items are scalars."""
+    if not raw.endswith("]"):
+        raise BlockYamlError(f"unterminated flow sequence: {raw!r}")
+    body = raw[1:-1].strip()
+    if not body:
+        return []
+    items: list[object] = []
+    for item in _split_flow_items(body):
+        item = item.strip()
+        if not item:
+            raise BlockYamlError(f"empty flow sequence item in {raw!r}")
+        if item[:1] in {"[", "{"}:
+            raise BlockYamlError(f"nested flow collection in {raw!r}")
+        items.append(_scalar(item))
+    return items
+
+
+def _split_flow_items(body: str) -> list[str]:
+    """Split on commas that are not inside a quoted item."""
+    items: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    for char in body:
+        if quote is not None:
+            current.append(char)
+            if char == quote:
+                quote = None
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            current.append(char)
+            continue
+        if char == ",":
+            items.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    if quote is not None:
+        raise BlockYamlError(f"unbalanced quoting in flow sequence: {body!r}")
+    items.append("".join(current))
+    return items
 
 
 def _resolve_plain(raw: str) -> object:

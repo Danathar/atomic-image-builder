@@ -76,9 +76,69 @@ class BlockYamlTests(unittest.TestCase):
         with self.assertRaises(BlockYamlError):
             parse_block_yaml("remove:\n  packages:\n    - \"a\"\nremove:\n  packages:\n    - \"b\"\n")
 
-    def test_rejects_an_unsupported_flow_collection(self) -> None:
+    def test_rejects_an_unsupported_flow_mapping(self) -> None:
         with self.assertRaises(BlockYamlError):
-            parse_block_yaml("packages: [htop, tmux]\n")
+            parse_block_yaml("on: {schedule: nightly}\n")
+
+    def test_a_flow_sequence_is_a_list_of_its_items(self) -> None:
+        # generate_container_workflow emits paths-ignore inline. A parser that
+        # handed the line back as the string "['**/README.md', 'x']" would
+        # report a one-element list and see a dropped path as unchanged.
+        self.assertEqual(
+            parse_block_yaml("paths-ignore: ['**/README.md', '.state.json']\n"),
+            {"paths-ignore": ["**/README.md", ".state.json"]},
+        )
+
+    def test_a_flow_sequence_splits_only_on_commas_outside_quotes(self) -> None:
+        self.assertEqual(
+            parse_block_yaml("a: ['x,y', z]\n"),
+            {"a": ["x,y", "z"]},
+        )
+
+    def test_an_empty_flow_sequence_is_an_empty_list(self) -> None:
+        self.assertEqual(parse_block_yaml("a: []\n"), {"a": []})
+
+    def test_rejects_a_flow_sequence_that_is_not_closed(self) -> None:
+        with self.assertRaises(BlockYamlError):
+            parse_block_yaml("a: ['x', 'y'\n")
+
+    def test_rejects_a_nested_flow_collection(self) -> None:
+        with self.assertRaises(BlockYamlError):
+            parse_block_yaml("a: [[x], y]\n")
+
+    def test_rejects_an_empty_flow_sequence_item(self) -> None:
+        with self.assertRaises(BlockYamlError):
+            parse_block_yaml("a: [x, , y]\n")
+
+    def test_single_quoting_makes_a_literal_a_string_again(self) -> None:
+        # The cron expression and cosign-release are single-quoted, and both
+        # would resolve differently unquoted: "05 10 * * *" is not a number
+        # but 'v3.1.2' vs v3.1.2 is exactly the distinction a released pin
+        # depends on staying visible.
+        self.assertEqual(
+            parse_block_yaml("a: '123'\nb: 'true'\nc: '05 10 * * *'\n"),
+            {"a": "123", "b": "true", "c": "05 10 * * *"},
+        )
+
+    def test_a_single_quoted_scalar_escapes_its_quote_by_doubling_it(self) -> None:
+        self.assertEqual(parse_block_yaml("a: 'it''s'\n"), {"a": "it's"})
+
+    def test_rejects_an_unbalanced_single_quote(self) -> None:
+        with self.assertRaises(BlockYamlError):
+            parse_block_yaml("a: 'x\n")
+
+    def test_rejects_an_unbalanced_double_quote(self) -> None:
+        with self.assertRaises(BlockYamlError):
+            parse_block_yaml('a: "x\n')
+
+    def test_a_quote_inside_a_plain_scalar_is_an_ordinary_character(self) -> None:
+        # Every Actions `if:` guard spells its literals with single quotes in
+        # the middle of an otherwise plain scalar. Treating a quote as opening
+        # a quoted scalar wherever it appears would reject the whole document.
+        self.assertEqual(
+            parse_block_yaml("if: github.event_name != 'pull_request'\n"),
+            {"if": "github.event_name != 'pull_request'"},
+        )
 
     def test_rejects_a_line_that_is_neither_a_key_nor_a_sequence_entry(self) -> None:
         with self.assertRaises(BlockYamlError):
