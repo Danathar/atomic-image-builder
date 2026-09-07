@@ -7256,6 +7256,43 @@ class BuilderTests(unittest.TestCase):
         for source in (wrapper, installing):
             self.assertIn("https://token.actions.githubusercontent.com", source)
 
+    def test_release_wrapper_assets_match_what_the_docs_download(self) -> None:
+        # publish-wrapper.yml names the files; the docs name the URLs they are
+        # fetched from. A rename on either side leaves the documented install
+        # 404ing, and the failure lands on new users rather than on CI.
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/publish-wrapper.yml").read_text()
+        self.assertIn("cp contrib/aib dist/aib", workflow)
+        self.assertIn("sha256sum aib > aib.sha256", workflow)
+        self.assertIn("gh release upload \"$TAG\" dist/aib dist/aib.sha256 --clobber", workflow)
+        base = "https://github.com/Danathar/atomic-image-builder/releases/latest/download"
+        for doc in ("README.md", "docs/installing.md"):
+            text = (root / doc).read_text()
+            self.assertIn(f"{base}/aib", text, doc)
+            self.assertIn(f"{base}/aib.sha256", text, doc)
+
+    def test_recommended_wrapper_install_is_release_bound_and_checksummed(self) -> None:
+        # The wrapper verifies the image and then decides whether to forward
+        # the user's GitHub credential into it, which puts it upstream of every
+        # check it performs. Installing it from `main` means a push to `main`
+        # substitutes it, and a substituted wrapper can read the token before
+        # cosign is ever reached. The README's recommended path must therefore
+        # be the release one, and must actually verify what it downloaded.
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+        self.assertIn("sha256sum -c -", readme)
+        self.assertNotIn("main/contrib/aib", readme)
+
+    def test_installing_docs_keep_the_main_wrapper_as_the_bleeding_edge_option(self) -> None:
+        # Removing it outright would push anyone who needs a wrapper fix before
+        # the next release onto copy-paste from the blob view. It stays, named
+        # as what it is rather than presented as the default.
+        installing = (Path(__file__).resolve().parents[1] / "docs/installing.md").read_text()
+        self.assertIn(
+            "https://raw.githubusercontent.com/Danathar/atomic-image-builder/main/contrib/aib",
+            installing,
+        )
+        self.assertIn("bleeding edge", installing)
+
     def test_docs_document_pulling_a_newer_image_for_container_runs(self) -> None:
         root = Path(__file__).resolve().parents[1]
         installing = (root / "docs/installing.md").read_text()

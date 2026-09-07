@@ -68,13 +68,40 @@ is the only prerequisite for a bare `podman run`; the `aib` wrapper additionally
 needs `cosign` on the host, because it verifies the image's signature before
 running it. See [Verifying the image](#verifying-the-image).
 
-### Using the wrapper script
+### Installing the wrapper
+
+```bash
+curl -fsSLO https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib
+curl -fsSL  https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib.sha256 | sha256sum -c -
+install -m 755 aib ~/.local/bin/aib && rm aib
+aib
+```
+
+`aib` and `aib.sha256` are attached to each release by
+[`publish-wrapper.yml`](../.github/workflows/publish-wrapper.yml), both generated
+from the same checkout of the tag, so the pair always agrees. `sha256sum -c -`
+exits non-zero and prints `FAILED` if it does not; do not run a wrapper that
+fails that check.
+
+Verifying the wrapper matters for the same reason the wrapper verifies the
+image. It runs the image as root, and it forwards your GitHub credential into
+it — and it decides *whether* to forward that credential. A wrapper is a
+position upstream of every check it performs: a substituted one can call
+`gh auth token` and never reach cosign at all. Fetching it from a release, and
+checking it against a checksum published with that release, is what keeps the
+thing doing the verifying from being the unverified part.
+
+#### The `main` version
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Danathar/atomic-image-builder/main/contrib/aib -o ~/.local/bin/aib
 chmod +x ~/.local/bin/aib
-aib
 ```
+
+This is the bleeding edge: whatever is on the default branch at the moment you
+run it, with no checksum to check it against and no release behind it. Use it
+to pick up a wrapper fix before the next release, or to test a change. The
+release install above is the recommended one.
 
 The wrapper forwards your host's `gh` login when there is one (otherwise it
 persists an in-container login across runs in a podman-managed volume), makes

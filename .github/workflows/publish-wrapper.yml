@@ -1,0 +1,86 @@
+---
+name: Publish the aib wrapper
+
+# contrib/aib verifies the container image before running it, and then hands
+# that image the user's GitHub credential. Nothing verifies the wrapper. The
+# install docs used to fetch it from `main`, so every new user took whatever
+# was on the default branch at the moment they ran curl -- and a wrapper
+# changed on `main` can call `gh auth token` before cosign is ever involved.
+#
+# Attaching it to the release makes the recommended install release-bound and
+# checkable: `aib.sha256` is generated here from the same checkout that
+# produced `aib`, so the pair always agrees, and the docs' verification step
+# has something to compare against that a later push to `main` cannot move.
+on:
+  release:
+    types: [published]
+  # For a release published before this workflow existed, or after a failed run.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach the wrapper to (e.g. v0.9.5)"
+        required: true
+
+permissions:
+  contents: read
+
+# Serialized for the same reason update-homebrew-formula.yml is: two releases
+# in quick succession must not race to upload assets to the same tag.
+concurrency:
+  group: publish-wrapper
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Attach the wrapper and its checksum
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      # Release assets are repository contents. This job pushes no commits.
+      contents: write
+    steps:
+      # The release event already checks out the tag, but a workflow_dispatch
+      # rerun does not, so the ref is named either way.
+      - name: Checkout the release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      # Named `aib`, not `contrib/aib`: `sha256sum -c` matches on the path
+      # recorded in the checksum file, and the docs tell users to verify a
+      # downloaded file called `aib`.
+      - name: Stage the wrapper and its checksum
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp contrib/aib dist/aib
+          (cd dist && sha256sum aib > aib.sha256)
+          # Fails the job rather than uploading a pair that does not agree.
+          (cd dist && sha256sum -c aib.sha256)
+          cat dist/aib.sha256
+
+      # --clobber so a rerun replaces the assets instead of failing on names
+      # that already exist. The checksum is regenerated above from the same
+      # checkout, so a replacement is always self-consistent.
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" dist/aib dist/aib.sha256 --clobber
+
+      - name: Summarize
+        if: always()
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          {
+            echo "## aib wrapper"
+            echo
+            echo "Attached \`aib\` and \`aib.sha256\` to \`${TAG}\`."
+            echo
+            echo '```'
+            cat dist/aib.sha256 2>/dev/null || echo "(no checksum produced)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
