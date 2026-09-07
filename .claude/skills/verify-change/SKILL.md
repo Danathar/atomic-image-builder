@@ -63,6 +63,22 @@ case most likely to pass locally and fail on the push. What a docs-only change
 can skip is the image work below; say which you skipped rather than reporting
 a gate you did not run.
 
+## What a missing tool hides
+
+A test that skips rather than fails means a green local run does not always
+mean what it looks like. Two tools do that here, and both cover generated
+output -- the part that reaches other people's repositories:
+
+- **`just`** runs the generated `spawn-vm` recipe. It is the only check that
+  catches a wrong Just parameter binding; `just --fmt --check` and a dry run
+  both pass on one.
+- **`actionlint`** lints the generated workflows. It is what would have caught
+  the invalid `./`-prefixed path filters in #237.
+
+CI installs both at pinned versions, so a skip here becomes a real run there.
+`python3 -m unittest discover -s tests -v 2>&1 | grep -i skipped` says which
+ones you are missing.
+
 ## What this does not cover
 
 The container image. `--skip-upstream` and the suite above never build it, so

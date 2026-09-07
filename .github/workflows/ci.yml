@@ -32,6 +32,12 @@ jobs:
       # our generated repos never run does not belong in that table, so pin the
       # binary by version and checksum instead, the same way the tools above
       # are pinned by version.
+      #
+      # just is here for one test. The generated Justfile's spawn-vm recipe
+      # forwards arguments to another recipe, and `just --fmt --check` and a
+      # dry run both pass on a wrong binding -- running it is the only thing
+      # that catches one (see #239). Without just on the runner that test
+      # skips, which is the same as not having it.
       - name: Install test tooling
         run: |
           pip install coverage==7.16.0 ruff==0.16.5
@@ -46,6 +52,10 @@ jobs:
             https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP/bin" actionlint
+          curl -fsSL -o "$RUNNER_TEMP/just.tar.gz" \
+            https://github.com/casey/just/releases/download/1.57.0/just-1.57.0-x86_64-unknown-linux-musl.tar.gz
+          echo "45b548094283cb9739af8f13273b8cddeee869f5b4ef2bb631b1f311cb566155  $RUNNER_TEMP/just.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/just.tar.gz" -C "$RUNNER_TEMP/bin" just
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Run tests
