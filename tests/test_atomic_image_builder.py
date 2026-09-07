@@ -11483,6 +11483,64 @@ class BuilderTests(unittest.TestCase):
         # systemd-vmspawn always runs; only the nested rebuild is in question.
         return [line for line in recorded if line.startswith("just ")]
 
+    # actionlint diagnostics a generated project carries that this repo
+    # cannot fix, matched on their message so anything else still fails.
+    #
+    # The runner labels are real: GitHub lists ubuntu-26.04 and its ARM
+    # variant in the official runner-images table, and actionlint 1.7.12
+    # simply predates them. maintenance_notes.txt's "Containerfile Workflow
+    # Runner Baseline" says to check that warning against GitHub's current
+    # table before believing it, which is what was done here.
+    #
+    # brand_name is an expression in upstream image-template's own workflow.
+    # template_snapshots/ is a pinned upstream copy this repo must not
+    # reformat or lint-fix, so it is upstream's to correct, not ours.
+    GENERATED_WORKFLOW_IGNORES = (
+        r'label "ubuntu-26\.04(-arm)?" is unknown',
+        r'property "brand_name" is not defined',
+    )
+
+    @unittest.skipUnless(shutil.which("actionlint"), "requires actionlint to lint generated workflows")
+    def test_generated_workflows_pass_actionlint(self) -> None:
+        """Both build methods' generated workflows are valid GitHub Actions.
+
+        The tool's own workflows are linted by ci.yml's *Run actionlint* step.
+        These are the ones that reach other people's repositories, and nothing
+        checked them: #237's './disk_config/disk.toml' path filters were
+        invalid globs that matched nothing, and shipped that way.
+
+        shellcheck integration is disabled here, unlike for this repo's own
+        workflows. Every shellcheck finding in a generated project is inside a
+        `run:` block copied verbatim from template_snapshots/ -- upstream's
+        text, which this repo is explicitly forbidden to reformat -- so
+        enabling it would gate this suite on a fix only upstream can make.
+        The structural checks, which are what caught #237 and would catch its
+        recurrence, all still run.
+        """
+        for method in ("containerfile", "bluebuild"):
+            with self.subTest(method=method):
+                app = self.make_app()
+                app.config.method = method
+                with tempfile.TemporaryDirectory() as tmp:
+                    repo_dir = Path(tmp)
+                    app.seed_project_template(repo_dir)
+                    app.write_project_files(repo_dir, include_workflow=True)
+                    workflows = sorted((repo_dir / ".github/workflows").glob("*.yml"))
+                    self.assertTrue(workflows, "no workflows were generated")
+                    proc = subprocess.run(
+                        [shutil.which("actionlint"), "-shellcheck=", "-oneline", *map(str, workflows)],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                unexpected = [
+                    line
+                    for line in proc.stdout.splitlines()
+                    if line.strip()
+                    and not any(re.search(pattern, line) for pattern in self.GENERATED_WORKFLOW_IGNORES)
+                ]
+                self.assertEqual(unexpected, [], "\n".join(unexpected))
+
     # ── search_packages deselection-only path ──────────────────────────
 
     def test_search_packages_deselection_only_when_all_already_selected(self) -> None:

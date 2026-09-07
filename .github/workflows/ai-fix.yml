@@ -58,9 +58,10 @@ jobs:
         with:
           python-version: "3.10"
 
-      # Same version and checksum ci.yml pins, for the same reason: hadolint
-      # ships a binary rather than a package, and an action would have to
-      # enter ACTION_PINS. shellcheck is already on the runner image.
+      # Same versions and checksums ci.yml pins, for the same reason:
+      # hadolint and actionlint ship binaries rather than packages, and an
+      # action would have to enter ACTION_PINS. shellcheck is already on the
+      # runner image.
       - name: Install test tooling
         run: |
           set -euo pipefail
@@ -70,6 +71,10 @@ jobs:
             https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-Linux-x86_64
           echo "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47  $RUNNER_TEMP/bin/hadolint" | sha256sum -c -
           chmod +x "$RUNNER_TEMP/bin/hadolint"
+          curl -fsSL -o "$RUNNER_TEMP/actionlint.tar.gz" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP/bin" actionlint
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       # Every step below records its outcome instead of failing the job. A red
@@ -98,6 +103,7 @@ jobs:
               "ruff:ruff check" \
               "shellcheck:shellcheck -x contrib/aib container/entrypoint.sh \
                  tests/test_contrib_aib.sh tests/test_entrypoint.sh tests/e2e/*.sh" \
+              "actionlint:actionlint" \
               "hadolint:hadolint Containerfile container/Containerfile.coverage" \
               "audit:python3 maintenance_audit.py --skip-upstream"
             do

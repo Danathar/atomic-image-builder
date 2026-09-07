@@ -48,6 +48,10 @@ jobs:
             https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-Linux-x86_64
           echo "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47  $RUNNER_TEMP/bin/hadolint" | sha256sum -c -
           chmod +x "$RUNNER_TEMP/bin/hadolint"
+          curl -fsSL -o "$RUNNER_TEMP/actionlint.tar.gz" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP/bin" actionlint
           curl -fsSL -o "$RUNNER_TEMP/just.tar.gz" \
             https://github.com/casey/just/releases/download/1.57.0/just-1.57.0-x86_64-unknown-linux-musl.tar.gz
           echo "45b548094283cb9739af8f13273b8cddeee869f5b4ef2bb631b1f311cb566155  $RUNNER_TEMP/just.tar.gz" | sha256sum -c -
@@ -122,6 +126,22 @@ jobs:
           shellcheck -x contrib/aib container/entrypoint.sh \
             tests/test_contrib_aib.sh tests/test_entrypoint.sh \
             tests/e2e/lib.sh tests/e2e/smoke.sh tests/e2e/coverage_scenarios.sh
+
+      # Workflows are the one thing here that cannot be exercised locally: a
+      # bad expression, a misspelt runner label or an unparseable path filter
+      # is only discovered by pushing. actionlint is a static binary, fetched
+      # and checksummed for the same reason hadolint is -- an action would
+      # have to appear in ACTION_PINS, and generated repos never run a linter
+      # of ours.
+      #
+      # No file arguments: with none, actionlint lints every workflow under
+      # .github/workflows, so this call cannot fall out of step with the
+      # directory the way a hand-maintained file list can. shellcheck
+      # integration is left on here, because these are workflows this repo
+      # owns and can fix. The generated ones are a different case -- see
+      # test_generated_workflows_pass_actionlint.
+      - name: Run actionlint
+        run: actionlint
 
       # Both Containerfiles are built by the container-build job below and
       # Containerfile is what publish-image.yml ships to GHCR on every merge,

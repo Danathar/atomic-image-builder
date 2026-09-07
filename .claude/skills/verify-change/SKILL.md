@@ -29,6 +29,9 @@ shellcheck -x contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh test
 tests/test_contrib_aib.sh
 tests/test_entrypoint.sh
 
+# No file arguments: given none, actionlint lints every workflow under
+# .github/workflows, so this cannot fall out of step with the directory.
+actionlint
 hadolint Containerfile container/Containerfile.coverage
 python3 maintenance_audit.py --skip-upstream
 ```
@@ -63,12 +66,18 @@ a gate you did not run.
 ## What a missing tool hides
 
 A test that skips rather than fails means a green local run does not always
-mean what it looks like. `just` is the case to know about: without it the
-test that runs the generated `spawn-vm` recipe skips, and that is the only
-check that catches a wrong Just parameter binding -- `just --fmt --check` and
-a dry run both pass on one. CI installs it at a pinned version, so a skip here
-becomes a real run there. `python3 -m unittest discover -s tests -v 2>&1 |
-grep -i skipped` says which ones you are missing.
+mean what it looks like. Two tools do that here, and both cover generated
+output -- the part that reaches other people's repositories:
+
+- **`just`** runs the generated `spawn-vm` recipe. It is the only check that
+  catches a wrong Just parameter binding; `just --fmt --check` and a dry run
+  both pass on one.
+- **`actionlint`** lints the generated workflows. It is what would have caught
+  the invalid `./`-prefixed path filters in #237.
+
+CI installs both at pinned versions, so a skip here becomes a real run there.
+`python3 -m unittest discover -s tests -v 2>&1 | grep -i skipped` says which
+ones you are missing.
 
 ## What this does not cover
 

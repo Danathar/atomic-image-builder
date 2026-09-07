@@ -18,8 +18,8 @@ setup:
    to follow.
 3. Run the checks below locally — [Tests](#tests), [Coverage](#coverage), and
    [Linting](#linting) — before opening a pull request. CI runs the same
-   checks (`unittest`, the 90% coverage gate, `ruff`, `shellcheck`, and
-   `hadolint`) and has to pass before a PR can be reviewed.
+   checks (`unittest`, the 90% coverage gate, `ruff`, `shellcheck`,
+   `actionlint`, and `hadolint`) and has to pass before a PR can be reviewed.
 4. Open the PR against `main` and describe what changed and why. Keep it
    scoped to one thing; a PR that mixes an unrelated cleanup with the actual
    fix is harder to review and to revert if something goes wrong.
@@ -150,11 +150,12 @@ Because artifacts expire after 30 days, `coverage_badge.py` publishes the unit n
 
 ## Linting
 
-Three linters, one per language CI ships. All three gate the `test` job.
+Four linters, one per language CI ships. All four gate the `test` job.
 
 ```bash
 ruff check                                    # Python -- pip install command is in Tests, above
 shellcheck -x contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/test_entrypoint.sh tests/e2e/*.sh
+actionlint                                    # GitHub Actions -- every workflow under .github/workflows
 hadolint Containerfile container/Containerfile.coverage
 ```
 
@@ -180,7 +181,21 @@ file nothing lints — so keep the command above byte-identical to the one
 `ci.yml`'s *Run shellcheck* step runs. `-x` is load-bearing rather than
 decorative: `tests/e2e/smoke.sh` and `tests/e2e/coverage_scenarios.sh` each
 carry a `# shellcheck source=tests/e2e/lib.sh` directive, and shellcheck
-follows it only when told it may read external sources. hadolint is a
+follows it only when told it may read external sources.
+
+`actionlint` takes no file arguments on purpose: given none it lints every
+workflow under `.github/workflows`, so unlike the shellcheck command above
+there is no file list that can fall out of step with the directory. CI pins
+v1.7.12 by sha256, for the same ACTION_PINS reason hadolint is pinned.
+Workflows are the one thing here that cannot be exercised locally — a bad
+expression, a misspelt runner label or an unparseable path filter is otherwise
+discovered only by pushing. The workflows this tool *generates* into other
+people's repositories get the same check, from
+`test_generated_workflows_pass_actionlint`, which skips when actionlint is not
+installed. That test disables actionlint's shellcheck integration: every
+shellcheck finding in a generated project sits inside a `run:` block copied
+verbatim from `template_snapshots/`, which this repo must not reformat, so
+gating on it would mean gating on a fix only upstream can make. hadolint is a
 static binary; CI pins v2.14.0 by sha256 rather than using
 `hadolint/hadolint-action`, because `maintenance_audit.py` requires every
 `uses:` in this repo's workflows to appear in `ACTION_PINS` — the table
