@@ -36,6 +36,7 @@ ruff check
 shellcheck -x contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/test_entrypoint.sh tests/e2e/*.sh
 tests/test_contrib_aib.sh
 tests/test_entrypoint.sh
+actionlint
 hadolint Containerfile container/Containerfile.coverage
 python3 maintenance_audit.py --skip-upstream
 ```
