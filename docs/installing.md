@@ -15,6 +15,21 @@ already present. The container image bundles its own, so Podman is
 almost the whole prerequisite there — the `aib` wrapper also wants `cosign`, to
 verify the image's signature before running it.
 
+`cosign` comes from Homebrew on both targets. The two differ in one way only:
+Universal Blue images (Bluefin, Aurora, Bazzite) ship Homebrew already, and
+Fedora Atomic (Silverblue, Kinoite) does not — so install it from
+[brew.sh](https://brew.sh) there first. Then, on either:
+
+```bash
+brew install cosign
+```
+
+`rpm-ostree install cosign` is not an alternative on either one. cosign is not
+packaged for Fedora at all, which is the same reason the Homebrew formula below
+has to supply it — and layering a package onto the OS image and rebooting to
+get one command would be the wrong mechanism on an atomic desktop even if it
+were packaged.
+
 What the container cannot bundle is your host's rpm-ostree *state*: it has no
 access to the host's system D-Bus, so the system scan depends on the `aib`
 wrapper handing that state in. See
@@ -130,7 +145,7 @@ Two things follow from that, both deliberate:
 
 | Situation                            | What happens                                                                     |
 | ------------------------------------ | -------------------------------------------------------------------------------- |
-| `cosign` not installed               | The wrapper refuses to run and says so. Install cosign, or opt out explicitly.   |
+| `cosign` not installed               | The wrapper refuses to run and says so, naming `brew install cosign`.            |
 | Offline, or you want to opt out      | `AIB_SKIP_VERIFY=1 aib` runs the image unverified, and warns loudly that it did. |
 | `AIB_IMAGE` points at your own build | Not verified — your build cannot satisfy this repository's certificate identity. |
 

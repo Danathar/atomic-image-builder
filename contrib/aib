@@ -153,9 +153,29 @@ if [ "$verify_image" = no ]; then
     podman_args+=(--pull=newer)
 else
     if ! command -v cosign >/dev/null 2>&1; then
+        # Upstream's install page lists a dozen platforms and leaves the reader
+        # to work out which line is theirs. This tool only ever runs on Fedora
+        # Atomic and Universal Blue, so it can just say the answer.
+        #
+        # The two targets differ in exactly one way here: Universal Blue images
+        # ship Homebrew, and Fedora Atomic does not. So the branch is on brew
+        # being present, not on the distro, which gets it right for both
+        # without parsing /etc/os-release.
+        #
+        # Not `rpm-ostree install cosign` on either: cosign is not packaged for
+        # Fedora at all (packages.fedoraproject.org serves git, gh, gum and
+        # podman, and 404s on cosign), so the command fails. Even if it were,
+        # layering a package onto the OS image and rebooting to get one CLI
+        # command is the wrong mechanism on an atomic desktop.
         echo "aib: cosign is needed to check who built this image before running it," >&2
-        echo "aib: and it is not installed. Install it from:" >&2
-        echo "aib:   https://docs.sigstore.dev/cosign/system_config/installation/" >&2
+        echo "aib: and it is not installed." >&2
+        if command -v brew >/dev/null 2>&1; then
+            echo "aib: Install it with:  brew install cosign" >&2
+        else
+            echo "aib: Universal Blue images ship Homebrew; on Fedora Atomic, install it" >&2
+            echo "aib: from https://brew.sh first. Then:" >&2
+            echo "aib:   brew install cosign" >&2
+        fi
         echo "aib: Or skip the check with AIB_SKIP_VERIFY=1 -- an unchecked image" >&2
         echo "aib: gets no GitHub login." >&2
         exit 1

@@ -229,7 +229,39 @@ test_verify_requires_cosign() {
     # by having the tool silently fail to reach GitHub.
     assert_contains "$out" "no GitHub login" "cosign missing: says the escape hatch costs the login"
     assert_contains "$out" "AIB_SKIP_VERIFY=1" "cosign missing: names the escape hatch"
+    # The stub dir is the whole PATH, so there is no brew here. This is the
+    # branch a Fedora Atomic user without Homebrew gets, and it must not send
+    # them to `rpm-ostree install cosign`: cosign is not in Fedora's
+    # repositories, so that command fails.
+    assert_contains "$out" "brew install cosign" "cosign missing, no brew: names how this audience installs it"
+    # Both targets by name, because they differ here and only here: Universal
+    # Blue ships Homebrew and Fedora Atomic does not. A reader has to be able
+    # to tell which sentence is theirs.
+    assert_contains "$out" "Universal Blue" "cosign missing, no brew: names the target that already has brew"
+    assert_contains "$out" "Fedora Atomic" "cosign missing, no brew: names the target that does not"
+    assert_contains "$out" "https://brew.sh" "cosign missing, no brew: says where to get brew"
+    assert_not_contains "$out" "rpm-ostree" "cosign missing: does not suggest layering a package that does not exist"
+    assert_not_contains "$out" "docs.sigstore.dev" "cosign missing: not a generic upstream platform list"
     assert_eq "$(cat "$podman_log" 2>/dev/null)" "" "cosign missing: podman run never happens"
+    cleanup_stubs
+}
+
+# --- cosign missing on a host that has brew: just the one command ----------
+# Every Universal Blue image ships Homebrew, so this is the branch nearly
+# every reader of this message actually gets. Telling them what Homebrew is
+# and where to get it would be three lines of noise about something already
+# installed.
+test_cosign_missing_with_brew_names_only_the_command() {
+    setup_stubs
+    rm -f "$stub_dir/cosign"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$stub_dir/brew"
+    chmod +x "$stub_dir/brew"
+    local out
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" "$aib" 2>&1)"
+    assert_contains "$out" "Install it with:  brew install cosign" "cosign missing, brew present: one exact command"
+    assert_not_contains "$out" "https://brew.sh" "cosign missing, brew present: no detour explaining brew"
+    assert_not_contains "$out" "Fedora Atomic" "cosign missing, brew present: no detour about a distro they are not on"
+    assert_contains "$out" "no GitHub login" "cosign missing, brew present: still says the escape hatch costs the login"
     cleanup_stubs
 }
 
@@ -797,6 +829,7 @@ test_verify_runs_the_digest_it_verified
 test_verify_uses_the_publisher_identity
 test_verify_failure_refuses_to_run
 test_verify_requires_cosign
+test_cosign_missing_with_brew_names_only_the_command
 test_skip_verify_warns_and_runs
 test_pull_failure_refuses_to_run
 test_custom_image_is_not_verified
