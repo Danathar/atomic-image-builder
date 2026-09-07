@@ -29,6 +29,9 @@ shellcheck -x contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh test
 tests/test_contrib_aib.sh
 tests/test_entrypoint.sh
 
+# No file arguments: given none, actionlint lints every workflow under
+# .github/workflows, so this cannot fall out of step with the directory.
+actionlint
 hadolint Containerfile container/Containerfile.coverage
 python3 maintenance_audit.py --skip-upstream
 ```
