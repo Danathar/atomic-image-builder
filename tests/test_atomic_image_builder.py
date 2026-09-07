@@ -57,6 +57,7 @@ from atomic_image_builder import (
     ensure_workflow_job_env_entries,
     format_daily_rebuild_note,
     is_valid_repo_name,
+    managed_path,
     normalize_container_image_reference,
     patch_cosign_compatibility,
     patch_workflow_steps,
@@ -8639,6 +8640,130 @@ class BuilderTests(unittest.TestCase):
             github_user="example",
         )
         return app
+
+    # --- symlinks in a managed repo ---------------------------------------
+    # A managed repo is a clone of whatever is on GitHub, and git checks out
+    # symlinks as symlinks. Every one of these would, before managed_path,
+    # have written the generated file through the link to the sentinel
+    # outside the clone -- silently, because the symlink in the worktree is
+    # unchanged by a write through it, so the diff the update flow shows
+    # before pushing is empty. A merged pull request to a user's own image
+    # repo is the whole of the setup required.
+
+    def seed_symlink_repo(self, tmp: str, link: str, *, to_dir: bool = False) -> tuple[Path, Path]:
+        """A repo whose `link` points outside it. Returns (repo_dir, outside).
+
+        `outside` holds one sentinel file and nothing else, so a caller can
+        assert on both halves of an escape: the sentinel's contents for a file
+        link, and the directory's entries for a directory link -- which
+        redirects a *new* file rather than overwriting the sentinel, and so
+        would satisfy a contents-only check even while escaping."""
+        outside = Path(tmp) / "outside"
+        outside.mkdir()
+        (outside / "victim.txt").write_text(self.SENTINEL)
+        repo_dir = Path(tmp) / "clone"
+        repo_dir.mkdir()
+        link_path = repo_dir / link
+        link_path.parent.mkdir(parents=True, exist_ok=True)
+        link_path.symlink_to(outside if to_dir else outside / "victim.txt", target_is_directory=to_dir)
+        return repo_dir, outside
+
+    SENTINEL = "SENTINEL\n"
+
+    def assert_update_refuses(self, app: App, link: str, *, to_dir: bool = False) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir, outside = self.seed_symlink_repo(tmp, link, to_dir=to_dir)
+            with self.assertRaises(CommandError) as ctx:
+                app.write_project_files(repo_dir, include_workflow=True, default_branch="main")
+            self.assertIn("symbolic link", str(ctx.exception))
+            self.assertEqual(
+                (outside / "victim.txt").read_text(), self.SENTINEL,
+                f"{link}: a write through the link overwrote the file outside the clone",
+            )
+            self.assertEqual(
+                sorted(entry.name for entry in outside.iterdir()), ["victim.txt"],
+                f"{link}: a write through the link created a file outside the clone",
+            )
+
+    def test_write_project_files_refuses_a_symlinked_readme(self) -> None:
+        self.assert_update_refuses(self.make_app(), "README.md")
+
+    def test_write_project_files_refuses_a_symlinked_state_file(self) -> None:
+        self.assert_update_refuses(self.make_app(), STATE_FILE)
+
+    def test_write_project_files_refuses_a_symlinked_containerfile(self) -> None:
+        self.assert_update_refuses(self.make_app(), "Containerfile")
+
+    def test_write_project_files_refuses_a_symlinked_gitignore(self) -> None:
+        self.assert_update_refuses(self.make_app(), ".gitignore")
+
+    def test_write_project_files_refuses_a_symlinked_workflow(self) -> None:
+        self.assert_update_refuses(self.make_app(), ".github/workflows/build.yml")
+
+    def test_write_project_files_refuses_a_symlinked_build_files_dir(self) -> None:
+        # A directory link is the useful one: it redirects build.sh without
+        # naming it, and would redirect anything added under build_files later.
+        self.assert_update_refuses(self.make_app(), "build_files", to_dir=True)
+
+    def test_write_project_files_refuses_a_symlinked_workflow_parent(self) -> None:
+        # The parent components matter as much as the file. `.github` as a link
+        # sends the generated workflow outside the clone, and
+        # `mkdir(parents=True, exist_ok=True)` beneath it succeeds quietly
+        # rather than raising the way a missing directory would.
+        self.assert_update_refuses(self.make_app(), ".github", to_dir=True)
+
+    def test_write_project_files_refuses_a_symlinked_disk_config_dir(self) -> None:
+        self.assert_update_refuses(self.make_app(), "disk_config", to_dir=True)
+
+    def test_write_project_files_refuses_a_symlinked_cosign_pub(self) -> None:
+        app = self.make_app()
+        app.generated_cosign_pub = "PUBLIC KEY DATA"
+        self.assert_update_refuses(app, "cosign.pub")
+
+    def test_write_bluebuild_project_files_refuses_a_symlinked_recipe(self) -> None:
+        # The BlueBuild writer is a separate function with its own path set,
+        # so the Containerfile scenarios above say nothing about it.
+        self.assert_update_refuses(self.make_bluebuild_app(), "recipes/recipe.yml")
+
+    def test_write_bluebuild_project_files_refuses_a_symlinked_readme(self) -> None:
+        self.assert_update_refuses(self.make_bluebuild_app(), "README.md")
+
+    def test_load_repo_config_refuses_a_symlinked_state_file(self) -> None:
+        # Reads matter too, in the other direction: the state file is parsed
+        # as JSON and its values reach generated output, so following a link
+        # to somewhere outside the clone reads a file the repo does not own.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir, _outside = self.seed_symlink_repo(tmp, STATE_FILE)
+            with self.assertRaises(CommandError) as ctx:
+                app.load_repo_config(repo_dir)
+            self.assertIn("symbolic link", str(ctx.exception))
+
+    def test_managed_path_names_the_offending_component(self) -> None:
+        # The message has to say which path to fix. A repo with a link at
+        # `.github` reports `.github`, not the workflow file under it.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / ".github").symlink_to(base, target_is_directory=True)
+            with self.assertRaises(CommandError) as ctx:
+                managed_path(base, ".github/workflows/build.yml")
+            self.assertIn("`.github`", str(ctx.exception))
+
+    def test_managed_path_rejects_a_traversal_component(self) -> None:
+        # No caller passes one today; every relative path here is a literal.
+        # It refuses anyway, so that a future caller building one from a
+        # config value cannot turn this helper into the way out of the clone.
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(CommandError):
+                managed_path(Path(tmp), "../escaped")
+
+    def test_managed_path_allows_an_ordinary_nested_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self.assertEqual(
+                managed_path(base, ".github/workflows/build.yml"),
+                base / ".github" / "workflows" / "build.yml",
+            )
 
     def test_split_image_ref_separates_tag(self) -> None:
         app = self.make_app()

@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, tzinfo
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 if sys.version_info < (3, 10):  # noqa: UP036
     raise SystemExit("Python 3.10 or newer is required.")
@@ -967,6 +967,45 @@ class CommandError(RuntimeError):
 
 class ScreenBack(RuntimeError):
     pass
+
+
+def managed_path(base_dir: Path, relative: str) -> Path:
+    # Every read and write the tool performs inside a managed repo goes through
+    # here. The repo is a clone of whatever is on GitHub, and git checks out
+    # symlinks as symlinks, so a file the tool believes it owns can be a
+    # pointer at something outside the clone that it does not:
+    #
+    #     README.md -> /home/dan/.bashrc
+    #
+    # Python's open() follows that. `readme_path.write_text(...)` would then
+    # rewrite the user's shell profile, on a host where the tool's own promise
+    # is that it writes to GitHub and never to the running system. A directory
+    # link is worse, because one of them redirects every generated file beneath
+    # it, and worse again because it is silent: the symlink in the worktree is
+    # unchanged by a write through it, so `git status` reports nothing and the
+    # diff the update flow shows the user before pushing is empty.
+    #
+    # Getting there needs only a merged pull request to a user's own image
+    # repo, which is a repo whose contents this tool otherwise treats as its
+    # own output. Refuse rather than sanitize: there is no legitimate reason
+    # for a managed file to be a link, and a repo that has one is telling us
+    # something has gone wrong with it.
+    #
+    # Each component is checked, not just the last. `.github` being a link is
+    # what redirects `.github/workflows/build.yml`, and `mkdir(parents=True,
+    # exist_ok=True)` on a path under it succeeds quietly.
+    current = base_dir
+    for part in PurePosixPath(relative).parts:
+        if part in ("", ".", "..") or "/" in part or "\\" in part:
+            raise CommandError(f"Refusing to use `{relative}` as a path inside a managed repo.")
+        current = current / part
+        if current.is_symlink():
+            raise CommandError(
+                f"`{current.relative_to(base_dir)}` in this repo is a symbolic link, and this tool "
+                "will not read or write through one. Replace it with a regular file or directory "
+                "and run the update again."
+            )
+    return current
 
 
 def run(
@@ -2991,7 +3030,7 @@ class App:
         self.generated_cosign_pub = None
         bluebuild_signing = self.config.method == "bluebuild"
         if self.repo_secret_exists(owner, repo, "SIGNING_SECRET"):
-            if repo_dir is not None and not (repo_dir / "cosign.pub").exists():
+            if repo_dir is not None and not managed_path(repo_dir, "cosign.pub").exists():
                 # GitHub secrets are write-only, so the public half of the key
                 # cannot be recovered from SIGNING_SECRET. Rotation is the only
                 # way to restore signing when cosign.pub has gone missing.
@@ -3086,7 +3125,7 @@ class App:
                 )
             return
         try:
-            (repo_dir / "cosign.pub").write_text(pub_text)
+            managed_path(repo_dir, "cosign.pub").write_text(pub_text)
             self.configure_temp_repo_git_identity(repo_dir)
             run(["git", "add", "cosign.pub"], cwd=repo_dir)
             run(["git", "commit", "-m", "Rotate cosign signing key"], cwd=repo_dir)
@@ -3880,7 +3919,7 @@ class App:
     def load_repo_config(self, repo_dir: Path) -> None:
         # Prefer the canonical JSON state file whenever possible. That is what
         # lets update flows be stable instead of reparsing generated shell.
-        state_path = repo_dir / STATE_FILE
+        state_path = managed_path(repo_dir, STATE_FILE)
         if not state_path.exists():
             raise CommandError(
                 f"This repo does not contain `{STATE_FILE}`, so it was not created by this tool. "
@@ -5018,15 +5057,15 @@ class App:
         return ensure_trailing_newline("\n".join(lines))
 
     def write_installer_configs(self, base_dir: Path) -> None:
-        disk_dir = base_dir / "disk_config"
+        disk_dir = managed_path(base_dir, "disk_config")
         if not disk_dir.exists():
             return
         for name in ("iso-gnome.toml", "iso-kde.toml"):
-            path = disk_dir / name
+            path = managed_path(base_dir, f"disk_config/{name}")
             if path.exists():
                 path.write_text(self.patch_installer_config(path.read_text()))
         selected_name = self.installer_config_name()
-        selected_path = disk_dir / selected_name
+        selected_path = managed_path(base_dir, f"disk_config/{selected_name}")
         if selected_path.exists():
             iso_text = selected_path.read_text()
         else:
@@ -5034,7 +5073,7 @@ class App:
             if not template_path.is_file():
                 raise CommandError(f"Bundled installer config not found: {selected_name}")
             iso_text = template_path.read_text()
-        (disk_dir / "iso.toml").write_text(self.patch_installer_config(iso_text))
+        managed_path(base_dir, "disk_config/iso.toml").write_text(self.patch_installer_config(iso_text))
 
     def _split_image_ref(self, uri: str) -> tuple[str, str]:
         # BlueBuild recipes separate "base-image" and "image-version" so we need
@@ -5125,10 +5164,10 @@ class App:
     def write_bluebuild_project_files(self, base_dir: Path, *, include_workflow: bool, default_branch: str = "main") -> None:
         # This is the "materialize the repo" step for BlueBuild mode. The recipe
         # YAML replaces the Containerfile + build.sh used by Containerfile mode.
-        readme_path = base_dir / "README.md"
-        gitignore_path = base_dir / ".gitignore"
-        recipe_path = base_dir / "recipes" / "recipe.yml"
-        workflow_path = base_dir / ".github/workflows/build.yml"
+        readme_path = managed_path(base_dir, "README.md")
+        gitignore_path = managed_path(base_dir, ".gitignore")
+        recipe_path = managed_path(base_dir, "recipes/recipe.yml")
+        workflow_path = managed_path(base_dir, ".github/workflows/build.yml")
 
         readme_path.write_text(self.generate_readme())
 
@@ -5142,7 +5181,7 @@ class App:
         recipe_path.write_text(self.generate_recipe())
 
         if self.generated_cosign_pub is not None:
-            (base_dir / "cosign.pub").write_text(ensure_trailing_newline(self.generated_cosign_pub))
+            managed_path(base_dir, "cosign.pub").write_text(ensure_trailing_newline(self.generated_cosign_pub))
 
         if include_workflow:
             workflow_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5159,12 +5198,12 @@ class App:
         # This is the "materialize the repo" step for Containerfile mode. It
         # patches template-owned files where possible and generates tool-owned
         # files where needed.
-        readme_path = base_dir / "README.md"
-        gitignore_path = base_dir / ".gitignore"
-        justfile_path = base_dir / "Justfile"
-        env_path = base_dir / "image-template.env"
-        containerfile_path = base_dir / "Containerfile"
-        workflow_path = base_dir / ".github/workflows/build.yml"
+        readme_path = managed_path(base_dir, "README.md")
+        gitignore_path = managed_path(base_dir, ".gitignore")
+        justfile_path = managed_path(base_dir, "Justfile")
+        env_path = managed_path(base_dir, "image-template.env")
+        containerfile_path = managed_path(base_dir, "Containerfile")
+        workflow_path = managed_path(base_dir, ".github/workflows/build.yml")
 
         readme_path.write_text(self.generate_readme())
 
@@ -5174,14 +5213,14 @@ class App:
                 existing_gitignore.append(entry)
         gitignore_path.write_text(ensure_trailing_newline("\n".join(existing_gitignore)))
 
-        (base_dir / "build_files").mkdir(parents=True, exist_ok=True)
+        managed_path(base_dir, "build_files").mkdir(parents=True, exist_ok=True)
         existing_containerfile = containerfile_path.read_text() if containerfile_path.exists() else None
         containerfile_path.write_text(self.render_containerfile(existing_containerfile))
-        build_sh = base_dir / "build_files/build.sh"
+        build_sh = managed_path(base_dir, "build_files/build.sh")
         build_sh.write_text(self.generate_build_sh())
         build_sh.chmod(0o755)
         if self.generated_cosign_pub is not None:
-            (base_dir / "cosign.pub").write_text(ensure_trailing_newline(self.generated_cosign_pub))
+            managed_path(base_dir, "cosign.pub").write_text(ensure_trailing_newline(self.generated_cosign_pub))
 
         if not justfile_path.exists():
             # Restore from the bundled template snapshot so updates can recreate
@@ -5215,7 +5254,7 @@ class App:
                 workflow_path.write_text(self.patch_container_workflow(workflow_path.read_text(), default_branch=default_branch))
             else:
                 workflow_path.write_text(self.generate_container_workflow(default_branch=default_branch))
-            disk_workflow_path = base_dir / ".github/workflows/build-disk.yml"
+            disk_workflow_path = managed_path(base_dir, ".github/workflows/build-disk.yml")
             if disk_workflow_path.exists():
                 disk_workflow_path.write_text(self.patch_container_disk_workflow(disk_workflow_path.read_text(), default_branch=default_branch))
 
@@ -5224,7 +5263,7 @@ class App:
         # updated later even if a human edits generated files by hand.
         self.validate_config()
         base_dir.mkdir(parents=True, exist_ok=True)
-        (base_dir / STATE_FILE).write_text(json.dumps(self.state_payload(), indent=2) + "\n")
+        managed_path(base_dir, STATE_FILE).write_text(json.dumps(self.state_payload(), indent=2) + "\n")
         if self.config.method == "bluebuild":
             self.write_bluebuild_project_files(base_dir, include_workflow=include_workflow, default_branch=default_branch)
         else:
