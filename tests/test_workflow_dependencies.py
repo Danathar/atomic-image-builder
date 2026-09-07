@@ -190,3 +190,131 @@ class ReleaseBinaryPinTests(unittest.TestCase):
             if absent:
                 short[path.name] = sorted(absent)
         self.assertEqual(short, {}, "workflow runs the unit suite without the tools it needs")
+
+
+# `curl … -o <dest> <url>` and the `"<digest>  <dest>"` line pinning it, in a
+# Containerfile rather than a workflow. Written separately from the workflow
+# patterns above because the Containerfile records its digests through a file
+# (`echo "…" > f` / `printf '%s\n' "…" > f`, then `sha256sum -c f`) rather
+# than through the pipeline the workflows use -- see the comment on the cosign
+# install for why a pipeline is the wrong shape there.
+_CF_CURL = re.compile(r"curl\s[^\n]*?-o\s+(?P<dest>\S+)\s+(?P<url>https?://\S+)")
+_CF_DIGEST = re.compile(r'"(?P<digest>[0-9a-f]{64})\s+(?P<dest>[^"\s]+)"')
+# A repo file's `gpgkey=`, a bare `rpm --import`, and dnf's own repo-file
+# fetch: the three ways a signing key or the configuration naming it can enter
+# the image from the network.
+_GPGKEY = re.compile(r"gpgkey=(?P<target>\S+?)\\n")
+_RPM_IMPORT = re.compile(r"rpm\s+--import\s+(?P<targets>[^&|\n]+)")
+_REPOFILE = re.compile(r"--from-repofile=(?P<url>\S+)")
+
+_CONTAINERFILES = ("Containerfile", "container/Containerfile.coverage")
+
+
+def _containerfile(name: str) -> str:
+    """The file's instructions, comments dropped and continuations folded.
+
+    Comments go first because these checks look for URLs in places a URL must
+    not appear, and the comments here legitimately quote the very forms being
+    forbidden -- explaining what `--from-repofile=https://…` used to do is not
+    the same as doing it. A Dockerfile comment is a line whose first non-blank
+    character is `#`, and none of the `printf` bodies below start with one.
+    """
+    lines = [
+        line
+        for line in (ROOT / name).read_text().splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    return re.sub(r"\\\n\s*", " ", "\n".join(lines))
+
+
+class ContainerImageTrustRootTests(unittest.TestCase):
+    """The published image's trust roots may not be fetched mutably.
+
+    This is the image `contrib/aib` verifies and then hands the user's GitHub
+    credential to, so what goes into it matters more than the usual. cosign
+    signs the result, but a signature answers "did this project's workflow
+    build this" and not "was what it built trustworthy" -- the second question
+    is only answerable if every trust root the build consumes is pinned to a
+    value recorded in this repository.
+
+    `gpgcheck=1` against a `gpgkey=` URL on the package origin is the specific
+    trap: it proves whoever served the package also served the key, which is
+    not a second opinion at all. These read the file rather than building it,
+    so they run in the ordinary unit suite with no network and no podman.
+    """
+
+    def test_every_containerfile_download_is_checksum_verified(self) -> None:
+        # Tied by destination path, not by proximity: the realistic mistake
+        # when adding the next pinned download is copying the block above and
+        # leaving the previous file name in the checksum line, which reads
+        # fine and verifies the wrong file -- or nothing.
+        unverified = []
+        for name in _CONTAINERFILES:
+            text = _containerfile(name)
+            digests = {m.group("dest") for m in _CF_DIGEST.finditer(text)}
+            for match in _CF_CURL.finditer(text):
+                dest = match.group("dest").strip("\"'")
+                if dest not in digests:
+                    unverified.append(f"{name}: {match.group('url')} -> {dest}")
+        self.assertEqual(
+            unverified,
+            [],
+            "downloaded into the published image with no sha256 recorded "
+            "against its destination path",
+        )
+
+    def test_every_recorded_digest_is_actually_checked(self) -> None:
+        # A digest written to a file nothing runs `sha256sum -c` against is
+        # documentation, not verification, and looks identical in review.
+        for name in _CONTAINERFILES:
+            text = _containerfile(name)
+            with self.subTest(containerfile=name):
+                if not _CF_DIGEST.search(text):
+                    continue
+                self.assertIn(
+                    "sha256sum -c",
+                    text,
+                    "digests are recorded but never verified",
+                )
+
+    def test_no_signing_key_is_trusted_straight_off_the_network(self) -> None:
+        # The whole of the fix for #268: a key has to come from a file this
+        # build already checked, never from a URL resolved at install time.
+        offenders = []
+        for name in _CONTAINERFILES:
+            text = _containerfile(name)
+            for match in _GPGKEY.finditer(text):
+                target = match.group("target")
+                if not target.startswith("file://"):
+                    offenders.append(f"{name}: gpgkey={target}")
+            for match in _RPM_IMPORT.finditer(text):
+                for target in match.group("targets").split():
+                    if target.startswith(("http://", "https://")):
+                        offenders.append(f"{name}: rpm --import {target}")
+        self.assertEqual(
+            offenders,
+            [],
+            "a signing key is fetched over the network instead of being read "
+            "from a checksum-verified local copy",
+        )
+
+    def test_no_repository_configuration_is_fetched_at_build_time(self) -> None:
+        # A .repo file pulled from the network carries its own gpgkey= line,
+        # so fetching the configuration hands away the choice of trust root
+        # even when every key in the image is otherwise pinned.
+        offenders = []
+        for name in _CONTAINERFILES:
+            for match in _REPOFILE.finditer(_containerfile(name)):
+                if match.group("url").startswith(("http://", "https://")):
+                    offenders.append(f"{name}: --from-repofile={match.group('url')}")
+        self.assertEqual(offenders, [], "repository configuration is fetched at build time")
+
+    def test_the_guards_above_can_see_the_file_they_read(self) -> None:
+        # Every check here passes vacuously on an empty or renamed file, and
+        # two of them pass vacuously on a file that simply has no repos. Assert
+        # the fixture: the published image really does configure two
+        # third-party repositories and really does pin three downloads.
+        text = _containerfile("Containerfile")
+        self.assertEqual(len(_GPGKEY.findall(text)), 2, "expected the charm and gh-cli repos")
+        self.assertEqual(len(_CF_CURL.findall(text)), 3, "expected two keys and the cosign RPM")
+        self.assertEqual(len(_CF_DIGEST.findall(text)), 3)
