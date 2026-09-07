@@ -99,6 +99,47 @@ tests/test_workflow_dependencies.py holds the offline half of this: every
 download in Containerfile has a digest recorded against its destination path,
 every recorded digest is actually checked, and no key or .repo file is fetched
 over the network at install time.
+OIDC Token Scope on Generated Builds
+------------------------------------
+The Containerfile-method workflows are generated without `id-token: write`,
+and this is a deliberate divergence from the bundled snapshots, which do
+declare it.  strip_permission_entries() removes it in patch_container_workflow
+and patch_container_disk_workflow; generate_container_workflow simply does not
+emit it.  The snapshots themselves are NOT edited — template_snapshots/ is a
+pinned upstream copy — so the drift is in the patchers, where the snapshot
+refresh will not silently undo it.
+
+Why it can go: signing on this path is key-based, not keyless.  The workflow
+runs `cosign sign --key env://COSIGN_PRIVATE_KEY` with COSIGN_EXPERIMENTAL
+explicitly false, and none of the actions it uses asks GitHub for an OIDC
+token.  Checked at the pinned SHAs of actions/checkout,
+ublue-os/remove-unwanted-software, extractions/setup-just,
+docker/login-action, sigstore/cosign-installer, actions/upload-artifact and
+osbuild/bootc-image-builder-action: several bundle @actions/core, which
+*exports* getIDToken, but none of them calls it.
+
+Why it matters: one job serves pull_request, push and schedule alike, and on a
+pull_request event the workflow file comes from the pull request's own head.
+Every scope the job declares is therefore a scope a proposed change can spend.
+Fork pull requests already get a read-only token from GitHub regardless, so
+what this removes is the same-repo-branch case — defence in depth, not a
+demonstrated exploit.
+
+The BlueBuild method KEEPS `id-token: write`.  blue-build/github-action hands
+the recipe to the BlueBuild CLI, which does support keyless cosign signing, so
+there is a plausible consumer there and removing it needs evidence this change
+does not have.
+
+Action required: restore `id-token: write` — by dropping "id-token" from
+UNUSED_WORKFLOW_PERMISSIONS in atomic_image_builder.py — if the Containerfile
+path ever adopts keyless signing, build provenance / artifact attestation
+(actions/attest-build-provenance), or registry login by OIDC rather than by
+password.  Any of those needs the token, and the failure mode is a red run at
+signing time, not a silently unsigned image.  A snapshot refresh that adds
+such a step upstream will not trip anything automatically: the round-trip
+tests in tests/test_atomic_image_builder.py assert the scope is absent, so
+they will keep passing while the new step fails at runtime.  Re-read the
+snapshot's steps when refreshing it.
 
 
 Containerfile-Method Image Identity: image-template.env

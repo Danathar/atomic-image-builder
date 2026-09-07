@@ -81,6 +81,24 @@ COSIGN
     chmod +x "$stub_dir/cosign"
 }
 
+# A logged-in `gh`. Six scenarios need one, and they need the same one: the
+# token's value is asserted by several of them, so a per-scenario copy that
+# drifted would weaken the assertion rather than fail it.
+install_gh_stub() {
+    cat >"$stub_dir/gh" <<'GH'
+#!/usr/bin/env bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+    exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
+    echo "fake-token-123"
+    exit 0
+fi
+exit 1
+GH
+    chmod +x "$stub_dir/gh"
+}
+
 cleanup_stubs() {
     rm -rf "$stub_dir"
 }
@@ -203,9 +221,48 @@ test_verify_requires_cosign() {
     out="$(PATH="$stub_dir" HOME="$stub_dir/home" "$aib" 2>&1)"
     status=$?
     assert_eq "$status" "1" "cosign missing: exit status"
-    assert_contains "$out" "cosign is required" "cosign missing: names what is missing"
+    assert_contains "$out" "cosign is needed" "cosign missing: names what is missing"
+    assert_contains "$out" "who built" "cosign missing: says what cosign is for"
+    assert_not_contains "$out" "signature" "cosign missing: no unexplained jargon"
+    # The escape hatch stopped being free when credentials started following
+    # verification. Naming it without saying that leaves the reader to find out
+    # by having the tool silently fail to reach GitHub.
+    assert_contains "$out" "no GitHub login" "cosign missing: says the escape hatch costs the login"
     assert_contains "$out" "AIB_SKIP_VERIFY=1" "cosign missing: names the escape hatch"
+    # The stub dir is the whole PATH, so there is no brew here. This is the
+    # branch a Fedora Atomic user without Homebrew gets, and it must not send
+    # them to `rpm-ostree install cosign`: cosign is not in Fedora's
+    # repositories, so that command fails.
+    assert_contains "$out" "brew install cosign" "cosign missing, no brew: names how this audience installs it"
+    # Both targets by name, because they differ here and only here: Universal
+    # Blue ships Homebrew and Fedora Atomic does not. A reader has to be able
+    # to tell which sentence is theirs.
+    assert_contains "$out" "Universal Blue" "cosign missing, no brew: names the target that already has brew"
+    assert_contains "$out" "Fedora Atomic" "cosign missing, no brew: names the target that does not"
+    assert_contains "$out" "https://brew.sh" "cosign missing, no brew: says where to get brew"
+    assert_not_contains "$out" "rpm-ostree" "cosign missing: does not suggest layering a package that does not exist"
+    assert_not_contains "$out" "docs.sigstore.dev" "cosign missing: not a generic upstream platform list"
     assert_eq "$(cat "$podman_log" 2>/dev/null)" "" "cosign missing: podman run never happens"
+    cleanup_stubs
+}
+
+# --- cosign missing on a host that has brew: just the one command ----------
+# Every Universal Blue image ships Homebrew, so this is the branch nearly
+# every reader of this message actually gets. Telling them what Homebrew is
+# and where to get it would be three lines of noise about something already
+# installed.
+test_cosign_missing_with_brew_names_only_the_command() {
+    setup_stubs
+    rm -f "$stub_dir/cosign"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$stub_dir/brew"
+    chmod +x "$stub_dir/brew"
+    local out
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" "$aib" 2>&1)"
+    assert_contains "$out" "brew install cosign" "cosign missing, brew present: one exact command"
+    assert_contains "$out" "AIB_SKIP_VERIFY=1 aib" "cosign missing, brew present: the opt-out is a whole command too"
+    assert_not_contains "$out" "https://brew.sh" "cosign missing, brew present: no detour explaining brew"
+    assert_not_contains "$out" "Fedora Atomic" "cosign missing, brew present: no detour about a distro they are not on"
+    assert_contains "$out" "no GitHub login" "cosign missing, brew present: still says the escape hatch costs the login"
     cleanup_stubs
 }
 
@@ -220,7 +277,7 @@ test_skip_verify_warns_and_runs() {
     out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_SKIP_VERIFY=1 "$aib" 2>&1)"
     args="$(cat "$podman_log")"
     assert_contains "$out" "WARNING" "skip verify: warns"
-    assert_contains "$out" "without" "skip verify: says verification did not happen"
+    assert_contains "$out" "is not" "skip verify: says the check did not happen"
     assert_contains "$args" "run" "skip verify: still runs the image"
     assert_eq "$(cat "$cosign_log" 2>/dev/null)" "" "skip verify: cosign is not consulted"
     cleanup_stubs
@@ -236,7 +293,9 @@ test_pull_failure_refuses_to_run() {
     out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_TEST_PULL_STATUS=1 "$aib" 2>&1)"
     status=$?
     assert_eq "$status" "1" "pull failure: exit status"
-    assert_contains "$out" "could not pull" "pull failure: says what failed"
+    assert_contains "$out" "could not download" "pull failure: says what failed"
+    assert_contains "$out" "no GitHub login" "pull failure: says the offline copy costs the login"
+    assert_not_contains "$out" "signature" "pull failure: no unexplained jargon"
     assert_contains "$out" "AIB_SKIP_VERIFY=1" "pull failure: names the offline escape hatch"
     assert_eq "$(cat "$podman_log" 2>/dev/null)" "" "pull failure: podman run never happens"
     cleanup_stubs
@@ -294,18 +353,7 @@ test_podman_missing() {
 # --- gh authenticated: GH_TOKEN forwarded, no aib-gh volume ----------------
 test_gh_authenticated() {
     setup_stubs
-    cat >"$stub_dir/gh" <<'GH'
-#!/usr/bin/env bash
-if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-    exit 0
-fi
-if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
-    echo "fake-token-123"
-    exit 0
-fi
-exit 1
-GH
-    chmod +x "$stub_dir/gh"
+    install_gh_stub
     PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1
     local args
     args="$(cat "$podman_log")"
@@ -327,18 +375,7 @@ GH
 # unset variable and silently falls back to no GitHub auth at all.
 test_gh_token_forwarded_by_environment_not_argv() {
     setup_stubs
-    cat >"$stub_dir/gh" <<'GH'
-#!/usr/bin/env bash
-if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-    exit 0
-fi
-if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
-    echo "fake-token-123"
-    exit 0
-fi
-exit 1
-GH
-    chmod +x "$stub_dir/gh"
+    install_gh_stub
     # `env -u` rather than relying on the unset at the top of the file: this
     # scenario is the one that breaks silently if GH_TOKEN is in the
     # environment, so it states the precondition itself rather than
@@ -350,6 +387,162 @@ GH
     assert_contains "$args" "-e GH_TOKEN " "gh token: forwarded as a bare -e GH_TOKEN, with no value attached"
     assert_not_contains "$args" "fake-token-123" "gh token: the value never reaches podman's command line"
     assert_eq "$forwarded" "fake-token-123" "gh token: the value reaches podman through the exported environment"
+    cleanup_stubs
+}
+
+# --- an unverified image gets no GitHub credentials ------------------------
+# The credential is the part of this wrapper worth stealing. Verification and
+# forwarding used to be independent decisions, so `AIB_IMAGE=<anything> aib`
+# on a host with `gh` logged in ran an unchecked image *and* handed it a live
+# token. These three scenarios pin the two decisions together: the token
+# reaches podman's environment only where cosign said what the image is.
+test_custom_image_gets_no_credentials() {
+    setup_stubs
+    install_gh_stub
+    local out args forwarded
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN AIB_IMAGE="localhost/my-own-build:dev" "$aib" 2>&1)"
+    args="$(cat "$podman_log")"
+    forwarded="$(cat "$podman_env_log")"
+    assert_not_contains "$args" "-e GH_TOKEN" "custom image: GH_TOKEN not forwarded"
+    assert_not_contains "$args" "fake-token-123" "custom image: no token value in podman's argv"
+    assert_eq "$forwarded" "<unset>" "custom image: no token in podman's environment either"
+    # The named volume is a stored credential too: an earlier verified run's
+    # in-container `gh auth login` lives in it, so mounting it into an
+    # unverified image leaks the same account by another route.
+    assert_not_contains "$args" "aib-gh:/root/.config/gh" "custom image: gh config volume not mounted"
+    assert_contains "$args" "run" "custom image: still runs, just logged out"
+    assert_contains "$out" "localhost/my-own-build:dev" "custom image: names the image it declined to trust"
+    assert_contains "$out" "no GitHub login" "custom image: says plainly what was withheld"
+    # The explanation, not the mechanism. A reader who has just pasted somebody
+    # else's command needs to know what a signature check would have bought
+    # them -- whether this image came from this project -- not the name of the
+    # thing that did not happen. "AIB_ALLOW_UNVERIFIED_AUTH" is the variable
+    # name and is exempt; the prose around it is what is being held to this.
+    assert_contains "$out" "who built" "custom image: explains what the check would have told them"
+    assert_not_contains "$out" "signature" "custom image: no unexplained jargon"
+    assert_not_contains "$out" "unverified image" "custom image: no unexplained jargon"
+    # A command to copy, not an operation to perform. "Unset AIB_IMAGE" needs a
+    # reader who knows what an environment variable is, and is also wrong for
+    # the likeliest arrival: someone who pasted `AIB_IMAGE=... aib` has nothing
+    # to unset. `env -u` works either way and needs no model of itself.
+    assert_contains "$out" "env -u AIB_IMAGE aib" "custom image: the fix is a runnable command"
+    assert_not_contains "$out" "Unset AIB_IMAGE" "custom image: does not ask the reader to unset a variable"
+    assert_contains "$out" "AIB_ALLOW_UNVERIFIED_AUTH=1" "custom image: names the opt-in"
+    # Order, not just presence. A reader who reaches this message because they
+    # pasted something a stranger gave them has to meet the way out before the
+    # way through; a search that lands on the override first is how this
+    # becomes cargo-culted advice.
+    assert_contains "${out%%AIB_ALLOW_UNVERIFIED_AUTH*}" "env -u AIB_IMAGE aib" "custom image: the fix is stated before the override"
+    cleanup_stubs
+}
+
+test_skip_verify_gets_no_credentials() {
+    setup_stubs
+    install_gh_stub
+    rm -f "$stub_dir/cosign"
+    local out args forwarded
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN AIB_SKIP_VERIFY=1 "$aib" 2>&1)"
+    args="$(cat "$podman_log")"
+    forwarded="$(cat "$podman_env_log")"
+    assert_not_contains "$args" "-e GH_TOKEN" "skip verify: GH_TOKEN not forwarded"
+    assert_eq "$forwarded" "<unset>" "skip verify: no token in podman's environment"
+    assert_not_contains "$args" "aib-gh:/root/.config/gh" "skip verify: gh config volume not mounted"
+    # A different cause needs a different remedy. Someone who set
+    # AIB_SKIP_VERIFY chose to; telling them to unset AIB_IMAGE, which they
+    # never set, sends them looking for a variable that is not there.
+    #
+    # Keyed on "no GitHub login", not on "AIB_SKIP_VERIFY": the warning printed
+    # further up already names that variable, so asserting it here would pass
+    # whether or not this message exists at all. A mutation collapsing both
+    # messages into one generic line was caught by the custom-image scenario
+    # and not by this one until the string narrowed.
+    assert_contains "$out" "no GitHub login" "skip verify: says plainly what was withheld"
+    assert_contains "$out" "who built" "skip verify: explains what the check would have told them"
+    assert_not_contains "$out" "signature" "skip verify: no unexplained jargon"
+    assert_not_contains "$out" "unverified image" "skip verify: no unexplained jargon"
+    assert_contains "$out" "env -u AIB_SKIP_VERIFY aib" "skip verify: the fix is a runnable command"
+    assert_not_contains "$out" "AIB_IMAGE" "skip verify: does not blame a variable that was never set"
+    # Said once, not twice. The warning above already carries the command that
+    # undoes this; repeating it in the credential message put the same line on
+    # screen twice, which reads as two separate problems.
+    assert_eq "$(printf '%s' "$out" | grep -c "env -u AIB_SKIP_VERIFY aib")" "1" "skip verify: the remedy is stated once"
+    # Four lines total on this path, two of them the warning above. This is the
+    # only security UI a reader who does not open the docs will see, and a
+    # block long enough to skim is one that does not get read.
+    # A bound, not an exact count: the point is that it stays readable, and an
+    # exact number breaks on any wording change while saying nothing more.
+    assert_eq "$(printf '%s\n' "$out" | awk 'END{print (NR<=8)?"ok":NR}')" "ok" "skip verify: stays short enough to read"
+    cleanup_stubs
+}
+
+# --- the opt-in restores both credential paths, loudly ---------------------
+# Someone iterating on their own build of this image needs the credential back
+# or the tool cannot do the thing it exists to do. That is a decision the user
+# states, not one the wrapper infers from AIB_IMAGE being set.
+test_unverified_auth_opt_in_forwards_token() {
+    setup_stubs
+    install_gh_stub
+    local out args forwarded
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN \
+        AIB_IMAGE="localhost/my-own-build:dev" AIB_ALLOW_UNVERIFIED_AUTH=1 "$aib" 2>&1)"
+    args="$(cat "$podman_log")"
+    forwarded="$(cat "$podman_env_log")"
+    assert_contains "$args" "-e GH_TOKEN " "opt-in: forwarded as a bare -e GH_TOKEN"
+    assert_not_contains "$args" "fake-token-123" "opt-in: the value still never reaches podman's argv"
+    assert_eq "$forwarded" "fake-token-123" "opt-in: the value reaches podman's environment"
+    assert_contains "$out" "WARNING" "opt-in: warns that credentials went to an unverified image"
+    cleanup_stubs
+}
+
+test_unverified_auth_opt_in_mounts_gh_volume() {
+    setup_stubs
+    local args
+    args="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_IMAGE="localhost/my-own-build:dev" \
+        AIB_ALLOW_UNVERIFIED_AUTH=1 "$aib" >/dev/null 2>&1; cat "$podman_log")"
+    assert_contains "$args" "aib-gh:/root/.config/gh" "opt-in, no gh: config volume mounted"
+    cleanup_stubs
+}
+
+# --- the remedy the message prints actually works --------------------------
+# Asserting that a message contains a command says nothing about whether the
+# command does what the sentence around it claims. This takes the string out
+# of the message rather than hard-coding it, then runs it, so a reworded
+# remedy that no longer works fails here instead of in someone's terminal.
+test_printed_remedy_restores_the_verified_run() {
+    setup_stubs
+    install_gh_stub
+    # `env -u AIB_IMAGE aib` has to be able to find `aib`, and the stub dir is
+    # the entire PATH these scenarios run with.
+    ln -s "$aib" "$stub_dir/aib"
+    local out official optin args forwarded
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN \
+        AIB_IMAGE="localhost/my-own-build:dev" "$aib" 2>&1)"
+    # Both remedies are read out of the message rather than written here, so a
+    # reworded line that no longer works fails in this scenario instead of in
+    # somebody's terminal. Each is the indented line following its sentence.
+    official="$(printf '%s\n' "$out" | sed -n '/To run the official image instead/{n;s/^aib:   //p;}')"
+    optin="$(printf '%s\n' "$out" | sed -n '/keep this image and send your login/{n;s/^aib:   //p;}')"
+    assert_eq "$official" "env -u AIB_IMAGE aib" "remedy: prints the official-image command"
+    assert_eq "$optin" "AIB_ALLOW_UNVERIFIED_AUTH=1 AIB_IMAGE=localhost/my-own-build:dev aib" "remedy: prints the opt-in command, with the image repeated back"
+
+    # Paste the first one, with AIB_IMAGE still set -- the reader's situation.
+    PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN \
+        AIB_IMAGE="localhost/my-own-build:dev" bash -c "$official" >/dev/null 2>&1
+    args="$(cat "$podman_log")"
+    forwarded="$(cat "$podman_env_log")"
+    assert_contains "$args" "ghcr.io/danathar/atomic-image-builder@$test_digest" "remedy: runs the verified official image"
+    assert_contains "$args" "-e GH_TOKEN " "remedy: the login comes back"
+    assert_eq "$forwarded" "fake-token-123" "remedy: and reaches the container"
+
+    # Paste the second one. It has to keep the custom image AND send the login;
+    # dropping AIB_IMAGE from the printed line would quietly run the official
+    # image instead, which is not what the sentence above it offered.
+    PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN \
+        AIB_IMAGE="localhost/my-own-build:dev" bash -c "$optin" >/dev/null 2>&1
+    args="$(cat "$podman_log")"
+    forwarded="$(cat "$podman_env_log")"
+    assert_contains "$args" "localhost/my-own-build:dev" "remedy: the opt-in keeps the custom image"
+    assert_eq "$forwarded" "fake-token-123" "remedy: the opt-in sends the login"
     cleanup_stubs
 }
 
@@ -630,6 +823,11 @@ RPMOSTREE
 test_podman_missing
 test_gh_authenticated
 test_gh_token_forwarded_by_environment_not_argv
+test_custom_image_gets_no_credentials
+test_skip_verify_gets_no_credentials
+test_unverified_auth_opt_in_forwards_token
+test_unverified_auth_opt_in_mounts_gh_volume
+test_printed_remedy_restores_the_verified_run
 test_gh_missing
 test_gh_not_logged_in
 test_rpm_ostree_success
@@ -649,6 +847,7 @@ test_verify_runs_the_digest_it_verified
 test_verify_uses_the_publisher_identity
 test_verify_failure_refuses_to_run
 test_verify_requires_cosign
+test_cosign_missing_with_brew_names_only_the_command
 test_skip_verify_warns_and_runs
 test_pull_failure_refuses_to_run
 test_custom_image_is_not_verified
