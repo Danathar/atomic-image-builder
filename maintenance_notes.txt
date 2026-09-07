@@ -38,6 +38,67 @@ tests/test_atomic_image_builder.py cover the current shape.  Add a round-trip
 audit here if upstream ever changes the indentation style; the silent no-op
 failure mode is hard to notice otherwise.
 
+Third-Party Repository Trust Roots
+----------------------------------
+The published tool image installs `gh` and `gum` from their vendors' own yum
+repositories.  Both repositories' signing keys are pinned by sha256 in
+Containerfile, fetched into /tmp, verified there, and only then installed to
+/etc/pki/rpm-gpg — and each .repo file points at that verified local copy with
+`gpgkey=file://...`, never at a URL.
+
+Why, in one line: `gpgcheck=1` against a `gpgkey=` URL on the same origin as
+the packages proves only that whoever served the package also served the key.
+Pinning moves the trust root into this repository, where changing it is a
+reviewed commit.  The gh .repo file is written by Containerfile rather than
+fetched with `config-manager --from-repofile=`, for the same reason: that file
+carries the `gpgkey=` line, so fetching the configuration hands away the choice
+of trust root even when every key is otherwise pinned.
+
+Current pins:
+
+  Charm       https://repo.charm.sh/yum/gpg.key
+              ED92 7B38 BE98 1E53 CA09  153D 03BB F595 D4DF D35C
+              Charmbracelet Inc. <vt100@charm.sh>, expires 2027-07-13
+
+  GitHub CLI  https://cli.github.com/packages/githubcli-archive-keyring.asc
+              7F38 BBB5 9D06 4DBC B3D8  4D72 5612 B364 6231 3325   (current)
+              2C61 0620 1985 B60E 6C7A  C873 23F3 D4EA 7571 6059   (expired
+              2026-09-05, still bundled — a keyring holding a retired key
+              alongside its replacement is normal during a rotation)
+
+Action required: when either vendor rotates or re-publishes its key, the
+sha256 stops matching and the image build fails with a checksum error.  That is
+the intended failure mode — a trust root must not change quietly — but it is
+not self-service.  maintenance_audit.py --check-action-updates checks these
+pins against upstream weekly and reports a *mismatch as an advisory*, so the
+rotation is normally noticed before it breaks a build.
+
+To re-pin, verify identity before writing anything down.  A new digest is
+never a rubber-stamp update: the digest only says the file changed, and the
+fingerprint is the thing that says it is still the right key.
+
+    curl -fsSL -o /tmp/key https://repo.charm.sh/yum/gpg.key
+    gpg --show-keys --with-fingerprint /tmp/key     # compare to the list above
+    sha256sum /tmp/key                              # the new pin
+
+If the fingerprint is unchanged, the key was merely re-armored and the new
+sha256 can go straight into Containerfile.  If the fingerprint changed, the
+vendor rotated: confirm the new fingerprint against an announcement from the
+vendor — not against the same host that just served you the key — before
+updating both the digest and the fingerprint recorded here and in
+Containerfile's comment.
+
+Two things deliberately NOT done here, both from #268 and both still open:
+the Fedora base image is a tag rather than a digest (digest-pinning it needs
+refresh automation first, or it becomes a stale pin, which is its own hazard),
+and the image publishes no SBOM or provenance attestation.  The RPM versions
+themselves are deliberately not frozen — security updates are the point of the
+nightly rebuild.
+
+tests/test_workflow_dependencies.py holds the offline half of this: every
+download in Containerfile has a digest recorded against its destination path,
+every recorded digest is actually checked, and no key or .repo file is fetched
+over the network at install time.
 OIDC Token Scope on Generated Builds
 ------------------------------------
 The Containerfile-method workflows are generated without `id-token: write`,

@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import json
 import subprocess
@@ -15,13 +16,16 @@ from maintenance_audit import (
     TemplateSource,
     audit_action_pin_freshness,
     audit_action_update_availability,
+    audit_container_trust_roots,
     audit_local_snapshot,
     audit_upstream_drift,
     describe_pin_drift,
     describe_snapshot_drift,
+    fetch_sha256,
     github_api_json,
     github_repo_slug,
     is_newer_version_available,
+    iter_pinned_downloads,
     iter_pinned_refs,
     load_template_source,
     main,
@@ -659,3 +663,139 @@ class MaintenanceAuditTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(run.call_args.args[0], Path(tmp).resolve())
         self.assertEqual(run.call_args.kwargs["check_action_updates"], True)
+
+
+# A Containerfile shaped like the real one: two keys pinned by digest, one
+# download with no digest recorded, and continuations to fold.
+_PINNED_CONTAINERFILE = """\
+FROM registry.fedoraproject.org/fedora:44
+
+RUN dnf5 -y install curl && \\
+    curl -fsSL -o /tmp/KEY-a https://example.invalid/a.key && \\
+    curl -fsSL -o /tmp/KEY-b https://example.invalid/b.key && \\
+    curl -fsSL -o /tmp/unpinned https://example.invalid/c.tar && \\
+    printf '%s\\n' \\
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  /tmp/KEY-a" \\
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  /tmp/KEY-b" \\
+      > /tmp/keys.sha256 && \\
+    sha256sum -c /tmp/keys.sha256
+"""
+
+
+class ContainerTrustRootAuditTests(unittest.TestCase):
+    """The image's key pins are checked against upstream once a week.
+
+    A sha256 pin on a file its owner may rotate is a maintenance obligation as
+    much as a control: the day the key changes, the build stops. These cover
+    the check that reports it as an advisory first, while it is still someone
+    noticing rather than a red nightly with a bare checksum mismatch.
+    """
+
+    def test_pinned_downloads_are_paired_by_destination(self) -> None:
+        # By destination and not by order, because the mistake worth catching
+        # is a copied block that kept the previous file's name -- which pairs
+        # a real URL with a digest for something else.
+        self.assertEqual(
+            iter_pinned_downloads(_PINNED_CONTAINERFILE),
+            [
+                ("https://example.invalid/a.key", "/tmp/KEY-a", "a" * 64),
+                ("https://example.invalid/b.key", "/tmp/KEY-b", "b" * 64),
+            ],
+        )
+
+    def test_a_download_with_no_digest_is_not_reported_here(self) -> None:
+        # Whether an unpinned download may exist is a question for the offline
+        # guard in tests/test_workflow_dependencies.py. This audit only asks
+        # whether what upstream serves still matches what was written down, and
+        # it has nothing to compare an unpinned download against.
+        destinations = [dest for _url, dest, _digest in iter_pinned_downloads(_PINNED_CONTAINERFILE)]
+        self.assertNotIn("/tmp/unpinned", destinations)
+
+    def test_fetch_sha256_digests_what_the_server_actually_sent(self) -> None:
+        body = b"-----BEGIN PGP PUBLIC KEY BLOCK-----\n"
+        with local_http_server(status=200, body=body) as url:
+            self.assertEqual(fetch_sha256(url), hashlib.sha256(body).hexdigest())
+
+    def test_fetch_sha256_reports_an_http_error_rather_than_raising_urllib(self) -> None:
+        with local_http_server(status=404, body=b"nope") as url:
+            with self.assertRaises(RuntimeError) as caught:
+                fetch_sha256(url)
+        self.assertIn("404", str(caught.exception))
+
+    def test_fetch_sha256_reports_a_connection_failure(self) -> None:
+        with self.assertRaises(RuntimeError):
+            fetch_sha256(closed_port_url())
+
+    def test_a_pin_that_still_matches_upstream_says_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Containerfile").write_text(_PINNED_CONTAINERFILE)
+            digests = {
+                "https://example.invalid/a.key": "a" * 64,
+                "https://example.invalid/b.key": "b" * 64,
+            }
+            with patch("maintenance_audit.fetch_sha256", side_effect=digests.__getitem__):
+                self.assertEqual(audit_container_trust_roots(root), [])
+
+    def test_a_rotated_key_is_reported_with_both_digests(self) -> None:
+        # Both, because the advisory has to be actionable without a checkout:
+        # what is pinned now, and what upstream serves instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Containerfile").write_text(_PINNED_CONTAINERFILE)
+            with patch("maintenance_audit.fetch_sha256", return_value="c" * 64):
+                advisories = audit_container_trust_roots(root)
+
+        self.assertEqual(len(advisories), 2)
+        self.assertIn("https://example.invalid/a.key", advisories[0])
+        self.assertIn("/tmp/KEY-a", advisories[0])
+        self.assertIn("a" * 64, advisories[0])
+        self.assertIn("c" * 64, advisories[0])
+        # It must not read as a version bump to apply. Confirming the
+        # fingerprint is the whole point of pinning the key in the first place.
+        self.assertIn("fingerprint", advisories[0])
+
+    def test_an_upstream_that_cannot_be_reached_is_said_so_not_passed(self) -> None:
+        # Silence on an unreachable host would read exactly like a pin that
+        # still matches, which is the one thing this must never do.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Containerfile").write_text(_PINNED_CONTAINERFILE)
+            with patch("maintenance_audit.fetch_sha256", side_effect=RuntimeError("timed out")):
+                advisories = audit_container_trust_roots(root)
+
+        self.assertEqual(len(advisories), 2)
+        for advisory in advisories:
+            self.assertIn("Unable to check", advisory)
+
+    def test_a_missing_containerfile_is_reported_rather_than_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            advisories = audit_container_trust_roots(Path(tmp))
+
+        self.assertEqual(len(advisories), 1)
+        self.assertIn("Unable to read Containerfile", advisories[0])
+
+    def test_this_repositorys_own_containerfile_is_parsed_by_the_audit(self) -> None:
+        # The fixture above proves the parser works on a file shaped like the
+        # real one. This proves the real one is that shape -- otherwise the
+        # weekly check runs, finds nothing to look at, and reports success.
+        found = iter_pinned_downloads((Path(__file__).resolve().parents[1] / "Containerfile").read_text())
+        self.assertEqual(len(found), 3, "expected two signing keys and the cosign RPM")
+        for _url, _dest, digest in found:
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+    def test_the_weekly_run_is_the_one_that_checks_the_pins(self) -> None:
+        # Offline callers (--skip-upstream, from nightly-compliance and
+        # ai-fix) must not reach for the network; the weekly audit must.
+        with patch("maintenance_audit.audit_container_trust_roots", return_value=["x"]) as checked:
+            with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
+                with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
+                    repo_root = Path(__file__).resolve().parents[1]
+                    run_audit(repo_root, skip_upstream=True, check_action_updates=False)
+                    self.assertEqual(checked.call_count, 0)
+
+                    _findings, advisories = run_audit(
+                        repo_root, skip_upstream=True, check_action_updates=True
+                    )
+                    self.assertEqual(checked.call_count, 1)
+                    self.assertIn("x", advisories)

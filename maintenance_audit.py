@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -23,6 +24,13 @@ WORKFLOW_DIRS: tuple[Path, ...] = (
     Path("template_snapshots/containerfile/.github/workflows"),
     Path("template_snapshots/bluebuild/.github/workflows"),
 )
+CONTAINERFILE = Path("Containerfile")
+# `curl … -o <dest> <url>`, after backslash continuations are folded, and the
+# `"<digest>  <dest>"` line that pins what that download must contain. Both
+# forms the Containerfile uses -- `echo "…" >` and `printf '%s\n' "…" …` --
+# quote the pair the same way, so one pattern reads both.
+PINNED_DOWNLOAD_RE = re.compile(r"curl\s[^\n]*?-o\s+(?P<dest>\S+)\s+(?P<url>https://\S+)")
+PINNED_DIGEST_RE = re.compile(r'"(?P<digest>[0-9a-f]{64})\s+(?P<dest>[^"\s]+)"')
 REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 GITHUB_REPO_URL_RE = re.compile(r"^(?:https://|git@)github\.com[/:](?P<slug>[^/]+/[^/]+?)(?:\.git)?/?$")
 # Above this many commits behind, snapshot drift stops being routine upstream
@@ -459,7 +467,90 @@ def run_audit(
     if check_action_updates:
         advisories.extend(audit_action_update_availability())
         advisories.extend(audit_action_pin_freshness())
+        # Same gate, and for the same reason: this is the run that is allowed
+        # to go and ask upstream whether a pin has gone stale. The offline
+        # callers (--skip-upstream, from nightly-compliance and ai-fix) get
+        # the local checks only.
+        advisories.extend(audit_container_trust_roots(repo_root))
     return findings, advisories
+
+
+def iter_pinned_downloads(text: str) -> list[tuple[str, str, str]]:
+    """(url, dest, digest) for every checksum-pinned download in a Containerfile.
+
+    A download with no digest recorded against its destination is skipped
+    rather than reported: whether one may exist at all is a question for
+    tests/test_workflow_dependencies.py, which reads the same file offline.
+    This function only answers "does what upstream serves still match what we
+    wrote down".
+    """
+    joined = re.sub(r"\\\n\s*", " ", text)
+    digests = {
+        match.group("dest"): match.group("digest")
+        for match in PINNED_DIGEST_RE.finditer(joined)
+    }
+    found: list[tuple[str, str, str]] = []
+    for match in PINNED_DOWNLOAD_RE.finditer(joined):
+        dest = match.group("dest").strip("\"'")
+        digest = digests.get(dest)
+        if digest is not None:
+            found.append((match.group("url"), dest, digest))
+    return found
+
+
+def fetch_sha256(url: str) -> str:
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "atomic-image-builder-maintenance-audit"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return hashlib.sha256(response.read()).hexdigest()
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(str(exc.reason)) from exc
+
+
+def audit_container_trust_roots(repo_root: Path) -> list[str]:
+    """Advise when a pinned download no longer matches what upstream serves.
+
+    The published image pins the two repository signing keys by sha256, which
+    is what stops a repository's own host vouching for its own key. The cost
+    of that pin is that a key rotated upstream stops the image building, and
+    the first anyone would hear of it is a red nightly build with a checksum
+    mismatch and no context.
+
+    So it is checked here first, weekly, as an advisory carrying the digest to
+    re-pin. Advisory rather than a failure because upstream rotating a key is
+    a normal event that this repository does not control -- the same reasoning
+    that keeps snapshot drift advisory -- and because nothing is wrong with the
+    image already published: it was built against the key that was pinned when
+    it was built.
+
+    A digest that changed is never a rubber-stamp update. See
+    maintenance_notes.txt, "Third-Party Repository Trust Roots", for
+    confirming the fingerprint before writing the new value down.
+    """
+    path = repo_root / CONTAINERFILE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"Unable to read {CONTAINERFILE}: {exc}"]
+    advisories: list[str] = []
+    for url, dest, digest in iter_pinned_downloads(text):
+        try:
+            actual = fetch_sha256(url)
+        except RuntimeError as exc:
+            advisories.append(f"Unable to check the pinned download {url}: {exc}")
+            continue
+        if actual != digest:
+            advisories.append(
+                f"{url} no longer matches the sha256 pinned for {dest} in "
+                f"{CONTAINERFILE}: pinned {digest}, upstream {actual}. "
+                "Confirm the key's fingerprint before re-pinning -- see "
+                'maintenance_notes.txt, "Third-Party Repository Trust Roots".'
+            )
+    return advisories
 
 
 def main(argv: list[str] | None = None) -> int:
