@@ -59,9 +59,12 @@ jobs:
           python-version: "3.10"
 
       # Same versions and checksums ci.yml pins, for the same reason:
-      # hadolint and actionlint ship binaries rather than packages, and an
-      # action would have to enter ACTION_PINS. shellcheck is already on the
-      # runner image.
+      # hadolint, actionlint and just ship binaries rather than packages, and
+      # an action would have to enter ACTION_PINS. shellcheck is already on
+      # the runner image. just is here because the unit suite below skips
+      # tests without it, and a skipped test still counts in "Ran N tests" --
+      # so this job would otherwise report `unittest` as passing while
+      # checking less than ci.yml does.
       - name: Install test tooling
         run: |
           set -euo pipefail
@@ -75,6 +78,10 @@ jobs:
             https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP/bin" actionlint
+          curl -fsSL -o "$RUNNER_TEMP/just.tar.gz" \
+            https://github.com/casey/just/releases/download/1.57.0/just-1.57.0-x86_64-unknown-linux-musl.tar.gz
+          echo "45b548094283cb9739af8f13273b8cddeee869f5b4ef2bb631b1f311cb566155  $RUNNER_TEMP/just.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/just.tar.gz" -C "$RUNNER_TEMP/bin" just
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       # Every step below records its outcome instead of failing the job. A red
