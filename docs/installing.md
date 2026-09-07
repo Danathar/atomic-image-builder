@@ -15,6 +15,21 @@ already present. The container image bundles its own, so Podman is
 almost the whole prerequisite there — the `aib` wrapper also wants `cosign`, to
 verify the image's signature before running it.
 
+`cosign` comes from Homebrew on both targets. The two differ in one way only:
+Universal Blue images (Bluefin, Aurora, Bazzite) ship Homebrew already, and
+Fedora Atomic (Silverblue, Kinoite) does not — so install it from
+[brew.sh](https://brew.sh) there first. Then, on either:
+
+```bash
+brew install cosign
+```
+
+`rpm-ostree install cosign` is not an alternative on either one. cosign is not
+packaged for Fedora at all, which is the same reason the Homebrew formula below
+has to supply it — and layering a package onto the OS image and rebooting to
+get one command would be the wrong mechanism on an atomic desktop even if it
+were packaged.
+
 What the container cannot bundle is your host's rpm-ostree *state*: it has no
 access to the host's system D-Bus, so the system scan depends on the `aib`
 wrapper handing that state in. See
@@ -106,8 +121,10 @@ release install above is the recommended one.
 The wrapper forwards your host's `gh` login when there is one (otherwise it
 persists an in-container login across runs in a podman-managed volume), makes
 your host's `rpm-ostree` state available to the system scan, and mounts your
-local timezone. See the comments at the top of [`contrib/aib`](../contrib/aib)
-for exactly what it mounts and why.
+local timezone. Either GitHub credential is forwarded only to an image whose
+signature was verified — see [Verifying the image](#verifying-the-image). See
+the comments at the top of [`contrib/aib`](../contrib/aib) for exactly what it
+mounts and why.
 
 ### Plain `podman run`
 
@@ -130,9 +147,18 @@ otherwise.
 
 ### Verifying the image
 
+**What a signature answers here.** Anyone can publish a container image under
+any name, and the name alone proves nothing about who built it. A signature is
+what makes that claim checkable: it lets your machine confirm the image came
+out of *this project's own GitHub Actions workflow* before running it. That is
+the whole question — not whether the image is good software, but whether it is
+the one this project published or somebody else's standing where it should be.
+
 Every published image is signed with keyless (OIDC) cosign at publish time — the
 identity being verified is the publishing workflow itself, not a key anyone
-holds.
+holds. That is why the check below constrains a workflow path and an OIDC
+issuer rather than naming a key: there is no key to steal, and no key for you
+to have to trust.
 
 **The `aib` wrapper does this for you, on every run.** It is the path where
 nobody thinks about pulling: it fetches a mutable tag each time, runs it as root
@@ -146,9 +172,43 @@ Two things follow from that, both deliberate:
 
 | Situation                            | What happens                                                                     |
 | ------------------------------------ | -------------------------------------------------------------------------------- |
-| `cosign` not installed               | The wrapper refuses to run and says so. Install cosign, or opt out explicitly.   |
+| `cosign` not installed               | The wrapper refuses to run and says so, naming `brew install cosign`.            |
 | Offline, or you want to opt out      | `AIB_SKIP_VERIFY=1 aib` runs the image unverified, and warns loudly that it did. |
 | `AIB_IMAGE` points at your own build | Not verified — your build cannot satisfy this repository's certificate identity. |
+
+### Credentials follow the signature
+
+An image the wrapper did not verify gets no GitHub credentials: neither a token
+from your host's `gh` login nor the `aib-gh` volume holding an in-container one.
+Both of the rows above are unverified runs, so both of them are logged out.
+
+That pairing is the point. Without it,
+
+```bash
+AIB_IMAGE=evil.example/evil/image aib
+```
+
+would not only run someone else's image as root — it would hand that image a
+live credential for your GitHub account, which is a much larger thing to agree
+to than "skip a check". The tool still starts; the steps that reach GitHub are
+the ones that stop working.
+
+The wrapper's own messages avoid the word "signature" and say "no way to check
+who built it" instead, because that is the part that makes withholding a GitHub
+login follow rather than seem arbitrary. When it declines, it prints the exact
+command that undoes it — `env -u AIB_IMAGE aib`, or `env -u AIB_SKIP_VERIFY aib`
+— rather than telling you to unset a variable. The usual way to arrive here is pasting a command with
+the variable written in front of it, and there is then nothing left set to
+unset; the command above works either way.
+
+To forward credentials anyway — iterating on your own build of this image is
+the case that needs it — say so explicitly:
+
+```bash
+AIB_ALLOW_UNVERIFIED_AUTH=1 AIB_IMAGE=localhost/my-own-build:dev aib
+```
+
+It warns each time. Set it only for an image you built yourself.
 
 A release tag of the published image (`ghcr.io/danathar/atomic-image-builder:v1.2.3`)
 *is* verified, because the identity below accepts tag refs as well as `main`.
