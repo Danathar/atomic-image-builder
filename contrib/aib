@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #
 # aib — run Atomic Image Builder as a container. No local clone or
-# dependency install required; podman is the only prerequisite.
+# dependency install required; podman and cosign are the prerequisites.
+# cosign is needed to verify the published image's signature before running
+# it; AIB_SKIP_VERIFY=1 drops that requirement and the protection with it.
 #
 # Install:
 #   curl -fsSL https://raw.githubusercontent.com/Danathar/atomic-image-builder/main/contrib/aib -o ~/.local/bin/aib
@@ -11,14 +13,33 @@
 #   aib
 #
 # Config:
-#   AIB_IMAGE   Image to run. Default: ghcr.io/danathar/atomic-image-builder:latest
+#   AIB_IMAGE         Image to run. Default:
+#                     ghcr.io/danathar/atomic-image-builder:latest
+#   AIB_SKIP_VERIFY   Set to any value to skip signature verification. Needed
+#                     for an offline run, or on a host without cosign. This
+#                     runs an unverified image, so the wrapper says so loudly.
 #
 # What this script mounts or passes into the container, and why:
 #
-#   --pull=newer
+#   cosign verify, then run by digest
+#       This wrapper is the path where nobody thinks about pulling: it fetches
+#       and executes a mutable tag on every run, as root in the container,
+#       with the host's GitHub token forwarded in. A signature nothing checks
+#       protects nobody, so the published image is verified here rather than
+#       only in a one-time step in the install docs. The digest cosign
+#       verified is the digest podman is given, because verifying a tag and
+#       then letting podman resolve it again leaves a window for the tag to
+#       move in between.
+#
+#       Verification applies only to images this project publishes. Point
+#       AIB_IMAGE at your own build and it is left alone -- being forced
+#       through this repository's certificate identity would just fail.
+#
+#   --pull=newer  (unverified paths only)
 #       Checks the registry for a newer image on every run and pulls only when
 #       the digest differs. See the note by podman_args below for why this is
-#       not left at podman's default.
+#       not left at podman's default. The verified path does its own explicit
+#       pull instead, because it has to resolve a digest before running.
 #
 #   -e GH_TOKEN
 #       When the host has `gh` logged in, forwards a token so the container
@@ -60,20 +81,95 @@
 
 set -euo pipefail
 
-AIB_IMAGE="${AIB_IMAGE:-ghcr.io/danathar/atomic-image-builder:latest}"
+AIB_PUBLISHED_REPO="ghcr.io/danathar/atomic-image-builder"
+AIB_IMAGE="${AIB_IMAGE:-$AIB_PUBLISHED_REPO:latest}"
+
+# Byte-identical to the invocation in docs/installing.md, and to what
+# publish-image.yml signs with. The refs/(heads/main|tags/.+) alternation is
+# load-bearing: :latest is signed from a push to main, but a release is
+# published from a tag ref, so its certificate identity ends @refs/tags/<tag>.
+AIB_CERT_IDENTITY='^https://github\.com/Danathar/atomic-image-builder/\.github/workflows/publish-image\.yml@refs/(heads/main|tags/.+)$'
+AIB_CERT_ISSUER='https://token.actions.githubusercontent.com'
 
 if ! command -v podman >/dev/null 2>&1; then
     echo "aib: podman is required but was not found on PATH. Install podman and try again." >&2
     exit 1
 fi
 
-# --pull=newer, because the wrapper is the path where nobody thinks about
-# pulling. Podman's default (--pull=missing) would run whatever copy was first
-# fetched, forever; the tool bakes in its own action pins and template
-# snapshots, so a stale image quietly generates repos from stale pins. This
-# fetches only when the registry digest differs, and podman suppresses pull
-# errors when a local image exists, so an offline run still works.
-podman_args=(--rm -it --pull=newer)
+# Verify only what this project publishes. A user running their own build must
+# not be pushed through this repository's certificate identity, which their
+# image cannot satisfy.
+verify_image=no
+case "$AIB_IMAGE" in
+    "$AIB_PUBLISHED_REPO" | "$AIB_PUBLISHED_REPO":* | "$AIB_PUBLISHED_REPO"@*)
+        verify_image=yes
+        ;;
+esac
+
+if [ -n "${AIB_SKIP_VERIFY:-}" ] && [ "$verify_image" = yes ]; then
+    echo "aib: WARNING - AIB_SKIP_VERIFY is set. Running $AIB_IMAGE without" >&2
+    echo "aib: verifying its signature. Unset AIB_SKIP_VERIFY to restore the check." >&2
+    verify_image=no
+fi
+
+podman_args=(--rm -it)
+run_image="$AIB_IMAGE"
+
+if [ "$verify_image" = no ]; then
+    # --pull=newer, because the wrapper is the path where nobody thinks about
+    # pulling. Podman's default (--pull=missing) would run whatever copy was
+    # first fetched, forever; the tool bakes in its own action pins and
+    # template snapshots, so a stale image quietly generates repos from stale
+    # pins. This fetches only when the registry digest differs, and podman
+    # suppresses pull errors when a local image exists, so an offline run
+    # still works.
+    podman_args+=(--pull=newer)
+else
+    if ! command -v cosign >/dev/null 2>&1; then
+        echo "aib: cosign is required to verify $AIB_IMAGE before running it." >&2
+        echo "aib: install cosign from https://docs.sigstore.dev/cosign/system_config/installation/," >&2
+        echo "aib: or set AIB_SKIP_VERIFY=1 to run without verifying the signature." >&2
+        exit 1
+    fi
+
+    # Pull first so there is a concrete digest to verify, then run that exact
+    # digest. Failing closed here is deliberate: a pull failure is also how an
+    # offline run arrives, and running an unverified image is not the right
+    # default for either.
+    if ! podman pull --quiet "$AIB_IMAGE" >/dev/null; then
+        echo "aib: could not pull $AIB_IMAGE, so its signature cannot be verified." >&2
+        echo "aib: set AIB_SKIP_VERIFY=1 to run an already-pulled copy offline." >&2
+        exit 1
+    fi
+
+    digest=""
+    if ! digest="$(podman image inspect --format '{{.Digest}}' "$AIB_IMAGE" 2>/dev/null)"; then
+        digest=""
+    fi
+    # Exactly a sha256 digest, not merely something starting "sha256:". This
+    # value is interpolated into the reference both cosign and podman are
+    # given, and a truncated or padded one could resolve differently for each
+    # -- which would mean verifying one image and running another.
+    if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        echo "aib: could not determine the digest of $AIB_IMAGE; refusing to run unverified." >&2
+        exit 1
+    fi
+
+    verified_ref="$AIB_PUBLISHED_REPO@$digest"
+    if ! cosign_output="$(cosign verify \
+        --certificate-identity-regexp "$AIB_CERT_IDENTITY" \
+        --certificate-oidc-issuer "$AIB_CERT_ISSUER" \
+        "$verified_ref" 2>&1)"; then
+        echo "aib: SIGNATURE VERIFICATION FAILED for $verified_ref" >&2
+        echo "aib: refusing to run it. This image is not one this project published," >&2
+        echo "aib: or its signature could not be checked. cosign said:" >&2
+        printf '%s\n' "$cosign_output" >&2
+        exit 1
+    fi
+
+    # Run the digest that was verified, not the tag that resolved to it.
+    run_image="$verified_ref"
+fi
 
 # --- GitHub auth -------------------------------------------------------
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
@@ -124,5 +220,5 @@ fi
 # Not `exec`: the EXIT trap above must fire to clean up the temp status
 # file, and `exec` would replace this shell (and its pending trap) with
 # podman before that could happen. Preserve podman's exit code as our own.
-podman run "${podman_args[@]}" "$AIB_IMAGE" "$@"
+podman run "${podman_args[@]}" "$run_image" "$@"
 exit $?

@@ -7050,9 +7050,48 @@ class BuilderTests(unittest.TestCase):
         # Podman's default (--pull=missing) would pin wrapper users to whatever
         # copy they first fetched. The tool bakes in its own action pins and
         # template snapshots, so a stale image generates repos from stale pins.
+        #
+        # Two paths now reach that, and both have to: the verified path pulls
+        # explicitly because it must resolve a digest before it can check a
+        # signature, and everything else still uses --pull=newer. Asserting the
+        # old literal `podman_args=(--rm -it --pull=newer)` would have said the
+        # protection was gone when it had only moved.
         wrapper = (Path(__file__).resolve().parents[1] / "contrib/aib").read_text()
-        self.assertIn("--pull=newer", wrapper)
-        self.assertIn("podman_args=(--rm -it --pull=newer)", wrapper)
+        self.assertIn("podman_args+=(--pull=newer)", wrapper)
+        self.assertIn('podman pull --quiet "$AIB_IMAGE"', wrapper)
+
+    def test_contrib_wrapper_verifies_the_digest_it_runs(self) -> None:
+        # The wrapper fetches a mutable tag on every run and hands the
+        # container the host's GitHub token, so a signature checked once by
+        # hand at install time protects nothing afterwards (#243). Verifying
+        # the tag and then letting podman resolve it again would leave a
+        # window for the tag to move in between, so the reference cosign is
+        # given has to be the reference podman runs.
+        root = Path(__file__).resolve().parents[1]
+        wrapper = (root / "contrib/aib").read_text()
+        self.assertIn("cosign verify", wrapper)
+        self.assertIn('verified_ref="$AIB_PUBLISHED_REPO@$digest"', wrapper)
+        self.assertIn('run_image="$verified_ref"', wrapper)
+        self.assertIn('podman run "${podman_args[@]}" "$run_image"', wrapper)
+        # A failed check aborts rather than degrading to an unverified run.
+        self.assertIn("SIGNATURE VERIFICATION FAILED", wrapper)
+
+    def test_contrib_wrapper_and_docs_agree_on_the_signing_identity(self) -> None:
+        # An identity constraint that drifts from the one the image is signed
+        # with fails every run; one that drifts from the documented command
+        # sends anyone verifying by hand to a different answer than the
+        # wrapper gets. Both spellings have to stay the same string.
+        root = Path(__file__).resolve().parents[1]
+        wrapper = (root / "contrib/aib").read_text()
+        installing = (root / "docs/installing.md").read_text()
+        identity = (
+            r"^https://github\.com/Danathar/atomic-image-builder/"
+            r"\.github/workflows/publish-image\.yml@refs/(heads/main|tags/.+)$"
+        )
+        self.assertIn(identity, wrapper)
+        self.assertIn(identity, installing)
+        for source in (wrapper, installing):
+            self.assertIn("https://token.actions.githubusercontent.com", source)
 
     def test_docs_document_pulling_a_newer_image_for_container_runs(self) -> None:
         root = Path(__file__).resolve().parents[1]
