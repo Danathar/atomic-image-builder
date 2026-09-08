@@ -35,6 +35,9 @@ particular it refuses
 * an ordered list that does not count up from 1;
 * a line indented one to three spaces, which is neither a paragraph nor a
   four-space literal block;
+* an unsupported Markdown block opener -- block quotes, ``*`` or ``+``
+  bullets, thematic breaks, setext headings, tilde fences and link reference
+  definitions -- rather than treating the construct as paragraph text;
 * a block that starts on the line directly below another one, with no blank
   line between them -- CommonMark resolves several of those as lazy
   continuations of the block above, and guessing which is not this parser's
@@ -61,6 +64,9 @@ from dataclasses import dataclass
 
 _ORDERED_RE = re.compile(r"^(?P<number>\d+)\. (?P<text>.*)$")
 _DELIMITER_CELL_RE = re.compile(r"^:?-+:?$")
+_THEMATIC_BREAK_RE = re.compile(r"^(?:(?:\* *){3,}|(?:_ *){3,}|(?:- *){3,})$")
+_SETEXT_UNDERLINE_RE = re.compile(r"^(?:=+|-+)$")
+_LINK_REFERENCE_RE = re.compile(r"^\[[^]]+\]:")
 
 # A literal block is indented by four spaces. Anything indented less is not a
 # block of its own, and the parser says so rather than silently dedenting.
@@ -283,6 +289,14 @@ def parse(text: str) -> Document:
 
 def _kind(line: str) -> str:
     """Name the block a non-blank line opens, without consuming anything."""
+    if (
+        line.startswith(">")
+        or line.startswith(("* ", "+ ", "~~~"))
+        or _THEMATIC_BREAK_RE.match(line)
+        or _SETEXT_UNDERLINE_RE.match(line)
+        or _LINK_REFERENCE_RE.match(line)
+    ):
+        return "unsupported Markdown block"
     if line.startswith("#"):
         return "heading"
     if line.startswith("|"):
@@ -300,6 +314,8 @@ def _kind(line: str) -> str:
 
 def _parse_block(lines: list[str], index: int) -> tuple[Block, int]:
     kind = _kind(lines[index])
+    if kind == "unsupported Markdown block":
+        raise ReadmeError(f"unsupported Markdown block opener at line {index + 1}: {lines[index]!r}")
     if kind == "heading":
         return _parse_heading(lines, index)
     if kind == "code block":

@@ -219,6 +219,27 @@ class ReadmeParserTests(unittest.TestCase):
         with self.assertRaisesRegex(ReadmeError, "indented 2 spaces"):
             parse_readme("# A\n\n  two spaces\n")
 
+    def test_rejects_unsupported_markdown_block_openers(self) -> None:
+        for opener in (
+            "> block quote",
+            "* unsupported bullet",
+            "+ unsupported bullet",
+            "---",
+            "* * *",
+            "___",
+            "===",
+            "--",
+            "~~~python",
+            "[label]: https://example.com",
+        ):
+            with self.subTest(opener=opener):
+                with self.assertRaisesRegex(ReadmeError, "unsupported Markdown block opener at line 1"):
+                    parse_readme(f"{opener}\n")
+
+    def test_rejects_an_unsupported_block_opener_inside_a_paragraph(self) -> None:
+        with self.assertRaisesRegex(ReadmeError, "unsupported Markdown block at line 2 follows the paragraph"):
+            parse_readme("paragraph\n> block quote\n")
+
     def test_rejects_a_block_glued_to_the_one_above_it(self) -> None:
         # CommonMark reads some of these as lazy continuations of the block
         # above. The generator always leaves a blank line, so rather than pick
