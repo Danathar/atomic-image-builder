@@ -8891,25 +8891,27 @@ class BuilderTests(unittest.TestCase):
 
         trust = doc.section("Trusting The Signing Key")
         blocks = trust.code_blocks()
-        self.assertEqual([block.info for block in blocks], ["bash", "json", "yaml"])
+        self.assertEqual([block.info for block in blocks], ["bash", "bash", "json", "yaml"])
         self.assertEqual(
             blocks[0].lines,
-            ("sudo install -Dm0644 cosign.pub /etc/pki/containers/test-image.pub",),
+            ("sudo install -Dm0644 cosign.pub /etc/pki/containers/example-test-image.pub",),
         )
+        self.assertEqual(blocks[1].lines[0], "sudo python3 - <<'EOF'")
+        self.assertEqual(blocks[1].lines[-1], "EOF")
         self.assertEqual(
-            blocks[1].lines,
+            blocks[2].lines,
             (
                 '"ghcr.io/example/test-image": [',
                 "  {",
                 '    "type": "sigstoreSigned",',
-                '    "keyPath": "/etc/pki/containers/test-image.pub",',
+                '    "keyPath": "/etc/pki/containers/example-test-image.pub",',
                 '    "signedIdentity": { "type": "matchRepository" }',
                 "  }",
                 "]",
             ),
         )
         self.assertEqual(
-            blocks[2].lines,
+            blocks[3].lines,
             (
                 "docker:",
                 "  ghcr.io/example/test-image:",
@@ -8917,7 +8919,7 @@ class BuilderTests(unittest.TestCase):
             ),
         )
         trust_text = " ".join(paragraph.text for paragraph in trust.paragraphs())
-        self.assertIn("Preserve every other entry; do not replace the file", trust_text)
+        self.assertIn("comma-separated from whatever is already there", trust_text)
         self.assertIn("Reinstall `cosign.pub` after rotating", trust_text)
 
         using = doc.section("Using The Image")
@@ -8931,6 +8933,107 @@ class BuilderTests(unittest.TestCase):
         enforcement = using.paragraphs()[-1].text
         self.assertIn("later `bootc upgrade` operations", enforcement)
         self.assertIn("Dropping the flag disables verification for both", enforcement)
+
+    def policy_merge_script(self, app: App, policy_path: Path) -> str:
+        """The Python the README's policy.json block feeds to ``sudo python3``.
+
+        Pulled out of the rendered document rather than restated here: the point
+        of the tests below is that the text a reader pastes is the text that
+        runs, so a generator that stopped emitting a working merge has to fail
+        them.
+        """
+        block = self.readme_doc(app).section("Trusting The Signing Key").code_blocks()[1]
+        body = block.lines[1:-1]
+        return "\n".join(body).replace('"/etc/containers/policy.json"', json.dumps(str(policy_path)))
+
+    def test_generated_policy_merge_adds_the_entry_to_a_stock_fedora_policy(self) -> None:
+        # The stock Fedora policy has no `transports.docker` object at all, so
+        # "add this entry to the existing docker object" had no object to add
+        # to and no comma to place. Running the generated command has to leave
+        # parseable JSON with both the old transport and the new entry (#278).
+        app = self.make_app()
+        app.config.signing_enabled = True
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "policy.json"
+            policy_path.write_text(
+                json.dumps(
+                    {
+                        "default": [{"type": "insecureAcceptAnything"}],
+                        "transports": {"docker-daemon": {"": [{"type": "insecureAcceptAnything"}]}},
+                    }
+                )
+            )
+            subprocess.run(
+                [sys.executable, "-c", self.policy_merge_script(app, policy_path)],
+                check=True,
+            )
+            merged = json.loads(policy_path.read_text())
+
+        self.assertEqual(merged["default"], [{"type": "insecureAcceptAnything"}])
+        self.assertIn("docker-daemon", merged["transports"])
+        self.assertEqual(
+            merged["transports"]["docker"]["ghcr.io/example/test-image"],
+            [
+                {
+                    "type": "sigstoreSigned",
+                    "keyPath": "/etc/pki/containers/example-test-image.pub",
+                    "signedIdentity": {"type": "matchRepository"},
+                }
+            ],
+        )
+
+    def test_generated_policy_merge_keeps_an_existing_docker_entry(self) -> None:
+        app = self.make_app()
+        app.config.signing_enabled = True
+        existing = {"quay.io/fedora/fedora-bootc": [{"type": "insecureAcceptAnything"}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "policy.json"
+            policy_path.write_text(json.dumps({"default": [{"type": "reject"}], "transports": {"docker": dict(existing)}}))
+            script = self.policy_merge_script(app, policy_path)
+            subprocess.run([sys.executable, "-c", script], check=True)
+            # Idempotent: pasting the block twice is not an error and does not
+            # duplicate the entry.
+            subprocess.run([sys.executable, "-c", script], check=True)
+            merged = json.loads(policy_path.read_text())
+
+        docker = merged["transports"]["docker"]
+        self.assertEqual(docker["quay.io/fedora/fedora-bootc"], existing["quay.io/fedora/fedora-bootc"])
+        self.assertEqual(sorted(docker), ["ghcr.io/example/test-image", "quay.io/fedora/fedora-bootc"])
+
+    def test_generated_trust_filenames_are_owner_qualified(self) -> None:
+        # /etc/pki/containers and /etc/containers/registries.d are machine-wide.
+        # Two owners publishing the same repository name must not write the same
+        # two filenames, or the second install silently invalidates the first
+        # repository's policy entry (#278).
+        rendered = {}
+        for github_user in ("example", "OtherOwner"):
+            app = self.make_app()
+            app.config.github_user = github_user
+            app.config.signing_enabled = True
+            trust = self.readme_doc(app).section("Trusting The Signing Key")
+            blocks = trust.code_blocks()
+            rendered[github_user] = (
+                blocks[0].lines[0],
+                blocks[2].lines[3],
+                " ".join(paragraph.text for paragraph in trust.paragraphs()),
+            )
+
+        for github_user, slug in (("example", "example"), ("OtherOwner", "otherowner")):
+            install, key_path_entry, prose = rendered[github_user]
+            self.assertEqual(
+                install,
+                f"sudo install -Dm0644 cosign.pub /etc/pki/containers/{slug}-test-image.pub",
+            )
+            # The policy entry has to name the same file the install wrote, or
+            # enforcement reads a key that is not there.
+            self.assertEqual(
+                key_path_entry,
+                f'    "keyPath": "/etc/pki/containers/{slug}-test-image.pub",',
+            )
+            self.assertIn(f"`/etc/containers/registries.d/{slug}-test-image.yaml`", prose)
+
+        self.assertNotEqual(rendered["example"][0], rendered["OtherOwner"][0])
+
 
     def test_generate_readme_omits_signing_policy_when_signing_is_disabled(self) -> None:
         app = self.make_app()

@@ -5690,6 +5690,14 @@ class App:
         ]
         signing_policy_lines: list[str] = []
         if self.config.signing_enabled:
+            # /etc/pki/containers and /etc/containers/registries.d are both
+            # machine-wide, so the repository name alone is not a unique
+            # filename: two generated repositories with the same name under
+            # different owners would install over each other's key while both
+            # policy entries kept pointing at the one path. Owner-qualify the
+            # key the same way the discovery file is already qualified.
+            trust_basename = f"{owner.lower()}-{self.config.repo_name}"
+            key_path = f"/etc/pki/containers/{trust_basename}.pub"
             signing_policy_lines = [
                 "## Trusting The Signing Key",
                 "",
@@ -5697,17 +5705,49 @@ class App:
                 "and install its committed public key:",
                 "",
                 "```bash",
-                f"sudo install -Dm0644 cosign.pub /etc/pki/containers/{self.config.repo_name}.pub",
+                f"sudo install -Dm0644 cosign.pub {key_path}",
                 "```",
                 "",
-                "Edit `/etc/containers/policy.json` and add this entry inside its existing",
-                "`transports` -> `docker` object. Preserve every other entry; do not replace the file:",
+                "The filename carries the owner because `/etc/pki/containers` is shared by every",
+                "image this machine trusts.",
+                "",
+                # Telling the reader to paste a bare object member into
+                # policy.json leaves them to work out the comma, and the stock
+                # Fedora policy has no `docker` object to paste it into at all
+                # -- so the literal instruction produced unparseable JSON and a
+                # switch that fails closed. Do the merge for them instead.
+                "Then add this repository to `/etc/containers/policy.json`. This command adds one",
+                "entry, keeps every other entry, creates `transports` -> `docker` if the file has",
+                "none -- the stock Fedora policy does not -- and always writes valid JSON:",
+                "",
+                "```bash",
+                "sudo python3 - <<'EOF'",
+                "import json, pathlib",
+                "",
+                'path = pathlib.Path("/etc/containers/policy.json")',
+                "policy = json.loads(path.read_text())",
+                'docker = policy.setdefault("transports", {}).setdefault("docker", {})',
+                f'docker["{image_repository}"] = [',
+                "    {",
+                '        "type": "sigstoreSigned",',
+                f'        "keyPath": "{key_path}",',
+                '        "signedIdentity": {"type": "matchRepository"},',
+                "    }",
+                "]",
+                'path.write_text(json.dumps(policy, indent=4) + "\\n")',
+                "EOF",
+                "```",
+                "",
+                "It reads and parses the file before writing anything, so an already-broken",
+                "`policy.json` stops it rather than being overwritten. To edit the file by hand",
+                "instead, add this member to the `docker` object, comma-separated from whatever",
+                "is already there:",
                 "",
                 "```json",
                 f'"{image_repository}": [',
                 "  {",
                 '    "type": "sigstoreSigned",',
-                f'    "keyPath": "/etc/pki/containers/{self.config.repo_name}.pub",',
+                f'    "keyPath": "{key_path}",',
                 '    "signedIdentity": { "type": "matchRepository" }',
                 "  }",
                 "]",
@@ -5715,7 +5755,7 @@ class App:
                 "",
                 "Cosign stores these signatures as registry attachments, whose lookup is disabled",
                 "by default. As root, create the repository-specific discovery file",
-                f"`/etc/containers/registries.d/{owner.lower()}-{self.config.repo_name}.yaml` with:",
+                f"`/etc/containers/registries.d/{trust_basename}.yaml` with:",
                 "",
                 "```yaml",
                 "docker:",
