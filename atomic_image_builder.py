@@ -134,6 +134,12 @@ SPAWN_VM_REBUILD_FIXED = (
 )
 FROM_LINE_RE = re.compile(r"^(\s*FROM(?:\s+--platform=\S+)?\s+)(\S+)(.*)$", flags=re.IGNORECASE)
 INSTALLER_SWITCH_RE = re.compile(r"^(\s*bootc switch --mutate-in-place --transport registry )(\S+)(.*)$")
+INSTALLER_UNVERIFIED_SWITCH_COMMENT = (
+    "# Signature enforcement is deliberately omitted for this installer switch:",
+    "# the standalone installer has no trusted copy of this repo's cosign.pub",
+    "# before its first pull. After installation, follow README's Trusting The",
+    "# Signing Key section and repeat the enforced switch so later upgrades verify it.",
+)
 # dnf5 prints this when -C (cache-only) is used and no repository metadata has
 # been downloaded yet. Matched so package search can offer to fix it in place
 # instead of naming a command the user may have no shell to run.
@@ -1654,6 +1660,11 @@ class App:
         image_owner = (owner or self.config.github_user or self.github_user or "your-user").lower()
         return f"ghcr.io/{image_owner}/{self.config.repo_name}:latest"
 
+    @staticmethod
+    def bootc_switch_command(image_ref: str, *, signing_enabled: bool) -> str:
+        enforce = "--enforce-container-sigpolicy " if signing_enabled else ""
+        return f"sudo bootc switch {enforce}{image_ref}"
+
     def render_preflight_failure(
         self,
         *,
@@ -2977,6 +2988,22 @@ class App:
             return False
         return isinstance(payload, dict) and payload.get("scan_customizations_carried") is True
 
+    def repo_signing_enabled(self, owner: str, repo: str) -> bool:
+        # Like the scan flag above, this screen is reached through the picker
+        # without loading the selected repo into self.config. Read the persisted
+        # flag rather than assuming every historical managed repo has signing.
+        try:
+            proc = run(
+                ["gh", "api", f"repos/{owner}/{repo}/contents/{STATE_FILE}", "--jq", ".content"],
+                check=False,
+            )
+            if proc.returncode != 0 or not proc.stdout.strip():
+                return False
+            payload = json.loads(base64.b64decode(proc.stdout.strip()).decode("utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
+        return isinstance(payload, dict) and payload.get("signing_enabled") is True
+
     def repo_has_state_file(self, owner: str, repo: str) -> bool:
         return self.repo_file_exists(owner, repo, STATE_FILE)
 
@@ -3687,10 +3714,23 @@ class App:
             "The first build publishes a private package. Make it public before switching:",
             ghcr_package_page_url(owner, repo),
             "",
-            "Then switch with:",
-            f"sudo bootc switch {image_uri}",
-            f"Track the build: https://github.com/{owner}/{repo}/actions",
         ]
+        if self.config.signing_enabled:
+            summary_lines.append("Before switching, follow 'Trusting The Signing Key' in the repo README.")
+        summary_lines.extend(
+            [
+                "Then switch with:",
+                self.bootc_switch_command(image_uri, signing_enabled=self.config.signing_enabled),
+            ]
+        )
+        if self.config.signing_enabled:
+            summary_lines.extend(
+                [
+                    "The enforcement flag verifies this switch and every later bootc upgrade.",
+                    "Dropping it disables signature verification for both.",
+                ]
+            )
+        summary_lines.append(f"Track the build: https://github.com/{owner}/{repo}/actions")
         if self.carried_scan_customizations():
             summary_lines.extend(
                 [
@@ -3973,15 +4013,25 @@ class App:
                 f"Or give the machine GHCR pull credentials for root instead: {BOOTC_REGISTRY_DOCS_URL}",
             )
         if latest_succeeded and self.repo_carried_scan_customizations(owner, repo):
+            signing_enabled = self.repo_signing_enabled(owner, repo)
+            image_ref = f"ghcr.io/{owner.lower()}/{repo}:latest"
             print()
             self.menu_section(
                 "Switching This Machine",
                 "This image carries package changes scanned from your system.",
+                *(
+                    (
+                        "First follow 'Trusting The Signing Key' in the repo README.",
+                        "The enforcement flag verifies this switch and every later bootc upgrade; dropping it disables both checks.",
+                    )
+                    if signing_enabled
+                    else ()
+                ),
                 "Run both in the same session, and do not reboot in between:",
                 "  sudo rpm-ostree reset",
                 # Built from the arguments, not from self.config: this screen is
                 # reachable via the repo picker, which does not load the config.
-                f"  sudo bootc switch ghcr.io/{owner.lower()}/{repo}:latest",
+                f"  {self.bootc_switch_command(image_ref, signing_enabled=signing_enabled)}",
                 "  systemctl reboot",
             )
         self.gum.enter_to_continue("Press Enter to return to the main menu...")
@@ -5124,7 +5174,11 @@ class App:
             if not match:
                 continue
             prefix, _current_ref, suffix = match.groups()
-            lines[index] = f"{prefix}{image_ref}{suffix}"
+            replacement = f"{prefix}{image_ref}{suffix}"
+            if self.config.signing_enabled and INSTALLER_UNVERIFIED_SWITCH_COMMENT[0] not in lines:
+                lines[index : index + 1] = [*INSTALLER_UNVERIFIED_SWITCH_COMMENT, replacement]
+            else:
+                lines[index] = replacement
             break
         return ensure_trailing_newline("\n".join(lines))
 
@@ -5603,6 +5657,7 @@ class App:
         base_name = self.config.base_image_name or self.config.base_image_uri
         owner = self.config.github_user or "your-user"
         image_ref = self.published_image_ref(owner)
+        image_repository = image_ref.removesuffix(":latest")
         packages = "\n".join(f"- `{pkg}`" for pkg in self.config.packages) or "- None selected yet."
         copr_repos = "\n".join(f"- `{repo}`" for repo in self.config.copr_repos) or "- None."
         services = "\n".join(f"- `{service}`" for service in self.config.services) or "- None."
@@ -5633,20 +5688,69 @@ class App:
             f"root before the switch below will work. See <{BOOTC_REGISTRY_DOCS_URL}>.",
             "",
         ]
+        signing_policy_lines: list[str] = []
+        if self.config.signing_enabled:
+            signing_policy_lines = [
+                "## Trusting The Signing Key",
+                "",
+                "This repository signs every published image. Before switching, clone this repo",
+                "and install its committed public key:",
+                "",
+                "```bash",
+                f"sudo install -Dm0644 cosign.pub /etc/pki/containers/{self.config.repo_name}.pub",
+                "```",
+                "",
+                "Edit `/etc/containers/policy.json` and add this entry inside its existing",
+                "`transports` -> `docker` object. Preserve every other entry; do not replace the file:",
+                "",
+                "```json",
+                f'"{image_repository}": [',
+                "  {",
+                '    "type": "sigstoreSigned",',
+                f'    "keyPath": "/etc/pki/containers/{self.config.repo_name}.pub",',
+                '    "signedIdentity": { "type": "matchRepository" }',
+                "  }",
+                "]",
+                "```",
+                "",
+                "Cosign stores these signatures as registry attachments, whose lookup is disabled",
+                "by default. As root, create the repository-specific discovery file",
+                f"`/etc/containers/registries.d/{owner.lower()}-{self.config.repo_name}.yaml` with:",
+                "",
+                "```yaml",
+                "docker:",
+                f"  {image_repository}:",
+                "    use-sigstore-attachments: true",
+                "```",
+                "",
+                "Reinstall `cosign.pub` after rotating the repository's signing key.",
+                "",
+            ]
         using_image_lines = [
             *package_access_lines,
+            *signing_policy_lines,
             "## Using The Image",
             "",
             "After the first successful GitHub Actions build finishes, switch to it with:",
             "",
             "```bash",
-            f"sudo bootc switch {image_ref}",
+            self.bootc_switch_command(image_ref, signing_enabled=self.config.signing_enabled),
             "systemctl reboot",
             "```",
         ]
+        if self.config.signing_enabled:
+            using_image_lines.extend(
+                [
+                    "",
+                    "`--enforce-container-sigpolicy` verifies this switch against the policy above",
+                    "and keeps signature verification enabled for later `bootc upgrade` operations.",
+                    "Dropping the flag disables verification for both the switch and those upgrades.",
+                ]
+            )
         if self.carried_scan_customizations():
             using_image_lines = [
                 *package_access_lines,
+                *signing_policy_lines,
                 "## Using The Image",
                 "",
                 "This repo carries over package changes scanned from your current system.",
@@ -5654,7 +5758,7 @@ class App:
                 "",
                 "```bash",
                 "sudo rpm-ostree reset",
-                f"sudo bootc switch {image_ref}",
+                self.bootc_switch_command(image_ref, signing_enabled=self.config.signing_enabled),
                 "systemctl reboot",
                 "```",
                 "",
@@ -5670,6 +5774,15 @@ class App:
                 "`rpm-ostree status` first and check for anything -- a local RPM, a replaced",
                 "base package -- that this image does not build in.",
             ]
+            if self.config.signing_enabled:
+                using_image_lines.extend(
+                    [
+                        "",
+                        "`--enforce-container-sigpolicy` verifies this switch against the policy above",
+                        "and keeps signature verification enabled for later `bootc upgrade` operations.",
+                        "Dropping the flag disables verification for both the switch and those upgrades.",
+                    ]
+                )
 
         sections = [
             f"# Custom {base_name} Image",
