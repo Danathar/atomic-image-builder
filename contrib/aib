@@ -3,11 +3,23 @@
 # aib — run Atomic Image Builder as a container. No local clone or
 # dependency install required; podman and cosign are the prerequisites.
 # cosign is needed to verify the published image's signature before running
-# it; AIB_SKIP_VERIFY=1 drops that requirement and the protection with it.
+# it; AIB_SKIP_VERIFY=1 drops that requirement, the protection with it, and
+# the GitHub login the container would otherwise be given.
 #
 # Install:
-#   curl -fsSL https://raw.githubusercontent.com/Danathar/atomic-image-builder/main/contrib/aib -o ~/.local/bin/aib
-#   chmod +x ~/.local/bin/aib
+#   curl -fsSLO https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib
+#   curl -fsSL  https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib.sha256 | sha256sum -c -
+#   install -m 755 aib ~/.local/bin/aib && rm aib
+#
+#   Checked, not merely downloaded. This file is what decides whether the
+#   image's signature is verified at all, and whether the host's GitHub login
+#   is forwarded into it -- so a substituted wrapper can read `gh auth token`
+#   and never reach cosign. Fetching it from a release, and checking it
+#   against a digest published with that release, is what keeps the thing
+#   doing the verifying from being the unverified part.
+#
+#   docs/installing.md carries the `main` URL for the bleeding edge, and says
+#   why it is not the default.
 #
 # Usage:
 #   aib
