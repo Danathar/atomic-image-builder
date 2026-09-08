@@ -19,6 +19,8 @@ from unittest.mock import patch
 import atomic_image_builder
 from _block_yaml import parse as parse_block_yaml
 from _containerfile import parse as parse_containerfile
+from _readme_md import Document
+from _readme_md import parse as parse_readme
 from atomic_image_builder import (
     ACCENT_COLOR,
     ACTION_PINS,
@@ -209,6 +211,19 @@ class BuilderTests(unittest.TestCase):
             github_user="example",
         )
         return app
+
+    def readme_doc(self, app: App) -> Document:
+        """The generated README, parsed into headings, blocks and table rows.
+
+        Every assertion about it goes through here rather than through
+        ``assertIn`` on the joined string: a substring only asks whether text
+        appears *somewhere* in a hundred-line document, and what this document
+        means is which heading a list sits under, which row a value lands in,
+        and what order the commands in a fenced block run in. Nine mutations
+        that broke exactly those things survived the whole suite while the
+        assertions were substrings (#273).
+        """
+        return parse_readme(app.generate_readme())
 
     def test_state_file_uses_current_tool_slug(self) -> None:
         self.assertEqual(STATE_FILE, f".{TOOL_SLUG}.json")
@@ -8313,31 +8328,6 @@ class BuilderTests(unittest.TestCase):
             else:
                 self.fail(f"Base image {bi.key} is not covered by this test")
 
-    def test_generate_readme_uses_custom_base_title_and_lists_packages(self) -> None:
-        app = self.make_app()
-        app.config.base_image_name = "Bazzite"
-        app.config.packages = ["tmux", "ripgrep"]
-        readme = app.generate_readme()
-        self.assertIn("# Custom Bazzite Image", readme)
-        self.assertIn("| Base Image | `Bazzite` |", readme)
-        self.assertIn("- `tmux`", readme)
-        self.assertIn("- `ripgrep`", readme)
-        self.assertIn("## Requested Packages", readme)
-        self.assertIn("requested by this repo's generated build script", readme)
-        self.assertIn(app.requested_packages_note(), readme)
-        self.assertNotIn("## Installed Packages", readme)
-        self.assertIn(f"## Managed By {TOOL_NAME}", readme)
-        self.assertIn(f"`{STATE_FILE}`", readme)
-        self.assertIn(f"stop using `{TOOL_SLUG}` for this repo", readme)
-        self.assertNotIn("## Local Build", readme)
-        self.assertNotIn("just build", readme)
-
-    def test_generate_readme_uses_lowercase_published_image_owner(self) -> None:
-        app = self.make_app()
-        app.config.github_user = "ExampleUser"
-        readme = app.generate_readme()
-        self.assertIn("| Published Image | `ghcr.io/exampleuser/test-image:latest` |", readme)
-
     def test_write_project_files_updates_readme_when_config_changes(self) -> None:
         app = self.make_app()
         with tempfile.TemporaryDirectory() as tmp:
@@ -8351,9 +8341,11 @@ class BuilderTests(unittest.TestCase):
             app.write_project_files(repo_dir, include_workflow=False)
             second_readme = (repo_dir / "README.md").read_text()
 
-        self.assertIn("- `tmux`", first_readme)
-        self.assertNotIn("- `tmux`", second_readme)
-        self.assertIn("- `ripgrep`", second_readme)
+        # Read as a list under its own heading rather than as substrings: the
+        # rewrite has to replace the list, not merely mention the new name
+        # somewhere in the file.
+        self.assertEqual(parse_readme(first_readme).bullets("Requested Packages"), ("`tmux`",))
+        self.assertEqual(parse_readme(second_readme).bullets("Requested Packages"), ("`ripgrep`",))
 
     def test_write_project_files_load_repo_config_roundtrip(self) -> None:
         """State file written by write_project_files survives load_repo_config."""
@@ -8758,50 +8750,254 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("scanned_removed", rewritten)
         self.assertNotIn("steam", json.dumps(rewritten))
 
+    # ── the generated README, read as a document rather than a string ───
+
+    def test_generate_readme_emits_its_sections_in_order(self) -> None:
+        # The whole outline, asserted at once. A substring cannot tell a
+        # section that moved, one that was renamed ("## Managed by" for
+        # "## Managed By"), or one emitted twice from a correct document --
+        # all three keep every assertIn passing, and all three fail here.
+        app = self.make_app()
+        self.assertEqual(
+            self.readme_doc(app).outline(),
+            (
+                (1, "Custom Bazzite (KDE) Image"),
+                (2, f"Managed By {TOOL_NAME}"),
+                (2, "Requested Packages"),
+                (2, "COPR Repositories"),
+                (2, "Enabled Services"),
+                (2, "Removed Base Packages"),
+                (2, "Before The First Switch"),
+                (2, "Using The Image"),
+            ),
+        )
+        # The two negatives the old substring test carried, kept as
+        # substrings: "this string appears nowhere in the document" is the one
+        # question a substring answers better than structure does. The tool
+        # cannot do a nested build from inside its own container, so the
+        # generated repo must not tell anyone to try.
+        readme = app.generate_readme()
+        self.assertNotIn("## Local Build", readme)
+        self.assertNotIn("just build", readme)
+
+    def test_generate_readme_keeps_the_same_sections_on_the_scanned_path(self) -> None:
+        # The scanned path rebuilds the whole tail of the document, so it is
+        # where a heading is most easily lost or duplicated. It changes what
+        # "Using The Image" contains, never which sections exist.
+        self.assertEqual(
+            self.readme_doc(self.scanned_app()).outline(),
+            self.readme_doc(self.make_app()).outline(),
+        )
+
+    def test_generate_readme_uses_custom_base_title_and_lists_packages(self) -> None:
+        # Each list is asserted under its own heading and in full. Swapping
+        # two of these lists -- services rendered under "## COPR Repositories"
+        # and copr_repos under "## Enabled Services" -- leaves every name
+        # still "in" the document, and used to pass.
+        app = self.make_app()
+        app.config.base_image_name = "Bazzite"
+        app.config.packages = ["tmux", "ripgrep"]
+        app.config.copr_repos = ["atim/starship"]
+        app.config.services = ["sshd"]
+        app.config.removed_packages = ["firefox"]
+        doc = self.readme_doc(app)
+        self.assertEqual(doc.outline()[0], (1, "Custom Bazzite Image"))
+        self.assertEqual(doc.bullets("Requested Packages"), ("`tmux`", "`ripgrep`"))
+        self.assertEqual(doc.bullets("COPR Repositories"), ("`atim/starship`",))
+        self.assertEqual(doc.bullets("Enabled Services"), ("`sshd`",))
+        self.assertEqual(doc.bullets("Removed Base Packages"), ("`firefox`",))
+
+    def test_generate_readme_keeps_the_configured_description_above_the_boilerplate(self) -> None:
+        # The one line the user wrote. Dropping it leaves a README that still
+        # says everything else, so nothing short of reading the paragraphs
+        # under the title in order notices it is gone.
+        app = self.make_app()
+        app.config.image_desc = "A desktop image for the workshop laptop"
+        title = self.readme_doc(app).section("Custom Bazzite (KDE) Image")
+        self.assertEqual(
+            [paragraph.text for paragraph in title.paragraphs()],
+            [
+                "A desktop image for the workshop laptop",
+                "This repository builds a custom bootc image on GitHub Actions.",
+            ],
+        )
+
+    def test_generate_readme_drops_the_description_paragraph_when_none_is_configured(self) -> None:
+        # An empty description must leave no empty paragraph behind it.
+        app = self.make_app()
+        app.config.image_desc = ""
+        title = self.readme_doc(app).section("Custom Bazzite (KDE) Image")
+        self.assertEqual(
+            [paragraph.text for paragraph in title.paragraphs()],
+            ["This repository builds a custom bootc image on GitHub Actions."],
+        )
+
+    def test_generate_readme_settings_table_fills_each_row_from_its_own_setting(self) -> None:
+        # Read by row label, so a value landing one row up is a failure. It
+        # was not: filling "Base Image URI" from base_image_name, or
+        # "Published Image" from the base URI, left both strings "in" the
+        # document and the whole suite green.
+        app = self.make_app()
+        app.config.base_image_name = "Bazzite"
+        table = self.readme_doc(app).table("Custom Bazzite Image")
+        self.assertEqual(table.header, ("Setting", "Value"))
+        self.assertEqual(
+            table.labels,
+            ("Repository", "Base Image", "Base Image URI", "Published Image", "Build Method"),
+        )
+        self.assertEqual(table.value("Repository"), "`example/test-image`")
+        self.assertEqual(table.value("Base Image"), "`Bazzite`")
+        self.assertEqual(table.value("Base Image URI"), "`ghcr.io/ublue-os/bazzite:stable`")
+        self.assertEqual(table.value("Published Image"), "`ghcr.io/example/test-image:latest`")
+        self.assertEqual(table.value("Build Method"), f"`{METHOD_DISPLAY['containerfile']}`")
+
+    def test_generate_readme_uses_lowercase_published_image_owner(self) -> None:
+        app = self.make_app()
+        app.config.github_user = "ExampleUser"
+        table = self.readme_doc(app).table("Custom Bazzite (KDE) Image")
+        self.assertEqual(table.value("Published Image"), "`ghcr.io/exampleuser/test-image:latest`")
+
+    def test_generate_readme_managed_by_section_names_the_state_file_and_the_generated_file(self) -> None:
+        # Which file a later update will overwrite depends on the method, and
+        # naming the wrong one tells the reader their edits are safe where
+        # they are not.
+        for method, generated in (("containerfile", "build_files/build.sh"), ("bluebuild", "recipes/recipe.yml")):
+            with self.subTest(method=method):
+                app = self.make_app()
+                app.config.method = method
+                doc = self.readme_doc(app)
+                self.assertEqual(
+                    doc.table("Custom Bazzite (KDE) Image").value("Build Method"),
+                    f"`{METHOD_DISPLAY[method]}`",
+                )
+                managed = doc.section(f"Managed By {TOOL_NAME}").paragraphs()
+                self.assertEqual(len(managed), 3)
+                self.assertIn(f"`{STATE_FILE}`", managed[0].text)
+                self.assertIn(f"stop using `{TOOL_SLUG}` for this repo", managed[1].text)
+                self.assertIn(f"`{generated}`", managed[2].text)
+
+    def test_generate_readme_requested_packages_note_sits_under_its_own_heading(self) -> None:
+        # The note is one paragraph with the lead-in, not a stray line that
+        # happens to appear elsewhere in the file.
+        for method, source in (("containerfile", "generated build script"), ("bluebuild", "recipe")):
+            with self.subTest(method=method):
+                app = self.make_app()
+                app.config.method = method
+                paragraph = self.readme_doc(app).section("Requested Packages").paragraph()
+                self.assertEqual(
+                    paragraph.lines,
+                    (
+                        f"These are the package names requested by this repo's {source}.",
+                        app.requested_packages_note(),
+                    ),
+                )
+
+    def test_generate_readme_placeholder_differs_between_packages_and_the_other_lists(self) -> None:
+        # "- None selected yet." belongs only where the wizard offered a
+        # selection. Under COPR, services or removals it invites the reader to
+        # go and select from a step that does not exist on this path, and the
+        # substring assertions could not tell the two placeholders apart.
+        doc = self.readme_doc(self.make_app())
+        self.assertEqual(doc.bullets("Requested Packages"), ("None selected yet.",))
+        self.assertEqual(doc.bullets("COPR Repositories"), ("None.",))
+        self.assertEqual(doc.bullets("Enabled Services"), ("None.",))
+        self.assertEqual(doc.bullets("Removed Base Packages"), ("None.",))
+
     def test_generate_readme_says_the_package_is_private_before_the_switch(self) -> None:
         # The switch command was presented as ready to run the moment the build
         # went green. It is not: the package is private by default, and a
         # public repository does not change that. This has to come before the
         # command, not as a troubleshooting note after it.
         app = self.make_app()
-        readme = app.generate_readme()
-        access_at = readme.index("## Before The First Switch")
-        switch_at = readme.index("sudo bootc switch")
-        self.assertLess(access_at, switch_at)
-        self.assertIn("**private** package", readme)
-        self.assertIn("https://github.com/example/test-image/pkgs/container/test-image", readme)
-        self.assertIn(atomic_image_builder.BOOTC_REGISTRY_DOCS_URL, readme)
+        doc = self.readme_doc(app)
+        titles = [title for _, title in doc.outline()]
+        self.assertLess(titles.index("Before The First Switch"), titles.index("Using The Image"))
+        section = doc.section("Before The First Switch")
+        self.assertEqual(
+            [type(block).__name__ for block in section.blocks],
+            ["Paragraph", "LiteralBlock", "Paragraph", "Paragraph", "OrderedList", "Paragraph"],
+        )
+        # The ref the reader is told to make public is the one they will
+        # switch to, not the base image or some other repo's.
+        self.assertEqual(section.literal_block().lines, (app.published_image_ref(),))
+        self.assertIn("**private** package", section.paragraphs()[1].text)
+        self.assertEqual(
+            section.ordered(),
+            (
+                f"Open <{atomic_image_builder.ghcr_package_page_url('example', 'test-image')}>",
+                "**Package settings** -> **Change visibility** -> **Public**",
+            ),
+        )
+        self.assertIn(atomic_image_builder.BOOTC_REGISTRY_DOCS_URL, section.paragraphs()[3].text)
 
     def test_generate_readme_keeps_the_access_step_on_the_scanned_path(self) -> None:
         # The scanned README replaces the whole "Using The Image" block, which
         # is how the access step could have been dropped from exactly the path
-        # that has the most to go wrong.
-        readme = self.scanned_app().generate_readme()
-        self.assertIn("## Before The First Switch", readme)
-        self.assertIn("sudo rpm-ostree reset", readme)
+        # that has the most to go wrong. Compared block for block against the
+        # plain path, since the section is meant to be identical on both.
+        scanned = self.readme_doc(self.scanned_app()).section("Before The First Switch")
+        plain = self.readme_doc(self.make_app()).section("Before The First Switch")
+        self.assertEqual(scanned.blocks, plain.blocks)
 
     def test_generate_readme_notes_carried_scan_customizations(self) -> None:
-        readme = self.scanned_app().generate_readme()
-        self.assertIn("This repo carries over package changes scanned from your current system.", readme)
-        self.assertIn("sudo rpm-ostree reset", readme)
-        self.assertIn("Do not reboot between `rpm-ostree reset` and `bootc switch`.", readme)
+        # The command order is the whole point of this block: reset, then
+        # switch, then reboot, in one session. Moving `systemctl reboot` up
+        # between the first two turns the README into an instruction to reboot
+        # mid-transaction -- which the paragraph directly below it warns
+        # against -- and every substring assertion still passed.
+        app = self.scanned_app()
+        section = self.readme_doc(app).section("Using The Image")
+        self.assertEqual(
+            section.paragraphs()[0].lines,
+            (
+                "This repo carries over package changes scanned from your current system.",
+                "Run these commands in the same session before rebooting:",
+            ),
+        )
+        block = section.code_block()
+        self.assertEqual(block.info, "bash")
+        self.assertEqual(
+            block.lines,
+            (
+                "sudo rpm-ostree reset",
+                f"sudo bootc switch {app.published_image_ref()}",
+                "systemctl reboot",
+            ),
+        )
+        self.assertEqual(
+            section.paragraphs()[1].text,
+            "Do not reboot between `rpm-ostree reset` and `bootc switch`.",
+        )
 
     def test_generate_readme_says_what_the_recommended_reset_removes(self) -> None:
         # With no category flags, `rpm-ostree reset` clears overlays,
         # overrides and initramfs customization alike. Presented as the last
         # step of carrying customizations over, it read as undoing exactly
         # what had been carried -- and anything else on the host went with it.
-        readme = self.scanned_app().generate_readme()
-        self.assertIn("not only the ones this image reproduces", readme)
-        self.assertIn("override and initramfs", readme)
-        self.assertIn("rpm-ostree status", readme)
+        # It has to be the paragraph after the warning, not merely somewhere.
+        section = self.readme_doc(self.scanned_app()).section("Using The Image")
+        qualification = section.paragraphs()[2].text
+        self.assertIn("not only the ones this image reproduces", qualification)
+        self.assertIn("override and initramfs", qualification)
+        self.assertIn("rpm-ostree status", qualification)
 
     def test_generate_readme_omits_the_reset_block_without_carried_customizations(self) -> None:
         # The qualification belongs to the reset instruction, so it must not
-        # appear on a build that never recommends one.
-        readme = self.make_app().generate_readme()
-        self.assertNotIn("rpm-ostree reset", readme)
-        self.assertNotIn("not only the ones this image reproduces", readme)
+        # appear on a build that never recommends one. Asserting the section's
+        # blocks exactly says that once, for the paragraph and the command
+        # alike, rather than listing strings that must be absent.
+        app = self.make_app()
+        section = self.readme_doc(app).section("Using The Image")
+        self.assertEqual([type(block).__name__ for block in section.blocks], ["Paragraph", "CodeBlock"])
+        self.assertEqual(
+            section.paragraph().text,
+            "After the first successful GitHub Actions build finishes, switch to it with:",
+        )
+        self.assertEqual(section.code_block().info, "bash")
+        self.assertEqual(
+            section.code_block().lines,
+            (f"sudo bootc switch {app.published_image_ref()}", "systemctl reboot"),
+        )
 
     def test_config_from_state_payload_roundtrips_brew_enabled(self) -> None:
         cfg = config_from_state_payload({"brew_enabled": True})
@@ -9865,9 +10061,13 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("BlueBuild", captured[0])
 
     def test_generate_readme_uses_method_display(self) -> None:
+        # Read as the Build Method row's value rather than as a string
+        # somewhere in the file: the substring form passed for any README
+        # that mentioned the display name at all, including one that put
+        # it in a different row or a paragraph.
         app = self.make_bluebuild_app()
-        readme = app.generate_readme()
-        self.assertIn(METHOD_DISPLAY["bluebuild"], readme)
+        table = self.readme_doc(app).table("Custom Bazzite (KDE) Image")
+        self.assertEqual(table.value("Build Method"), f"`{METHOD_DISPLAY['bluebuild']}`")
 
     def test_method_display_covers_all_allowed_methods(self) -> None:
         from atomic_image_builder import ALLOWED_METHODS
