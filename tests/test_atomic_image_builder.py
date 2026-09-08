@@ -7485,6 +7485,46 @@ class BuilderTests(unittest.TestCase):
         # The README is deliberately short, but it must still lead somewhere.
         self.assertIn("docs/installing.md", (root / "README.md").read_text())
 
+    def test_plain_podman_run_snippet_forwards_no_github_credential(self) -> None:
+        # The same failure mode e7bc782 fixed inside the wrapper, except
+        # copy-pasteable: this snippet is offered as a first-class alternative
+        # to `aib` and it checks nothing -- no digest, no cosign, just a
+        # mutable tag run as root. Splicing `$(gh auth token)` into it handed a
+        # live GitHub credential to an image nobody had vouched for. The
+        # unverified path in the docs withholds the token for the same reason
+        # the unverified path in the wrapper does, so the snippet must not
+        # carry one, and must say where the verified alternative is.
+        installing = (Path(__file__).resolve().parents[1] / "docs/installing.md").read_text()
+        plain = installing.split("### Plain `podman run`", 1)[1].split("\n### ", 1)[0]
+        self.assertIn("podman run --rm -it --pull=newer", plain)
+        self.assertNotIn("-e GH_TOKEN", plain)
+        self.assertIn("#credentials-follow-the-signature", plain)
+        self.assertIn("#verifying-the-image", plain)
+
+    def test_documented_by_hand_check_runs_the_digest_it_verified(self) -> None:
+        # The by-hand recipe is the one documented `podman run` that does get a
+        # GitHub token, so it has to be at least as careful as the wrapper.
+        # Verifying `:latest` and then running `:latest` is two resolutions of
+        # a mutable tag with a check in between -- whatever the second one
+        # returns is what runs, verified or not. cosign and podman have to be
+        # given the same digest, and the run has to be conditional on the
+        # check passing.
+        installing = (Path(__file__).resolve().parents[1] / "docs/installing.md").read_text()
+        section = installing.split("### Credentials follow the signature", 1)[1]
+        verifying = section.split("\n### ", 1)[0]
+        self.assertIn(
+            "ref=\"$image@$(podman image inspect"
+            " --format '{{.Digest}}' \"$image:latest\")\"",
+            verifying,
+        )
+        # cosign is handed $ref, and the run is chained off its exit status.
+        self.assertIn('  "$ref" &&\n', verifying)
+        self.assertIn('podman run --rm -it -e GH_TOKEN="$(gh auth token)" "$ref"', verifying)
+        # Not the tag: that is the shape this replaced, where cosign checked
+        # one resolution of `latest` and podman then went and asked for
+        # another.
+        self.assertNotIn("  ghcr.io/danathar/atomic-image-builder:latest\n```", verifying)
+
     def test_readme_coverage_badge_links_to_the_explainer(self) -> None:
         # Clicking the badge used to land on the raw trend CSV -- a wall of
         # date/SHA/percentage rows that explains nothing to a reader who does
