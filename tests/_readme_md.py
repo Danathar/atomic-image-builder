@@ -1,38 +1,56 @@
 """A strict parser for the Markdown subset ``generate_readme`` emits.
 
-``generate_readme`` builds the project README by joining string literals into
-one list and returning ``"\\n".join(sections)``, and the tests for it asserted
-substring membership only. That leaves the document's structure unasserted,
-and the structure is where the meaning is: which heading a list of names sits
-under, which row of the settings table a value lands in, what order the
-commands inside a fenced block run in, whether a section body was replaced by
-another section's body.
+``generate_readme`` builds the generated project README by joining ~90 string
+literals into one list and returning ``"\\n".join(sections)``, and every test
+for it asserted substring membership against that flat string. A substring
+assertion only asks whether some text appears *somewhere* in a hundred-line
+document, and the meaning of this document lives in its structure: which
+heading a list of names sits under, which row of the settings table a value
+lands in, and what order the commands inside a fenced block run in.
 
-Every one of these produces a wrong README while every ``assertIn`` in the
-suite still passes:
-
-* ``services`` rendered under ``## COPR Repositories`` and ``copr_repos``
-  under ``## Enabled Services`` -- both names are still "in" the document.
-* ``| Base Image URI |`` filled with the base image's display name instead of
-  its URI -- the URI is still "in" the document, in the row above.
-* ``systemctl reboot`` placed between ``rpm-ostree reset`` and
-  ``bootc switch``, so following the README reboots mid-transaction.
-* The configured image description dropped from the top of the file.
-* ``## Removed Base Packages`` listing the requested packages.
-
-Substrings cannot see any of it, because a substring assertion asks only
-whether a string appears somewhere in a 100-line document. So this parses the
-README into blocks instead, and gives the tests a way to ask what is under a
-given heading rather than what is somewhere in the file.
+Nine single-edit mutations to the generator survived the whole unit suite for
+exactly that reason -- ``services`` rendered under ``## COPR Repositories``
+and ``copr_repos`` under ``## Enabled Services`` (both lists still "in" the
+document), the ``| Base Image URI |`` row filled from ``base_name`` (the URI
+still "in" it, one row up), the configured description paragraph dropped
+outright, ``## Managed By`` renamed to ``## Managed by``, and ``systemctl
+reboot`` moved to sit between ``rpm-ostree reset`` and ``bootc switch``, which
+turns the README into an instruction to reboot mid-transaction that the prose
+two lines below it warns against. So this parses the document into blocks
+instead, and the accessors below *raise* on an absent or duplicated heading
+rather than handing back an empty result -- a section the generator stopped
+emitting has to fail a test, not quietly satisfy one.
 
 CI installs no third-party packages for the unit suite (``coverage`` and
 ``ruff``, pinned in CONTRIBUTING.md), so this is stdlib-only. It handles only
-what ``generate_readme`` can produce -- ATX headings, paragraphs, bullet
+what the generator can produce -- ATX headings, paragraphs, ``-`` bullet
 lists, ordered lists, pipe tables, fenced code blocks and four-space literal
-blocks -- and raises :class:`ReadmeError` on anything else, including an
-unterminated fence, a table row whose cell count disagrees with its header,
-and an ordered list that does not count from 1. Being narrow is the point: an
-unsupported construct is a failure, never a guess.
+blocks -- and raises :class:`ReadmeError` on anything else. Being narrow is
+the point: an unsupported construct is a failure, never a guess. In
+particular it refuses
+
+* a fence that is never closed;
+* a table with no delimiter row, a delimiter row that is not all dashes, or a
+  body row whose cell count disagrees with the header's;
+* an ordered list that does not count up from 1;
+* a line indented one to three spaces, which is neither a paragraph nor a
+  four-space literal block;
+* an unsupported Markdown block opener -- block quotes, ``*`` or ``+``
+  bullets, thematic breaks, setext headings, tilde fences and link reference
+  definitions -- rather than treating the construct as paragraph text;
+* a block that starts on the line directly below another one, with no blank
+  line between them -- CommonMark resolves several of those as lazy
+  continuations of the block above, and guessing which is not this parser's
+  job;
+* a tab anywhere, since indentation is structural here;
+* a line with trailing whitespace, because two trailing spaces are a hard
+  line break in Markdown and this parser does not model breaks, so accepting
+  one would misrepresent the document it was asked to describe.
+
+Headings do not nest here: a section is the run of blocks between its own
+heading and the next heading of *any* level. The generated README has no
+subsections, and modelling a hierarchy it does not have would only let a
+block land in the wrong section without the tests noticing.
 
 Not collected as a test module (name doesn't start with ``test``), but
 importable by files under tests/ once ``unittest discover -s tests`` puts this
@@ -44,292 +62,415 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+_ORDERED_RE = re.compile(r"^(?P<number>\d+)\. (?P<text>.*)$")
+_DELIMITER_CELL_RE = re.compile(r"^:?-+:?$")
+_THEMATIC_BREAK_RE = re.compile(r"^(?:(?:\* *){3,}|(?:_ *){3,}|(?:- *){3,})$")
+_SETEXT_UNDERLINE_RE = re.compile(r"^(?:=+|-+)$")
+_LINK_REFERENCE_RE = re.compile(r"^\[[^]]+\]:")
 
-class ReadmeError(Exception):
-    """Raised for any construct this parser does not support."""
+# A literal block is indented by four spaces. Anything indented less is not a
+# block of its own, and the parser says so rather than silently dedenting.
+_LITERAL_INDENT = 4
+# ATX headings stop at six '#'s; a seventh makes it a paragraph that happens
+# to start with hashes, which this document never emits.
+_MAX_HEADING_LEVEL = 6
 
 
-# A fenced block opens and closes with exactly three backticks; the opening
-# fence may name a language. Anything else (tildes, four backticks, an info
-# string with spaces) is outside what the generator emits.
-_FENCE = re.compile(r"^```([A-Za-z0-9_+-]*)$")
-_HEADING = re.compile(r"^(#{1,6}) +(\S.*)$")
-_BULLET = re.compile(r"^- +(\S.*)$")
-_ORDERED = re.compile(r"^(\d+)\. +(\S.*)$")
-_TABLE_DELIMITER_CELL = re.compile(r"^:?-{3,}:?$")
+class ReadmeError(ValueError):
+    """Raised when the document is outside the supported subset or malformed."""
 
 
 @dataclass(frozen=True)
-class Heading:
+class Block:
+    """Common base: every block knows the 1-based line it starts on."""
+
+    line: int
+
+
+@dataclass(frozen=True)
+class Heading(Block):
     level: int
     text: str
-    line: int
 
 
 @dataclass(frozen=True)
-class Paragraph:
-    text: str
-    line: int
+class Paragraph(Block):
+    lines: tuple[str, ...]
+
+    @property
+    def text(self) -> str:
+        """The paragraph as one string, its soft line breaks joined by spaces."""
+        return " ".join(self.lines)
 
 
 @dataclass(frozen=True)
-class BulletList:
+class BulletList(Block):
     items: tuple[str, ...]
-    line: int
 
 
 @dataclass(frozen=True)
-class OrderedList:
+class OrderedList(Block):
     items: tuple[str, ...]
-    line: int
 
 
 @dataclass(frozen=True)
-class Table:
+class CodeBlock(Block):
+    # The fence's info string: "bash" for ```bash, "" for a bare fence.
+    info: str
+    lines: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class LiteralBlock(Block):
+    lines: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Table(Block):
     header: tuple[str, ...]
     rows: tuple[tuple[str, ...], ...]
-    line: int
 
-    def value(self, label: str) -> str:
-        """Return the second cell of the row whose first cell is ``label``.
-
-        Raises rather than returning a default: a settings table that lost a
-        row, or grew a second row with the same label, is a defect in the
-        generated README and must not read as an empty value.
-        """
-        matches = [row for row in self.rows if row[0] == label]
-        if not matches:
-            raise ReadmeError(f"table has no row labelled {label!r}")
-        if len(matches) > 1:
-            raise ReadmeError(f"table has {len(matches)} rows labelled {label!r}")
-        (row,) = matches
-        if len(row) != 2:
-            raise ReadmeError(f"row {label!r} has {len(row)} cells, expected 2")
-        return row[1]
-
+    @property
     def labels(self) -> tuple[str, ...]:
-        """First-column cells, in document order."""
+        """Each row's first cell, in order."""
         return tuple(row[0] for row in self.rows)
 
+    def value(self, label: str, column: str | None = None) -> str:
+        """Return the cell in row ``label``, under ``column``.
+
+        ``column`` defaults to the second column, which is what a two-column
+        settings table means by "the value". An absent or repeated label is an
+        error: a row the generator stopped emitting must fail the test that
+        reads it rather than come back empty.
+        """
+        matching = [row for row in self.rows if row[0] == label]
+        if not matching:
+            raise ReadmeError(f"table at line {self.line} has no row {label!r}; it has {list(self.labels)}")
+        if len(matching) > 1:
+            raise ReadmeError(f"table at line {self.line} has {len(matching)} rows labelled {label!r}")
+        if column is None:
+            if len(self.header) != 2:
+                raise ReadmeError(
+                    f"table at line {self.line} has {len(self.header)} columns, so value() needs a column name"
+                )
+            return matching[0][1]
+        if self.header.count(column) != 1:
+            raise ReadmeError(
+                f"table at line {self.line} has {self.header.count(column)} columns named {column!r};"
+                f" it has {list(self.header)}"
+            )
+        return matching[0][self.header.index(column)]
+
 
 @dataclass(frozen=True)
-class CodeBlock:
-    language: str
-    lines: tuple[str, ...]
-    line: int
+class Section:
+    """A heading and the blocks between it and the next heading."""
 
+    heading: Heading
+    blocks: tuple[Block, ...]
 
-@dataclass(frozen=True)
-class LiteralBlock:
-    """A four-space-indented block, Markdown's other way of showing code."""
+    @property
+    def title(self) -> str:
+        return self.heading.text
 
-    lines: tuple[str, ...]
-    line: int
+    def _only(self, kind: type, name: str) -> Block:
+        """The section's one block of ``kind``; an error if none or several.
+
+        Returning an empty result for an absent block is what made the old
+        substring assertions weak, so this raises in both directions instead.
+        """
+        found = [block for block in self.blocks if type(block) is kind]
+        if not found:
+            raise ReadmeError(f"section {self.title!r} at line {self.heading.line} has no {name}")
+        if len(found) > 1:
+            raise ReadmeError(
+                f"section {self.title!r} at line {self.heading.line} has {len(found)} {name}s, at lines "
+                + ", ".join(str(block.line) for block in found)
+            )
+        return found[0]
+
+    def paragraphs(self) -> tuple[Paragraph, ...]:
+        return tuple(block for block in self.blocks if isinstance(block, Paragraph))
+
+    def paragraph(self) -> Paragraph:
+        """The section's one paragraph."""
+        return self._only(Paragraph, "paragraph")
+
+    def bullets(self) -> tuple[str, ...]:
+        """The items of the section's one bullet list."""
+        return self._only(BulletList, "bullet list").items
+
+    def ordered(self) -> tuple[str, ...]:
+        """The items of the section's one ordered list."""
+        return self._only(OrderedList, "ordered list").items
+
+    def code_blocks(self) -> tuple[CodeBlock, ...]:
+        return tuple(block for block in self.blocks if isinstance(block, CodeBlock))
+
+    def code_block(self) -> CodeBlock:
+        """The section's one fenced block."""
+        return self._only(CodeBlock, "code block")
+
+    def literal_block(self) -> LiteralBlock:
+        """The section's one four-space literal block."""
+        return self._only(LiteralBlock, "literal block")
+
+    def table(self) -> Table:
+        """The section's one pipe table."""
+        return self._only(Table, "table")
 
 
 @dataclass(frozen=True)
 class Document:
-    blocks: tuple[object, ...]
+    blocks: tuple[Block, ...]
 
+    @property
     def headings(self) -> tuple[Heading, ...]:
         return tuple(block for block in self.blocks if isinstance(block, Heading))
 
-    def heading_texts(self) -> tuple[str, ...]:
-        return tuple(heading.text for heading in self.headings())
+    def outline(self) -> tuple[tuple[int, str], ...]:
+        """Every heading as ``(level, text)``, in document order.
 
-    def title(self) -> str:
-        """The single level-1 heading.
-
-        A README with none, or with two, is malformed regardless of what the
-        rest of it says.
+        Asserted whole, this is what catches a heading that moved, one that
+        was renamed, and a block emitted twice -- none of which a substring
+        assertion can see.
         """
-        top = [heading for heading in self.headings() if heading.level == 1]
-        if len(top) != 1:
-            raise ReadmeError(f"expected exactly 1 level-1 heading, found {len(top)}")
-        return top[0].text
+        return tuple((heading.level, heading.text) for heading in self.headings)
 
-    def section(self, title: str) -> tuple[object, ...]:
-        """Blocks under ``title``, up to the next heading of the same or a
-        higher level.
-
-        An absent or duplicated heading raises: a test that asked for a
-        section the generator stopped emitting must fail, not silently assert
-        against an empty body.
-        """
-        starts = [
+    def section(self, title: str) -> Section:
+        """The section headed ``title``; an error if absent or duplicated."""
+        positions = [
             index
             for index, block in enumerate(self.blocks)
             if isinstance(block, Heading) and block.text == title
         ]
-        if not starts:
-            raise ReadmeError(f"no heading titled {title!r}")
-        if len(starts) > 1:
-            raise ReadmeError(f"{len(starts)} headings titled {title!r}")
-        (start,) = starts
-        level = self.blocks[start].level  # type: ignore[attr-defined]
-        end = len(self.blocks)
-        for index in range(start + 1, len(self.blocks)):
-            block = self.blocks[index]
-            if isinstance(block, Heading) and block.level <= level:
-                end = index
-                break
-        return self.blocks[start + 1 : end]
-
-    def has_section(self, title: str) -> bool:
-        return any(
-            isinstance(block, Heading) and block.text == title for block in self.blocks
-        )
+        if not positions:
+            raise ReadmeError(f"no heading {title!r}; the document has {[text for _, text in self.outline()]}")
+        if len(positions) > 1:
+            lines = [self.blocks[index].line for index in positions]
+            raise ReadmeError(f"heading {title!r} appears {len(positions)} times, at lines {lines}")
+        start = positions[0]
+        end = start + 1
+        while end < len(self.blocks) and not isinstance(self.blocks[end], Heading):
+            end += 1
+        return Section(self.blocks[start], tuple(self.blocks[start + 1 : end]))
 
     def bullets(self, title: str) -> tuple[str, ...]:
-        """The items of the one bullet list under ``title``."""
-        lists = [block for block in self.section(title) if isinstance(block, BulletList)]
-        if len(lists) != 1:
-            raise ReadmeError(f"section {title!r} has {len(lists)} bullet lists, expected 1")
-        return lists[0].items
+        return self.section(title).bullets()
 
     def code_blocks(self, title: str) -> tuple[CodeBlock, ...]:
-        return tuple(
-            block for block in self.section(title) if isinstance(block, CodeBlock)
-        )
+        return self.section(title).code_blocks()
 
-    def only_table(self) -> Table:
-        tables = [block for block in self.blocks if isinstance(block, Table)]
-        if len(tables) != 1:
-            raise ReadmeError(f"document has {len(tables)} tables, expected 1")
-        return tables[0]
-
-    def text(self) -> str:
-        """Every paragraph, joined -- for the few assertions that really are
-        about prose rather than structure."""
-        return "\n".join(
-            block.text for block in self.blocks if isinstance(block, Paragraph)
-        )
-
-
-def _split_row(raw: str, line: int) -> tuple[str, ...]:
-    if not raw.startswith("|") or not raw.endswith("|"):
-        raise ReadmeError(f"line {line}: table row is not delimited by pipes: {raw!r}")
-    return tuple(cell.strip() for cell in raw[1:-1].split("|"))
+    def table(self, title: str) -> Table:
+        return self.section(title).table()
 
 
 def parse(text: str) -> Document:
-    """Parse ``text`` into a :class:`Document`, or raise :class:`ReadmeError`."""
+    """Parse ``text`` into a :class:`Document`, in file order."""
+    if "\t" in text:
+        raise ReadmeError("tab character: indentation is structural here, so tabs are not supported")
     lines = text.split("\n")
-    blocks: list[object] = []
+    # A file ending in a newline splits to a final "" that is not a line.
+    if lines and lines[-1] == "":
+        lines.pop()
+    for number, line in enumerate(lines, start=1):
+        if line != line.rstrip():
+            raise ReadmeError(f"trailing whitespace at line {number}: {line!r}")
+    blocks: list[Block] = []
     index = 0
     while index < len(lines):
-        raw = lines[index]
-        number = index + 1
-        if not raw.strip():
+        if not lines[index]:
             index += 1
             continue
+        block, index = _parse_block(lines, index)
+        blocks.append(block)
+    return Document(tuple(blocks))
 
-        fence = _FENCE.match(raw)
-        if fence:
-            body: list[str] = []
-            index += 1
-            while index < len(lines) and not _FENCE.match(lines[index]):
-                body.append(lines[index])
-                index += 1
-            if index >= len(lines):
-                raise ReadmeError(f"line {number}: unterminated code fence")
-            closing = _FENCE.match(lines[index])
-            assert closing is not None
-            if closing.group(1):
-                raise ReadmeError(f"line {index + 1}: closing fence carries a language")
-            index += 1
-            blocks.append(CodeBlock(language=fence.group(1), lines=tuple(body), line=number))
-            continue
 
-        if raw.startswith("#"):
-            heading = _HEADING.match(raw)
-            if not heading:
-                raise ReadmeError(f"line {number}: malformed heading: {raw!r}")
-            blocks.append(
-                Heading(level=len(heading.group(1)), text=heading.group(2).rstrip(), line=number)
+def _kind(line: str) -> str:
+    """Name the block a non-blank line opens, without consuming anything."""
+    if (
+        line.startswith(">")
+        or line.startswith(("* ", "+ ", "~~~"))
+        or _THEMATIC_BREAK_RE.match(line)
+        or _SETEXT_UNDERLINE_RE.match(line)
+        or _LINK_REFERENCE_RE.match(line)
+    ):
+        return "unsupported Markdown block"
+    if line.startswith("#"):
+        return "heading"
+    if line.startswith("|"):
+        return "table"
+    if line.startswith("- "):
+        return "bullet list"
+    if _ORDERED_RE.match(line):
+        return "ordered list"
+    if line.startswith(" "):
+        return "indented block"
+    if line.startswith("```"):
+        return "code block"
+    return "paragraph"
+
+
+def _parse_block(lines: list[str], index: int) -> tuple[Block, int]:
+    kind = _kind(lines[index])
+    if kind == "unsupported Markdown block":
+        raise ReadmeError(f"unsupported Markdown block opener at line {index + 1}: {lines[index]!r}")
+    if kind == "heading":
+        return _parse_heading(lines, index)
+    if kind == "code block":
+        return _parse_code_block(lines, index)
+    if kind == "table":
+        return _parse_table(lines, index)
+    if kind == "bullet list":
+        return _parse_bullets(lines, index)
+    if kind == "ordered list":
+        return _parse_ordered(lines, index)
+    if kind == "indented block":
+        return _parse_literal(lines, index)
+    return _parse_paragraph(lines, index)
+
+
+def _require_break(lines: list[str], index: int, opened: str, start: int) -> None:
+    """Refuse a block that begins on the line below another one.
+
+    CommonMark resolves several of these as lazy continuations of the block
+    above rather than as new blocks, so accepting them would mean choosing an
+    interpretation. The generator always separates its blocks with a blank
+    line, so this only ever fires on a generator that stopped doing that.
+    """
+    if index >= len(lines) or not lines[index]:
+        return
+    raise ReadmeError(
+        f"{_kind(lines[index])} at line {index + 1} follows the {opened} opened at line {start + 1}"
+        " with no blank line between them"
+    )
+
+
+def _parse_heading(lines: list[str], index: int) -> tuple[Heading, int]:
+    line = lines[index]
+    level = len(line) - len(line.lstrip("#"))
+    if level > _MAX_HEADING_LEVEL:
+        raise ReadmeError(f"heading at line {index + 1} has {level} '#'s, which is not a heading")
+    rest = line[level:]
+    if not rest.startswith(" "):
+        raise ReadmeError(f"heading at line {index + 1} has no space after its '#'s: {line!r}")
+    title = rest[1:]
+    # Only one space separates the hashes from the text, and none trails it --
+    # the trailing-whitespace rule above already refuses the empty case.
+    if title != title.strip():
+        raise ReadmeError(f"heading at line {index + 1} pads its text with spaces: {line!r}")
+    if title.endswith("#"):
+        raise ReadmeError(f"heading at line {index + 1} uses a closing '#' sequence, which this subset omits")
+    return Heading(index + 1, level, title), index + 1
+
+
+def _parse_code_block(lines: list[str], index: int) -> tuple[CodeBlock, int]:
+    start = index
+    info = lines[index][3:]
+    if "`" in info:
+        raise ReadmeError(f"code fence at line {index + 1} has a backtick in its info string: {lines[index]!r}")
+    body: list[str] = []
+    index += 1
+    while True:
+        if index >= len(lines):
+            raise ReadmeError(f"code fence opened at line {start + 1} is never closed")
+        if lines[index] == "```":
+            index += 1
+            break
+        body.append(lines[index])
+        index += 1
+    block = CodeBlock(start + 1, info, tuple(body))
+    _require_break(lines, index, "code block", start)
+    return block, index
+
+
+def _split_row(line: str, number: int) -> tuple[str, ...]:
+    if len(line) < 2 or not line.endswith("|"):
+        raise ReadmeError(f"table row at line {number} is not delimited by '|' at both ends: {line!r}")
+    return tuple(cell.strip() for cell in line[1:-1].split("|"))
+
+
+def _parse_table(lines: list[str], index: int) -> tuple[Table, int]:
+    start = index
+    header = _split_row(lines[index], index + 1)
+    index += 1
+    if index >= len(lines) or not lines[index].startswith("|"):
+        raise ReadmeError(f"table at line {start + 1} has no delimiter row under its header")
+    delimiter = _split_row(lines[index], index + 1)
+    if len(delimiter) != len(header):
+        raise ReadmeError(
+            f"table at line {start + 1} has {len(header)} header cells but {len(delimiter)} delimiter cells"
+        )
+    for cell in delimiter:
+        if not _DELIMITER_CELL_RE.match(cell):
+            raise ReadmeError(f"table delimiter cell {cell!r} at line {index + 1} is not a run of dashes")
+    index += 1
+    rows: list[tuple[str, ...]] = []
+    while index < len(lines) and lines[index].startswith("|"):
+        row = _split_row(lines[index], index + 1)
+        if len(row) != len(header):
+            raise ReadmeError(f"table row at line {index + 1} has {len(row)} cells but the header has {len(header)}")
+        rows.append(row)
+        index += 1
+    block = Table(start + 1, header, tuple(rows))
+    _require_break(lines, index, "table", start)
+    return block, index
+
+
+def _parse_bullets(lines: list[str], index: int) -> tuple[BulletList, int]:
+    start = index
+    items: list[str] = []
+    while index < len(lines) and lines[index].startswith("- "):
+        items.append(lines[index][2:])
+        index += 1
+    block = BulletList(start + 1, tuple(items))
+    _require_break(lines, index, "bullet list", start)
+    return block, index
+
+
+def _parse_ordered(lines: list[str], index: int) -> tuple[OrderedList, int]:
+    start = index
+    items: list[str] = []
+    while index < len(lines):
+        match = _ORDERED_RE.match(lines[index])
+        if match is None:
+            break
+        number = int(match.group("number"))
+        if number != len(items) + 1:
+            raise ReadmeError(f"ordered list at line {start + 1} numbers its item {len(items) + 1} as {number}")
+        items.append(match.group("text"))
+        index += 1
+    block = OrderedList(start + 1, tuple(items))
+    _require_break(lines, index, "ordered list", start)
+    return block, index
+
+
+def _parse_literal(lines: list[str], index: int) -> tuple[LiteralBlock, int]:
+    start = index
+    body: list[str] = []
+    while index < len(lines) and lines[index].startswith(" "):
+        if not lines[index].startswith(" " * _LITERAL_INDENT):
+            raise ReadmeError(
+                f"line {index + 1} is indented {len(lines[index]) - len(lines[index].lstrip(' '))} spaces,"
+                f" which is neither a paragraph nor a {_LITERAL_INDENT}-space literal block"
             )
-            index += 1
-            continue
+        body.append(lines[index][_LITERAL_INDENT:])
+        index += 1
+    block = LiteralBlock(start + 1, tuple(body))
+    _require_break(lines, index, "literal block", start)
+    return block, index
 
-        if _BULLET.match(raw):
-            items = []
-            while index < len(lines):
-                item = _BULLET.match(lines[index])
-                if not item:
-                    break
-                items.append(item.group(1).rstrip())
-                index += 1
-            blocks.append(BulletList(items=tuple(items), line=number))
-            continue
 
-        if _ORDERED.match(raw):
-            items = []
-            expected = 1
-            while index < len(lines):
-                item = _ORDERED.match(lines[index])
-                if not item:
-                    break
-                if int(item.group(1)) != expected:
-                    raise ReadmeError(
-                        f"line {index + 1}: ordered list item numbered "
-                        f"{item.group(1)}, expected {expected}"
-                    )
-                items.append(item.group(2).rstrip())
-                expected += 1
-                index += 1
-            blocks.append(OrderedList(items=tuple(items), line=number))
-            continue
-
-        if raw.startswith("|"):
-            header = _split_row(raw, number)
-            if index + 1 >= len(lines):
-                raise ReadmeError(f"line {number}: table header has no delimiter row")
-            delimiter = _split_row(lines[index + 1], index + 2)
-            if len(delimiter) != len(header) or not all(
-                _TABLE_DELIMITER_CELL.match(cell) for cell in delimiter
-            ):
-                raise ReadmeError(f"line {index + 2}: table delimiter row is malformed")
-            index += 2
-            rows = []
-            while index < len(lines) and lines[index].startswith("|"):
-                row = _split_row(lines[index], index + 1)
-                if len(row) != len(header):
-                    raise ReadmeError(
-                        f"line {index + 1}: table row has {len(row)} cells, "
-                        f"header has {len(header)}"
-                    )
-                rows.append(row)
-                index += 1
-            blocks.append(Table(header=header, rows=tuple(rows), line=number))
-            continue
-
-        if raw.startswith("    ") and raw.strip():
-            body = []
-            while index < len(lines) and lines[index].startswith("    "):
-                body.append(lines[index][4:])
-                index += 1
-            blocks.append(LiteralBlock(lines=tuple(body), line=number))
-            continue
-
-        if raw.startswith(" "):
-            raise ReadmeError(f"line {number}: unsupported indentation: {raw!r}")
-
-        paragraph = []
-        while index < len(lines):
-            current = lines[index]
-            if not current.strip():
-                break
-            if (
-                current.startswith("#")
-                or current.startswith("|")
-                or current.startswith(" ")
-                or _FENCE.match(current)
-                or _BULLET.match(current)
-                or _ORDERED.match(current)
-            ):
-                break
-            paragraph.append(current)
-            index += 1
-        blocks.append(Paragraph(text="\n".join(paragraph), line=number))
-
-    return Document(blocks=tuple(blocks))
+def _parse_paragraph(lines: list[str], index: int) -> tuple[Paragraph, int]:
+    start = index
+    body: list[str] = []
+    while index < len(lines) and lines[index]:
+        if _kind(lines[index]) != "paragraph":
+            raise ReadmeError(
+                f"{_kind(lines[index])} at line {index + 1} follows the paragraph opened at line {start + 1}"
+                " with no blank line between them"
+            )
+        body.append(lines[index])
+        index += 1
+    return Paragraph(start + 1, tuple(body)), index

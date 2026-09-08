@@ -19,7 +19,7 @@ from unittest.mock import patch
 import atomic_image_builder
 from _block_yaml import parse as parse_block_yaml
 from _containerfile import parse as parse_containerfile
-from _readme_md import LiteralBlock, OrderedList, Paragraph
+from _readme_md import Document
 from _readme_md import parse as parse_readme
 from atomic_image_builder import (
     ACCENT_COLOR,
@@ -211,6 +211,19 @@ class BuilderTests(unittest.TestCase):
             github_user="example",
         )
         return app
+
+    def readme_doc(self, app: App) -> Document:
+        """The generated README, parsed into headings, blocks and table rows.
+
+        Every assertion about it goes through here rather than through
+        ``assertIn`` on the joined string: a substring only asks whether text
+        appears *somewhere* in a hundred-line document, and what this document
+        means is which heading a list sits under, which row a value lands in,
+        and what order the commands in a fenced block run in. Nine mutations
+        that broke exactly those things survived the whole suite while the
+        assertions were substrings (#273).
+        """
+        return parse_readme(app.generate_readme())
 
     def test_state_file_uses_current_tool_slug(self) -> None:
         self.assertEqual(STATE_FILE, f".{TOOL_SLUG}.json")
@@ -3847,6 +3860,43 @@ class BuilderTests(unittest.TestCase):
         # belongs -- there is no package to check yet at this point.
         self.assertIn("Make it public before switching", output.getvalue())
         self.assertIn("pkgs/container/test-image", output.getvalue())
+        self.assertIn(
+            "sudo bootc switch --enforce-container-sigpolicy ghcr.io/example/test-image:latest",
+            output.getvalue(),
+        )
+        self.assertIn("every later bootc upgrade", output.getvalue())
+        self.assertIn("Dropping it disables signature verification for both", output.getvalue())
+
+    def test_do_build_summary_omits_enforcement_when_signing_is_disabled(self) -> None:
+        # ensure_signing_ready currently either returns true or raises, but the
+        # renderer still follows the persisted flag so an older unsigned path
+        # cannot be told that a nonexistent policy is enforcing its switch.
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        app.config.github_user = "example"
+        app.gum = GumStub()
+
+        def fake_run(args, **_kwargs):
+            if args[:3] == ["gh", "repo", "view"]:
+                return subprocess.CompletedProcess(list(args), 1, "", "")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    with patch.object(app, "ensure_signing_ready", return_value=False):
+                        with patch.object(app, "repo_default_branch", return_value="main"):
+                            with patch.object(app, "seed_project_template", return_value=None):
+                                with patch.object(app, "write_project_files", return_value=None):
+                                    self.assertTrue(app.do_build())
+
+        rendered = output.getvalue()
+        self.assertIn("sudo bootc switch ghcr.io/example/test-image:latest", rendered)
+        self.assertNotIn("--enforce-container-sigpolicy", rendered)
+        self.assertNotIn("Trusting The Signing Key", rendered)
+        self.assertNotIn("Dropping it disables signature verification", rendered)
 
     def test_do_build_summary_uses_lowercase_ghcr_owner(self) -> None:
         app = self.make_app()
@@ -4929,13 +4979,19 @@ class BuilderTests(unittest.TestCase):
         runs = json.dumps([{"conclusion": "success", "workflowName": "build", "displayTitle": "t", "url": "u"}])
         with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
             with patch.object(app, "repo_carried_scan_customizations", return_value=True):
-                with redirect_stdout(io.StringIO()):
-                    app.render_build_status("Example", "my-image")
+                with patch.object(app, "repo_signing_enabled", return_value=True):
+                    with redirect_stdout(io.StringIO()):
+                        app.render_build_status("Example", "my-image")
         hints = " ".join(m for level, m in stub.messages if level == "hint")
         self.assertIn("sudo rpm-ostree reset", hints)
         # Built from the arguments, since the picker does not load the config.
-        self.assertIn("ghcr.io/example/my-image:latest", hints)
+        self.assertIn(
+            "sudo bootc switch --enforce-container-sigpolicy ghcr.io/example/my-image:latest",
+            hints,
+        )
         self.assertIn("do not reboot in between", hints.lower())
+        self.assertIn("every later bootc upgrade", hints)
+        self.assertIn("dropping it disables both checks", hints.lower())
 
     def test_build_status_says_a_green_build_is_not_yet_readable(self) -> None:
         # A green build is not a switchable image: the package it published is
@@ -5129,6 +5185,22 @@ class BuilderTests(unittest.TestCase):
         ):
             with patch("atomic_image_builder.run", return_value=proc):
                 self.assertFalse(app.repo_carried_scan_customizations("owner", "repo"))
+
+    def test_repo_signing_enabled_reads_the_remote_state_file(self) -> None:
+        import base64
+        payload = base64.b64encode(json.dumps({"signing_enabled": True}).encode()).decode()
+        app = self.make_app()
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, payload, "")):
+            self.assertTrue(app.repo_signing_enabled("owner", "repo"))
+        # Missing, false, or unreadable state must retain the historical
+        # unflagged command instead of claiming a trust policy exists.
+        for proc in (
+            subprocess.CompletedProcess([], 0, base64.b64encode(b"{}").decode(), ""),
+            subprocess.CompletedProcess([], 1, "", "boom"),
+            subprocess.CompletedProcess([], 0, "not-base64!!", ""),
+        ):
+            with patch("atomic_image_builder.run", return_value=proc):
+                self.assertFalse(app.repo_signing_enabled("owner", "repo"))
 
     def test_open_url_in_browser_discards_output_and_does_not_wait(self) -> None:
         # A GUI browser is chatty on stderr. Inheriting the terminal writes
@@ -7487,6 +7559,46 @@ class BuilderTests(unittest.TestCase):
         # The README is deliberately short, but it must still lead somewhere.
         self.assertIn("docs/installing.md", (root / "README.md").read_text())
 
+    def test_plain_podman_run_snippet_forwards_no_github_credential(self) -> None:
+        # The same failure mode e7bc782 fixed inside the wrapper, except
+        # copy-pasteable: this snippet is offered as a first-class alternative
+        # to `aib` and it checks nothing -- no digest, no cosign, just a
+        # mutable tag run as root. Splicing `$(gh auth token)` into it handed a
+        # live GitHub credential to an image nobody had vouched for. The
+        # unverified path in the docs withholds the token for the same reason
+        # the unverified path in the wrapper does, so the snippet must not
+        # carry one, and must say where the verified alternative is.
+        installing = (Path(__file__).resolve().parents[1] / "docs/installing.md").read_text()
+        plain = installing.split("### Plain `podman run`", 1)[1].split("\n### ", 1)[0]
+        self.assertIn("podman run --rm -it --pull=newer", plain)
+        self.assertNotIn("-e GH_TOKEN", plain)
+        self.assertIn("#credentials-follow-the-signature", plain)
+        self.assertIn("#verifying-the-image", plain)
+
+    def test_documented_by_hand_check_runs_the_digest_it_verified(self) -> None:
+        # The by-hand recipe is the one documented `podman run` that does get a
+        # GitHub token, so it has to be at least as careful as the wrapper.
+        # Verifying `:latest` and then running `:latest` is two resolutions of
+        # a mutable tag with a check in between -- whatever the second one
+        # returns is what runs, verified or not. cosign and podman have to be
+        # given the same digest, and the run has to be conditional on the
+        # check passing.
+        installing = (Path(__file__).resolve().parents[1] / "docs/installing.md").read_text()
+        section = installing.split("### Credentials follow the signature", 1)[1]
+        verifying = section.split("\n### ", 1)[0]
+        self.assertIn(
+            "ref=\"$image@$(podman image inspect"
+            " --format '{{.Digest}}' \"$image:latest\")\"",
+            verifying,
+        )
+        # cosign is handed $ref, and the run is chained off its exit status.
+        self.assertIn('  "$ref" &&\n', verifying)
+        self.assertIn('podman run --rm -it -e GH_TOKEN="$(gh auth token)" "$ref"', verifying)
+        # Not the tag: that is the shape this replaced, where cosign checked
+        # one resolution of `latest` and podman then went and asked for
+        # another.
+        self.assertNotIn("  ghcr.io/danathar/atomic-image-builder:latest\n```", verifying)
+
     def test_readme_coverage_badge_links_to_the_explainer(self) -> None:
         # Clicking the badge used to land on the raw trend CSV -- a wall of
         # date/SHA/percentage rows that explains nothing to a reader who does
@@ -8315,111 +8427,6 @@ class BuilderTests(unittest.TestCase):
             else:
                 self.fail(f"Base image {bi.key} is not covered by this test")
 
-    def test_generate_readme_uses_custom_base_title_and_lists_packages(self) -> None:
-        app = self.make_app()
-        app.config.base_image_name = "Bazzite"
-        app.config.packages = ["tmux", "ripgrep"]
-        document = parse_readme(app.generate_readme())
-        self.assertEqual(document.title(), "Custom Bazzite Image")
-        self.assertEqual(document.only_table().value("Base Image"), "`Bazzite`")
-        self.assertEqual(document.bullets("Requested Packages"), ("`tmux`", "`ripgrep`"))
-        self.assertIn("requested by this repo's generated build script", document.text())
-        self.assertIn(app.requested_packages_note(), document.text())
-        self.assertFalse(document.has_section("Installed Packages"))
-        managed = document.section(f"Managed By {TOOL_NAME}")
-        self.assertIn(f"`{STATE_FILE}`", "\n".join(block.text for block in managed))
-        self.assertIn(
-            f"stop using `{TOOL_SLUG}` for this repo",
-            "\n".join(block.text for block in managed),
-        )
-        self.assertFalse(document.has_section("Local Build"))
-        self.assertNotIn("just build", app.generate_readme())
-
-    def test_generate_readme_puts_the_configured_description_under_the_title(self) -> None:
-        # The description is the one line in the README the user wrote, and it
-        # is a bare paragraph with no heading of its own -- so losing it, or
-        # letting it drift below the boilerplate sentence that follows it,
-        # changes nothing any substring assertion can see.
-        app = self.make_app()
-        app.config.image_desc = "A desktop image for the workshop laptop"
-        document = parse_readme(app.generate_readme())
-        self.assertEqual(
-            [block.text for block in document.blocks[1:3]],
-            [
-                "A desktop image for the workshop laptop",
-                "This repository builds a custom bootc image on GitHub Actions.",
-            ],
-        )
-
-    def test_generate_readme_settings_table_carries_one_row_per_setting(self) -> None:
-        # Every value here also appears somewhere else in the document, so a
-        # row filled from the wrong field -- the URI row showing the display
-        # name, say -- leaves every `assertIn` in this file passing.
-        app = self.make_app()
-        table = parse_readme(app.generate_readme()).only_table()
-        self.assertEqual(table.header, ("Setting", "Value"))
-        self.assertEqual(
-            table.labels(),
-            ("Repository", "Base Image", "Base Image URI", "Published Image", "Build Method"),
-        )
-        self.assertEqual(table.value("Repository"), "`example/test-image`")
-        self.assertEqual(table.value("Base Image"), "`Bazzite (KDE)`")
-        self.assertEqual(table.value("Base Image URI"), "`ghcr.io/ublue-os/bazzite:stable`")
-        self.assertEqual(table.value("Published Image"), "`ghcr.io/example/test-image:latest`")
-        self.assertEqual(
-            table.value("Build Method"), f"`{METHOD_DISPLAY['containerfile']}`"
-        )
-
-    def test_generate_readme_lists_each_kind_of_name_under_its_own_heading(self) -> None:
-        # The four list sections are built the same way from four different
-        # config fields, so two of them can trade bodies and leave every name
-        # still present in the document.
-        app = self.make_app()
-        app.config.packages = ["tmux"]
-        app.config.copr_repos = ["atim/starship"]
-        app.config.services = ["sshd.service"]
-        app.config.removed_packages = ["firefox"]
-        document = parse_readme(app.generate_readme())
-        self.assertEqual(document.bullets("Requested Packages"), ("`tmux`",))
-        self.assertEqual(document.bullets("COPR Repositories"), ("`atim/starship`",))
-        self.assertEqual(document.bullets("Enabled Services"), ("`sshd.service`",))
-        self.assertEqual(document.bullets("Removed Base Packages"), ("`firefox`",))
-
-    def test_generate_readme_gives_each_empty_list_its_own_placeholder(self) -> None:
-        # "None selected yet." invites the reader to go select some, which is
-        # true of packages and wrong for the three sections the wizard has no
-        # step for on this path.
-        document = parse_readme(self.make_app().generate_readme())
-        self.assertEqual(document.bullets("Requested Packages"), ("None selected yet.",))
-        self.assertEqual(document.bullets("COPR Repositories"), ("None.",))
-        self.assertEqual(document.bullets("Enabled Services"), ("None.",))
-        self.assertEqual(document.bullets("Removed Base Packages"), ("None.",))
-
-    def test_generate_readme_keeps_its_sections_in_reading_order(self) -> None:
-        document = parse_readme(self.make_app().generate_readme())
-        self.assertEqual(
-            document.heading_texts(),
-            (
-                "Custom Bazzite (KDE) Image",
-                f"Managed By {TOOL_NAME}",
-                "Requested Packages",
-                "COPR Repositories",
-                "Enabled Services",
-                "Removed Base Packages",
-                "Before The First Switch",
-                "Using The Image",
-            ),
-        )
-
-    def test_generate_readme_uses_lowercase_published_image_owner(self) -> None:
-        app = self.make_app()
-        app.config.github_user = "ExampleUser"
-        document = parse_readme(app.generate_readme())
-        self.assertEqual(
-            document.only_table().value("Published Image"),
-            "`ghcr.io/exampleuser/test-image:latest`",
-        )
-
     def test_write_project_files_updates_readme_when_config_changes(self) -> None:
         app = self.make_app()
         with tempfile.TemporaryDirectory() as tmp:
@@ -8433,9 +8440,11 @@ class BuilderTests(unittest.TestCase):
             app.write_project_files(repo_dir, include_workflow=False)
             second_readme = (repo_dir / "README.md").read_text()
 
-        self.assertIn("- `tmux`", first_readme)
-        self.assertNotIn("- `tmux`", second_readme)
-        self.assertIn("- `ripgrep`", second_readme)
+        # Read as a list under its own heading rather than as substrings: the
+        # rewrite has to replace the list, not merely mention the new name
+        # somewhere in the file.
+        self.assertEqual(parse_readme(first_readme).bullets("Requested Packages"), ("`tmux`",))
+        self.assertEqual(parse_readme(second_readme).bullets("Requested Packages"), ("`ripgrep`",))
 
     def test_write_project_files_load_repo_config_roundtrip(self) -> None:
         """State file written by write_project_files survives load_repo_config."""
@@ -8840,101 +8849,444 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("scanned_removed", rewritten)
         self.assertNotIn("steam", json.dumps(rewritten))
 
+    # ── the generated README, read as a document rather than a string ───
+
+    def test_generate_readme_emits_its_sections_in_order(self) -> None:
+        # The whole outline, asserted at once. A substring cannot tell a
+        # section that moved, one that was renamed ("## Managed by" for
+        # "## Managed By"), or one emitted twice from a correct document --
+        # all three keep every assertIn passing, and all three fail here.
+        app = self.make_app()
+        self.assertEqual(
+            self.readme_doc(app).outline(),
+            (
+                (1, "Custom Bazzite (KDE) Image"),
+                (2, f"Managed By {TOOL_NAME}"),
+                (2, "Requested Packages"),
+                (2, "COPR Repositories"),
+                (2, "Enabled Services"),
+                (2, "Removed Base Packages"),
+                (2, "Before The First Switch"),
+                (2, "Using The Image"),
+            ),
+        )
+        # The two negatives the old substring test carried, kept as
+        # substrings: "this string appears nowhere in the document" is the one
+        # question a substring answers better than structure does. The tool
+        # cannot do a nested build from inside its own container, so the
+        # generated repo must not tell anyone to try.
+        readme = app.generate_readme()
+        self.assertNotIn("## Local Build", readme)
+        self.assertNotIn("just build", readme)
+
+    def test_generate_readme_installs_and_enforces_the_signing_policy(self) -> None:
+        app = self.make_app()
+        app.config.signing_enabled = True
+        doc = self.readme_doc(app)
+        titles = [title for _level, title in doc.outline()]
+        self.assertEqual(
+            titles[-3:],
+            ["Before The First Switch", "Trusting The Signing Key", "Using The Image"],
+        )
+
+        trust = doc.section("Trusting The Signing Key")
+        blocks = trust.code_blocks()
+        self.assertEqual([block.info for block in blocks], ["bash", "bash", "json", "yaml"])
+        self.assertEqual(
+            blocks[0].lines,
+            ("sudo install -Dm0644 cosign.pub /etc/pki/containers/example-test-image.pub",),
+        )
+        self.assertEqual(blocks[1].lines[0], "sudo python3 - <<'EOF'")
+        self.assertEqual(blocks[1].lines[-1], "EOF")
+        self.assertEqual(
+            blocks[2].lines,
+            (
+                '"ghcr.io/example/test-image": [',
+                "  {",
+                '    "type": "sigstoreSigned",',
+                '    "keyPath": "/etc/pki/containers/example-test-image.pub",',
+                '    "signedIdentity": { "type": "matchRepository" }',
+                "  }",
+                "]",
+            ),
+        )
+        self.assertEqual(
+            blocks[3].lines,
+            (
+                "docker:",
+                "  ghcr.io/example/test-image:",
+                "    use-sigstore-attachments: true",
+            ),
+        )
+        trust_text = " ".join(paragraph.text for paragraph in trust.paragraphs())
+        self.assertIn("comma-separated from whatever is already there", trust_text)
+        self.assertIn("Reinstall `cosign.pub` after rotating", trust_text)
+
+        using = doc.section("Using The Image")
+        self.assertEqual(
+            using.code_block().lines,
+            (
+                "sudo bootc switch --enforce-container-sigpolicy ghcr.io/example/test-image:latest",
+                "systemctl reboot",
+            ),
+        )
+        enforcement = using.paragraphs()[-1].text
+        self.assertIn("later `bootc upgrade` operations", enforcement)
+        self.assertIn("Dropping the flag disables verification for both", enforcement)
+
+    def policy_merge_script(self, app: App, policy_path: Path) -> str:
+        """The Python the README's policy.json block feeds to ``sudo python3``.
+
+        Pulled out of the rendered document rather than restated here: the point
+        of the tests below is that the text a reader pastes is the text that
+        runs, so a generator that stopped emitting a working merge has to fail
+        them.
+        """
+        block = self.readme_doc(app).section("Trusting The Signing Key").code_blocks()[1]
+        body = block.lines[1:-1]
+        return "\n".join(body).replace('"/etc/containers/policy.json"', json.dumps(str(policy_path)))
+
+    def test_generated_policy_merge_adds_the_entry_to_a_stock_fedora_policy(self) -> None:
+        # The stock Fedora policy has no `transports.docker` object at all, so
+        # "add this entry to the existing docker object" had no object to add
+        # to and no comma to place. Running the generated command has to leave
+        # parseable JSON with both the old transport and the new entry (#278).
+        app = self.make_app()
+        app.config.signing_enabled = True
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "policy.json"
+            policy_path.write_text(
+                json.dumps(
+                    {
+                        "default": [{"type": "insecureAcceptAnything"}],
+                        "transports": {"docker-daemon": {"": [{"type": "insecureAcceptAnything"}]}},
+                    }
+                )
+            )
+            subprocess.run(
+                [sys.executable, "-c", self.policy_merge_script(app, policy_path)],
+                check=True,
+            )
+            merged = json.loads(policy_path.read_text())
+
+        self.assertEqual(merged["default"], [{"type": "insecureAcceptAnything"}])
+        self.assertIn("docker-daemon", merged["transports"])
+        self.assertEqual(
+            merged["transports"]["docker"]["ghcr.io/example/test-image"],
+            [
+                {
+                    "type": "sigstoreSigned",
+                    "keyPath": "/etc/pki/containers/example-test-image.pub",
+                    "signedIdentity": {"type": "matchRepository"},
+                }
+            ],
+        )
+
+    def test_generated_policy_merge_keeps_an_existing_docker_entry(self) -> None:
+        app = self.make_app()
+        app.config.signing_enabled = True
+        existing = {"quay.io/fedora/fedora-bootc": [{"type": "insecureAcceptAnything"}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "policy.json"
+            policy_path.write_text(json.dumps({"default": [{"type": "reject"}], "transports": {"docker": dict(existing)}}))
+            script = self.policy_merge_script(app, policy_path)
+            subprocess.run([sys.executable, "-c", script], check=True)
+            # Idempotent: pasting the block twice is not an error and does not
+            # duplicate the entry.
+            subprocess.run([sys.executable, "-c", script], check=True)
+            merged = json.loads(policy_path.read_text())
+
+        docker = merged["transports"]["docker"]
+        self.assertEqual(docker["quay.io/fedora/fedora-bootc"], existing["quay.io/fedora/fedora-bootc"])
+        self.assertEqual(sorted(docker), ["ghcr.io/example/test-image", "quay.io/fedora/fedora-bootc"])
+
+    def test_generated_trust_filenames_are_owner_qualified(self) -> None:
+        # /etc/pki/containers and /etc/containers/registries.d are machine-wide.
+        # Two owners publishing the same repository name must not write the same
+        # two filenames, or the second install silently invalidates the first
+        # repository's policy entry (#278).
+        rendered = {}
+        for github_user in ("example", "OtherOwner"):
+            app = self.make_app()
+            app.config.github_user = github_user
+            app.config.signing_enabled = True
+            trust = self.readme_doc(app).section("Trusting The Signing Key")
+            blocks = trust.code_blocks()
+            rendered[github_user] = (
+                blocks[0].lines[0],
+                blocks[2].lines[3],
+                " ".join(paragraph.text for paragraph in trust.paragraphs()),
+            )
+
+        for github_user, slug in (("example", "example"), ("OtherOwner", "otherowner")):
+            install, key_path_entry, prose = rendered[github_user]
+            self.assertEqual(
+                install,
+                f"sudo install -Dm0644 cosign.pub /etc/pki/containers/{slug}-test-image.pub",
+            )
+            # The policy entry has to name the same file the install wrote, or
+            # enforcement reads a key that is not there.
+            self.assertEqual(
+                key_path_entry,
+                f'    "keyPath": "/etc/pki/containers/{slug}-test-image.pub",',
+            )
+            self.assertIn(f"`/etc/containers/registries.d/{slug}-test-image.yaml`", prose)
+
+        self.assertNotEqual(rendered["example"][0], rendered["OtherOwner"][0])
+
+
+    def test_generate_readme_omits_signing_policy_when_signing_is_disabled(self) -> None:
+        app = self.make_app()
+        doc = self.readme_doc(app)
+        self.assertNotIn("Trusting The Signing Key", [title for _level, title in doc.outline()])
+        self.assertEqual(
+            doc.section("Using The Image").code_block().lines,
+            (f"sudo bootc switch {app.published_image_ref()}", "systemctl reboot"),
+        )
+
+    def test_bootc_switch_command_only_enforces_when_signing_is_enabled(self) -> None:
+        image_ref = "ghcr.io/example/test-image:latest"
+        self.assertEqual(
+            App.bootc_switch_command(image_ref, signing_enabled=True),
+            "sudo bootc switch --enforce-container-sigpolicy ghcr.io/example/test-image:latest",
+        )
+        self.assertEqual(
+            App.bootc_switch_command(image_ref, signing_enabled=False),
+            "sudo bootc switch ghcr.io/example/test-image:latest",
+        )
+
+    def test_generate_readme_keeps_the_same_sections_on_the_scanned_path(self) -> None:
+        # The scanned path rebuilds the whole tail of the document, so it is
+        # where a heading is most easily lost or duplicated. It changes what
+        # "Using The Image" contains, never which sections exist.
+        self.assertEqual(
+            self.readme_doc(self.scanned_app()).outline(),
+            self.readme_doc(self.make_app()).outline(),
+        )
+
+    def test_generate_readme_uses_custom_base_title_and_lists_packages(self) -> None:
+        # Each list is asserted under its own heading and in full. Swapping
+        # two of these lists -- services rendered under "## COPR Repositories"
+        # and copr_repos under "## Enabled Services" -- leaves every name
+        # still "in" the document, and used to pass.
+        app = self.make_app()
+        app.config.base_image_name = "Bazzite"
+        app.config.packages = ["tmux", "ripgrep"]
+        app.config.copr_repos = ["atim/starship"]
+        app.config.services = ["sshd"]
+        app.config.removed_packages = ["firefox"]
+        doc = self.readme_doc(app)
+        self.assertEqual(doc.outline()[0], (1, "Custom Bazzite Image"))
+        self.assertEqual(doc.bullets("Requested Packages"), ("`tmux`", "`ripgrep`"))
+        self.assertEqual(doc.bullets("COPR Repositories"), ("`atim/starship`",))
+        self.assertEqual(doc.bullets("Enabled Services"), ("`sshd`",))
+        self.assertEqual(doc.bullets("Removed Base Packages"), ("`firefox`",))
+
+    def test_generate_readme_keeps_the_configured_description_above_the_boilerplate(self) -> None:
+        # The one line the user wrote. Dropping it leaves a README that still
+        # says everything else, so nothing short of reading the paragraphs
+        # under the title in order notices it is gone.
+        app = self.make_app()
+        app.config.image_desc = "A desktop image for the workshop laptop"
+        title = self.readme_doc(app).section("Custom Bazzite (KDE) Image")
+        self.assertEqual(
+            [paragraph.text for paragraph in title.paragraphs()],
+            [
+                "A desktop image for the workshop laptop",
+                "This repository builds a custom bootc image on GitHub Actions.",
+            ],
+        )
+
+    def test_generate_readme_drops_the_description_paragraph_when_none_is_configured(self) -> None:
+        # An empty description must leave no empty paragraph behind it.
+        app = self.make_app()
+        app.config.image_desc = ""
+        title = self.readme_doc(app).section("Custom Bazzite (KDE) Image")
+        self.assertEqual(
+            [paragraph.text for paragraph in title.paragraphs()],
+            ["This repository builds a custom bootc image on GitHub Actions."],
+        )
+
+    def test_generate_readme_settings_table_fills_each_row_from_its_own_setting(self) -> None:
+        # Read by row label, so a value landing one row up is a failure. It
+        # was not: filling "Base Image URI" from base_image_name, or
+        # "Published Image" from the base URI, left both strings "in" the
+        # document and the whole suite green.
+        app = self.make_app()
+        app.config.base_image_name = "Bazzite"
+        table = self.readme_doc(app).table("Custom Bazzite Image")
+        self.assertEqual(table.header, ("Setting", "Value"))
+        self.assertEqual(
+            table.labels,
+            ("Repository", "Base Image", "Base Image URI", "Published Image", "Build Method"),
+        )
+        self.assertEqual(table.value("Repository"), "`example/test-image`")
+        self.assertEqual(table.value("Base Image"), "`Bazzite`")
+        self.assertEqual(table.value("Base Image URI"), "`ghcr.io/ublue-os/bazzite:stable`")
+        self.assertEqual(table.value("Published Image"), "`ghcr.io/example/test-image:latest`")
+        self.assertEqual(table.value("Build Method"), f"`{METHOD_DISPLAY['containerfile']}`")
+
+    def test_generate_readme_uses_lowercase_published_image_owner(self) -> None:
+        app = self.make_app()
+        app.config.github_user = "ExampleUser"
+        table = self.readme_doc(app).table("Custom Bazzite (KDE) Image")
+        self.assertEqual(table.value("Published Image"), "`ghcr.io/exampleuser/test-image:latest`")
+
+    def test_generate_readme_managed_by_section_names_the_state_file_and_the_generated_file(self) -> None:
+        # Which file a later update will overwrite depends on the method, and
+        # naming the wrong one tells the reader their edits are safe where
+        # they are not.
+        for method, generated in (("containerfile", "build_files/build.sh"), ("bluebuild", "recipes/recipe.yml")):
+            with self.subTest(method=method):
+                app = self.make_app()
+                app.config.method = method
+                doc = self.readme_doc(app)
+                self.assertEqual(
+                    doc.table("Custom Bazzite (KDE) Image").value("Build Method"),
+                    f"`{METHOD_DISPLAY[method]}`",
+                )
+                managed = doc.section(f"Managed By {TOOL_NAME}").paragraphs()
+                self.assertEqual(len(managed), 3)
+                self.assertIn(f"`{STATE_FILE}`", managed[0].text)
+                self.assertIn(f"stop using `{TOOL_SLUG}` for this repo", managed[1].text)
+                self.assertIn(f"`{generated}`", managed[2].text)
+
+    def test_generate_readme_requested_packages_note_sits_under_its_own_heading(self) -> None:
+        # The note is one paragraph with the lead-in, not a stray line that
+        # happens to appear elsewhere in the file.
+        for method, source in (("containerfile", "generated build script"), ("bluebuild", "recipe")):
+            with self.subTest(method=method):
+                app = self.make_app()
+                app.config.method = method
+                paragraph = self.readme_doc(app).section("Requested Packages").paragraph()
+                self.assertEqual(
+                    paragraph.lines,
+                    (
+                        f"These are the package names requested by this repo's {source}.",
+                        app.requested_packages_note(),
+                    ),
+                )
+
+    def test_generate_readme_placeholder_differs_between_packages_and_the_other_lists(self) -> None:
+        # "- None selected yet." belongs only where the wizard offered a
+        # selection. Under COPR, services or removals it invites the reader to
+        # go and select from a step that does not exist on this path, and the
+        # substring assertions could not tell the two placeholders apart.
+        doc = self.readme_doc(self.make_app())
+        self.assertEqual(doc.bullets("Requested Packages"), ("None selected yet.",))
+        self.assertEqual(doc.bullets("COPR Repositories"), ("None.",))
+        self.assertEqual(doc.bullets("Enabled Services"), ("None.",))
+        self.assertEqual(doc.bullets("Removed Base Packages"), ("None.",))
+
     def test_generate_readme_says_the_package_is_private_before_the_switch(self) -> None:
         # The switch command was presented as ready to run the moment the build
         # went green. It is not: the package is private by default, and a
         # public repository does not change that. This has to come before the
         # command, not as a troubleshooting note after it.
         app = self.make_app()
-        document = parse_readme(app.generate_readme())
-        headings = document.heading_texts()
-        self.assertLess(
-            headings.index("Before The First Switch"), headings.index("Using The Image")
+        doc = self.readme_doc(app)
+        titles = [title for _, title in doc.outline()]
+        self.assertLess(titles.index("Before The First Switch"), titles.index("Using The Image"))
+        section = doc.section("Before The First Switch")
+        self.assertEqual(
+            [type(block).__name__ for block in section.blocks],
+            ["Paragraph", "LiteralBlock", "Paragraph", "Paragraph", "OrderedList", "Paragraph"],
         )
-        access = document.section("Before The First Switch")
-        access_text = "\n".join(
-            block.text for block in access if isinstance(block, Paragraph)
+        # The ref the reader is told to make public is the one they will
+        # switch to, not the base image or some other repo's.
+        self.assertEqual(section.literal_block().lines, (app.published_image_ref(),))
+        self.assertIn("**private** package", section.paragraphs()[1].text)
+        self.assertEqual(
+            section.ordered(),
+            (
+                f"Open <{atomic_image_builder.ghcr_package_page_url('example', 'test-image')}>",
+                "**Package settings** -> **Change visibility** -> **Public**",
+            ),
         )
-        self.assertIn("**private** package", access_text)
-        self.assertIn(atomic_image_builder.BOOTC_REGISTRY_DOCS_URL, access_text)
-        # The image reference the reader is told is private has to be the one
-        # the workflow actually publishes, so it is shown as a block of its
-        # own rather than quoted inside the prose.
-        literals = [block for block in access if isinstance(block, LiteralBlock)]
-        self.assertEqual([block.lines for block in literals], [("ghcr.io/example/test-image:latest",)])
-        steps = [block for block in access if isinstance(block, OrderedList)]
-        self.assertEqual(len(steps), 1)
-        self.assertIn(
-            "<https://github.com/example/test-image/pkgs/container/test-image>",
-            steps[0].items[0],
-        )
-        self.assertIn("Change visibility", steps[0].items[1])
+        self.assertIn(atomic_image_builder.BOOTC_REGISTRY_DOCS_URL, section.paragraphs()[3].text)
 
     def test_generate_readme_keeps_the_access_step_on_the_scanned_path(self) -> None:
         # The scanned README replaces the whole "Using The Image" block, which
         # is how the access step could have been dropped from exactly the path
-        # that has the most to go wrong.
-        document = parse_readme(self.scanned_app().generate_readme())
-        self.assertTrue(document.has_section("Before The First Switch"))
-        self.assertEqual(
-            document.only_table().value("Published Image"),
-            "`ghcr.io/example/test-image:latest`",
-        )
+        # that has the most to go wrong. Compared block for block against the
+        # plain path, since the section is meant to be identical on both.
+        scanned = self.readme_doc(self.scanned_app()).section("Before The First Switch")
+        plain = self.readme_doc(self.make_app()).section("Before The First Switch")
+        self.assertEqual(scanned.blocks, plain.blocks)
 
     def test_generate_readme_notes_carried_scan_customizations(self) -> None:
-        document = parse_readme(self.scanned_app().generate_readme())
-        text = "\n".join(
-            block.text
-            for block in document.section("Using The Image")
-            if isinstance(block, Paragraph)
+        # The command order is the whole point of this block: reset, then
+        # switch, then reboot, in one session. Moving `systemctl reboot` up
+        # between the first two turns the README into an instruction to reboot
+        # mid-transaction -- which the paragraph directly below it warns
+        # against -- and every substring assertion still passed.
+        app = self.scanned_app()
+        section = self.readme_doc(app).section("Using The Image")
+        self.assertEqual(
+            section.paragraphs()[0].lines,
+            (
+                "This repo carries over package changes scanned from your current system.",
+                "Run these commands in the same session before rebooting:",
+            ),
         )
-        self.assertIn("This repo carries over package changes scanned from your current system.", text)
-        self.assertIn("Do not reboot between `rpm-ostree reset` and `bootc switch`.", text)
-
-    def test_generate_readme_orders_the_scanned_switch_commands(self) -> None:
-        # The three commands only work in this order: rebooting between the
-        # reset and the switch boots the host back onto the un-reset
-        # deployment, which is the failure the prose right below the block
-        # warns about. Order inside a fenced block is invisible to a substring
-        # assertion -- all three commands are "in" the README either way.
-        (block,) = parse_readme(self.scanned_app().generate_readme()).code_blocks(
-            "Using The Image"
-        )
-        self.assertEqual(block.language, "bash")
+        block = section.code_block()
+        self.assertEqual(block.info, "bash")
         self.assertEqual(
             block.lines,
             (
                 "sudo rpm-ostree reset",
-                "sudo bootc switch ghcr.io/example/test-image:latest",
+                f"sudo bootc switch {app.published_image_ref()}",
                 "systemctl reboot",
             ),
         )
-
-    def test_generate_readme_switch_block_omits_the_reset_without_carried_changes(self) -> None:
-        (block,) = parse_readme(self.make_app().generate_readme()).code_blocks(
-            "Using The Image"
-        )
         self.assertEqual(
-            block.lines,
-            ("sudo bootc switch ghcr.io/example/test-image:latest", "systemctl reboot"),
+            section.paragraphs()[1].text,
+            "Do not reboot between `rpm-ostree reset` and `bootc switch`.",
         )
+
+    def test_generate_readme_enforces_signatures_on_the_scanned_path(self) -> None:
+        app = self.scanned_app()
+        app.config.signing_enabled = True
+        section = self.readme_doc(app).section("Using The Image")
+        self.assertEqual(
+            section.code_block().lines,
+            (
+                "sudo rpm-ostree reset",
+                "sudo bootc switch --enforce-container-sigpolicy ghcr.io/example/test-image:latest",
+                "systemctl reboot",
+            ),
+        )
+        self.assertIn("later `bootc upgrade` operations", section.paragraphs()[-1].text)
 
     def test_generate_readme_says_what_the_recommended_reset_removes(self) -> None:
         # With no category flags, `rpm-ostree reset` clears overlays,
         # overrides and initramfs customization alike. Presented as the last
         # step of carrying customizations over, it read as undoing exactly
         # what had been carried -- and anything else on the host went with it.
-        readme = self.scanned_app().generate_readme()
-        self.assertIn("not only the ones this image reproduces", readme)
-        self.assertIn("override and initramfs", readme)
-        self.assertIn("rpm-ostree status", readme)
+        # It has to be the paragraph after the warning, not merely somewhere.
+        section = self.readme_doc(self.scanned_app()).section("Using The Image")
+        qualification = section.paragraphs()[2].text
+        self.assertIn("not only the ones this image reproduces", qualification)
+        self.assertIn("override and initramfs", qualification)
+        self.assertIn("rpm-ostree status", qualification)
 
     def test_generate_readme_omits_the_reset_block_without_carried_customizations(self) -> None:
         # The qualification belongs to the reset instruction, so it must not
-        # appear on a build that never recommends one.
-        readme = self.make_app().generate_readme()
-        self.assertNotIn("rpm-ostree reset", readme)
-        self.assertNotIn("not only the ones this image reproduces", readme)
+        # appear on a build that never recommends one. Asserting the section's
+        # blocks exactly says that once, for the paragraph and the command
+        # alike, rather than listing strings that must be absent.
+        app = self.make_app()
+        section = self.readme_doc(app).section("Using The Image")
+        self.assertEqual([type(block).__name__ for block in section.blocks], ["Paragraph", "CodeBlock"])
+        self.assertEqual(
+            section.paragraph().text,
+            "After the first successful GitHub Actions build finishes, switch to it with:",
+        )
+        self.assertEqual(section.code_block().info, "bash")
+        self.assertEqual(
+            section.code_block().lines,
+            (f"sudo bootc switch {app.published_image_ref()}", "systemctl reboot"),
+        )
 
     def test_config_from_state_payload_roundtrips_brew_enabled(self) -> None:
         cfg = config_from_state_payload({"brew_enabled": True})
@@ -9998,11 +10350,13 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("BlueBuild", captured[0])
 
     def test_generate_readme_uses_method_display(self) -> None:
+        # Read as the Build Method row's value rather than as a string
+        # somewhere in the file: the substring form passed for any README
+        # that mentioned the display name at all, including one that put
+        # it in a different row or a paragraph.
         app = self.make_bluebuild_app()
-        document = parse_readme(app.generate_readme())
-        self.assertEqual(
-            document.only_table().value("Build Method"), f"`{METHOD_DISPLAY['bluebuild']}`"
-        )
+        table = self.readme_doc(app).table("Custom Bazzite (KDE) Image")
+        self.assertEqual(table.value("Build Method"), f"`{METHOD_DISPLAY['bluebuild']}`")
 
     def test_method_display_covers_all_allowed_methods(self) -> None:
         from atomic_image_builder import ALLOWED_METHODS
@@ -11641,6 +11995,29 @@ class BuilderTests(unittest.TestCase):
         app = self.make_app()
         original = "[customizations.installer.kickstart]\ncontents = \"\"\"\ntext --non-interactive\n\"\"\"\n"
         self.assertEqual(app.patch_installer_config(original), original)
+
+    def test_patch_installer_config_documents_why_its_first_pull_is_unenforced(self) -> None:
+        app = self.make_app()
+        app.config.signing_enabled = True
+        original = (CONTAINERFILE_TEMPLATE_DIR / "disk_config/iso-kde.toml").read_text()
+        patched = app.patch_installer_config(original)
+
+        self.assertIn("standalone installer has no trusted copy", patched)
+        comment = " ".join(line.removeprefix("# ") for line in patched.splitlines() if line.startswith("# "))
+        self.assertIn("follow README's Trusting The Signing Key", comment)
+        self.assertIn("repeat the enforced switch so later upgrades verify it", comment)
+        self.assertIn(
+            "bootc switch --mutate-in-place --transport registry ghcr.io/example/test-image:latest",
+            patched,
+        )
+        self.assertNotIn("--enforce-container-sigpolicy", patched)
+        self.assertEqual(app.patch_installer_config(patched), patched)
+
+    def test_patch_installer_config_omits_signing_note_when_signing_is_disabled(self) -> None:
+        app = self.make_app()
+        original = (CONTAINERFILE_TEMPLATE_DIR / "disk_config/iso-kde.toml").read_text()
+        patched = app.patch_installer_config(original)
+        self.assertNotIn("Signature enforcement is deliberately omitted", patched)
 
     def test_write_installer_configs_skips_when_no_disk_dir(self) -> None:
         """When disk_config/ doesn't exist, write_installer_configs is a no-op."""

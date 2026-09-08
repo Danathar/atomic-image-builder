@@ -57,13 +57,19 @@ pull credentials for root before the switch works. See
 ## Migrating layered packages from your current system
 
 If you use the scan flow to carry layered packages from your current system into
-the new image, run these in the same session before rebooting:
+the new image, first follow **Trusting The Signing Key** in the generated repo's
+README. Then run these in the same session before rebooting:
 
 ```bash
 sudo rpm-ostree reset
-sudo bootc switch ghcr.io/<your-user>/<your-repo>:latest
+sudo bootc switch --enforce-container-sigpolicy ghcr.io/<your-user>/<your-repo>:latest
 systemctl reboot
 ```
+
+`--enforce-container-sigpolicy` verifies the switch against that repository's
+signing key and keeps verification enabled for every later `bootc upgrade`.
+Dropping the flag disables signature verification for both the switch and those
+upgrades.
 
 That clears the old layered package state from the current deployment before you
 switch to the image-based version of those changes. You do not need to reboot

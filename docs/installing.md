@@ -132,9 +132,23 @@ If you would rather not use the wrapper script:
 
 ```bash
 podman run --rm -it --pull=newer \
-  -e GH_TOKEN="$(gh auth token)" \
   ghcr.io/danathar/atomic-image-builder:latest
 ```
+
+That forwards no GitHub credential, and the omission is deliberate. Nothing in
+the command checks who built the image: it fetches a mutable tag and runs
+whatever is behind it, as root. Handing `$(gh auth token)` to an image nothing
+has vouched for is a much larger thing to agree to than running it — which is
+why the wrapper withholds credentials from an image it did not verify, and why
+this snippet withholds them too. What a signature answers here, and what
+checking one costs, is [Verifying the image](#verifying-the-image).
+
+The tool still starts; the steps that reach GitHub are the ones that stop
+working. `gh auth login` inside the container gets those back, at the price of
+logging in again every run — `--rm` discards the login along with the
+container. To forward your host's token instead, verify first and run the
+digest you verified — [Credentials follow the
+signature](#credentials-follow-the-signature) has that command.
 
 Staying current matters more than it looks. Podman's default is
 `--pull=missing`, which pulls only when the image is absent locally — so once you
@@ -213,14 +227,31 @@ It warns each time. Set it only for an image you built yourself.
 A release tag of the published image (`ghcr.io/danathar/atomic-image-builder:v1.2.3`)
 *is* verified, because the identity below accepts tag refs as well as `main`.
 
-To run the same check by hand — against a bare `podman run`, say:
+To run the same check by hand — before a bare `podman run`, say, so that run
+can be given a GitHub token — resolve a digest, verify that digest, and run it:
 
 ```bash
+image=ghcr.io/danathar/atomic-image-builder
+podman pull "$image:latest"
+ref="$image@$(podman image inspect --format '{{.Digest}}' "$image:latest")"
+
 cosign verify \
   --certificate-identity-regexp '^https://github\.com/Danathar/atomic-image-builder/\.github/workflows/publish-image\.yml@refs/(heads/main|tags/.+)$' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  ghcr.io/danathar/atomic-image-builder:latest
+  "$ref" &&
+  podman run --rm -it -e GH_TOKEN="$(gh auth token)" "$ref"
 ```
+
+Verifying `:latest` and then running `:latest` would be two lookups of a
+mutable tag with a check in between, and it is the second one that decides what
+runs. Resolving the digest once and handing the same `$ref` to both closes
+that — the same reason the wrapper runs the digest it verified rather than the
+tag that produced it. The `&&` does the rest of the work: if `cosign verify`
+exits non-zero nothing runs, and `gh auth token` is never even called.
+
+That command needs `cosign`; `brew install cosign` if you do not have it. The
+plain `podman run` above deliberately does without both the check and the
+token, and is the right shape when you do not want either.
 
 The `refs/(heads/main|tags/.+)` alternation matters: `latest` is signed from a
 push to `main`, but a release publishes from a tag ref, so its certificate
