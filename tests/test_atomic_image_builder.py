@@ -3860,6 +3860,43 @@ class BuilderTests(unittest.TestCase):
         # belongs -- there is no package to check yet at this point.
         self.assertIn("Make it public before switching", output.getvalue())
         self.assertIn("pkgs/container/test-image", output.getvalue())
+        self.assertIn(
+            "sudo bootc switch --enforce-container-sigpolicy ghcr.io/example/test-image:latest",
+            output.getvalue(),
+        )
+        self.assertIn("every later bootc upgrade", output.getvalue())
+        self.assertIn("Dropping it disables signature verification for both", output.getvalue())
+
+    def test_do_build_summary_omits_enforcement_when_signing_is_disabled(self) -> None:
+        # ensure_signing_ready currently either returns true or raises, but the
+        # renderer still follows the persisted flag so an older unsigned path
+        # cannot be told that a nonexistent policy is enforcing its switch.
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        app.config.github_user = "example"
+        app.gum = GumStub()
+
+        def fake_run(args, **_kwargs):
+            if args[:3] == ["gh", "repo", "view"]:
+                return subprocess.CompletedProcess(list(args), 1, "", "")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    with patch.object(app, "ensure_signing_ready", return_value=False):
+                        with patch.object(app, "repo_default_branch", return_value="main"):
+                            with patch.object(app, "seed_project_template", return_value=None):
+                                with patch.object(app, "write_project_files", return_value=None):
+                                    self.assertTrue(app.do_build())
+
+        rendered = output.getvalue()
+        self.assertIn("sudo bootc switch ghcr.io/example/test-image:latest", rendered)
+        self.assertNotIn("--enforce-container-sigpolicy", rendered)
+        self.assertNotIn("Trusting The Signing Key", rendered)
+        self.assertNotIn("Dropping it disables signature verification", rendered)
 
     def test_do_build_summary_uses_lowercase_ghcr_owner(self) -> None:
         app = self.make_app()
@@ -4942,13 +4979,19 @@ class BuilderTests(unittest.TestCase):
         runs = json.dumps([{"conclusion": "success", "workflowName": "build", "displayTitle": "t", "url": "u"}])
         with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
             with patch.object(app, "repo_carried_scan_customizations", return_value=True):
-                with redirect_stdout(io.StringIO()):
-                    app.render_build_status("Example", "my-image")
+                with patch.object(app, "repo_signing_enabled", return_value=True):
+                    with redirect_stdout(io.StringIO()):
+                        app.render_build_status("Example", "my-image")
         hints = " ".join(m for level, m in stub.messages if level == "hint")
         self.assertIn("sudo rpm-ostree reset", hints)
         # Built from the arguments, since the picker does not load the config.
-        self.assertIn("ghcr.io/example/my-image:latest", hints)
+        self.assertIn(
+            "sudo bootc switch --enforce-container-sigpolicy ghcr.io/example/my-image:latest",
+            hints,
+        )
         self.assertIn("do not reboot in between", hints.lower())
+        self.assertIn("every later bootc upgrade", hints)
+        self.assertIn("dropping it disables both checks", hints.lower())
 
     def test_build_status_says_a_green_build_is_not_yet_readable(self) -> None:
         # A green build is not a switchable image: the package it published is
@@ -5142,6 +5185,22 @@ class BuilderTests(unittest.TestCase):
         ):
             with patch("atomic_image_builder.run", return_value=proc):
                 self.assertFalse(app.repo_carried_scan_customizations("owner", "repo"))
+
+    def test_repo_signing_enabled_reads_the_remote_state_file(self) -> None:
+        import base64
+        payload = base64.b64encode(json.dumps({"signing_enabled": True}).encode()).decode()
+        app = self.make_app()
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, payload, "")):
+            self.assertTrue(app.repo_signing_enabled("owner", "repo"))
+        # Missing, false, or unreadable state must retain the historical
+        # unflagged command instead of claiming a trust policy exists.
+        for proc in (
+            subprocess.CompletedProcess([], 0, base64.b64encode(b"{}").decode(), ""),
+            subprocess.CompletedProcess([], 1, "", "boom"),
+            subprocess.CompletedProcess([], 0, "not-base64!!", ""),
+        ):
+            with patch("atomic_image_builder.run", return_value=proc):
+                self.assertFalse(app.repo_signing_enabled("owner", "repo"))
 
     def test_open_url_in_browser_discards_output_and_does_not_wait(self) -> None:
         # A GUI browser is chatty on stderr. Inheriting the terminal writes
@@ -8820,6 +8879,182 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("## Local Build", readme)
         self.assertNotIn("just build", readme)
 
+    def test_generate_readme_installs_and_enforces_the_signing_policy(self) -> None:
+        app = self.make_app()
+        app.config.signing_enabled = True
+        doc = self.readme_doc(app)
+        titles = [title for _level, title in doc.outline()]
+        self.assertEqual(
+            titles[-3:],
+            ["Before The First Switch", "Trusting The Signing Key", "Using The Image"],
+        )
+
+        trust = doc.section("Trusting The Signing Key")
+        blocks = trust.code_blocks()
+        self.assertEqual([block.info for block in blocks], ["bash", "bash", "json", "yaml"])
+        self.assertEqual(
+            blocks[0].lines,
+            ("sudo install -Dm0644 cosign.pub /etc/pki/containers/example-test-image.pub",),
+        )
+        self.assertEqual(blocks[1].lines[0], "sudo python3 - <<'EOF'")
+        self.assertEqual(blocks[1].lines[-1], "EOF")
+        self.assertEqual(
+            blocks[2].lines,
+            (
+                '"ghcr.io/example/test-image": [',
+                "  {",
+                '    "type": "sigstoreSigned",',
+                '    "keyPath": "/etc/pki/containers/example-test-image.pub",',
+                '    "signedIdentity": { "type": "matchRepository" }',
+                "  }",
+                "]",
+            ),
+        )
+        self.assertEqual(
+            blocks[3].lines,
+            (
+                "docker:",
+                "  ghcr.io/example/test-image:",
+                "    use-sigstore-attachments: true",
+            ),
+        )
+        trust_text = " ".join(paragraph.text for paragraph in trust.paragraphs())
+        self.assertIn("comma-separated from whatever is already there", trust_text)
+        self.assertIn("Reinstall `cosign.pub` after rotating", trust_text)
+
+        using = doc.section("Using The Image")
+        self.assertEqual(
+            using.code_block().lines,
+            (
+                "sudo bootc switch --enforce-container-sigpolicy ghcr.io/example/test-image:latest",
+                "systemctl reboot",
+            ),
+        )
+        enforcement = using.paragraphs()[-1].text
+        self.assertIn("later `bootc upgrade` operations", enforcement)
+        self.assertIn("Dropping the flag disables verification for both", enforcement)
+
+    def policy_merge_script(self, app: App, policy_path: Path) -> str:
+        """The Python the README's policy.json block feeds to ``sudo python3``.
+
+        Pulled out of the rendered document rather than restated here: the point
+        of the tests below is that the text a reader pastes is the text that
+        runs, so a generator that stopped emitting a working merge has to fail
+        them.
+        """
+        block = self.readme_doc(app).section("Trusting The Signing Key").code_blocks()[1]
+        body = block.lines[1:-1]
+        return "\n".join(body).replace('"/etc/containers/policy.json"', json.dumps(str(policy_path)))
+
+    def test_generated_policy_merge_adds_the_entry_to_a_stock_fedora_policy(self) -> None:
+        # The stock Fedora policy has no `transports.docker` object at all, so
+        # "add this entry to the existing docker object" had no object to add
+        # to and no comma to place. Running the generated command has to leave
+        # parseable JSON with both the old transport and the new entry (#278).
+        app = self.make_app()
+        app.config.signing_enabled = True
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "policy.json"
+            policy_path.write_text(
+                json.dumps(
+                    {
+                        "default": [{"type": "insecureAcceptAnything"}],
+                        "transports": {"docker-daemon": {"": [{"type": "insecureAcceptAnything"}]}},
+                    }
+                )
+            )
+            subprocess.run(
+                [sys.executable, "-c", self.policy_merge_script(app, policy_path)],
+                check=True,
+            )
+            merged = json.loads(policy_path.read_text())
+
+        self.assertEqual(merged["default"], [{"type": "insecureAcceptAnything"}])
+        self.assertIn("docker-daemon", merged["transports"])
+        self.assertEqual(
+            merged["transports"]["docker"]["ghcr.io/example/test-image"],
+            [
+                {
+                    "type": "sigstoreSigned",
+                    "keyPath": "/etc/pki/containers/example-test-image.pub",
+                    "signedIdentity": {"type": "matchRepository"},
+                }
+            ],
+        )
+
+    def test_generated_policy_merge_keeps_an_existing_docker_entry(self) -> None:
+        app = self.make_app()
+        app.config.signing_enabled = True
+        existing = {"quay.io/fedora/fedora-bootc": [{"type": "insecureAcceptAnything"}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "policy.json"
+            policy_path.write_text(json.dumps({"default": [{"type": "reject"}], "transports": {"docker": dict(existing)}}))
+            script = self.policy_merge_script(app, policy_path)
+            subprocess.run([sys.executable, "-c", script], check=True)
+            # Idempotent: pasting the block twice is not an error and does not
+            # duplicate the entry.
+            subprocess.run([sys.executable, "-c", script], check=True)
+            merged = json.loads(policy_path.read_text())
+
+        docker = merged["transports"]["docker"]
+        self.assertEqual(docker["quay.io/fedora/fedora-bootc"], existing["quay.io/fedora/fedora-bootc"])
+        self.assertEqual(sorted(docker), ["ghcr.io/example/test-image", "quay.io/fedora/fedora-bootc"])
+
+    def test_generated_trust_filenames_are_owner_qualified(self) -> None:
+        # /etc/pki/containers and /etc/containers/registries.d are machine-wide.
+        # Two owners publishing the same repository name must not write the same
+        # two filenames, or the second install silently invalidates the first
+        # repository's policy entry (#278).
+        rendered = {}
+        for github_user in ("example", "OtherOwner"):
+            app = self.make_app()
+            app.config.github_user = github_user
+            app.config.signing_enabled = True
+            trust = self.readme_doc(app).section("Trusting The Signing Key")
+            blocks = trust.code_blocks()
+            rendered[github_user] = (
+                blocks[0].lines[0],
+                blocks[2].lines[3],
+                " ".join(paragraph.text for paragraph in trust.paragraphs()),
+            )
+
+        for github_user, slug in (("example", "example"), ("OtherOwner", "otherowner")):
+            install, key_path_entry, prose = rendered[github_user]
+            self.assertEqual(
+                install,
+                f"sudo install -Dm0644 cosign.pub /etc/pki/containers/{slug}-test-image.pub",
+            )
+            # The policy entry has to name the same file the install wrote, or
+            # enforcement reads a key that is not there.
+            self.assertEqual(
+                key_path_entry,
+                f'    "keyPath": "/etc/pki/containers/{slug}-test-image.pub",',
+            )
+            self.assertIn(f"`/etc/containers/registries.d/{slug}-test-image.yaml`", prose)
+
+        self.assertNotEqual(rendered["example"][0], rendered["OtherOwner"][0])
+
+
+    def test_generate_readme_omits_signing_policy_when_signing_is_disabled(self) -> None:
+        app = self.make_app()
+        doc = self.readme_doc(app)
+        self.assertNotIn("Trusting The Signing Key", [title for _level, title in doc.outline()])
+        self.assertEqual(
+            doc.section("Using The Image").code_block().lines,
+            (f"sudo bootc switch {app.published_image_ref()}", "systemctl reboot"),
+        )
+
+    def test_bootc_switch_command_only_enforces_when_signing_is_enabled(self) -> None:
+        image_ref = "ghcr.io/example/test-image:latest"
+        self.assertEqual(
+            App.bootc_switch_command(image_ref, signing_enabled=True),
+            "sudo bootc switch --enforce-container-sigpolicy ghcr.io/example/test-image:latest",
+        )
+        self.assertEqual(
+            App.bootc_switch_command(image_ref, signing_enabled=False),
+            "sudo bootc switch ghcr.io/example/test-image:latest",
+        )
+
     def test_generate_readme_keeps_the_same_sections_on_the_scanned_path(self) -> None:
         # The scanned path rebuilds the whole tail of the document, so it is
         # where a heading is most easily lost or duplicated. It changes what
@@ -9008,6 +9243,20 @@ class BuilderTests(unittest.TestCase):
             section.paragraphs()[1].text,
             "Do not reboot between `rpm-ostree reset` and `bootc switch`.",
         )
+
+    def test_generate_readme_enforces_signatures_on_the_scanned_path(self) -> None:
+        app = self.scanned_app()
+        app.config.signing_enabled = True
+        section = self.readme_doc(app).section("Using The Image")
+        self.assertEqual(
+            section.code_block().lines,
+            (
+                "sudo rpm-ostree reset",
+                "sudo bootc switch --enforce-container-sigpolicy ghcr.io/example/test-image:latest",
+                "systemctl reboot",
+            ),
+        )
+        self.assertIn("later `bootc upgrade` operations", section.paragraphs()[-1].text)
 
     def test_generate_readme_says_what_the_recommended_reset_removes(self) -> None:
         # With no category flags, `rpm-ostree reset` clears overlays,
@@ -11746,6 +11995,29 @@ class BuilderTests(unittest.TestCase):
         app = self.make_app()
         original = "[customizations.installer.kickstart]\ncontents = \"\"\"\ntext --non-interactive\n\"\"\"\n"
         self.assertEqual(app.patch_installer_config(original), original)
+
+    def test_patch_installer_config_documents_why_its_first_pull_is_unenforced(self) -> None:
+        app = self.make_app()
+        app.config.signing_enabled = True
+        original = (CONTAINERFILE_TEMPLATE_DIR / "disk_config/iso-kde.toml").read_text()
+        patched = app.patch_installer_config(original)
+
+        self.assertIn("standalone installer has no trusted copy", patched)
+        comment = " ".join(line.removeprefix("# ") for line in patched.splitlines() if line.startswith("# "))
+        self.assertIn("follow README's Trusting The Signing Key", comment)
+        self.assertIn("repeat the enforced switch so later upgrades verify it", comment)
+        self.assertIn(
+            "bootc switch --mutate-in-place --transport registry ghcr.io/example/test-image:latest",
+            patched,
+        )
+        self.assertNotIn("--enforce-container-sigpolicy", patched)
+        self.assertEqual(app.patch_installer_config(patched), patched)
+
+    def test_patch_installer_config_omits_signing_note_when_signing_is_disabled(self) -> None:
+        app = self.make_app()
+        original = (CONTAINERFILE_TEMPLATE_DIR / "disk_config/iso-kde.toml").read_text()
+        patched = app.patch_installer_config(original)
+        self.assertNotIn("Signature enforcement is deliberately omitted", patched)
 
     def test_write_installer_configs_skips_when_no_disk_dir(self) -> None:
         """When disk_config/ doesn't exist, write_installer_configs is a no-op."""
