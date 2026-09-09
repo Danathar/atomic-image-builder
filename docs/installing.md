@@ -86,8 +86,8 @@ running it. See [Verifying the image](#verifying-the-image).
 ### Installing the wrapper
 
 ```bash
-curl -fsSLO https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib
-curl -fsSL  https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib.sha256 | sha256sum -c -
+curl -fsSLO https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib &&
+curl -fsSL  https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib.sha256 | sha256sum -c - &&
 install -m 755 aib ~/.local/bin/aib && rm aib
 aib
 ```
@@ -95,8 +95,17 @@ aib
 `aib` and `aib.sha256` are attached to each release by
 [`publish-wrapper.yml`](../.github/workflows/publish-wrapper.yml), both generated
 from the same checkout of the tag, so the pair always agrees. `sha256sum -c -`
-exits non-zero and prints `FAILED` if it does not; do not run a wrapper that
-fails that check.
+exits non-zero and prints `FAILED` if it does not.
+
+The `&&` at the end of the first two lines is doing the same work it does in the
+`cosign verify` command further down: it makes the check a gate rather than a
+report. Pasted into a shell without them, each line runs regardless of what the
+one above it returned, so a `FAILED` checksum — or a download that produced no
+file at all — would still be followed by `install`, putting the unverified
+wrapper on your `PATH` and running it. With them, nothing is installed unless
+the file matches the checksum published with the release. The bare `aib` on the
+last line stays unchained deliberately: if the install did not happen, nothing
+new was placed on `PATH`.
 
 Verifying the wrapper matters for the same reason the wrapper verifies the
 image. It runs the image as root, and it forwards your GitHub credential into

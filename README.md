@@ -31,16 +31,18 @@ aib-tool
 **Have Podman?**
 
 ```bash
-curl -fsSLO https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib
-curl -fsSL  https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib.sha256 | sha256sum -c -
+curl -fsSLO https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib &&
+curl -fsSL  https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib.sha256 | sha256sum -c - &&
 install -m 755 aib ~/.local/bin/aib && rm aib
 aib
 ```
 
 The wrapper verifies the container image's signature before running it and then
 forwards your GitHub credential into it, so it is worth having checked the
-wrapper too. The `sha256sum -c -` line above is that check, and it is why the
-recommended install comes from a release rather than from `main`. See
+wrapper too. The `sha256sum -c -` line above is that check, the `&&` between the
+lines is what makes it a gate rather than a report — a failed checksum stops
+before `install` — and it is why the recommended install comes from a release
+rather than from `main`. See
 [Installing](docs/installing.md#installing-the-wrapper) for the `main` version,
 which is the bleeding edge and unverified.
 
