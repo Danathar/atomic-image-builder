@@ -71,3 +71,23 @@ def step_env(workflow_path: Path, step_name: str) -> dict[str, str]:
             env[key] = value
         return env
     return {}
+
+
+def step_if(workflow_path: Path, step_name: str) -> str | None:
+    """A step's `if:` condition, as written, or None when it has none.
+
+    A step whose shell only runs under a condition is only half described by
+    its shell: the condition is what keeps it away from the states the shell
+    would fail in. A test that executes the body can assert both.
+    """
+    lines, start, end = _step_lines(workflow_path, step_name)
+    # Only the step's own keys, so an `if:` nested under `with:` is not
+    # mistaken for the step's condition.
+    key_indent = len(lines[start]) - len(lines[start].lstrip()) + 2
+    for i in range(start + 1, end):
+        if len(lines[i]) - len(lines[i].lstrip()) != key_indent:
+            continue
+        stripped = lines[i].strip()
+        if stripped.startswith("if: "):
+            return stripped[len("if: ") :]
+    return None
