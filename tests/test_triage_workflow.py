@@ -21,65 +21,11 @@ import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from _workflow_steps import step_env, step_run_body
+
 ROOT = Path(__file__).resolve().parents[1]
 TRIAGE_WORKFLOW = ROOT / ".github/workflows/triage.yml"
 LABEL_STEP = "Label the issue"
-
-
-def _step_lines(workflow_path: Path, step_name: str) -> tuple[list[str], int, int]:
-    """The lines of one `- name: <step_name>` step, with its bounds.
-
-    Returns the workflow's lines, the index of the step's `- name:` line, and
-    the index one past the step's last line.
-    """
-    lines = workflow_path.read_text().splitlines()
-    starts = [i for i, line in enumerate(lines) if line.strip() == f"- name: {step_name}"]
-    if len(starts) != 1:
-        raise AssertionError(f"expected exactly one {step_name!r} step in {workflow_path}, found {len(starts)}")
-    start = starts[0]
-    indent = len(lines[start]) - len(lines[start].lstrip())
-    end = len(lines)
-    for i in range(start + 1, len(lines)):
-        stripped = lines[i].strip()
-        if stripped and len(lines[i]) - len(lines[i].lstrip()) <= indent:
-            end = i
-            break
-    return lines, start, end
-
-
-def step_run_body(workflow_path: Path, step_name: str) -> str:
-    """The dedented shell of a step's `run: |` block."""
-    lines, start, end = _step_lines(workflow_path, step_name)
-    for i in range(start + 1, end):
-        if lines[i].strip() != "run: |":
-            continue
-        body_indent = len(lines[i]) - len(lines[i].lstrip()) + 2
-        body = []
-        for line in lines[i + 1 : end]:
-            if line.strip() and len(line) - len(line.lstrip()) < body_indent:
-                break
-            body.append(line[body_indent:] if len(line) >= body_indent else "")
-        return "\n".join(body).rstrip() + "\n"
-    raise AssertionError(f"{step_name!r} in {workflow_path} has no `run: |` block")
-
-
-def step_env(workflow_path: Path, step_name: str) -> dict[str, str]:
-    """A step's `env:` mapping, as written (expressions left unevaluated)."""
-    lines, start, end = _step_lines(workflow_path, step_name)
-    for i in range(start + 1, end):
-        if lines[i].strip() != "env:":
-            continue
-        env_indent = len(lines[i]) - len(lines[i].lstrip())
-        env = {}
-        for line in lines[i + 1 : end]:
-            if not line.strip():
-                continue
-            if len(line) - len(line.lstrip()) <= env_indent:
-                break
-            key, _, value = line.strip().partition(": ")
-            env[key] = value
-        return env
-    return {}
 
 
 # `gh issue view --json title` and `--json body` are the step's only reads;
