@@ -7525,6 +7525,37 @@ class BuilderTests(unittest.TestCase):
         )
         self.assertIn("bleeding edge", installing)
 
+    def test_documented_wrapper_install_gates_on_the_checksum(self) -> None:
+        # The assertions above check that `sha256sum -c -` is present. Present
+        # is not the same as load-bearing: the block is pasted into an
+        # interactive shell, which has no `set -e`, so without `&&` the shell
+        # prints `aib: FAILED` and then runs `install` on the file that just
+        # failed -- and in README.md and installing.md runs the wrapper on the
+        # next line too. A failed download behaves the same way: `curl -fsSLO`
+        # writes no file, the checksum fails on the missing one, and `install`
+        # still runs. The `cosign verify` snippet in installing.md has always
+        # chained for this reason; this is the same rule applied to the install
+        # that puts the verifying wrapper on PATH in the first place.
+        root = Path(__file__).resolve().parents[1]
+        sources = {
+            "README.md": (root / "README.md").read_text(),
+            "docs/installing.md": (root / "docs/installing.md").read_text(),
+            "contrib/aib header": (root / "contrib/aib").read_text().split("set -euo pipefail", 1)[0],
+        }
+        release = "https://github.com/Danathar/atomic-image-builder/releases/latest/download"
+        for name, source in sources.items():
+            lines = [line.strip().lstrip("#").strip() for line in source.splitlines()]
+            download = [line for line in lines if line.rstrip(" &").endswith(f"{release}/aib")]
+            check = [line for line in lines if line.startswith("curl") and "sha256sum -c -" in line]
+            self.assertTrue(download, f"{name}: no wrapper download line")
+            self.assertTrue(check, f"{name}: no checksum line")
+            for line in download + check:
+                self.assertTrue(
+                    line.endswith("&&"),
+                    f"{name}: {line!r} does not chain into the next command, so the "
+                    "checksum reports instead of gating",
+                )
+
     def test_contrib_wrapper_header_and_docs_agree_on_the_install(self) -> None:
         # The wrapper's own header is install instructions that ship inside the
         # file being installed, so it is the copy a reader is most likely to

@@ -7,16 +7,19 @@
 # the GitHub login the container would otherwise be given.
 #
 # Install:
-#   curl -fsSLO https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib
-#   curl -fsSL  https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib.sha256 | sha256sum -c -
+#   curl -fsSLO https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib &&
+#   curl -fsSL  https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib.sha256 | sha256sum -c - &&
 #   install -m 755 aib ~/.local/bin/aib && rm aib
 #
-#   Checked, not merely downloaded. This file is what decides whether the
-#   image's signature is verified at all, and whether the host's GitHub login
-#   is forwarded into it -- so a substituted wrapper can read `gh auth token`
-#   and never reach cosign. Fetching it from a release, and checking it
-#   against a digest published with that release, is what keeps the thing
-#   doing the verifying from being the unverified part.
+#   Checked, not merely downloaded, and the `&&` is what makes the difference:
+#   pasted as three unchained lines, a `FAILED` checksum is printed and then
+#   `install` runs anyway, which is the check reporting rather than gating.
+#   This file is what decides whether the image's signature is verified at
+#   all, and whether the host's GitHub login is forwarded into it -- so a
+#   substituted wrapper can read `gh auth token` and never reach cosign.
+#   Fetching it from a release, checking it against a digest published with
+#   that release, and installing it only if that check passed, is what keeps
+#   the thing doing the verifying from being the unverified part.
 #
 #   docs/installing.md carries the `main` URL for the bleeding edge, and says
 #   why it is not the default.
