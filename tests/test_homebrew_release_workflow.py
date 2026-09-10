@@ -380,6 +380,36 @@ class CommitAndPushStepTests(_StepHarness):
         self.run_push_step(clone, tag="v1.2.3")
         self.assertEqual(_git(origin, "log", "-1", "--format=%s", "main"), "Point the Homebrew formula at v1.2.3")
 
+    def test_the_commit_carries_the_formula_and_nothing_else(self) -> None:
+        # The gate on this step is `git diff --quiet -- Formula/` and the
+        # verification before it is `homebrew_formula.py --check`, which reads
+        # the formula and nothing else. Those are the only paths the job has
+        # established anything about, so they are the only paths its commit may
+        # contain -- this is the one push to main with no review between it and
+        # everyone's `brew upgrade`.
+        origin, clone = self.set_up_clone()
+        self.edit_formula(clone)
+        proc = self.run_push_step(clone)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(_git(origin, "show", "--name-only", "--format=", "main").split(), [FORMULA])
+
+    def test_another_modified_file_stops_the_release_instead_of_riding_along(self) -> None:
+        # The case the pathspec exists for. `git commit -am` would stage this
+        # file too and push it to main under a message naming only the release,
+        # with neither the `if:` gate nor `--check` having looked at it. Scoped
+        # to Formula/, it is left unstaged instead, and the `git rebase` on the
+        # next line refuses to run against a dirty tree -- so a job whose
+        # contract is "a single machine-generated sha256" goes red rather than
+        # publishing something nothing verified.
+        origin, clone = self.set_up_clone()
+        before = _git(origin, "rev-parse", "main")
+        self.edit_formula(clone)
+        (clone / ".coveragerc.maintenance-audit").write_text("[run]\nsource = .\n")
+        proc = self.run_push_step(clone)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("unstaged changes", proc.stderr)
+        self.assertEqual(_git(origin, "rev-parse", "main"), before)
+
     def test_the_commit_is_authored_by_the_actions_bot(self) -> None:
         # There is no committer identity on a runner, so the step supplies one.
         # Without it `git commit` fails and the release stays unpinned.

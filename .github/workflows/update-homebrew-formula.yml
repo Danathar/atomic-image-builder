@@ -108,7 +108,21 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "Point the Homebrew formula at ${TAG}"
+          # Scoped to Formula/ rather than committing every modified tracked
+          # file with -a. The step's `if:` gate tests `git diff --quiet --
+          # Formula/` and `--check` verifies only the formula, so those are the
+          # paths this job has actually established anything about -- and this
+          # is the one automated push to main, with no review between it and
+          # everyone's `brew upgrade`. A pathspec keeps the commit's contents
+          # equal to the verified change instead of equal to whatever the
+          # working tree happened to hold.
+          #
+          # Fails closed if that ever diverges: another modified tracked file
+          # is left unstaged, and `git rebase` below refuses to run against a
+          # dirty tree, so the release goes red rather than quietly publishing
+          # it. Still exits non-zero when the formula itself did not change,
+          # which is what makes the `if:` above load-bearing.
+          git commit -m "Point the Homebrew formula at ${TAG}" -- Formula/
           # main may have moved while the release was being published.
           git fetch origin main
           git rebase origin/main
