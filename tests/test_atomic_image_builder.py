@@ -1610,6 +1610,30 @@ class BuilderTests(unittest.TestCase):
         line = "      uses: some-org/unpinned-action@v9"
         self.assertEqual(pin_action_uses_line(line), line)
 
+    def test_pin_action_uses_line_pins_the_compact_step_form_too(self) -> None:
+        # `- uses:` on one line is the other legal spelling of a step, and this
+        # runs over workflow text written outside this repository. A rewriter
+        # that only knew the `- name:` / `uses:` form left this line on its tag
+        # and said nothing -- in a managed repository nothing audits afterwards.
+        sha, label = ACTION_PINS["actions/checkout"]
+        self.assertEqual(
+            pin_action_uses_line("      - uses: actions/checkout@v4"),
+            f"      - uses: actions/checkout@{sha} # {label}",
+        )
+
+    def test_pin_action_uses_line_keeps_pinning_the_named_step_form(self) -> None:
+        sha, label = ACTION_PINS["actions/checkout"]
+        self.assertEqual(
+            pin_action_uses_line("        uses: actions/checkout@v4"),
+            f"        uses: actions/checkout@{sha} # {label}",
+        )
+
+    def test_pin_action_uses_line_leaves_a_uses_key_inside_a_word_alone(self) -> None:
+        # The dash is allowed before `uses:` now, so check the pattern did not
+        # loosen into matching a `with:` input whose name ends in "uses".
+        line = "        reuses: actions/checkout@v4"
+        self.assertEqual(pin_action_uses_line(line), line)
+
     def test_ensure_workflow_job_env_entries_returns_unchanged_without_env_or_steps_anchor(self) -> None:
         workflow_text = "name: Build\njobs:\n  build:\n    name: build\n"
         result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])

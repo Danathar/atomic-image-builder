@@ -672,7 +672,15 @@ def config_from_state_payload(data: object) -> Config:
 def pin_action_uses_line(line: str) -> str:
     # When patching upstream workflow text, we rewrite "uses:" lines to pinned
     # SHAs. This avoids supply-chain drift if an upstream tag ever changes.
-    match = re.fullmatch(r"(\s*uses:\s+)([^@\s]+)@([^\s#]+)(.*)", line)
+    #
+    # Both YAML spellings of a step have to be read, because this runs over
+    # workflow text written elsewhere -- upstream's snapshot, or whatever the
+    # repository's owner has edited it into since. maintenance_audit's USES_RE
+    # already allows for the compact `- uses:` form; a rewriter that only knew
+    # the `- name:` / `uses:` form would leave a compact step on its floating
+    # tag and report nothing, in a managed repository nothing audits later.
+    # The list dash is captured in the prefix so the line keeps its own shape.
+    match = re.fullmatch(r"(\s*(?:-\s+)?uses:\s+)([^@\s]+)@([^\s#]+)(.*)", line)
     if not match:
         return line
     prefix, action, _ref, suffix = match.groups()

@@ -18,6 +18,7 @@ from maintenance_audit import (
     audit_action_update_availability,
     audit_container_trust_roots,
     audit_local_snapshot,
+    audit_pin_table_shapes,
     audit_upstream_drift,
     describe_pin_drift,
     describe_snapshot_drift,
@@ -107,6 +108,46 @@ class MaintenanceAuditTests(unittest.TestCase):
     def test_audit_local_snapshot_passes_for_current_repo(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         self.assertEqual(audit_local_snapshot(repo_root), [])
+
+    def test_pin_tables_hold_only_commit_shas(self) -> None:
+        # The shipped tables, checked directly rather than through a fixture:
+        # these are the values that reach other people's repositories.
+        self.assertEqual(audit_pin_table_shapes(), [])
+
+    def test_a_tag_valued_pin_fails_the_audit_instead_of_matching_a_workflow(self) -> None:
+        # The discriminating case. A table entry holding a tag is consistent
+        # with a workflow that names the same tag, so the ref comparison below
+        # passes it; without the shape check the audit reports nothing and the
+        # floating ref ships.
+        self.assertEqual(
+            audit_pin_table_shapes(actions={"actions/checkout": ("v7", "v7")}, ref_pins={}),
+            [
+                "ACTION_PINS entry actions/checkout is pinned to 'v7' (labelled v7), "
+                "which is not a 40-character commit SHA."
+            ],
+        )
+
+    def test_a_branch_valued_ref_pin_fails_the_audit(self) -> None:
+        # ACTION_REF_PINS is only read by the patching path, and most of its
+        # targets appear in no workflow this audit reads -- so this check is
+        # the only offline thing that would ever see a bad value in it.
+        self.assertEqual(
+            audit_pin_table_shapes(
+                actions={},
+                ref_pins={"osbuild/bootc-image-builder-action@main": ("main", "main")},
+            ),
+            [
+                "ACTION_REF_PINS entry osbuild/bootc-image-builder-action@main is pinned to "
+                "'main' (labelled main), which is not a 40-character commit SHA."
+            ],
+        )
+
+    def test_a_short_sha_is_not_accepted_as_a_pin(self) -> None:
+        # An abbreviated SHA is not immutable the way a full one is -- it is a
+        # prefix, and Actions does not accept it -- so it fails here too.
+        findings = audit_pin_table_shapes(actions={"actions/checkout": ("3d3c42e", "v7")}, ref_pins={})
+        self.assertEqual(len(findings), 1)
+        self.assertIn("not a 40-character commit SHA", findings[0])
 
     def test_audit_local_snapshot_reports_unknown_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
