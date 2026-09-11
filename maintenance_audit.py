@@ -125,8 +125,43 @@ def iter_local_workflow_paths(repo_root: Path) -> list[Path]:
     return sorted(paths)
 
 
-def audit_local_snapshot(repo_root: Path) -> list[str]:
+def audit_pin_table_shapes(
+    actions: Mapping[str, tuple[str, str]] = ACTION_PINS,
+    ref_pins: Mapping[str, tuple[str, str]] = ACTION_REF_PINS,
+) -> list[str]:
+    """Check that every pin table value is a commit SHA rather than a ref.
+
+    The rest of the pin checking compares a workflow's ref to the table and
+    reports a disagreement, which says nothing about what the table holds. Both
+    consumers -- pinned_action() for generated workflows, pin_action_uses_line()
+    for patched ones -- emit that value verbatim, so a table entry holding a tag
+    or a branch name is a floating ref written into every repository the tool
+    touches, and it is self-consistent: the workflow text would match it and the
+    audit would pass.
+
+    ACTION_REF_PINS matters more here than its size suggests. It exists only for
+    the patching path, and most of its targets appear in no workflow this audit
+    reads, so nothing else offline would see a bad value in it at all.
+
+    A failure rather than an advisory: this is the repository contradicting its
+    own invariant, and it is fixable here.
+    """
     findings: list[str] = []
+    for action, (sha, label) in sorted(actions.items()):
+        if not REVISION_RE.fullmatch(sha):
+            findings.append(
+                f"ACTION_PINS entry {action} is pinned to {sha!r} (labelled {label}), which is not a 40-character commit SHA."
+            )
+    for key, (sha, label) in sorted(ref_pins.items()):
+        if not REVISION_RE.fullmatch(sha):
+            findings.append(
+                f"ACTION_REF_PINS entry {key} is pinned to {sha!r} (labelled {label}), which is not a 40-character commit SHA."
+            )
+    return findings
+
+
+def audit_local_snapshot(repo_root: Path) -> list[str]:
+    findings: list[str] = audit_pin_table_shapes()
     for source_rel, workflow_rel in TEMPLATE_SOURCES:
         source_path = repo_root / source_rel
         workflow_path = repo_root / workflow_rel
@@ -426,8 +461,9 @@ def run_audit(
 
     Failures mean the repository is internally inconsistent -- a metadata file
     missing, an action not covered by the pin tables, a workflow SHA that
-    disagrees with them. They are the repo contradicting itself, they are
-    fixable here, and the audit exits non-zero for them.
+    disagrees with them, a pin table value that is not a SHA at all. They are
+    the repo contradicting itself, they are fixable here, and the audit exits
+    non-zero for them.
 
     Advisories mean something outside the repo moved: an action pin's tag or
     branch, or a bundled template snapshot's upstream. They are reported and do
