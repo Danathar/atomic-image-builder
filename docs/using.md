@@ -97,9 +97,40 @@ When you choose a Fedora Atomic base image (Silverblue, Kinoite, etc.), the tool
 offers to include Homebrew using the Universal Blue brew OCI layer
 (`ghcr.io/ublue-os/brew:latest`). This adds:
 
-- The Homebrew installation and shell integration files
+- The Homebrew installation and `/etc/profile.d/brew-path.sh`, the one shell
+  integration fragment the generated image keeps
 - `brew-setup.service` for first-boot initialization
 - `brew-update.timer` and `brew-upgrade.timer` for automatic maintenance
 
 This option is skipped automatically for Universal Blue base images since they
 already include Homebrew. You can also toggle it later through the update menu.
+
+### Why the generated Containerfile deletes three of the layer's own files
+
+The brew layer's `/system_files` carries three login-shell fragments alongside
+the units and the tarball — `/etc/profile.d/brew.sh`,
+`/etc/profile.d/brew-bash-completion.sh` and
+`/usr/share/fish/vendor_conf.d/ublue-brew.fish`. All three execute code out of
+`/home/linuxbrew/.linuxbrew`, and `brew-setup.service` ends with
+`chown -R 1000:1000 /home/linuxbrew`, so on a booted machine that prefix is
+owned by the desktop user. `/etc/profile.d` and the fish vendor directory are
+read by *every* login shell, root's included (`su -`, `sudo -i`, a console or
+SSH root login) — so as shipped, whoever owns the prefix chooses what root
+executes, with no password and no sudo record.
+
+The generated Containerfile therefore removes the three, and writes
+`/etc/profile.d/brew-path.sh` in their place. That fragment only extends `PATH`,
+and only when the prefix is owned by the account whose shell it is (`test -O`),
+so `brew` still works for the desktop user and no login shell runs anything out
+of a user-writable prefix. The build then greps the login-shell directories and
+fails if anything else still mentions brew: the layer is an image this tool does
+not build, pulled by a mutable tag, so a later digest can add a fourth fragment
+without anything here changing.
+
+Two consequences are worth knowing:
+
+- `brew`'s bash completion is not installed. The way the layer provided it was
+  to source files out of the prefix itself, which is the vulnerability.
+- fish does not read `/etc/profile.d`, so fish users get no automatic `PATH`
+  entry. Add one in your own `files`/`system_files` overlay if you want it,
+  guarded the same way.

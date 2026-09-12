@@ -487,3 +487,40 @@ the actual patched recipe body (extracted from patch_container_rechunk_config_ar
 real output, not a hand-copied duplicate) the same way and shows the trap
 does clean it up. Both tests require a real bash and are skipped if one
 isn't available.
+
+Brew Payload Login-Shell Fragments: a hard-coded list plus a build-time sweep
+-----------------------------------------------------------------------------
+BREW_LOGIN_FRAGMENTS in atomic_image_builder.py names three files by path:
+
+  /etc/profile.d/brew.sh
+  /etc/profile.d/brew-bash-completion.sh
+  /usr/share/fish/vendor_conf.d/ublue-brew.fish
+
+They are not written by this repository. They arrive in every generated image
+through `COPY --from=ghcr.io/ublue-os/brew:latest /system_files /`, which the
+Containerfile generator, the Containerfile patcher and the BlueBuild recipe's
+containerfile module all emit when brew_enabled is on. Each one executes code
+out of /home/linuxbrew/.linuxbrew, and brew-setup.service ends with
+`chown -R 1000:1000 /home/linuxbrew`, so on a booted machine that prefix is
+owned by the desktop user. /etc/profile.d and the fish vendor directory are
+read by every login shell, root's included, which makes each fragment UID 1000
+choosing what root executes.
+
+brew_login_fragment_run_lines() emits the step that removes them, installs
+/etc/profile.d/brew-path.sh (PATH only, guarded by `test -O`, executes nothing
+from the prefix) and then greps the login-shell directories, failing the build
+if anything else there still mentions brew.
+
+The list is this digest's inventory; the sweep is what covers the next one.
+That split is deliberate, because the reference is a mutable tag on an image
+this repository does not build: a later digest can add a fourth fragment
+without a single tracked file changing here, and no static check in this tree
+can see it. Removing the sweep to "simplify" the step removes the only part
+that is not already out of date.
+
+Action required: none on a schedule. When a build starts failing with
+"unguarded Homebrew shell integration from the brew payload", the payload has
+grown a fragment. Read it, and either add its path to BREW_LOGIN_FRAGMENTS or,
+if it turns out to be safe, exclude it explicitly in the sweep -- do not widen
+the grep. tests/test_brew_login_fragments.py executes the step against fixture
+trees, so a change to either half is exercised rather than pattern-matched.
