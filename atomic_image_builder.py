@@ -59,6 +59,42 @@ REPO_NAME_RULE = (
 DEFAULT_GITHUB_BUILD_CRON = "05 10 * * *"
 FEDORA_ATOMIC_FALLBACK_TAG = "44"
 UNIVERSAL_BLUE_BREW_IMAGE = "ghcr.io/ublue-os/brew:latest"
+# The brew payload's /system_files carries three login-shell fragments
+# alongside the units and the tarball, and none of them is guarded:
+#
+#   /etc/profile.d/brew.sh                         evals `brew shellenv`
+#   /etc/profile.d/brew-bash-completion.sh         runs `brew completions link`,
+#                                                  then sources every file in the
+#                                                  prefix's etc/bash_completion.d
+#   /usr/share/fish/vendor_conf.d/ublue-brew.fish  the fish equivalent
+#
+# All three execute code out of /home/linuxbrew/.linuxbrew, and
+# brew-setup.service -- which the block presets -- ends with
+# `chown -R 1000:1000 /home/linuxbrew`. /etc/profile.d and the fish vendor
+# directory are read by every login shell, the root account's included (`su -`,
+# `sudo -i`, a console or SSH root login), so on a booted machine each fragment
+# is UID 1000 choosing what root executes, with no password and no sudo record.
+#
+# This tool only offers Homebrew for a Fedora Atomic or CentOS base
+# (offer_brew_if_applicable forces it off for Universal Blue, which ships its
+# own), so the block is what puts the fragments in the image at all.
+BREW_LOGIN_FRAGMENTS = (
+    "/etc/profile.d/brew.sh",
+    "/etc/profile.d/brew-bash-completion.sh",
+    "/usr/share/fish/vendor_conf.d/ublue-brew.fish",
+)
+# The replacement. It puts the prefix on PATH for the account that owns it and
+# executes nothing out of it, so `brew` still works for that user.
+BREW_PATH_FRAGMENT = "/etc/profile.d/brew-path.sh"
+# Everything a login shell reads on its way in. The sweep is the load-bearing
+# half of the fix: the payload is an image this tool does not build, pulled by a
+# mutable tag, so deleting three names fixes today's digest and says nothing
+# about the next one. Only a check of what actually landed can see a fourth.
+BREW_LOGIN_SHELL_DIRS = (
+    "/etc/profile.d",
+    "/etc/fish/conf.d",
+    "/usr/share/fish/vendor_conf.d",
+)
 MAX_UI_WIDTH = 120
 # Every colour here is a 256-palette index chosen to stay legible on BOTH a
 # light and a dark terminal. The originals were picked on a dark background and
@@ -602,6 +638,82 @@ def command_exists(name: str) -> bool:
 
 def shell_quote(value: str) -> str:
     return shlex.quote(value)
+
+
+def brew_login_fragment_run_lines(indent: str = "") -> list[str]:
+    """Return the RUN step that keeps the brew payload out of root's login shell.
+
+    Emitted immediately after the ``COPY --from=<brew image> /system_files /``
+    and its preset RUN, by every path that writes that COPY: the Containerfile
+    generator, the Containerfile patcher, and the BlueBuild recipe's
+    containerfile module. See BREW_LOGIN_FRAGMENTS for what it removes and why.
+
+    The step does three things, in order: remove the three fragments the pinned
+    payload ships, write a replacement that only extends PATH, and fail the
+    build if anything else in a login-shell directory still mentions brew.
+
+    ``indent`` prefixes every line, for the BlueBuild recipe, where the same
+    text lives inside a YAML literal block scalar.
+    """
+    first, *rest = BREW_LOGIN_FRAGMENTS
+    removals = [f"{indent}RUN rm -f {first} \\"]
+    removals += [f"{indent}          {path} \\" for path in rest]
+    # Written with printf rather than a heredoc: a heredoc inside a RUN needs
+    # BuildKit's heredoc support, and these repos are also built with
+    # buildah-build and plain `podman build` from the Justfile.
+    #
+    # Nothing below is expanded when the Containerfile is parsed -- RUN is not
+    # one of the instructions Docker does environment replacement on -- and
+    # every line the file receives is single-quoted here, so ${PATH} reaches
+    # the fragment as text for the login shell to expand.
+    fragment = [
+        "# Put the Homebrew prefix on PATH for the account that owns it, and run",
+        "# nothing out of it. brew-setup.service ends with",
+        '# "chown -R 1000:1000 /home/linuxbrew", so every file under the prefix,',
+        "# the brew executable included, is writable by the desktop user, and",
+        "# /etc/profile.d is read by every login shell, including the root",
+        "# account. A fragment that evals or sources anything from the prefix",
+        "# therefore hands its owner code execution as root.",
+        "#",
+        '# -O is "owned by the effective user", so this is inert for root and for',
+        "# every account that does not own the prefix. The prefix is appended,",
+        "# not prepended, so system binaries keep priority -- the ordering the",
+        "# payload fragment aimed for.",
+        "if [ -O /home/linuxbrew/.linuxbrew ] && [ -d /home/linuxbrew/.linuxbrew/bin ]; then",
+        '  case ":${PATH}:" in',
+        '    *":/home/linuxbrew/.linuxbrew/bin:"*) ;;',
+        '    *) PATH="${PATH}:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin"; export PATH ;;',
+        "  esac",
+        "fi",
+    ]
+    # Every fragment line is emitted inside a single-quoted printf argument, so
+    # one apostrophe would close the quote and hand the rest of the line to the
+    # build shell. Nothing here needs one; refuse rather than write a broken --
+    # or worse, a differently-behaving -- Containerfile if that ever changes.
+    for line in fragment:
+        if "'" in line:
+            raise CommandError(f"brew PATH fragment line cannot contain an apostrophe: {line!r}")
+    lines = [*removals]
+    lines[-1] = lines[-1].removesuffix(" \\") + " && \\"
+    lines.append(f"{indent}    printf '%s\\n' \\")
+    lines.extend(f"{indent}      '{line}' \\" for line in fragment)
+    lines.append(f"{indent}      > {BREW_PATH_FRAGMENT} && \\")
+    lines.append(f"{indent}    chmod 0644 {BREW_PATH_FRAGMENT} && \\")
+    lines.append(
+        f'{indent}    unguarded="$(grep -rlI -- brew {" ".join(BREW_LOGIN_SHELL_DIRS)} 2>/dev/null \\'
+    )
+    lines.append(f"{indent}      | grep -vxF -e {BREW_PATH_FRAGMENT} || true)\" && \\")
+    lines.append(f'{indent}    if [ -n "${{unguarded}}" ]; then \\')
+    lines.append(
+        f'{indent}        echo "error: unguarded Homebrew shell integration from the brew payload:" >&2; \\'
+    )
+    lines.append(f"{indent}        printf '%s\\n' \"${{unguarded}}\" >&2; \\")
+    lines.append(
+        f'{indent}        echo "Remove it in this step, or guard it the way {BREW_PATH_FRAGMENT} is." >&2; \\'
+    )
+    lines.append(f"{indent}        exit 1; \\")
+    lines.append(f"{indent}    fi")
+    return lines
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -4490,26 +4602,34 @@ class App:
         for i, line in enumerate(lines):
             if line.strip().startswith("COPY --from=") and "brew" in line.lower() and "/system_files" in line:
                 brew_start = i
-                # The block is the COPY plus the systemctl preset RUN that
-                # depends on the units the COPY installs. Blank lines between
-                # the two are legal and a hand-edited Containerfile may well
-                # have them; the old scan stopped at the first blank line, so
-                # disabling Homebrew deleted only the COPY and left the RUN
-                # behind, presetting units nothing provides any more and
-                # breaking the build.
+                # The block is the COPY plus the RUNs that depend on what it
+                # installs: the systemctl preset, and the step that strips the
+                # payload's own login-shell fragments. Blank lines between them
+                # are legal and a hand-edited Containerfile may well have them;
+                # the old scan stopped at the first blank line, so disabling
+                # Homebrew deleted only the COPY and left the RUN behind,
+                # presetting units nothing provides any more and breaking the
+                # build. It also stopped after one RUN, which was right when
+                # the block had one; with two, an update that kept Homebrew on
+                # would replace the preset and leave a stale second copy of the
+                # fragment step stranded below it.
                 brew_end = i + 1
-                probe = i + 1
-                while probe < len(lines) and not lines[probe].strip():
-                    probe += 1
-                if probe < len(lines) and lines[probe].strip().startswith("RUN"):
+                while True:
+                    probe = brew_end
+                    while probe < len(lines) and not lines[probe].strip():
+                        probe += 1
+                    if probe >= len(lines) or not lines[probe].strip().startswith("RUN"):
+                        break
                     run_end = probe
                     while run_end < len(lines) and lines[run_end].rstrip().endswith("\\"):
                         run_end += 1
-                    # Only absorb the RUN when it is actually the brew preset -
-                    # "brew" appears on the continuation lines, not the RUN line
-                    # itself - so an unrelated neighbouring RUN is never eaten.
-                    if "brew" in " ".join(lines[probe : run_end + 1]).lower():
-                        brew_end = run_end + 1
+                    # Only absorb a RUN that belongs to the block - for the
+                    # preset, "brew" appears on the continuation lines rather
+                    # than the RUN line itself - so an unrelated neighbouring
+                    # RUN is never eaten.
+                    if "brew" not in " ".join(lines[probe : run_end + 1]).lower():
+                        break
+                    brew_end = run_end + 1
                 # Consume a trailing blank line so removal/replacement
                 # does not leave a double blank.
                 if brew_end < len(lines) and not lines[brew_end].strip():
@@ -4531,6 +4651,7 @@ class App:
             "    /usr/bin/systemctl preset brew-setup.service && \\",
             "    /usr/bin/systemctl preset brew-update.timer && \\",
             "    /usr/bin/systemctl preset brew-upgrade.timer",
+            *brew_login_fragment_run_lines(),
             "",
         ]
         if brew_start is not None:
@@ -5270,6 +5391,13 @@ class App:
                 "            /usr/bin/systemctl preset brew-setup.service && \\",
                 "            /usr/bin/systemctl preset brew-update.timer && \\",
                 "            /usr/bin/systemctl preset brew-upgrade.timer",
+                # A second literal block, so the fragment step stays one
+                # snippet BlueBuild hands to the build shell intact. Its
+                # printf lines are not YAML - inside a literal block scalar
+                # nothing in them is interpreted - but they only survive that
+                # way if the block is theirs alone.
+                "      - |",
+                *brew_login_fragment_run_lines(indent="        "),
             ])
 
         if self.config.copr_repos or self.config.packages or self.config.removed_packages:
@@ -5422,6 +5550,7 @@ class App:
                 "    /usr/bin/systemctl preset brew-setup.service && \\",
                 "    /usr/bin/systemctl preset brew-update.timer && \\",
                 "    /usr/bin/systemctl preset brew-upgrade.timer",
+                *brew_login_fragment_run_lines(),
                 "",
             ])
         lines.extend([

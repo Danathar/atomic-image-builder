@@ -28,6 +28,9 @@ from atomic_image_builder import (
     BASE_IMAGES,
     BLUEBUILD_RECIPE_SCHEMA,
     BLUEBUILD_TEMPLATE_DIR,
+    BREW_LOGIN_FRAGMENTS,
+    BREW_LOGIN_SHELL_DIRS,
+    BREW_PATH_FRAGMENT,
     COMMON_SERVICES,
     CONTAINERFILE_TEMPLATE_DIR,
     CONTROLS_COLOR,
@@ -8606,7 +8609,7 @@ class BuilderTests(unittest.TestCase):
         instructions = parse_containerfile(app.generate_containerfile())
         self.assertEqual(
             [item.keyword for item in instructions],
-            ["FROM", "COPY", "FROM", "COPY", "RUN", "RUN", "RUN"],
+            ["FROM", "COPY", "FROM", "COPY", "RUN", "RUN", "RUN", "RUN"],
         )
         brew_copy, brew_preset = instructions[3], instructions[4]
         self.assertEqual(brew_copy.flag("from"), UNIVERSAL_BLUE_BREW_IMAGE)
@@ -8621,8 +8624,57 @@ class BuilderTests(unittest.TestCase):
             ],
         )
         # Presetting runs before the user's build.sh, not after it.
-        self.assertEqual(instructions[5].argument, "/ctx/build.sh")
-        self.assertEqual(instructions[6].argument, "bootc container lint")
+        self.assertEqual(instructions[6].argument, "/ctx/build.sh")
+        self.assertEqual(instructions[7].argument, "bootc container lint")
+
+    def test_generate_containerfile_strips_the_brew_payloads_login_fragments(self) -> None:
+        # The COPY above brings in three fragments this repository does not
+        # write, and brew-setup.service -- preset by the RUN before this one --
+        # ends with `chown -R 1000:1000 /home/linuxbrew`. /etc/profile.d and
+        # the fish vendor directory are read by every login shell, root's
+        # included, so leaving them in means UID 1000 chooses what root runs.
+        # Order is asserted because removing them before the COPY that creates
+        # them is a no-op that leaves every other assertion here green.
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.brew_enabled = True
+        instructions = parse_containerfile(app.generate_containerfile())
+        brew_copy, _preset, sweep = instructions[3], instructions[4], instructions[5]
+        self.assertEqual(brew_copy.flag("from"), UNIVERSAL_BLUE_BREW_IMAGE)
+        self.assertLess(brew_copy.line, sweep.line)
+        self.assertTrue(sweep.argument.startswith("rm -f "), sweep.argument)
+        for fragment in BREW_LOGIN_FRAGMENTS:
+            self.assertIn(fragment, sweep.argument)
+        # The replacement is installed in the same step, so an image can never
+        # have the fragments removed and nothing putting brew on PATH.
+        self.assertIn(f"> {BREW_PATH_FRAGMENT}", sweep.argument)
+        self.assertIn("[ -O /home/linuxbrew/.linuxbrew ]", sweep.argument)
+        # And the sweep that covers the next digest: the payload is an image
+        # this tool does not build, named by a mutable tag, so a fourth
+        # fragment can arrive without any file in this repository changing.
+        for directory in BREW_LOGIN_SHELL_DIRS:
+            self.assertIn(directory, sweep.argument)
+        self.assertIn("exit 1", sweep.argument)
+
+    def test_generate_containerfile_omits_the_fragment_sweep_without_brew(self) -> None:
+        # Nothing brings the fragments in, so a step that removes them would
+        # write /etc/profile.d/brew-path.sh into an image with no Homebrew.
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.brew_enabled = False
+        self.assertNotIn(BREW_PATH_FRAGMENT, app.generate_containerfile())
+
+    def test_brew_path_fragment_lines_carry_no_apostrophe(self) -> None:
+        # Every line of the fragment is emitted as a single-quoted printf
+        # argument, so one apostrophe would close the quote and hand the rest
+        # of the line to the build shell. The generator refuses rather than
+        # emit that, and this is the assertion that the refusal is not the
+        # only thing standing between the repo and a broken Containerfile.
+        emitted = "\n".join(atomic_image_builder.brew_login_fragment_run_lines())
+        quoted = [line.strip() for line in emitted.splitlines() if line.strip().startswith("'")]
+        self.assertTrue(quoted)
+        for line in quoted:
+            self.assertEqual(line.count("'"), 2, line)
 
     def test_render_containerfile_injects_brew_block_into_existing(self) -> None:
         app = self.make_app()
@@ -8749,7 +8801,10 @@ class BuilderTests(unittest.TestCase):
         """)
         result = app.render_containerfile(existing)
         self.assertEqual(result.count("/system_files"), 1)
-        self.assertEqual(result.count("brew-setup.service"), 1)
+        # The instruction, not the bare unit name: the fragment step written
+        # after the presets names brew-setup.service in a comment, explaining
+        # which unit leaves the prefix owned by UID 1000.
+        self.assertEqual(result.count("preset brew-setup.service"), 1)
         self.assertIn("brew-upgrade.timer", result)
         self.assertIn("RUN /ctx/build.sh", result)
 
@@ -8777,6 +8832,36 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("/ctx/build.sh", result)
         # Should not leave double blank lines after replacement.
         self.assertNotIn("\n\n\n", result)
+
+    def test_render_containerfile_rewrites_a_whole_brew_block_without_duplicating_it(self) -> None:
+        # An update run re-renders a Containerfile this tool wrote. The block
+        # is now a COPY and two RUNs, and the scan used to stop after the
+        # first RUN, so the second -- the fragment step -- would be left
+        # stranded below the fresh block. Two copies of it is not merely
+        # untidy: the sweep in the stale one fails the build on the
+        # brew-path.sh the fresh one installs.
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.brew_enabled = True
+        once = app.render_containerfile(app.generate_containerfile())
+        self.assertEqual(once.count("rm -f /etc/profile.d/brew.sh"), 1)
+        self.assertEqual(app.render_containerfile(once), once)
+
+    def test_render_containerfile_removes_the_fragment_step_when_brew_is_disabled(self) -> None:
+        # Turning Homebrew off has to take the whole block. A stranded
+        # fragment step would write brew-path.sh into an image with no
+        # Homebrew in it, and sweep directories for a payload that never
+        # arrived.
+        app = self.make_app()
+        app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
+        app.config.brew_enabled = True
+        with_brew = app.generate_containerfile()
+        self.assertIn(BREW_PATH_FRAGMENT, with_brew)
+        app.config.brew_enabled = False
+        without = app.render_containerfile(with_brew)
+        self.assertNotIn("brew", without.lower())
+        self.assertIn("/ctx/build.sh", without)
+        self.assertIn("bootc container lint", without)
 
     def test_render_containerfile_removes_brew_copy_that_ends_the_file(self) -> None:
         # A brew COPY with nothing after it: the scan for the preset RUN walks
@@ -9839,20 +9924,26 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(dnf["install"]["packages"], ["epel:"])
         self.assertEqual(dnf["remove"]["packages"], ["epel:"])
 
-    def test_generate_recipe_brew_snippets_stay_one_scalar_and_one_literal_block(self) -> None:
+    def test_generate_recipe_brew_snippets_stay_one_scalar_and_two_literal_blocks(self) -> None:
         app = self.make_bluebuild_app()
         app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
         app.config.brew_enabled = True
         containerfile = self.recipe_module(self.recipe_document(app), "containerfile")
-        copy_snippet, run_snippet = containerfile["snippets"]
+        copy_snippet, preset_snippet, fragment_snippet = containerfile["snippets"]
         self.assertEqual(copy_snippet, f"COPY --from={UNIVERSAL_BLUE_BREW_IMAGE} /system_files /")
-        self.assertTrue(run_snippet.startswith("RUN --mount=type=cache,dst=/var/cache \\"), run_snippet)
-        # The literal block is one shell command: every line but the last has
-        # to keep its continuation, or the image builds without the presets.
-        run_lines = run_snippet.splitlines()
-        self.assertTrue(all(line.endswith("\\") for line in run_lines[:-1]), run_snippet)
-        self.assertFalse(run_lines[-1].endswith("\\"), run_snippet)
-        self.assertIn("preset brew-upgrade.timer", run_lines[-1])
+        self.assertTrue(preset_snippet.startswith("RUN --mount=type=cache,dst=/var/cache \\"), preset_snippet)
+        # Each literal block is one shell command: every line but the last has
+        # to keep its continuation, or the image builds without the presets --
+        # or, for the second block, with the payload's login-shell fragments
+        # still in it and only the first `rm -f` argument removed.
+        for snippet, tail in ((preset_snippet, "preset brew-upgrade.timer"), (fragment_snippet, "fi")):
+            run_lines = snippet.splitlines()
+            self.assertTrue(all(line.endswith("\\") for line in run_lines[:-1]), snippet)
+            self.assertFalse(run_lines[-1].endswith("\\"), snippet)
+            self.assertIn(tail, run_lines[-1])
+        self.assertTrue(fragment_snippet.startswith("RUN rm -f "), fragment_snippet)
+        for fragment in BREW_LOGIN_FRAGMENTS:
+            self.assertIn(fragment, fragment_snippet)
 
     def test_generate_recipe_full_config_parses_into_the_expected_module_sequence(self) -> None:
         app = self.make_bluebuild_app()
