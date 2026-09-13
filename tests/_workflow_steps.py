@@ -90,6 +90,30 @@ def step_env(workflow_path: Path, step_name: str) -> dict[str, str]:
     return {}
 
 
+def step_with(workflow_path: Path, step_name: str) -> dict[str, str]:
+    """A step's `with:` mapping, as written (expressions left unevaluated).
+
+    A `uses:` step has no shell to execute, so its inputs are the only thing a
+    test can hold: an upload whose `path:` or `include-hidden-files:` no longer
+    matches what the step before it wrote still uploads, and still passes.
+    """
+    lines, start, end = _step_lines(workflow_path, step_name)
+    for i in range(start + 1, end):
+        if lines[i].strip() != "with:":
+            continue
+        with_indent = len(lines[i]) - len(lines[i].lstrip())
+        inputs = {}
+        for line in lines[i + 1 : end]:
+            if not line.strip():
+                continue
+            if len(line) - len(line.lstrip()) <= with_indent:
+                break
+            key, _, value = line.strip().partition(": ")
+            inputs[key] = value
+        return inputs
+    return {}
+
+
 def step_if(workflow_path: Path, step_name: str) -> str | None:
     """A step's `if:` condition, as written, or None when it has none.
 
