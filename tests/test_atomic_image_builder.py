@@ -31,6 +31,8 @@ from atomic_image_builder import (
     BREW_LOGIN_FRAGMENTS,
     BREW_LOGIN_SHELL_DIRS,
     BREW_PATH_FRAGMENT,
+    BREW_SETUP_DROPIN,
+    BREW_SETUP_UNIT,
     COMMON_SERVICES,
     CONTAINERFILE_TEMPLATE_DIR,
     CONTROLS_COLOR,
@@ -8609,7 +8611,7 @@ class BuilderTests(unittest.TestCase):
         instructions = parse_containerfile(app.generate_containerfile())
         self.assertEqual(
             [item.keyword for item in instructions],
-            ["FROM", "COPY", "FROM", "COPY", "RUN", "RUN", "RUN", "RUN"],
+            ["FROM", "COPY", "FROM", "COPY", "RUN", "RUN", "RUN", "RUN", "RUN"],
         )
         brew_copy, brew_preset = instructions[3], instructions[4]
         self.assertEqual(brew_copy.flag("from"), UNIVERSAL_BLUE_BREW_IMAGE)
@@ -8623,9 +8625,14 @@ class BuilderTests(unittest.TestCase):
                 "/usr/bin/systemctl preset brew-upgrade.timer",
             ],
         )
+        # The two steps that fix what the COPY brought in sit between the
+        # preset and the build: the login-shell sweep, then the drop-in that
+        # confines brew-setup.service's staging to a private /tmp.
+        self.assertTrue(instructions[5].argument.startswith("rm -f "), instructions[5].argument)
+        self.assertIn(f"> {BREW_SETUP_DROPIN}", instructions[6].argument)
         # Presetting runs before the user's build.sh, not after it.
-        self.assertEqual(instructions[6].argument, "/ctx/build.sh")
-        self.assertEqual(instructions[7].argument, "bootc container lint")
+        self.assertEqual(instructions[7].argument, "/ctx/build.sh")
+        self.assertEqual(instructions[8].argument, "bootc container lint")
 
     def test_generate_containerfile_strips_the_brew_payloads_login_fragments(self) -> None:
         # The COPY above brings in three fragments this repository does not
@@ -9924,19 +9931,25 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(dnf["install"]["packages"], ["epel:"])
         self.assertEqual(dnf["remove"]["packages"], ["epel:"])
 
-    def test_generate_recipe_brew_snippets_stay_one_scalar_and_two_literal_blocks(self) -> None:
+    def test_generate_recipe_brew_snippets_stay_one_scalar_and_three_literal_blocks(self) -> None:
         app = self.make_bluebuild_app()
         app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
         app.config.brew_enabled = True
         containerfile = self.recipe_module(self.recipe_document(app), "containerfile")
-        copy_snippet, preset_snippet, fragment_snippet = containerfile["snippets"]
+        copy_snippet, preset_snippet, fragment_snippet, staging_snippet = containerfile["snippets"]
         self.assertEqual(copy_snippet, f"COPY --from={UNIVERSAL_BLUE_BREW_IMAGE} /system_files /")
         self.assertTrue(preset_snippet.startswith("RUN --mount=type=cache,dst=/var/cache \\"), preset_snippet)
         # Each literal block is one shell command: every line but the last has
         # to keep its continuation, or the image builds without the presets --
         # or, for the second block, with the payload's login-shell fragments
-        # still in it and only the first `rm -f` argument removed.
-        for snippet, tail in ((preset_snippet, "preset brew-upgrade.timer"), (fragment_snippet, "fi")):
+        # still in it and only the first `rm -f` argument removed -- or, for
+        # the third, with brew-setup.service still staging through the host's
+        # shared /tmp because the drop-in was never written.
+        for snippet, tail in (
+            (preset_snippet, "preset brew-upgrade.timer"),
+            (fragment_snippet, "fi"),
+            (staging_snippet, f"chmod 0644 {BREW_SETUP_DROPIN}"),
+        ):
             run_lines = snippet.splitlines()
             self.assertTrue(all(line.endswith("\\") for line in run_lines[:-1]), snippet)
             self.assertFalse(run_lines[-1].endswith("\\"), snippet)
@@ -9944,6 +9957,8 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(fragment_snippet.startswith("RUN rm -f "), fragment_snippet)
         for fragment in BREW_LOGIN_FRAGMENTS:
             self.assertIn(fragment, fragment_snippet)
+        self.assertIn("PrivateTmp=yes", staging_snippet)
+        self.assertIn(BREW_SETUP_UNIT, staging_snippet)
 
     def test_generate_recipe_full_config_parses_into_the_expected_module_sequence(self) -> None:
         app = self.make_bluebuild_app()
