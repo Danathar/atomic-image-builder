@@ -54,6 +54,23 @@ def step_run_body(workflow_path: Path, step_name: str) -> str:
     raise AssertionError(f"{step_name!r} in {workflow_path} has no `run: |` block")
 
 
+def step_command(workflow_path: Path, step_name: str) -> str:
+    """A step's shell, whether written as `run: |` or as a one-line `run:`.
+
+    ci.yml writes its shortest lint steps as a plain scalar (`run: ruff
+    check`), so a test comparing what another workflow runs against what the
+    gate runs cannot reach them through step_run_body alone.
+    """
+    lines, start, end = _step_lines(workflow_path, step_name)
+    for i in range(start + 1, end):
+        stripped = lines[i].strip()
+        if stripped == "run: |":
+            return step_run_body(workflow_path, step_name)
+        if stripped.startswith("run: "):
+            return stripped[len("run: ") :] + "\n"
+    raise AssertionError(f"{step_name!r} in {workflow_path} has no `run:`")
+
+
 def step_env(workflow_path: Path, step_name: str) -> dict[str, str]:
     """A step's `env:` mapping, as written (expressions left unevaluated)."""
     lines, start, end = _step_lines(workflow_path, step_name)
