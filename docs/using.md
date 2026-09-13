@@ -134,3 +134,40 @@ Two consequences are worth knowing:
 - fish does not read `/etc/profile.d`, so fish users get no automatic `PATH`
   entry. Add one in your own `files`/`system_files` overlay if you want it,
   guarded the same way.
+
+### Why the generated Containerfile adds a drop-in for `brew-setup.service`
+
+The layer's `brew-setup.service` unpacks the 154 MB Homebrew tarball on first
+boot, as root, staging it through `/tmp/homebrew`:
+
+```ini
+ExecStart=/usr/bin/mkdir -p /tmp/homebrew
+ExecStart=/usr/bin/tar --zstd -xf /usr/share/homebrew.tar.zst -C /tmp/homebrew
+ExecStart=/usr/bin/cp -R -n /tmp/homebrew/home/linuxbrew/.linuxbrew /home/linuxbrew
+ExecStart=/usr/bin/chown -R 1000:1000 /home/linuxbrew
+```
+
+The unit ships no `PrivateTmp=`, and `/tmp` on a booted system is a
+world-writable tmpfs. `mkdir -p` exits 0 on an existing symlink rather than
+replacing it, so an account that creates `/tmp/homebrew` first has root extract
+through its symlink, has whatever else it left there copied into
+`/home/linuxbrew`, and has the result handed to UID 1000 by the `chown`. The
+`-n` protects nothing on the run that matters — the unit's own
+`ConditionPathExists=!/home/linuxbrew/.linuxbrew` guarantees the destination
+does not exist yet.
+
+The generated Containerfile therefore writes
+`/usr/lib/systemd/system/brew-setup.service.d/10-private-tmp.conf`, carrying a
+single `PrivateTmp=yes`. The unit gets its own `/tmp` and `/var/tmp` for the
+whole invocation, shared by every `ExecStart=` of that invocation and by nothing
+else on the system, so the staging path stops being a name another account can
+claim. `/home/linuxbrew` is outside both, so the payload still lands where it
+should.
+
+A drop-in rather than a unit that overrides `ExecStart=`: a copy of the layer's
+command chain would drift silently the next time the layer moves. The same build
+step therefore fails if the layer stops shipping `brew-setup.service`, or if
+none of that unit's `ExecStart=` lines stage under `/tmp` or `/var/tmp` — the
+only two directories `PrivateTmp=` covers. As with the fragment sweep above, the
+layer is pulled by a mutable tag, so a payload that moved has to stop the build
+for review rather than ship beside a drop-in that no longer protects anything.

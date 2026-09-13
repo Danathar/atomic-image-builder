@@ -95,6 +95,24 @@ BREW_LOGIN_SHELL_DIRS = (
     "/etc/fish/conf.d",
     "/usr/share/fish/vendor_conf.d",
 )
+# The other half of what the payload does on a booted machine. brew-setup.service
+# stages a 154 MB tarball through one fixed path, as root, with no `PrivateTmp=`:
+#
+#   ExecStart=/usr/bin/mkdir -p /tmp/homebrew
+#   ExecStart=/usr/bin/tar --zstd -xf /usr/share/homebrew.tar.zst -C /tmp/homebrew
+#   ExecStart=/usr/bin/cp -R -n /tmp/homebrew/home/linuxbrew/.linuxbrew /home/linuxbrew
+#   ExecStart=/usr/bin/chown -R 1000:1000 /home/linuxbrew
+#
+# /tmp on a booted system is a world-writable tmpfs, and `mkdir -p` exits 0 on an
+# existing symlink instead of replacing it -- so an account that claims
+# /tmp/homebrew first has root extract through its symlink, has whatever it left
+# there copied into /home/linuxbrew, and has it handed to UID 1000 by the chown.
+# The `-n` protects nothing on the run that matters: the unit's own
+# `ConditionPathExists=!/home/linuxbrew/.linuxbrew` guarantees the destination
+# does not exist yet. The `--mount=type=tmpfs,dst=/tmp` on the preset RUN is a
+# build-time mount and has no bearing on any of this.
+BREW_SETUP_UNIT = "/usr/lib/systemd/system/brew-setup.service"
+BREW_SETUP_DROPIN = "/usr/lib/systemd/system/brew-setup.service.d/10-private-tmp.conf"
 MAX_UI_WIDTH = 120
 # Every colour here is a 256-palette index chosen to stay legible on BOTH a
 # light and a dark terminal. The originals were picked on a dark background and
@@ -713,6 +731,79 @@ def brew_login_fragment_run_lines(indent: str = "") -> list[str]:
     )
     lines.append(f"{indent}        exit 1; \\")
     lines.append(f"{indent}    fi")
+    return lines
+
+
+# `ExecStart=` lines only, and only a /tmp or /var/tmp path inside one. Scoping
+# it to ExecStart= is what keeps a `ConditionPathExists=` or a comment that
+# happens to name /tmp from standing in as evidence of where the payload stages.
+BREW_SETUP_STAGING_RE = "^ExecStart="
+BREW_SETUP_TMP_PATH_RE = "(^|[^[:alnum:]_.-])/(var/)?tmp(/|[[:space:]]|$)"
+
+
+def brew_setup_staging_run_lines(indent: str = "") -> list[str]:
+    """Return the RUN step that confines brew-setup.service to a private /tmp.
+
+    Emitted immediately after ``brew_login_fragment_run_lines()`` by every path
+    that writes the ``COPY --from=<brew image> /system_files /`` block: the
+    Containerfile generator, the Containerfile patcher, and the BlueBuild
+    recipe's containerfile module. See BREW_SETUP_UNIT for what the payload's
+    unit does without this and why it matters on a booted machine.
+
+    The step does two things, in this order: refuse to write the drop-in if the
+    payload no longer has a unit for it to apply to, or no longer stages
+    anywhere ``PrivateTmp=`` confines; and then write it. The check comes first
+    because the point of failing is to stop a vestigial drop-in shipping beside
+    a payload that has moved -- the image is named by a mutable tag, so what
+    landed in it is the only thing worth asserting against.
+
+    ``indent`` prefixes every line, for the BlueBuild recipe, where the same
+    text lives inside a YAML literal block scalar.
+    """
+    dropin = [
+        "# brew-setup.service stages the Homebrew payload through /tmp as root and",
+        "# ships no PrivateTmp=, so on a booted system its staging path is a name in",
+        "# a world-writable tmpfs that any local account can claim first. With this",
+        "# drop-in the unit gets its own /tmp and /var/tmp for the whole invocation,",
+        "# shared by every ExecStart= of that invocation and by nothing else on the",
+        "# system. /home/linuxbrew is outside both, so the payload still lands there.",
+        "#",
+        "# A drop-in rather than a unit that overrides ExecStart=: a copy of the",
+        "# payload command chain would drift silently the next time the payload moves.",
+        "[Service]",
+        "PrivateTmp=yes",
+    ]
+    # Same rule, and the same reason, as the login-shell fragment above: every
+    # line is emitted inside a single-quoted printf argument, so one apostrophe
+    # would close the quote and hand the rest of the line to the build shell.
+    for line in dropin:
+        if "'" in line:
+            raise CommandError(f"brew-setup drop-in line cannot contain an apostrophe: {line!r}")
+    lines = [f"{indent}RUN if [ ! -f {BREW_SETUP_UNIT} ]; then \\"]
+    lines.append(
+        f'{indent}        echo "error: the brew payload no longer ships {BREW_SETUP_UNIT}, so there is nothing to confine." >&2; \\'
+    )
+    lines.append(f"{indent}        exit 1; \\")
+    lines.append(f"{indent}    fi && \\")
+    lines.append(
+        f"{indent}    staging=\"$(grep -E '{BREW_SETUP_STAGING_RE}' {BREW_SETUP_UNIT} \\"
+    )
+    lines.append(f"{indent}      | grep -E '{BREW_SETUP_TMP_PATH_RE}' || true)\" && \\")
+    lines.append(f'{indent}    if [ -z "${{staging}}" ]; then \\')
+    lines.append(
+        f'{indent}        echo "error: brew-setup.service no longer stages under /tmp or /var/tmp, which is all PrivateTmp= confines:" >&2; \\'
+    )
+    lines.append(f"{indent}        grep -E '{BREW_SETUP_STAGING_RE}' {BREW_SETUP_UNIT} >&2; \\")
+    lines.append(
+        f'{indent}        echo "Find where the payload stages now before trusting {BREW_SETUP_DROPIN}." >&2; \\'
+    )
+    lines.append(f"{indent}        exit 1; \\")
+    lines.append(f"{indent}    fi && \\")
+    lines.append(f"{indent}    mkdir -p {PurePosixPath(BREW_SETUP_DROPIN).parent} && \\")
+    lines.append(f"{indent}    printf '%s\\n' \\")
+    lines.extend(f"{indent}      '{line}' \\" for line in dropin)
+    lines.append(f"{indent}      > {BREW_SETUP_DROPIN} && \\")
+    lines.append(f"{indent}    chmod 0644 {BREW_SETUP_DROPIN}")
     return lines
 
 
@@ -4652,6 +4743,7 @@ class App:
             "    /usr/bin/systemctl preset brew-update.timer && \\",
             "    /usr/bin/systemctl preset brew-upgrade.timer",
             *brew_login_fragment_run_lines(),
+            *brew_setup_staging_run_lines(),
             "",
         ]
         if brew_start is not None:
@@ -5398,6 +5490,10 @@ class App:
                 # way if the block is theirs alone.
                 "      - |",
                 *brew_login_fragment_run_lines(indent="        "),
+                # And a third, for the same reason: one snippet per RUN, so
+                # BlueBuild hands each to the build shell intact.
+                "      - |",
+                *brew_setup_staging_run_lines(indent="        "),
             ])
 
         if self.config.copr_repos or self.config.packages or self.config.removed_packages:
@@ -5551,6 +5647,7 @@ class App:
                 "    /usr/bin/systemctl preset brew-update.timer && \\",
                 "    /usr/bin/systemctl preset brew-upgrade.timer",
                 *brew_login_fragment_run_lines(),
+                *brew_setup_staging_run_lines(),
                 "",
             ])
         lines.extend([
