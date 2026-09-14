@@ -1,8 +1,12 @@
 import re
+import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from atomic_image_builder import UNIVERSAL_BLUE_BREW_IMAGE  # noqa: E402
 
 
 class WorkflowDependencyTests(unittest.TestCase):
@@ -208,6 +212,11 @@ _RPM_IMPORT = re.compile(r"rpm\s+--import\s+(?P<targets>[^&|\n]+)")
 _REPOFILE = re.compile(r"--from-repofile=(?P<url>\S+)")
 
 _CONTAINERFILES = ("Containerfile", "container/Containerfile.coverage")
+# A `COPY --from=` the generators actually emit: either the interpolated pin
+# constant, or a literal registry reference. Deliberately not `(\S+)` -- that
+# also matches the `COPY --from=<brew image>` placeholders in two docstrings
+# and the `"COPY --from="` prefix the block detector tests for.
+_EMITTED_COPY = re.compile(r"COPY --from=(\{[A-Z_]+\}|[a-z0-9][\w.\-]*\.[\w.\-]*/\S+)")
 
 
 def _containerfile(name: str) -> str:
@@ -318,3 +327,29 @@ class ContainerImageTrustRootTests(unittest.TestCase):
         self.assertEqual(len(_GPGKEY.findall(text)), 2, "expected the charm and gh-cli repos")
         self.assertEqual(len(_CF_CURL.findall(text)), 3, "expected two keys and the cosign RPM")
         self.assertEqual(len(_CF_DIGEST.findall(text)), 3)
+
+    def test_the_homebrew_payload_is_named_by_digest_not_by_tag(self) -> None:
+        # This is the one third-party image whose whole file tree is copied
+        # into `/` of an image a generated repository then signs, so a tag that
+        # moves upstream changes what that signature covers. Everything else
+        # the tool ships into a stranger's repository is pinned; this asserts
+        # the payload is too, offline, in the ordinary suite.
+        self.assertRegex(UNIVERSAL_BLUE_BREW_IMAGE, r"^[a-z0-9.\-]+(?:/[a-z0-9.\-_]+)+@sha256:[0-9a-f]{64}$")
+
+    def test_no_generated_copy_names_an_image_other_than_the_pinned_payload(self) -> None:
+        # A second `COPY --from=` emitted by the generator would be a second
+        # image copied into strangers' images, and writing one as a literal
+        # registry reference is how it would arrive unpinned. The pinned
+        # constant is the only spelling allowed at an emit site.
+        source = (ROOT / "atomic_image_builder.py").read_text()
+        refs = _EMITTED_COPY.findall(source)
+        # Not vacuous: the generators emit this block three times -- the
+        # from-scratch Containerfile, the patched one, and the BlueBuild
+        # snippet -- so a regex that stopped matching would be caught here
+        # rather than passing as "no offenders".
+        self.assertEqual(len(refs), 3, "expected the three brew COPY emit sites")
+        self.assertEqual(
+            [ref for ref in refs if ref != "{UNIVERSAL_BLUE_BREW_IMAGE}"],
+            [],
+            "a generated COPY names an image that is not the pinned payload",
+        )

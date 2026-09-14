@@ -95,7 +95,12 @@ images do not.
 
 When you choose a Fedora Atomic base image (Silverblue, Kinoite, etc.), the tool
 offers to include Homebrew using the Universal Blue brew OCI layer
-(`ghcr.io/ublue-os/brew:latest`). This adds:
+(`ghcr.io/ublue-os/brew`). The generated Containerfile names it by digest rather
+than by tag, because its whole `/system_files` tree is copied into `/` of an
+image your workflow then signs — a tag that moved upstream would change what
+that signature covers without changing anything in your repository. The pinned
+digest moves when this tool is updated, after the new payload has been reviewed.
+This adds:
 
 - The Homebrew installation and `/etc/profile.d/brew-path.sh`, the one shell
   integration fragment the generated image keeps

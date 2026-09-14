@@ -33,8 +33,8 @@ from atomic_image_builder import (  # noqa: E402
     brew_login_fragment_run_lines,
 )
 
-# What the payload actually ships, at the digest ghcr.io/ublue-os/brew:latest
-# resolved to when this was written. Only the part that matters is reproduced:
+# What the payload actually ships at UNIVERSAL_BLUE_BREW_IMAGE_DIGEST, the
+# digest the generators pin. Only the part that matters is reproduced:
 # each one executes something out of /home/linuxbrew/.linuxbrew.
 PAYLOAD_FRAGMENTS = {
     "/etc/profile.d/brew.sh": 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv | grep -Ev \'\\bPATH=\')"\n',

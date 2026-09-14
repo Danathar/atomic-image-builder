@@ -6,8 +6,10 @@ Why: brew-setup.service stages a 154 MB tarball through /tmp as root with no `Pr
 Goal: Keep the drop-in and the payload check that backstops it from drifting apart, and prove each one by behaviour rather than by substring.
 
 The unit is not in this repository at any revision -- it arrives from an image
-built somewhere else, named by a mutable tag -- so nothing here can assert what
-it contains by reading a tracked file. What can be pinned is what the generated
+built somewhere else -- so nothing here can assert what it contains by reading a
+tracked file. The reference the generators emit is pinned to a digest, which
+fixes which payload they copy but still says nothing about what is inside it, and
+a re-pin brings a payload this file has not seen. What can be pinned is what the generated
 build step does to a tree that holds one, which is why the step is executed here
 instead of pattern-matched. PAYLOAD_UNIT reproduces the unit the payload ships
 today; the staging check is what covers the ones it has not shipped yet.
@@ -36,8 +38,8 @@ from atomic_image_builder import (  # noqa: E402
     brew_setup_staging_run_lines,
 )
 
-# What the payload actually ships, at the digest ghcr.io/ublue-os/brew:latest
-# resolved to when this was written. Reproduced whole rather than trimmed: the
+# What the payload actually ships at UNIVERSAL_BLUE_BREW_IMAGE_DIGEST, the
+# digest the generators pin. Reproduced whole rather than trimmed: the
 # staging check reads ExecStart= lines and nothing else, so which lines are
 # present and which are merely Condition= is the distinction under test.
 PAYLOAD_UNIT = """\
