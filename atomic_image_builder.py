@@ -58,7 +58,25 @@ REPO_NAME_RULE = (
 )
 DEFAULT_GITHUB_BUILD_CRON = "05 10 * * *"
 FEDORA_ATOMIC_FALLBACK_TAG = "44"
-UNIVERSAL_BLUE_BREW_IMAGE = "ghcr.io/ublue-os/brew:latest"
+# Pinned by digest rather than by the tag it is published under. Every other
+# third-party input this tool writes into a stranger's repository is pinned --
+# actions through ACTION_PINS, downloads by sha256 -- and the payload below is
+# the one that was not, even though it is the only one whose whole file tree is
+# copied into `/` of an image the generated workflow then signs. A tag that
+# moves upstream changes what a signed image contains without changing a byte
+# of the repository that built it, and nothing in a generated repo records
+# which payload went in, so the change leaves no trace to find afterwards.
+#
+# Refreshing this is a deliberate step, not a rubber stamp: the digest names
+# the exact payload tests/test_brew_login_fragments.py and
+# tests/test_brew_setup_staging.py reproduce, and a new one can ship files
+# neither of them knows about. maintenance_audit.py --check-action-updates
+# reports weekly when the tag stops resolving here, so the pin going stale is
+# visible rather than silent.
+UNIVERSAL_BLUE_BREW_IMAGE_REPO = "ghcr.io/ublue-os/brew"
+UNIVERSAL_BLUE_BREW_IMAGE_TAG = "latest"
+UNIVERSAL_BLUE_BREW_IMAGE_DIGEST = "sha256:60ada2d65891d8797beef49d8b43f2108519cbbaf04c9c7363e1a008677fcd35"
+UNIVERSAL_BLUE_BREW_IMAGE = f"{UNIVERSAL_BLUE_BREW_IMAGE_REPO}@{UNIVERSAL_BLUE_BREW_IMAGE_DIGEST}"
 # The brew payload's /system_files carries three login-shell fragments
 # alongside the units and the tarball, and none of them is guarded:
 #

@@ -13,7 +13,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from atomic_image_builder import ACTION_PINS, ACTION_REF_PINS
+from atomic_image_builder import (
+    ACTION_PINS,
+    ACTION_REF_PINS,
+    UNIVERSAL_BLUE_BREW_IMAGE_DIGEST,
+    UNIVERSAL_BLUE_BREW_IMAGE_REPO,
+    UNIVERSAL_BLUE_BREW_IMAGE_TAG,
+)
 
 TEMPLATE_SOURCES: list[tuple[str, str]] = [
     ("template_snapshots/containerfile/.template-source", "template_snapshots/containerfile/.github/workflows/build.yml"),
@@ -44,6 +50,20 @@ SNAPSHOT_DRIFT_FAILURE_COMMITS = 25
 # network round trips on a shared runner -- this is a hang guard, not a
 # latency budget.
 SUBPROCESS_TIMEOUT_SECONDS = 120
+# Every media type a registry may answer a manifest request with. Asking for
+# all four matters: ghcr.io serves the brew payload as an OCI image index, and
+# a request that does not accept indexes is answered with a converted
+# single-platform manifest whose digest is not the one a `COPY --from=` would
+# resolve -- so the check would report drift on every run.
+OCI_MANIFEST_ACCEPT = ", ".join(
+    (
+        "application/vnd.oci.image.index.v1+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    )
+)
+USER_AGENT = "atomic-image-builder-maintenance-audit"
 USES_RE = re.compile(r"^\s*(?:-\s*)?uses:\s+([^@\s]+)@([^\s#]+)")
 VERSION_TAG_RE = re.compile(r"^v(\d+)(?:\.(\d+))?(?:\.(\d+))?$")
 
@@ -508,6 +528,9 @@ def run_audit(
         # callers (--skip-upstream, from nightly-compliance and ai-fix) get
         # the local checks only.
         advisories.extend(audit_container_trust_roots(repo_root))
+        # And the same gate again for the Homebrew payload pin, which is a
+        # registry read rather than a download but ages the same way.
+        advisories.extend(audit_brew_image_pin())
     return findings, advisories
 
 
@@ -587,6 +610,86 @@ def audit_container_trust_roots(repo_root: Path) -> list[str]:
                 'maintenance_notes.txt, "Third-Party Repository Trust Roots".'
             )
     return advisories
+
+
+def resolve_registry_tag_digest(registry: str, repository: str, tag: str) -> str:
+    """Return the digest a registry currently serves for <repository>:<tag>.
+
+    Two requests, because a registry answers an anonymous manifest read only
+    with a pull token it issues first. The digest comes from the response
+    header rather than from hashing the body: a registry is entitled to
+    re-serialize a manifest, and the header is the value it will honour in a
+    `COPY --from=...@sha256:...`.
+    """
+    token_request = urllib.request.Request(
+        f"https://{registry}/token?service={registry}&scope=repository:{repository}:pull",
+        headers={"User-Agent": USER_AGENT},
+    )
+    try:
+        with urllib.request.urlopen(token_request, timeout=20) as response:
+            payload = json.load(response)
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"HTTP {exc.code} requesting a pull token") from exc
+    except (urllib.error.URLError, ValueError) as exc:
+        raise RuntimeError(str(exc)) from exc
+    token = payload.get("token") if isinstance(payload, dict) else None
+    if not isinstance(token, str) or not token:
+        raise RuntimeError(f"{registry} issued no pull token for {repository}")
+
+    manifest_request = urllib.request.Request(
+        f"https://{registry}/v2/{repository}/manifests/{tag}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": OCI_MANIFEST_ACCEPT,
+            "User-Agent": USER_AGENT,
+        },
+        method="HEAD",
+    )
+    try:
+        with urllib.request.urlopen(manifest_request, timeout=20) as response:
+            digest = response.headers.get("Docker-Content-Digest")
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(str(exc.reason)) from exc
+    if not digest:
+        raise RuntimeError(f"{registry} returned no Docker-Content-Digest for {repository}:{tag}")
+    return digest
+
+
+def audit_brew_image_pin() -> list[str]:
+    """Advise when the Homebrew payload tag no longer resolves to the pin.
+
+    The payload is copied whole into `/` of every generated image that enables
+    Homebrew, which is why it is pinned by digest rather than by tag. The cost
+    of that pin is the one every pin has: upstream moves and the pinned copy
+    quietly ages, and without a check the first sign of it would be a user
+    reporting that a generated image ships a Homebrew months older than the
+    one they installed by hand.
+
+    Advisory, not a failure, for the same reason snapshot drift is: upstream
+    publishing a new payload is a normal event this repository does not
+    control, and nothing is wrong with what is pinned at the moment it
+    happens. Re-pinning is a review, not a bump -- a new payload can add files
+    that the two payload test modules do not know about, and neither the
+    login-fragment strip nor the brew-setup drop-in covers what it has not
+    seen.
+    """
+    registry, _, repository = UNIVERSAL_BLUE_BREW_IMAGE_REPO.partition("/")
+    reference = f"{UNIVERSAL_BLUE_BREW_IMAGE_REPO}:{UNIVERSAL_BLUE_BREW_IMAGE_TAG}"
+    try:
+        upstream = resolve_registry_tag_digest(registry, repository, UNIVERSAL_BLUE_BREW_IMAGE_TAG)
+    except RuntimeError as exc:
+        return [f"Unable to resolve {reference} upstream: {exc}"]
+    if upstream == UNIVERSAL_BLUE_BREW_IMAGE_DIGEST:
+        return []
+    return [
+        f"{reference} no longer resolves to the digest pinned in "
+        f"UNIVERSAL_BLUE_BREW_IMAGE_DIGEST: pinned {UNIVERSAL_BLUE_BREW_IMAGE_DIGEST}, "
+        f"upstream {upstream}. Review what the new payload ships before re-pinning -- "
+        "tests/test_brew_login_fragments.py and tests/test_brew_setup_staging.py "
+        "reproduce the files the pinned one carries."
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:

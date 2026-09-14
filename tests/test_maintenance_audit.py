@@ -10,12 +10,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 from _local_http_server import closed_port_url, local_http_server
+from atomic_image_builder import (
+    UNIVERSAL_BLUE_BREW_IMAGE_DIGEST,
+    UNIVERSAL_BLUE_BREW_IMAGE_TAG,
+)
 from maintenance_audit import (
     SNAPSHOT_DRIFT_FAILURE_COMMITS,
     SUBPROCESS_TIMEOUT_SECONDS,
     TemplateSource,
     audit_action_pin_freshness,
     audit_action_update_availability,
+    audit_brew_image_pin,
     audit_container_trust_roots,
     audit_local_snapshot,
     audit_pin_table_shapes,
@@ -35,6 +40,7 @@ from maintenance_audit import (
     query_github_ref_sha,
     query_latest_github_semver_tag,
     query_remote_head,
+    resolve_registry_tag_digest,
     run_audit,
     version_tag_precision,
 )
@@ -54,6 +60,19 @@ class FakeResponse:
 
     def read(self) -> bytes:
         return self._body
+
+
+class FakeHeadResponse:
+    """A HEAD response: headers and no body, the shape a manifest probe reads."""
+
+    def __init__(self, headers: dict[str, str]) -> None:
+        self.headers = headers
+
+    def __enter__(self) -> "FakeHeadResponse":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
 
 
 class MaintenanceAuditTests(unittest.TestCase):
@@ -831,12 +850,143 @@ class ContainerTrustRootAuditTests(unittest.TestCase):
         with patch("maintenance_audit.audit_container_trust_roots", return_value=["x"]) as checked:
             with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
                 with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
-                    repo_root = Path(__file__).resolve().parents[1]
-                    run_audit(repo_root, skip_upstream=True, check_action_updates=False)
-                    self.assertEqual(checked.call_count, 0)
+                    with patch("maintenance_audit.audit_brew_image_pin", return_value=[]):
+                        repo_root = Path(__file__).resolve().parents[1]
+                        run_audit(repo_root, skip_upstream=True, check_action_updates=False)
+                        self.assertEqual(checked.call_count, 0)
 
-                    _findings, advisories = run_audit(
-                        repo_root, skip_upstream=True, check_action_updates=True
-                    )
-                    self.assertEqual(checked.call_count, 1)
-                    self.assertIn("x", advisories)
+                        _findings, advisories = run_audit(
+                            repo_root, skip_upstream=True, check_action_updates=True
+                        )
+                        self.assertEqual(checked.call_count, 1)
+                        self.assertIn("x", advisories)
+
+
+class BrewPayloadPinAuditTests(unittest.TestCase):
+    """The Homebrew payload pin is checked against its tag once a week.
+
+    The payload is copied whole into `/` of every generated image that enables
+    Homebrew, so it is pinned by digest rather than by tag. The obligation that
+    comes with the pin is the same one the key pins carry: upstream publishes a
+    new payload and the pinned copy ages, with nothing to say so.
+    """
+
+    def test_a_tag_that_still_resolves_to_the_pin_says_nothing(self) -> None:
+        with patch(
+            "maintenance_audit.resolve_registry_tag_digest",
+            return_value=UNIVERSAL_BLUE_BREW_IMAGE_DIGEST,
+        ):
+            self.assertEqual(audit_brew_image_pin(), [])
+
+    def test_a_moved_tag_is_reported_with_both_digests(self) -> None:
+        moved = "sha256:" + "e" * 64
+        with patch("maintenance_audit.resolve_registry_tag_digest", return_value=moved):
+            (advisory,) = audit_brew_image_pin()
+        self.assertIn(UNIVERSAL_BLUE_BREW_IMAGE_DIGEST, advisory)
+        self.assertIn(moved, advisory)
+        # Naming the two payload modules is the point of the advisory: a new
+        # payload is a review of what it ships, not a digest to copy across.
+        self.assertIn("tests/test_brew_login_fragments.py", advisory)
+        self.assertIn("tests/test_brew_setup_staging.py", advisory)
+
+    def test_a_registry_that_cannot_be_reached_is_said_so_not_passed(self) -> None:
+        with patch(
+            "maintenance_audit.resolve_registry_tag_digest",
+            side_effect=RuntimeError("timed out"),
+        ):
+            (advisory,) = audit_brew_image_pin()
+        self.assertIn("Unable to resolve", advisory)
+        self.assertIn("timed out", advisory)
+
+    def test_the_registry_host_is_split_off_the_image_reference(self) -> None:
+        # ghcr.io/ublue-os/brew is one string in the tool; the registry API
+        # needs the host and the repository path apart, and splitting on the
+        # wrong slash asks ghcr.io for "brew" in nobody's namespace.
+        with patch(
+            "maintenance_audit.resolve_registry_tag_digest",
+            return_value=UNIVERSAL_BLUE_BREW_IMAGE_DIGEST,
+        ) as resolve:
+            audit_brew_image_pin()
+        resolve.assert_called_once_with("ghcr.io", "ublue-os/brew", UNIVERSAL_BLUE_BREW_IMAGE_TAG)
+
+    def test_resolve_registry_tag_digest_returns_the_header_the_registry_sent(self) -> None:
+        digest = "sha256:" + "1" * 64
+        responses = [FakeResponse({"token": "t"}), FakeHeadResponse({"Docker-Content-Digest": digest})]
+        with patch("urllib.request.urlopen", side_effect=responses):
+            self.assertEqual(resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest"), digest)
+
+    def test_the_manifest_is_requested_as_a_head_that_accepts_an_index(self) -> None:
+        # Both halves matter. A GET would download the manifest to read a
+        # header; and a request that does not accept an image index is
+        # answered with a converted single-platform manifest, whose digest is
+        # not what `COPY --from=` resolves -- so the check would report drift
+        # every week and the pin would be "refreshed" onto the wrong value.
+        requests = []
+
+        def record(request, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+            requests.append(request)
+            if len(requests) == 1:
+                return FakeResponse({"token": "t"})
+            return FakeHeadResponse({"Docker-Content-Digest": "sha256:" + "2" * 64})
+
+        with patch("urllib.request.urlopen", side_effect=record):
+            resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
+        manifest_request = requests[1]
+        self.assertEqual(manifest_request.get_method(), "HEAD")
+        self.assertIn("application/vnd.oci.image.index.v1+json", manifest_request.headers["Accept"])
+        self.assertEqual(manifest_request.headers["Authorization"], "Bearer t")
+
+    def test_resolve_registry_tag_digest_rejects_a_response_without_the_header(self) -> None:
+        responses = [FakeResponse({"token": "t"}), FakeHeadResponse({})]
+        with patch("urllib.request.urlopen", side_effect=responses):
+            with self.assertRaisesRegex(RuntimeError, "no Docker-Content-Digest"):
+                resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
+
+    def test_resolve_registry_tag_digest_rejects_a_token_response_with_no_token(self) -> None:
+        with patch("urllib.request.urlopen", return_value=FakeResponse({"errors": []})):
+            with self.assertRaisesRegex(RuntimeError, "issued no pull token"):
+                resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
+
+    def test_resolve_registry_tag_digest_reports_a_token_http_error(self) -> None:
+        error = urllib.error.HTTPError("https://ghcr.io/token", 403, "Forbidden", {}, None)
+        with patch("urllib.request.urlopen", side_effect=error):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 403 requesting a pull token"):
+                resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
+
+    def test_resolve_registry_tag_digest_reports_a_manifest_http_error(self) -> None:
+        error = urllib.error.HTTPError("https://ghcr.io/v2/x/manifests/latest", 404, "Not Found", {}, None)
+        with patch("urllib.request.urlopen", side_effect=[FakeResponse({"token": "t"}), error]):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 404"):
+                resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
+
+    def test_resolve_registry_tag_digest_reports_a_connection_failure(self) -> None:
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")):
+            with self.assertRaisesRegex(RuntimeError, "refused"):
+                resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
+
+    def test_a_connection_that_drops_after_the_token_is_reported_too(self) -> None:
+        # The second request has its own error handling, and a token that was
+        # issued before the connection failed would otherwise leave the
+        # failure to escape as a urllib exception rather than the RuntimeError
+        # the caller turns into an advisory.
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=[FakeResponse({"token": "t"}), urllib.error.URLError("reset by peer")],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "reset by peer"):
+                resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
+
+    def test_the_weekly_run_is_the_one_that_checks_the_payload_pin(self) -> None:
+        with patch("maintenance_audit.audit_brew_image_pin", return_value=["moved"]) as checked:
+            with patch("maintenance_audit.audit_container_trust_roots", return_value=[]):
+                with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
+                    with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
+                        repo_root = Path(__file__).resolve().parents[1]
+                        run_audit(repo_root, skip_upstream=True, check_action_updates=False)
+                        self.assertEqual(checked.call_count, 0)
+
+                        _findings, advisories = run_audit(
+                            repo_root, skip_upstream=True, check_action_updates=True
+                        )
+                        self.assertEqual(checked.call_count, 1)
+                        self.assertIn("moved", advisories)
