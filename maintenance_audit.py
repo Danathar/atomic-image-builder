@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -16,6 +17,9 @@ from pathlib import Path
 from atomic_image_builder import (
     ACTION_PINS,
     ACTION_REF_PINS,
+    BOOTC_IMAGE_BUILDER_IMAGE_DIGEST,
+    BOOTC_IMAGE_BUILDER_IMAGE_REPO,
+    BOOTC_IMAGE_BUILDER_IMAGE_TAG,
     UNIVERSAL_BLUE_BREW_IMAGE_DIGEST,
     UNIVERSAL_BLUE_BREW_IMAGE_REPO,
     UNIVERSAL_BLUE_BREW_IMAGE_TAG,
@@ -64,6 +68,8 @@ OCI_MANIFEST_ACCEPT = ", ".join(
     )
 )
 USER_AGENT = "atomic-image-builder-maintenance-audit"
+# The `key="value"` pairs of a `WWW-Authenticate: Bearer ...` challenge.
+BEARER_CHALLENGE_PARAM_RE = re.compile(r'(\w+)="([^"]*)"')
 USES_RE = re.compile(r"^\s*(?:-\s*)?uses:\s+([^@\s]+)@([^\s#]+)")
 VERSION_TAG_RE = re.compile(r"^v(\d+)(?:\.(\d+))?(?:\.(\d+))?$")
 
@@ -528,9 +534,10 @@ def run_audit(
         # callers (--skip-upstream, from nightly-compliance and ai-fix) get
         # the local checks only.
         advisories.extend(audit_container_trust_roots(repo_root))
-        # And the same gate again for the Homebrew payload pin, which is a
-        # registry read rather than a download but ages the same way.
+        # And the same gate again for the two image pins, which are registry
+        # reads rather than downloads but age the same way.
         advisories.extend(audit_brew_image_pin())
+        advisories.extend(audit_disk_builder_image_pin())
     return findings, advisories
 
 
@@ -615,14 +622,62 @@ def audit_container_trust_roots(repo_root: Path) -> list[str]:
 def resolve_registry_tag_digest(registry: str, repository: str, tag: str) -> str:
     """Return the digest a registry currently serves for <repository>:<tag>.
 
-    Two requests, because a registry answers an anonymous manifest read only
-    with a pull token it issues first. The digest comes from the response
-    header rather than from hashing the body: a registry is entitled to
-    re-serialize a manifest, and the header is the value it will honour in a
-    `COPY --from=...@sha256:...`.
+    A HEAD on the manifest, repeated with a bearer token if the registry
+    refuses the anonymous one. Registries disagree on whether a public
+    repository needs a token to read at all: ghcr.io answers 401 and names
+    its token endpoint in the WWW-Authenticate challenge, quay.io answers
+    outright and keeps its endpoint somewhere else. Following the challenge
+    is the one shape that works for both, and for the next registry a pin
+    lands on, where assuming an endpoint would be right for exactly one.
+
+    The digest comes from the response header rather than from hashing the
+    body: a registry is entitled to re-serialize a manifest, and the header is
+    the value it will honour in a `COPY --from=...@sha256:...`.
     """
+    url = f"https://{registry}/v2/{repository}/manifests/{tag}"
+    headers = {"Accept": OCI_MANIFEST_ACCEPT, "User-Agent": USER_AGENT}
+    try:
+        response_headers = head_registry_manifest(url, headers)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 401:
+            raise RuntimeError(f"HTTP {exc.code}") from exc
+        token = fetch_registry_pull_token(exc.headers.get("WWW-Authenticate", ""), registry, repository)
+        try:
+            response_headers = head_registry_manifest(url, {**headers, "Authorization": f"Bearer {token}"})
+        except urllib.error.HTTPError as retry_exc:
+            raise RuntimeError(f"HTTP {retry_exc.code}") from retry_exc
+        except urllib.error.URLError as retry_exc:
+            raise RuntimeError(str(retry_exc.reason)) from retry_exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(str(exc.reason)) from exc
+    digest = response_headers.get("Docker-Content-Digest")
+    if not digest:
+        raise RuntimeError(f"{registry} returned no Docker-Content-Digest for {repository}:{tag}")
+    return digest
+
+
+def head_registry_manifest(url: str, headers: Mapping[str, str]) -> Mapping[str, str]:
+    # Lets urllib's own errors escape: the caller decides whether a 401 is a
+    # failure or an invitation to fetch a token.
+    request = urllib.request.Request(url, headers=dict(headers), method="HEAD")
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return response.headers
+
+
+def fetch_registry_pull_token(challenge: str, registry: str, repository: str) -> str:
+    """Exchange a registry's Bearer challenge for the pull token it asks for.
+
+    The realm is the token endpoint; service and scope are echoed back to it
+    as query parameters, as the distribution spec's token flow has it. Either
+    `token` or `access_token` is a valid spelling of the answer.
+    """
+    params = dict(BEARER_CHALLENGE_PARAM_RE.findall(challenge)) if challenge.startswith("Bearer ") else {}
+    realm = params.pop("realm", None)
+    if not realm:
+        raise RuntimeError(f"{registry} refused an anonymous read of {repository} and offered no token endpoint")
+    query = {key: value for key, value in params.items() if key in {"service", "scope"}}
     token_request = urllib.request.Request(
-        f"https://{registry}/token?service={registry}&scope=repository:{repository}:pull",
+        f"{realm}?{urllib.parse.urlencode(query)}" if query else realm,
         headers={"User-Agent": USER_AGENT},
     )
     try:
@@ -632,29 +687,35 @@ def resolve_registry_tag_digest(registry: str, repository: str, tag: str) -> str
         raise RuntimeError(f"HTTP {exc.code} requesting a pull token") from exc
     except (urllib.error.URLError, ValueError) as exc:
         raise RuntimeError(str(exc)) from exc
-    token = payload.get("token") if isinstance(payload, dict) else None
+    token = None
+    if isinstance(payload, dict):
+        token = payload.get("token") or payload.get("access_token")
     if not isinstance(token, str) or not token:
         raise RuntimeError(f"{registry} issued no pull token for {repository}")
+    return token
 
-    manifest_request = urllib.request.Request(
-        f"https://{registry}/v2/{repository}/manifests/{tag}",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": OCI_MANIFEST_ACCEPT,
-            "User-Agent": USER_AGENT,
-        },
-        method="HEAD",
-    )
+
+def audit_image_pin(*, repo: str, tag: str, digest: str, constant: str, review: str) -> list[str]:
+    """Advise when a pinned image's tag no longer resolves to its pin.
+
+    Advisory, not a failure, for the same reason snapshot drift is: upstream
+    publishing a new image is a normal event this repository does not
+    control, and nothing is wrong with what is pinned at the moment it
+    happens. `review` says what re-pinning has to check, because for both
+    pins it is a review rather than a bump.
+    """
+    registry, _, repository = repo.partition("/")
+    reference = f"{repo}:{tag}"
     try:
-        with urllib.request.urlopen(manifest_request, timeout=20) as response:
-            digest = response.headers.get("Docker-Content-Digest")
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"HTTP {exc.code}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(str(exc.reason)) from exc
-    if not digest:
-        raise RuntimeError(f"{registry} returned no Docker-Content-Digest for {repository}:{tag}")
-    return digest
+        upstream = resolve_registry_tag_digest(registry, repository, tag)
+    except RuntimeError as exc:
+        return [f"Unable to resolve {reference} upstream: {exc}"]
+    if upstream == digest:
+        return []
+    return [
+        f"{reference} no longer resolves to the digest pinned in {constant}: "
+        f"pinned {digest}, upstream {upstream}. {review}"
+    ]
 
 
 def audit_brew_image_pin() -> list[str]:
@@ -667,29 +728,43 @@ def audit_brew_image_pin() -> list[str]:
     reporting that a generated image ships a Homebrew months older than the
     one they installed by hand.
 
-    Advisory, not a failure, for the same reason snapshot drift is: upstream
-    publishing a new payload is a normal event this repository does not
-    control, and nothing is wrong with what is pinned at the moment it
-    happens. Re-pinning is a review, not a bump -- a new payload can add files
-    that the two payload test modules do not know about, and neither the
-    login-fragment strip nor the brew-setup drop-in covers what it has not
-    seen.
+    Re-pinning is a review, not a bump -- a new payload can add files that the
+    two payload test modules do not know about, and neither the login-fragment
+    strip nor the brew-setup drop-in covers what it has not seen.
     """
-    registry, _, repository = UNIVERSAL_BLUE_BREW_IMAGE_REPO.partition("/")
-    reference = f"{UNIVERSAL_BLUE_BREW_IMAGE_REPO}:{UNIVERSAL_BLUE_BREW_IMAGE_TAG}"
-    try:
-        upstream = resolve_registry_tag_digest(registry, repository, UNIVERSAL_BLUE_BREW_IMAGE_TAG)
-    except RuntimeError as exc:
-        return [f"Unable to resolve {reference} upstream: {exc}"]
-    if upstream == UNIVERSAL_BLUE_BREW_IMAGE_DIGEST:
-        return []
-    return [
-        f"{reference} no longer resolves to the digest pinned in "
-        f"UNIVERSAL_BLUE_BREW_IMAGE_DIGEST: pinned {UNIVERSAL_BLUE_BREW_IMAGE_DIGEST}, "
-        f"upstream {upstream}. Review what the new payload ships before re-pinning -- "
-        "tests/test_brew_login_fragments.py and tests/test_brew_setup_staging.py "
-        "reproduce the files the pinned one carries."
-    ]
+    return audit_image_pin(
+        repo=UNIVERSAL_BLUE_BREW_IMAGE_REPO,
+        tag=UNIVERSAL_BLUE_BREW_IMAGE_TAG,
+        digest=UNIVERSAL_BLUE_BREW_IMAGE_DIGEST,
+        constant="UNIVERSAL_BLUE_BREW_IMAGE_DIGEST",
+        review=(
+            "Review what the new payload ships before re-pinning -- "
+            "tests/test_brew_login_fragments.py and tests/test_brew_setup_staging.py "
+            "reproduce the files the pinned one carries."
+        ),
+    )
+
+
+def audit_disk_builder_image_pin() -> list[str]:
+    """Advise when the bootc-image-builder tag no longer resolves to the pin.
+
+    The builder produces every qcow2 and installer ISO a generated repository
+    publishes, from its workflow and from `just build-qcow2` alike. Its pin
+    ages differently from the payload's: what a stale builder costs is not
+    an old Homebrew but a builder that has fallen behind the bootc in the
+    base images the wizard offers, so the review a re-pin needs is a
+    compatibility one.
+    """
+    return audit_image_pin(
+        repo=BOOTC_IMAGE_BUILDER_IMAGE_REPO,
+        tag=BOOTC_IMAGE_BUILDER_IMAGE_TAG,
+        digest=BOOTC_IMAGE_BUILDER_IMAGE_DIGEST,
+        constant="BOOTC_IMAGE_BUILDER_IMAGE_DIGEST",
+        review=(
+            "Confirm the new builder still handles the base images the wizard "
+            "offers before re-pinning -- a disk build against each is the check."
+        ),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

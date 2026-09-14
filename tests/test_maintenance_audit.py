@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 from _local_http_server import closed_port_url, local_http_server
 from atomic_image_builder import (
+    BOOTC_IMAGE_BUILDER_IMAGE_DIGEST,
+    BOOTC_IMAGE_BUILDER_IMAGE_TAG,
     UNIVERSAL_BLUE_BREW_IMAGE_DIGEST,
     UNIVERSAL_BLUE_BREW_IMAGE_TAG,
 )
@@ -22,11 +24,13 @@ from maintenance_audit import (
     audit_action_update_availability,
     audit_brew_image_pin,
     audit_container_trust_roots,
+    audit_disk_builder_image_pin,
     audit_local_snapshot,
     audit_pin_table_shapes,
     audit_upstream_drift,
     describe_pin_drift,
     describe_snapshot_drift,
+    fetch_registry_pull_token,
     fetch_sha256,
     github_api_json,
     github_repo_slug,
@@ -73,6 +77,15 @@ class FakeHeadResponse:
 
     def __exit__(self, *exc_info: object) -> None:
         return None
+
+
+GHCR_CHALLENGE = 'Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:ublue-os/brew:pull"'
+
+
+def unauthorized(challenge: str | None = GHCR_CHALLENGE) -> urllib.error.HTTPError:
+    """The 401 a registry answers an anonymous manifest read with."""
+    headers = {} if challenge is None else {"WWW-Authenticate": challenge}
+    return urllib.error.HTTPError("https://ghcr.io/v2/ublue-os/brew/manifests/latest", 401, "Unauthorized", headers, None)
 
 
 class MaintenanceAuditTests(unittest.TestCase):
@@ -850,7 +863,9 @@ class ContainerTrustRootAuditTests(unittest.TestCase):
         with patch("maintenance_audit.audit_container_trust_roots", return_value=["x"]) as checked:
             with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
                 with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
-                    with patch("maintenance_audit.audit_brew_image_pin", return_value=[]):
+                    with patch("maintenance_audit.audit_brew_image_pin", return_value=[]), patch(
+                        "maintenance_audit.audit_disk_builder_image_pin", return_value=[]
+                    ):
                         repo_root = Path(__file__).resolve().parents[1]
                         run_audit(repo_root, skip_upstream=True, check_action_updates=False)
                         self.assertEqual(checked.call_count, 0)
@@ -910,10 +925,24 @@ class BrewPayloadPinAuditTests(unittest.TestCase):
         resolve.assert_called_once_with("ghcr.io", "ublue-os/brew", UNIVERSAL_BLUE_BREW_IMAGE_TAG)
 
     def test_resolve_registry_tag_digest_returns_the_header_the_registry_sent(self) -> None:
+        # ghcr.io's shape: the anonymous read is refused with a challenge, the
+        # token comes from the realm it names, and the retry carries it.
         digest = "sha256:" + "1" * 64
-        responses = [FakeResponse({"token": "t"}), FakeHeadResponse({"Docker-Content-Digest": digest})]
+        responses = [unauthorized(), FakeResponse({"token": "t"}), FakeHeadResponse({"Docker-Content-Digest": digest})]
         with patch("urllib.request.urlopen", side_effect=responses):
             self.assertEqual(resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest"), digest)
+
+    def test_a_registry_that_answers_anonymously_is_not_asked_for_a_token(self) -> None:
+        # quay.io's shape: a public repository reads without a token, and its
+        # token endpoint is not where ghcr.io keeps its own. One request, no
+        # guess at an endpoint.
+        digest = "sha256:" + "3" * 64
+        with patch("urllib.request.urlopen", return_value=FakeHeadResponse({"Docker-Content-Digest": digest})) as opened:
+            self.assertEqual(
+                resolve_registry_tag_digest("quay.io", "centos-bootc/bootc-image-builder", "latest"), digest
+            )
+        self.assertEqual(opened.call_count, 1)
+        self.assertNotIn("Authorization", opened.call_args[0][0].headers)
 
     def test_the_manifest_is_requested_as_a_head_that_accepts_an_index(self) -> None:
         # Both halves matter. A GET would download the manifest to read a
@@ -926,37 +955,81 @@ class BrewPayloadPinAuditTests(unittest.TestCase):
         def record(request, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
             requests.append(request)
             if len(requests) == 1:
+                raise unauthorized()
+            if len(requests) == 2:
                 return FakeResponse({"token": "t"})
             return FakeHeadResponse({"Docker-Content-Digest": "sha256:" + "2" * 64})
 
         with patch("urllib.request.urlopen", side_effect=record):
             resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
-        manifest_request = requests[1]
-        self.assertEqual(manifest_request.get_method(), "HEAD")
-        self.assertIn("application/vnd.oci.image.index.v1+json", manifest_request.headers["Accept"])
-        self.assertEqual(manifest_request.headers["Authorization"], "Bearer t")
+        first, token_request, retry = requests
+        for manifest_request in (first, retry):
+            self.assertEqual(manifest_request.get_method(), "HEAD")
+            self.assertIn("application/vnd.oci.image.index.v1+json", manifest_request.headers["Accept"])
+        # The token endpoint, service and scope all come from the challenge,
+        # not from anything this module assumed about the registry.
+        self.assertEqual(
+            token_request.full_url, "https://ghcr.io/token?service=ghcr.io&scope=repository%3Aublue-os%2Fbrew%3Apull"
+        )
+        self.assertEqual(retry.headers["Authorization"], "Bearer t")
+
+    def test_fetch_registry_pull_token_accepts_the_other_spelling_of_the_answer(self) -> None:
+        # The distribution spec allows `access_token` as well as `token`.
+        with patch("urllib.request.urlopen", return_value=FakeResponse({"access_token": "a"})):
+            self.assertEqual(fetch_registry_pull_token(GHCR_CHALLENGE, "ghcr.io", "ublue-os/brew"), "a")
+
+    def test_fetch_registry_pull_token_sends_only_the_parameters_the_flow_defines(self) -> None:
+        # A challenge can carry `error="..."` and other parameters; only the
+        # realm is the endpoint and only service and scope go back to it.
+        challenge = 'Bearer realm="https://r.example/auth",scope="repository:x:pull",error="insufficient_scope"'
+        with patch("urllib.request.urlopen", return_value=FakeResponse({"token": "t"})) as opened:
+            fetch_registry_pull_token(challenge, "r.example", "x")
+        self.assertEqual(opened.call_args[0][0].full_url, "https://r.example/auth?scope=repository%3Ax%3Apull")
+        with patch("urllib.request.urlopen", return_value=FakeResponse({"token": "t"})) as opened:
+            fetch_registry_pull_token('Bearer realm="https://r.example/auth"', "r.example", "x")
+        self.assertEqual(opened.call_args[0][0].full_url, "https://r.example/auth")
+
+    def test_a_refusal_with_no_token_endpoint_is_an_error_not_a_guess(self) -> None:
+        for challenge in (None, "", "Basic realm=\"x\"", 'Bearer service="ghcr.io"'):
+            with self.subTest(challenge=challenge):
+                with patch("urllib.request.urlopen", side_effect=unauthorized(challenge)):
+                    with self.assertRaisesRegex(RuntimeError, "offered no token endpoint"):
+                        resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
 
     def test_resolve_registry_tag_digest_rejects_a_response_without_the_header(self) -> None:
-        responses = [FakeResponse({"token": "t"}), FakeHeadResponse({})]
-        with patch("urllib.request.urlopen", side_effect=responses):
+        with patch("urllib.request.urlopen", return_value=FakeHeadResponse({})):
             with self.assertRaisesRegex(RuntimeError, "no Docker-Content-Digest"):
                 resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
 
     def test_resolve_registry_tag_digest_rejects_a_token_response_with_no_token(self) -> None:
-        with patch("urllib.request.urlopen", return_value=FakeResponse({"errors": []})):
-            with self.assertRaisesRegex(RuntimeError, "issued no pull token"):
-                resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
+        for payload in ({"errors": []}, ["not", "an", "object"], {"token": ""}):
+            with self.subTest(payload=payload):
+                with patch("urllib.request.urlopen", side_effect=[unauthorized(), FakeResponse(payload)]):
+                    with self.assertRaisesRegex(RuntimeError, "issued no pull token"):
+                        resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
 
     def test_resolve_registry_tag_digest_reports_a_token_http_error(self) -> None:
         error = urllib.error.HTTPError("https://ghcr.io/token", 403, "Forbidden", {}, None)
-        with patch("urllib.request.urlopen", side_effect=error):
+        with patch("urllib.request.urlopen", side_effect=[unauthorized(), error]):
             with self.assertRaisesRegex(RuntimeError, "HTTP 403 requesting a pull token"):
+                resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
+
+    def test_resolve_registry_tag_digest_reports_a_token_that_is_not_json(self) -> None:
+        with patch("urllib.request.urlopen", side_effect=[unauthorized(), FakeResponse(None, raw=b"<html>")]):
+            with self.assertRaisesRegex(RuntimeError, "Expecting value"):
                 resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
 
     def test_resolve_registry_tag_digest_reports_a_manifest_http_error(self) -> None:
         error = urllib.error.HTTPError("https://ghcr.io/v2/x/manifests/latest", 404, "Not Found", {}, None)
-        with patch("urllib.request.urlopen", side_effect=[FakeResponse({"token": "t"}), error]):
+        with patch("urllib.request.urlopen", side_effect=error):
             with self.assertRaisesRegex(RuntimeError, "HTTP 404"):
+                resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
+
+    def test_a_token_the_registry_then_rejects_is_reported_not_retried(self) -> None:
+        # A second 401 is not another invitation; looping on it would be the
+        # failure mode of a registry that issues tokens it does not honour.
+        with patch("urllib.request.urlopen", side_effect=[unauthorized(), FakeResponse({"token": "t"}), unauthorized()]):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 401"):
                 resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
 
     def test_resolve_registry_tag_digest_reports_a_connection_failure(self) -> None:
@@ -965,28 +1038,90 @@ class BrewPayloadPinAuditTests(unittest.TestCase):
                 resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
 
     def test_a_connection_that_drops_after_the_token_is_reported_too(self) -> None:
-        # The second request has its own error handling, and a token that was
-        # issued before the connection failed would otherwise leave the
-        # failure to escape as a urllib exception rather than the RuntimeError
-        # the caller turns into an advisory.
+        # The retry has its own error handling, and a token that was issued
+        # before the connection failed would otherwise leave the failure to
+        # escape as a urllib exception rather than the RuntimeError the caller
+        # turns into an advisory.
         with patch(
             "urllib.request.urlopen",
-            side_effect=[FakeResponse({"token": "t"}), urllib.error.URLError("reset by peer")],
+            side_effect=[unauthorized(), FakeResponse({"token": "t"}), urllib.error.URLError("reset by peer")],
         ):
             with self.assertRaisesRegex(RuntimeError, "reset by peer"):
                 resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
 
+    def test_a_connection_that_drops_requesting_the_token_is_reported_too(self) -> None:
+        with patch("urllib.request.urlopen", side_effect=[unauthorized(), urllib.error.URLError("no route")]):
+            with self.assertRaisesRegex(RuntimeError, "no route"):
+                resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
+
     def test_the_weekly_run_is_the_one_that_checks_the_payload_pin(self) -> None:
         with patch("maintenance_audit.audit_brew_image_pin", return_value=["moved"]) as checked:
-            with patch("maintenance_audit.audit_container_trust_roots", return_value=[]):
-                with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
-                    with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
-                        repo_root = Path(__file__).resolve().parents[1]
-                        run_audit(repo_root, skip_upstream=True, check_action_updates=False)
-                        self.assertEqual(checked.call_count, 0)
+            with patch("maintenance_audit.audit_disk_builder_image_pin", return_value=[]):
+                with patch("maintenance_audit.audit_container_trust_roots", return_value=[]):
+                    with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
+                        with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
+                            repo_root = Path(__file__).resolve().parents[1]
+                            run_audit(repo_root, skip_upstream=True, check_action_updates=False)
+                            self.assertEqual(checked.call_count, 0)
 
-                        _findings, advisories = run_audit(
-                            repo_root, skip_upstream=True, check_action_updates=True
-                        )
-                        self.assertEqual(checked.call_count, 1)
-                        self.assertIn("moved", advisories)
+                            _findings, advisories = run_audit(
+                                repo_root, skip_upstream=True, check_action_updates=True
+                            )
+                            self.assertEqual(checked.call_count, 1)
+                            self.assertIn("moved", advisories)
+
+
+class DiskBuilderPinAuditTests(unittest.TestCase):
+    """The bootc-image-builder pin is checked against its tag once a week.
+
+    The builder produces every disk artifact a generated repository publishes,
+    so it is pinned like the payload is. What its pin ages into is different:
+    not an old Homebrew but a builder behind the bootc in the base images, so
+    the advisory has to say that a re-pin is a compatibility check.
+    """
+
+    def test_a_tag_that_still_resolves_to_the_pin_says_nothing(self) -> None:
+        with patch(
+            "maintenance_audit.resolve_registry_tag_digest",
+            return_value=BOOTC_IMAGE_BUILDER_IMAGE_DIGEST,
+        ):
+            self.assertEqual(audit_disk_builder_image_pin(), [])
+
+    def test_a_moved_tag_is_reported_with_both_digests_and_the_check_to_make(self) -> None:
+        moved = "sha256:" + "f" * 64
+        with patch("maintenance_audit.resolve_registry_tag_digest", return_value=moved):
+            (advisory,) = audit_disk_builder_image_pin()
+        self.assertIn("BOOTC_IMAGE_BUILDER_IMAGE_DIGEST", advisory)
+        self.assertIn(BOOTC_IMAGE_BUILDER_IMAGE_DIGEST, advisory)
+        self.assertIn(moved, advisory)
+        self.assertIn("base images", advisory)
+
+    def test_a_registry_that_cannot_be_reached_is_said_so_not_passed(self) -> None:
+        with patch("maintenance_audit.resolve_registry_tag_digest", side_effect=RuntimeError("timed out")):
+            (advisory,) = audit_disk_builder_image_pin()
+        self.assertIn("Unable to resolve quay.io/centos-bootc/bootc-image-builder:latest", advisory)
+        self.assertIn("timed out", advisory)
+
+    def test_the_registry_host_is_split_off_the_image_reference(self) -> None:
+        with patch(
+            "maintenance_audit.resolve_registry_tag_digest",
+            return_value=BOOTC_IMAGE_BUILDER_IMAGE_DIGEST,
+        ) as resolve:
+            audit_disk_builder_image_pin()
+        resolve.assert_called_once_with("quay.io", "centos-bootc/bootc-image-builder", BOOTC_IMAGE_BUILDER_IMAGE_TAG)
+
+    def test_the_weekly_run_is_the_one_that_checks_the_builder_pin(self) -> None:
+        with patch("maintenance_audit.audit_disk_builder_image_pin", return_value=["moved"]) as checked:
+            with patch("maintenance_audit.audit_brew_image_pin", return_value=[]):
+                with patch("maintenance_audit.audit_container_trust_roots", return_value=[]):
+                    with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
+                        with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
+                            repo_root = Path(__file__).resolve().parents[1]
+                            run_audit(repo_root, skip_upstream=True, check_action_updates=False)
+                            self.assertEqual(checked.call_count, 0)
+
+                            _findings, advisories = run_audit(
+                                repo_root, skip_upstream=True, check_action_updates=True
+                            )
+                            self.assertEqual(checked.call_count, 1)
+                            self.assertIn("moved", advisories)

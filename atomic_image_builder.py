@@ -77,6 +77,23 @@ UNIVERSAL_BLUE_BREW_IMAGE_REPO = "ghcr.io/ublue-os/brew"
 UNIVERSAL_BLUE_BREW_IMAGE_TAG = "latest"
 UNIVERSAL_BLUE_BREW_IMAGE_DIGEST = "sha256:60ada2d65891d8797beef49d8b43f2108519cbbaf04c9c7363e1a008677fcd35"
 UNIVERSAL_BLUE_BREW_IMAGE = f"{UNIVERSAL_BLUE_BREW_IMAGE_REPO}@{UNIVERSAL_BLUE_BREW_IMAGE_DIGEST}"
+# The other third-party image the tool ships to strangers, pinned for the
+# same reason. The bundled disk workflow names bootc-image-builder by its
+# :latest tag in `BIB_IMAGE`, and image-template.env names it again for the
+# Justfile's local `just build-qcow2`; the action that runs it is pinned by
+# SHA through ACTION_REF_PINS, the image it runs to produce the user's qcow2
+# and installer ISO was not. It is the one builder that touches every disk
+# artifact a generated repository publishes.
+#
+# What this pin costs is compatibility rather than freshness: the builder has
+# to keep up with the bootc in whichever base image the user chose, and a
+# pin holds it still while the base images move. That is why the weekly
+# advisory below exists -- a re-pin is a check that the new builder still
+# handles the base images the wizard offers, not a digest to copy across.
+BOOTC_IMAGE_BUILDER_IMAGE_REPO = "quay.io/centos-bootc/bootc-image-builder"
+BOOTC_IMAGE_BUILDER_IMAGE_TAG = "latest"
+BOOTC_IMAGE_BUILDER_IMAGE_DIGEST = "sha256:2b52843ea2bfda73b0a08d97e76b734393b1d3a804681b9fabb26723bd3a2f0b"
+BOOTC_IMAGE_BUILDER_IMAGE = f"{BOOTC_IMAGE_BUILDER_IMAGE_REPO}@{BOOTC_IMAGE_BUILDER_IMAGE_DIGEST}"
 # The brew payload's /system_files carries three login-shell fragments
 # alongside the units and the tarball, and none of them is guarded:
 #
@@ -195,6 +212,17 @@ DISK_RUNNER_CHOICE_RE = re.compile(
 # always true, so only the condition goes.
 DISK_ARM_ONLY_IF = "if: inputs.platform == 'arm64'"
 DISK_NON_ARM_IF = "if: inputs.platform != 'arm64'"
+# `BIB_IMAGE` as the bundled template spells it, in the workflow's env block
+# (`key: "value"`) and in image-template.env (`key="value"`). The reference is
+# matched on its repository and any tag or digest, so a repository written
+# before the pin, or on an earlier one, is re-pinned on its next update. A
+# different repository is the user's own choice of builder and passes through
+# untouched, the way every patcher here no-ops on text it does not recognise.
+DISK_BUILDER_IMAGE_RE = re.compile(
+    r"^(?P<prefix>\s*BIB_IMAGE[=:]\s*)(?P<quote>['\"]?)"
+    + re.escape(BOOTC_IMAGE_BUILDER_IMAGE_REPO)
+    + r"(?:[:@][^'\"\s#]*)?(?P=quote)(?P<suffix>\s*(?:#.*)?)$"
+)
 # The bundled Justfile's spawn-vm rebuild dispatch, and what it should say.
 # "the ISO" in upstream's message is wrong for every type but one, so it goes
 # with the arguments.
@@ -888,6 +916,20 @@ def config_from_state_payload(data: object) -> Config:
         raise ValueError(f"unsupported build method: {cfg.method}")
     cfg.normalize()
     return cfg
+
+
+def pin_disk_builder_image_line(line: str) -> str | None:
+    """The line with BIB_IMAGE re-pinned, or None if it does not name the builder.
+
+    Shared by the disk workflow and image-template.env patchers, which spell
+    the assignment differently and scope it differently but pin the same
+    image. The quoting and any trailing comment are the line's own.
+    """
+    match = DISK_BUILDER_IMAGE_RE.match(line)
+    if match is None:
+        return None
+    prefix, quote, suffix = match.group("prefix", "quote", "suffix")
+    return f"{prefix}{quote}{BOOTC_IMAGE_BUILDER_IMAGE}{quote}{suffix}"
 
 
 def pin_action_uses_line(line: str) -> str:
@@ -4882,9 +4924,9 @@ class App:
     def patch_image_template_env(self, existing_text: str) -> str:
         # image-template.env is dotenv-loaded by the Justfile, and its values are
         # interpolated directly into shell commands and label strings. Only the
-        # three fields we own are rewritten; every other line (including
-        # comments) passes through untouched so future upstream additions to
-        # this file are preserved across updates.
+        # three fields we own are rewritten, plus the builder image pin; every
+        # other line (including comments) passes through untouched so future
+        # upstream additions to this file are preserved across updates.
         def sanitize_env_value(value: str) -> str:
             # These characters would either break the double-quoted shell value,
             # let it escape into command substitution (e.g. via $(...)), or (for
@@ -4921,7 +4963,14 @@ class App:
             count=1,
             flags=re.MULTILINE,
         )
-        return ensure_trailing_newline(text)
+        # The same builder the disk workflow runs, for the local `just
+        # build-qcow2` path -- see patch_disk_builder_image(). Anchored at the
+        # line start like the three above.
+        output: list[str] = []
+        for line in text.splitlines():
+            pinned = None if line[:1].isspace() else pin_disk_builder_image_line(line)
+            output.append(line if pinned is None else pinned)
+        return ensure_trailing_newline("\n".join(output))
 
     def patch_container_workflow(self, existing_text: str, *, default_branch: str = "main") -> str:
         # This patcher updates the bundled template workflow in place. The main
@@ -5036,6 +5085,7 @@ class App:
         text = self.patch_workflow_path_filters("\n".join(lines))
         text = self.patch_disk_artifact_names(text)
         text = self.patch_disk_workflow_platform(text)
+        text = self.patch_disk_builder_image(text)
         text = strip_permission_entries(text, UNUSED_WORKFLOW_PERMISSIONS)
         return self.patch_workflow_branch_filters(text, default_branch)
 
@@ -5209,6 +5259,32 @@ class App:
             return [line for line in step_lines if line.strip() != DISK_NON_ARM_IF]
 
         return patch_workflow_steps("\n".join(lines), patch_step)
+
+    def patch_disk_builder_image(self, workflow_text: str) -> str:
+        # The bundled workflow names bootc-image-builder by its :latest tag and
+        # hands it to the builder action as `builder-image:`. The action is
+        # pinned by SHA; the image it runs to produce every disk artifact the
+        # repository publishes was the one input nothing pinned. Rewritten to
+        # the digest in BOOTC_IMAGE_BUILDER_IMAGE, matched on the repository
+        # so an earlier pin is refreshed and a builder the user swapped in is
+        # left alone.
+        #
+        # Scoped to the top-level env: block. The value is read once, as
+        # `${{ env.BIB_IMAGE }}`, and a step-level key that happened to share
+        # the name would not be the one the action reads.
+        lines = workflow_text.splitlines()
+        output: list[str] = []
+        in_env = False
+        for line in lines:
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            if stripped and indent == 0:
+                in_env = workflow_block_key(stripped) == "env"
+                output.append(line)
+                continue
+            pinned = pin_disk_builder_image_line(line) if in_env else None
+            output.append(line if pinned is None else pinned)
+        return ensure_trailing_newline("\n".join(output))
 
     def patch_workflow_branch_filters(self, workflow_text: str, default_branch: str) -> str:
         lines = workflow_text.splitlines()
