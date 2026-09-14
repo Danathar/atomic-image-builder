@@ -6,7 +6,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from atomic_image_builder import UNIVERSAL_BLUE_BREW_IMAGE  # noqa: E402
+from atomic_image_builder import (  # noqa: E402
+    BOOTC_IMAGE_BUILDER_IMAGE,
+    UNIVERSAL_BLUE_BREW_IMAGE,
+)
 
 
 class WorkflowDependencyTests(unittest.TestCase):
@@ -216,6 +219,7 @@ _CONTAINERFILES = ("Containerfile", "container/Containerfile.coverage")
 # constant, or a literal registry reference. Deliberately not `(\S+)` -- that
 # also matches the `COPY --from=<brew image>` placeholders in two docstrings
 # and the `"COPY --from="` prefix the block detector tests for.
+_DIGEST_PINNED_IMAGE = re.compile(r"^[a-z0-9.\-]+(?:/[a-z0-9.\-_]+)+@sha256:[0-9a-f]{64}$")
 _EMITTED_COPY = re.compile(r"COPY --from=(\{[A-Z_]+\}|[a-z0-9][\w.\-]*\.[\w.\-]*/\S+)")
 
 
@@ -334,7 +338,14 @@ class ContainerImageTrustRootTests(unittest.TestCase):
         # moves upstream changes what that signature covers. Everything else
         # the tool ships into a stranger's repository is pinned; this asserts
         # the payload is too, offline, in the ordinary suite.
-        self.assertRegex(UNIVERSAL_BLUE_BREW_IMAGE, r"^[a-z0-9.\-]+(?:/[a-z0-9.\-_]+)+@sha256:[0-9a-f]{64}$")
+        self.assertRegex(UNIVERSAL_BLUE_BREW_IMAGE, _DIGEST_PINNED_IMAGE)
+
+    def test_the_disk_builder_is_named_by_digest_not_by_tag(self) -> None:
+        # The other image the tool ships to strangers: bootc-image-builder
+        # produces every qcow2 and installer ISO a generated repository
+        # publishes. The action that runs it is pinned by SHA through
+        # ACTION_REF_PINS; this asserts the image it runs is pinned too.
+        self.assertRegex(BOOTC_IMAGE_BUILDER_IMAGE, _DIGEST_PINNED_IMAGE)
 
     def test_no_generated_copy_names_an_image_other_than_the_pinned_payload(self) -> None:
         # A second `COPY --from=` emitted by the generator would be a second

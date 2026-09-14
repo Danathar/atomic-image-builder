@@ -53,6 +53,11 @@ pull credentials for root before the switch works. See
   from a source checkout (see
   [container limitations](installing.md#limitations-of-running-in-a-container)).
 - The update menu can rotate the repo's cosign signing key and update `cosign.pub`.
+- The disk-image workflow (`build-disk.yml`) and the local `just build-qcow2`
+  both run `bootc-image-builder` by digest rather than by tag, for the same
+  reason the Homebrew layer below is: it produces every qcow2 and installer ISO
+  your repository publishes. The pinned digest moves when this tool is updated,
+  and an update re-pins a repository it created earlier.
 
 ## Migrating layered packages from your current system
 

@@ -99,6 +99,56 @@ tests/test_workflow_dependencies.py holds the offline half of this: every
 download in Containerfile has a digest recorded against its destination path,
 every recorded digest is actually checked, and no key or .repo file is fetched
 over the network at install time.
+
+Pinned Images Shipped To Generated Repositories
+-----------------------------------------------
+Two container images are written into every repository the tool creates, and
+both are pinned by digest in atomic_image_builder.py, with the repository and
+tag kept as separate constants so the weekly audit can resolve the tag and
+compare:
+
+  UNIVERSAL_BLUE_BREW_IMAGE   ghcr.io/ublue-os/brew                       (#303)
+  BOOTC_IMAGE_BUILDER_IMAGE   quay.io/centos-bootc/bootc-image-builder    (#303)
+
+The first is copied whole into `/` of every generated image that enables
+Homebrew and its units are preset to run on first boot.  The second produces
+every qcow2 and installer ISO a generated repository publishes -- from
+build-disk.yml's BIB_IMAGE and from image-template.env, which the Justfile
+dotenv-loads for `just build-qcow2`.  Neither is a `uses:` line or a `curl`
+line, so neither pin discipline that already existed could see them.
+
+Every emit site interpolates the constant, and the patchers re-pin an existing
+repository on its next update: _patch_brew_block() matches on
+`COPY --from=` + `brew` + `/system_files`, patch_disk_builder_image() and
+patch_image_template_env() match BIB_IMAGE on its repository and any tag or
+digest.  A builder the user swapped for a different repository passes through
+untouched.
+
+Action required: maintenance_audit.py --check-action-updates resolves each tag
+weekly and reports an *advisory* when it no longer lands on the pin.  A re-pin
+is a review, not a bump, and the review differs:
+
+  brew   a new payload can ship files neither tests/test_brew_login_fragments.py
+         nor tests/test_brew_setup_staging.py has seen; read what changed in
+         /system_files before moving the digest.
+  bib    the builder has to keep up with the bootc in the base images the wizard
+         offers; a disk build against each is the check.  This is the pin that
+         trades a supply-chain risk for a compatibility one, which is why it was
+         left for a maintainer's decision in #304 and made in the follow-up.
+
+To find the current digest, ask the registry the way the audit does -- a HEAD
+whose Accept includes the OCI image index type, because ghcr.io serves the
+brew payload as an index and answers a request that does not accept one with a
+converted single-platform manifest whose digest is not what `COPY --from=`
+resolves:
+
+    python3 -c 'import maintenance_audit as m; print(m.resolve_registry_tag_digest("quay.io", "centos-bootc/bootc-image-builder", "latest"))'
+
+resolve_registry_tag_digest() follows the registry's WWW-Authenticate
+challenge rather than assuming a token endpoint: ghcr.io refuses an anonymous
+read and names its endpoint, quay.io answers outright and keeps its endpoint
+at a different path.  The next registry a pin lands on gets the same treatment
+without a special case.
 OIDC Token Scope on Generated Builds
 ------------------------------------
 The Containerfile-method workflows are generated without `id-token: write`,

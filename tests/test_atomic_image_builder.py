@@ -28,6 +28,8 @@ from atomic_image_builder import (
     BASE_IMAGES,
     BLUEBUILD_RECIPE_SCHEMA,
     BLUEBUILD_TEMPLATE_DIR,
+    BOOTC_IMAGE_BUILDER_IMAGE,
+    BOOTC_IMAGE_BUILDER_IMAGE_REPO,
     BREW_LOGIN_FRAGMENTS,
     BREW_LOGIN_SHELL_DIRS,
     BREW_PATH_FRAGMENT,
@@ -6524,6 +6526,10 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("ubuntu-24.04", disk_workflow)
         self.assertIn(ACTION_REF_PINS["osbuild/bootc-image-builder-action@main"][0], disk_workflow)
         self.assertNotIn("osbuild/bootc-image-builder-action@main", disk_workflow)
+        # The builder the pinned action runs is pinned too: the action was
+        # covered by ACTION_REF_PINS, the image it hands to the action was not.
+        self.assertIn(f'  BIB_IMAGE: "{BOOTC_IMAGE_BUILDER_IMAGE}"\n', disk_workflow)
+        self.assertNotIn(f"{BOOTC_IMAGE_BUILDER_IMAGE_REPO}:", disk_workflow)
         self.assertEqual(iso_toml, iso_kde)
         self.assertIn("ghcr.io/example/test-image:latest", iso_toml)
         self.assertIn("ghcr.io/example/test-image:latest", iso_gnome)
@@ -11882,6 +11888,23 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("BIB_IMAGE=", result)
         self.assertIn("# Put your own image here", result)
 
+    def test_patch_image_template_env_pins_the_disk_builder_image(self) -> None:
+        # The Justfile dotenv-loads this file and runs `${bib_image}` for the
+        # local `just build-qcow2`, so the same builder the workflow runs is
+        # pinned here too, in the file's own quoting.
+        app = self.make_app()
+        existing = (CONTAINERFILE_TEMPLATE_DIR / "image-template.env").read_text()
+        self.assertIn(f'BIB_IMAGE="{BOOTC_IMAGE_BUILDER_IMAGE_REPO}:latest"\n', existing)
+        result = app.patch_image_template_env(existing)
+        self.assertIn(f'BIB_IMAGE="{BOOTC_IMAGE_BUILDER_IMAGE}"\n', result)
+        self.assertNotIn(f"{BOOTC_IMAGE_BUILDER_IMAGE_REPO}:", result)
+        self.assertEqual(app.patch_image_template_env(result), result)
+
+    def test_patch_image_template_env_leaves_a_builder_the_user_chose_alone(self) -> None:
+        app = self.make_app()
+        existing = 'IMAGE_NAME=x\nBIB_IMAGE="ghcr.io/example/my-bib:v1"\n'
+        self.assertIn('BIB_IMAGE="ghcr.io/example/my-bib:v1"\n', app.patch_image_template_env(existing))
+
     def test_patch_image_template_env_sanitizes_dangerous_characters(self) -> None:
         app = self.make_app()
         app.config.image_desc = 'Says "hi" `whoami` $(rm -rf /) \\'
@@ -12692,6 +12715,82 @@ class BuilderTests(unittest.TestCase):
         once = app.patch_disk_workflow_platform(snapshot)
         self.assertEqual(app.patch_disk_workflow_platform(once), once)
         self.assertNotIn("inputs.platform", once)
+
+    def test_generated_disk_workflow_pins_the_builder_image(self) -> None:
+        # The snapshot names the builder by tag -- the premise of the patcher,
+        # asserted so a snapshot refresh that pins upstream is noticed -- and
+        # the generated workflow names it by digest.
+        app = self.make_app()
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build-disk.yml").read_text()
+        self.assertIn(f'  BIB_IMAGE: "{BOOTC_IMAGE_BUILDER_IMAGE_REPO}:latest"\n', snapshot)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            disk_workflow = (repo_dir / ".github/workflows/build-disk.yml").read_text()
+        self.assertIn(f'  BIB_IMAGE: "{BOOTC_IMAGE_BUILDER_IMAGE}"\n', disk_workflow)
+        self.assertNotIn(f"{BOOTC_IMAGE_BUILDER_IMAGE_REPO}:", disk_workflow)
+        # Still read where the action reads it.
+        self.assertIn("          builder-image: ${{ env.BIB_IMAGE }}\n", disk_workflow)
+
+    def test_patch_disk_builder_image_refreshes_an_earlier_pin(self) -> None:
+        # Managed repositories are patched in place, so a repository written
+        # on a previous pin moves to the current one on its next update -- the
+        # same way _patch_brew_block() re-pins the payload.
+        app = self.make_app()
+        stale = "sha256:" + "0" * 64
+        workflow_text = f'env:\n  BIB_IMAGE: "{BOOTC_IMAGE_BUILDER_IMAGE_REPO}@{stale}"\n'
+        self.assertEqual(
+            app.patch_disk_builder_image(workflow_text),
+            f'env:\n  BIB_IMAGE: "{BOOTC_IMAGE_BUILDER_IMAGE}"\n',
+        )
+
+    def test_patch_disk_builder_image_keeps_the_quoting_and_comment_it_found(self) -> None:
+        app = self.make_app()
+        for before, after in (
+            (
+                f"  BIB_IMAGE: {BOOTC_IMAGE_BUILDER_IMAGE_REPO}:latest\n",
+                f"  BIB_IMAGE: {BOOTC_IMAGE_BUILDER_IMAGE}\n",
+            ),
+            (
+                f"  BIB_IMAGE: '{BOOTC_IMAGE_BUILDER_IMAGE_REPO}:latest'  # do not edit\n",
+                f"  BIB_IMAGE: '{BOOTC_IMAGE_BUILDER_IMAGE}'  # do not edit\n",
+            ),
+        ):
+            with self.subTest(before=before):
+                self.assertEqual(app.patch_disk_builder_image("env:\n" + before), "env:\n" + after)
+
+    def test_patch_disk_builder_image_leaves_a_builder_the_user_chose_alone(self) -> None:
+        # A different repository is the user's choice, and the patcher no-ops
+        # on text it does not recognise rather than overriding it.
+        app = self.make_app()
+        workflow_text = 'env:\n  BIB_IMAGE: "ghcr.io/example/my-bib:v1"\n'
+        self.assertEqual(app.patch_disk_builder_image(workflow_text), workflow_text)
+
+    def test_patch_disk_builder_image_only_reads_the_top_level_env_block(self) -> None:
+        # `${{ env.BIB_IMAGE }}` reads the workflow-level env. A step-level key
+        # that happens to share the name is not what the action reads.
+        app = self.make_app()
+        workflow_text = (
+            "env:\n"
+            f'  BIB_IMAGE: "{BOOTC_IMAGE_BUILDER_IMAGE_REPO}:latest"\n'
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - run: echo\n"
+            "        env:\n"
+            f'          BIB_IMAGE: "{BOOTC_IMAGE_BUILDER_IMAGE_REPO}:latest"\n'
+        )
+        result = app.patch_disk_builder_image(workflow_text)
+        self.assertIn(f'  BIB_IMAGE: "{BOOTC_IMAGE_BUILDER_IMAGE}"\n', result)
+        self.assertIn(f'          BIB_IMAGE: "{BOOTC_IMAGE_BUILDER_IMAGE_REPO}:latest"\n', result)
+
+    def test_patch_disk_builder_image_is_idempotent(self) -> None:
+        app = self.make_app()
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build-disk.yml").read_text()
+        once = app.patch_disk_builder_image(snapshot)
+        self.assertNotEqual(once, snapshot)
+        self.assertEqual(app.patch_disk_builder_image(once), once)
 
     def test_generated_justfile_spawn_vm_dispatches_by_disk_type(self) -> None:
         # `just spawn-vm 1 qcow2` forwarded its own arguments to build-vm,
