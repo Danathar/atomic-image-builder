@@ -62,6 +62,7 @@ REQUIRED_MENTIONS = (
     "--skip-upstream",
     "homebrew_formula.py",
     ".github/workflows/publish-image.yml",
+    ".github/workflows/publish-wrapper.yml",
     ".github/workflows/update-homebrew-formula.yml",
 )
 
@@ -107,7 +108,65 @@ def tool_module_names() -> set[str]:
 
 
 def workflow_text() -> str:
-    return "\n".join(sorted(path.read_text() for path in WORKFLOWS.glob("*.yml")))
+    return "\n".join(path.read_text() for path in workflow_paths())
+
+
+def workflow_paths() -> list[Path]:
+    """Every GitHub Actions workflow, including either supported suffix."""
+    return sorted(path for path in WORKFLOWS.iterdir() if path.suffix in {".yml", ".yaml"})
+
+
+def workflow_trigger_names(path: Path) -> set[str]:
+    """Top-level event names from a workflow's ``on`` declaration.
+
+    CI deliberately installs no YAML dependency. This accepts the three forms
+    Actions supports -- a scalar, a sequence, or a mapping -- and rejects an
+    inline mapping rather than guessing at YAML syntax it does not parse.
+    """
+    lines = path.read_text().splitlines()
+    for index, line in enumerate(lines):
+        if not line.startswith("on:"):
+            continue
+        inline = line.removeprefix("on:").split("#", 1)[0].strip()
+        if inline:
+            if inline.startswith("[") and inline.endswith("]"):
+                return {
+                    item.strip().strip("'\"")
+                    for item in inline[1:-1].split(",")
+                    if item.strip()
+                }
+            if inline.startswith("{"):
+                raise AssertionError(f"unsupported inline `on` mapping in {path}")
+            return {inline.strip("'\"")}
+
+        triggers: set[str] = set()
+        for child in lines[index + 1 :]:
+            stripped = child.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(child) - len(child.lstrip())
+            if indent == 0:
+                break
+            if indent != 2:
+                continue
+            if stripped.startswith("- "):
+                triggers.add(stripped.removeprefix("- ").split("#", 1)[0].strip("'\" "))
+                continue
+            match = re.match(r"([A-Za-z_][A-Za-z0-9_-]*):", stripped)
+            if match is None:
+                raise AssertionError(f"unsupported `on` entry in {path}: {child!r}")
+            triggers.add(match.group(1))
+        return triggers
+    raise AssertionError(f"{path} has no top-level `on` declaration")
+
+
+def release_workflow_paths() -> set[str]:
+    """Repository-relative paths of every workflow triggered by a release."""
+    return {
+        str(path.relative_to(ROOT))
+        for path in workflow_paths()
+        if "release" in workflow_trigger_names(path)
+    }
 
 
 def tier_sections() -> dict[int, list[str]]:
@@ -465,21 +524,20 @@ class TierThreeEvidenceTests(unittest.TestCase):
 
 
 class TierFourEvidenceTests(unittest.TestCase):
-    def test_the_release_workflows_it_names_exist(self) -> None:
-        for name in (
-            ".github/workflows/publish-image.yml",
-            ".github/workflows/update-homebrew-formula.yml",
-        ):
-            with self.subTest(name=name):
-                self.assertIn(name, tracked_paths())
+    def test_every_release_workflow_is_named_in_tier_four(self) -> None:
+        named = set(literals(paths_paragraph(tier_sections()[4])))
+        release_workflows = release_workflow_paths()
+        self.assertTrue(release_workflows, "the repository has no release-triggered workflows")
+        self.assertEqual(
+            release_workflows - named,
+            set(),
+            "release-triggered workflows missing from Tier 4's **Paths:** paragraph",
+        )
 
-    def test_each_named_release_workflow_holds_a_write_permission(self) -> None:
+    def test_each_release_workflow_holds_a_write_permission(self) -> None:
         # The tier is "credentials and the release path". A workflow here that
         # had dropped to read-only would no longer be what the tier describes.
-        for name in (
-            ".github/workflows/publish-image.yml",
-            ".github/workflows/update-homebrew-formula.yml",
-        ):
+        for name in sorted(release_workflow_paths()):
             with self.subTest(name=name):
                 text = (ROOT / name).read_text()
                 self.assertTrue(
