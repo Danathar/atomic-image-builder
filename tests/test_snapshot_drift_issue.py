@@ -27,6 +27,14 @@ def issue_list(*issues: dict) -> str:
     return json.dumps(list(issues))
 
 
+# The shape gh actually returns for this repository's own tracking issue (#226):
+# its issue list is GraphQL-backed, so an app actor's login carries the "app/"
+# prefix rather than the REST "[bot]" suffix. Spelled out here rather than
+# imported from the module so a change to TRACKING_ISSUE_AUTHORS has to face a
+# test that names the real value.
+BOT_AUTHOR = {"is_bot": True, "login": "app/github-actions"}
+
+
 class RunGhTests(unittest.TestCase):
     def test_run_gh_returns_stdout(self) -> None:
         with patch("snapshot_drift_issue.subprocess.run", return_value=gh_result("[]")) as run:
@@ -96,8 +104,8 @@ class RenderBodyTests(unittest.TestCase):
 class FindTrackingIssueTests(unittest.TestCase):
     def test_find_tracking_issue_matches_on_exact_title(self) -> None:
         payload = issue_list(
-            {"number": 3, "title": "something else", "body": "x"},
-            {"number": 7, "title": ISSUE_TITLE, "body": "current"},
+            {"number": 3, "title": "something else", "body": "x", "author": BOT_AUTHOR},
+            {"number": 7, "title": ISSUE_TITLE, "body": "current", "author": BOT_AUTHOR},
         )
         with patch("snapshot_drift_issue.run_gh", return_value=payload):
             self.assertEqual(find_tracking_issue(), (7, "current"))
@@ -106,15 +114,67 @@ class FindTrackingIssueTests(unittest.TestCase):
         with patch("snapshot_drift_issue.run_gh", return_value=issue_list({"number": 3, "title": "other"})):
             self.assertIsNone(find_tracking_issue())
 
+    def test_find_tracking_issue_ignores_a_title_somebody_else_wrote(self) -> None:
+        # This repository is public, so the title on its own is squattable. An
+        # adopted squat would take the weekly `issue edit`, the eventual
+        # `issue close`, and -- the part that matters -- would make sync()'s
+        # "no issue open" branch unreachable, so the real advisory would never
+        # be filed again.
+        payload = issue_list(
+            {"number": 7, "title": ISSUE_TITLE, "body": "squatted", "author": {"is_bot": False, "login": "stranger"}},
+        )
+        with patch("snapshot_drift_issue.run_gh", return_value=payload):
+            self.assertIsNone(find_tracking_issue())
+
+    def test_find_tracking_issue_skips_a_squat_and_keeps_looking(self) -> None:
+        # Order is not guaranteed, and a squatted issue filed first must not
+        # hide the genuine one behind it.
+        payload = issue_list(
+            {"number": 7, "title": ISSUE_TITLE, "body": "squatted", "author": {"login": "stranger"}},
+            {"number": 9, "title": ISSUE_TITLE, "body": "genuine", "author": BOT_AUTHOR},
+        )
+        with patch("snapshot_drift_issue.run_gh", return_value=payload):
+            self.assertEqual(find_tracking_issue(), (9, "genuine"))
+
+    def test_find_tracking_issue_accepts_the_rest_spelling_of_the_bot(self) -> None:
+        # gh's issue list uses GraphQL, but an issue read back through the REST
+        # shape spells the same actor "github-actions[bot]". Both are this
+        # workflow's own identity.
+        payload = issue_list({"number": 7, "title": ISSUE_TITLE, "body": "b", "author": {"login": "github-actions[bot]"}})
+        with patch("snapshot_drift_issue.run_gh", return_value=payload):
+            self.assertEqual(find_tracking_issue(), (7, "b"))
+
+    def test_find_tracking_issue_rejects_an_unusable_author_field(self) -> None:
+        # An absent or wrongly-shaped author has to read as "somebody else".
+        # Reading it as "no objection" is exactly the title-only match this
+        # check replaced.
+        for author in (None, "app/github-actions", {}, {"login": None}, {"is_bot": True}):
+            with self.subTest(author=author):
+                payload = issue_list({"number": 7, "title": ISSUE_TITLE, "body": "b", "author": author})
+                with patch("snapshot_drift_issue.run_gh", return_value=payload):
+                    self.assertIsNone(find_tracking_issue())
+
+    def test_find_tracking_issue_asks_gh_for_the_author(self) -> None:
+        # Without the field in the request every issue comes back authorless,
+        # and the check above would silently reject the genuine tracking issue
+        # forever -- filing a duplicate every week instead of none.
+        with patch("snapshot_drift_issue.run_gh", return_value="[]") as gh:
+            find_tracking_issue()
+        args = gh.call_args.args[0]
+        self.assertIn("author", args[args.index("--json") + 1].split(","))
+
     def test_find_tracking_issue_tolerates_junk_entries_and_empty_output(self) -> None:
-        payload = issue_list({"number": "not-an-int", "title": ISSUE_TITLE})
+        payload = issue_list({"number": "not-an-int", "title": ISSUE_TITLE, "author": BOT_AUTHOR})
         with patch("snapshot_drift_issue.run_gh", return_value=payload):
             self.assertIsNone(find_tracking_issue())
         with patch("snapshot_drift_issue.run_gh", return_value=""):
             self.assertIsNone(find_tracking_issue())
 
     def test_find_tracking_issue_defaults_a_missing_body(self) -> None:
-        with patch("snapshot_drift_issue.run_gh", return_value=issue_list({"number": 7, "title": ISSUE_TITLE})):
+        with patch(
+            "snapshot_drift_issue.run_gh",
+            return_value=issue_list({"number": 7, "title": ISSUE_TITLE, "author": BOT_AUTHOR}),
+        ):
             self.assertEqual(find_tracking_issue(), (7, ""))
 
     def test_find_tracking_issue_rejects_non_json_output(self) -> None:

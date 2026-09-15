@@ -40,6 +40,21 @@ ISSUE_TITLE = "Bundled template snapshot trails upstream"
 # plausibly going to reach, while still bounding a pathological repo instead
 # of paging forever.
 ISSUE_LIST_LIMIT = 10000
+# A title says which issue; it says nothing about whose. This repository is
+# public and takes issues from anyone, so a title alone is squattable: open an
+# issue spelled exactly like ISSUE_TITLE and the weekly audit -- which holds
+# `issues: write` -- would edit that issue's body every Monday and eventually
+# comment on and close it. Worse, it would never file a real one again, because
+# `existing is None` in sync() is what opens the tracking issue and a squatted
+# title keeps that branch unreachable. The drift advisory is deliberately
+# sub-threshold (see #129), so the issue list is the only place it is visible;
+# losing it loses the signal that the bundled snapshots -- and the pinned action
+# SHAs they ship to every generated repository -- have gone stale.
+#
+# So match the author too. gh's issue list is GraphQL-backed and spells an app
+# actor "app/github-actions"; the REST spelling is accepted as well so an issue
+# created through either path is still recognized as this workflow's own.
+TRACKING_ISSUE_AUTHORS = frozenset({"app/github-actions", "github-actions[bot]", "github-actions"})
 
 
 def run_gh(args: list[str]) -> str:
@@ -106,8 +121,19 @@ def render_body(messages: list[str], *, run_url: str | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def written_by_this_workflow(author: object) -> bool:
+    # Anything that is not a recognized actor object is not ours. An absent or
+    # unexpected `author` has to read as "somebody else" rather than as "no
+    # objection", or a gh whose payload shape changed would quietly restore the
+    # title-only match this exists to replace.
+    if not isinstance(author, dict):
+        return False
+    login = author.get("login")
+    return isinstance(login, str) and login in TRACKING_ISSUE_AUTHORS
+
+
 def find_tracking_issue(repo: str | None = None) -> tuple[int, str] | None:
-    args = ["issue", "list", "--state", "open", "--limit", str(ISSUE_LIST_LIMIT), "--json", "number,title,body"]
+    args = ["issue", "list", "--state", "open", "--limit", str(ISSUE_LIST_LIMIT), "--json", "number,title,body,author"]
     if repo:
         args.extend(["--repo", repo])
     try:
@@ -119,11 +145,19 @@ def find_tracking_issue(repo: str | None = None) -> tuple[int, str] | None:
     if not isinstance(payload, list):
         raise RuntimeError("Unexpected issue list payload")
     for item in payload:
-        if isinstance(item, dict) and item.get("title") == ISSUE_TITLE:
-            number = item.get("number")
-            body = item.get("body")
-            if isinstance(number, int):
-                return number, body if isinstance(body, str) else ""
+        if not isinstance(item, dict) or item.get("title") != ISSUE_TITLE:
+            continue
+        # Skipped rather than reported. A squatted title is indistinguishable
+        # here from a maintainer having hand-opened one, and this script must
+        # not fail the audit over issue bookkeeping either way -- so it passes
+        # over the issue and lets sync() file the genuine one alongside it,
+        # which every run after this then finds.
+        if not written_by_this_workflow(item.get("author")):
+            continue
+        number = item.get("number")
+        body = item.get("body")
+        if isinstance(number, int):
+            return number, body if isinstance(body, str) else ""
     return None
 
 
