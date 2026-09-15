@@ -28,6 +28,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -139,7 +140,15 @@ def workflow_trigger_names(path: Path) -> set[str]:
                 raise AssertionError(f"unsupported inline `on` mapping in {path}")
             return {inline.strip("'\"")}
 
+        # The children of `on:` are whatever depth the file indents them to.
+        # Two spaces is this repository's house style, not a YAML rule, so the
+        # depth is read off the first child rather than assumed: hard-coding it
+        # made every trigger in a four-space workflow skip silently, and a
+        # release workflow written that way would return no triggers at all,
+        # drop out of release_workflow_paths(), and never have to appear in
+        # Tier 4 -- the exact omission this module exists to catch.
         triggers: set[str] = set()
+        child_indent: int | None = None
         for child in lines[index + 1 :]:
             stripped = child.strip()
             if not stripped or stripped.startswith("#"):
@@ -147,8 +156,16 @@ def workflow_trigger_names(path: Path) -> set[str]:
             indent = len(child) - len(child.lstrip())
             if indent == 0:
                 break
-            if indent != 2:
+            if child_indent is None:
+                child_indent = indent
+            if indent > child_indent:
+                # Nested under a trigger -- `types:` beneath `release:`.
                 continue
+            if indent < child_indent:
+                raise AssertionError(
+                    f"inconsistent `on` indentation in {path}: {child!r} sits "
+                    f"shallower than the {child_indent}-space children above it"
+                )
             if stripped.startswith("- "):
                 triggers.add(stripped.removeprefix("- ").split("#", 1)[0].strip("'\" "))
                 continue
@@ -156,6 +173,8 @@ def workflow_trigger_names(path: Path) -> set[str]:
             if match is None:
                 raise AssertionError(f"unsupported `on` entry in {path}: {child!r}")
             triggers.add(match.group(1))
+        if not triggers:
+            raise AssertionError(f"{path} has an `on:` block this parser read as empty")
         return triggers
     raise AssertionError(f"{path} has no top-level `on` declaration")
 
@@ -521,6 +540,45 @@ class TierThreeEvidenceTests(unittest.TestCase):
             set(),
             "maintenance_audit.py now calls a patcher, so Tier 3's reason for demanding the patcher tests is stale",
         )
+
+
+class TriggerParserTests(unittest.TestCase):
+    """The `on:` reader, pinned against the shapes that used to slip past it.
+
+    `test_every_release_workflow_is_named_in_tier_four` can only require a
+    workflow the parser can see. These cases are the ones it could not: they
+    are valid YAML that Actions accepts, and each returned an empty set before
+    the depth was read off the file instead of assumed.
+    """
+
+    def triggers(self, body: str) -> set[str]:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "workflow.yml"
+            path.write_text(body)
+            return workflow_trigger_names(path)
+
+    def test_a_four_space_mapping_is_read(self) -> None:
+        self.assertEqual(
+            self.triggers("on:\n    release:\n        types: [published]\n"),
+            {"release"},
+        )
+
+    def test_a_four_space_sequence_is_read(self) -> None:
+        self.assertEqual(self.triggers("on:\n    - release\n    - push\n"), {"release", "push"})
+
+    def test_the_house_two_space_mapping_still_reads(self) -> None:
+        self.assertEqual(
+            self.triggers("on:\n  release:\n    types: [published]\n  push:\n"),
+            {"release", "push"},
+        )
+
+    def test_an_inconsistently_indented_child_raises(self) -> None:
+        with self.assertRaises(AssertionError):
+            self.triggers("on:\n    release:\n  push:\n")
+
+    def test_an_on_block_that_reads_as_empty_raises(self) -> None:
+        with self.assertRaises(AssertionError):
+            self.triggers("on:\n\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n")
 
 
 class TierFourEvidenceTests(unittest.TestCase):
