@@ -52,6 +52,35 @@ MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 USES = re.compile(r"^\s*(?:-\s+)?uses:\s*(?P<action>[^@\s]+)@(?P<ref>\S+)")
 JOB_KEY = re.compile(r"^  (?P<name>[A-Za-z_][A-Za-z0-9_-]*):\s*(?:#.*)?$")
 MAPPING_ENTRY = re.compile(r"^(?P<indent> *)(?P<key>[a-z][a-z-]*):\s*(?P<value>\S+)\s*(?:#.*)?$")
+INLINE_ENTRY = re.compile(r"^(?P<key>[a-z][a-z-]*):\s*(?P<value>[a-z-]+)$")
+TRAILING_COMMENT = re.compile(r"\s+#.*$")
+
+# `git push`, however the line spells it. The leading `git` takes options of
+# its own -- `git -C "$dir" push` is how ci.yml pushes the coverage branch --
+# so a scan anchored on the two words being adjacent reads that line as no
+# push at all, and a second writer spelled the same way would be invisible.
+GIT_PUSH = re.compile(r"\bgit\s+(?:-\S+\s+(?:\S+\s+)?)*push\b(?P<argv>[^&;|]*)")
+
+# Every scope GitHub understands, so the `write-all` and `read-all` scalars
+# expand to the same shape a block mapping produces. Without the expansion a
+# workflow granting `write-all` reads as granting nothing.
+PERMISSION_SCOPES = (
+    "actions",
+    "attestations",
+    "checks",
+    "contents",
+    "deployments",
+    "discussions",
+    "id-token",
+    "issues",
+    "models",
+    "packages",
+    "pages",
+    "pull-requests",
+    "repository-projects",
+    "security-events",
+    "statuses",
+)
 WRITE_JOB_MENTION = re.compile(
     r"`(?P<workflow>[^`]+\.ya?ml)`\s*/\s*`(?P<job>[A-Za-z_][A-Za-z0-9_-]*)`"
 )
@@ -325,7 +354,14 @@ def classify_effect(rule: str) -> str:
 
 
 def workflow_paths() -> list[Path]:
-    return sorted(WORKFLOWS.glob("*.yml"))
+    """Every workflow GitHub loads, both extensions.
+
+    GitHub reads `.github/workflows/*.yaml` as well as `*.yml`. A glob over
+    one extension is a blind spot every check built on this function inherits:
+    a `.yaml` workflow taking `contents: write` would not appear in the
+    inventory below, and so would never have to be documented.
+    """
+    return sorted(path for suffix in ("yml", "yaml") for path in WORKFLOWS.glob(f"*.{suffix}"))
 
 
 def mapping_block(lines: list[str], start: int, indent: int) -> dict[str, str]:
@@ -345,6 +381,42 @@ def mapping_block(lines: list[str], start: int, indent: int) -> dict[str, str]:
     return found
 
 
+def inline_permissions(value: str, path: Path) -> dict[str, str]:
+    """`permissions:` written on the key's own line, in any form GitHub takes.
+
+    The block-mapping reader below only sees indented children, so every
+    single-line form -- the `read-all` / `write-all` scalars and the flow
+    mapping `{contents: write}` -- reaches it as an empty mapping and reads as
+    a grant of nothing. Each one is parsed here, and anything this function
+    does not recognise raises rather than being quietly treated as empty.
+    """
+    value = TRAILING_COMMENT.sub("", value).strip()
+    if value in {"read-all", "write-all"}:
+        return dict.fromkeys(PERMISSION_SCOPES, value.removesuffix("-all"))
+    if value.startswith("{") and value.endswith("}"):
+        body = value[1:-1].strip()
+        if not body:
+            return {}
+        found: dict[str, str] = {}
+        for entry in body.split(","):
+            match = INLINE_ENTRY.match(entry.strip())
+            if match is None:
+                raise DocClaimError(
+                    f"{path.name}: unsupported permissions entry {entry.strip()!r}"
+                )
+            found[match.group("key")] = match.group("value")
+        return found
+    raise DocClaimError(f"{path.name}: unsupported inline permissions {value!r}")
+
+
+def permissions_at(lines: list[str], index: int, indent: int, path: Path) -> dict[str, str]:
+    """The permissions declared by `lines[index]`, inline or in a block."""
+    _, _, inline = lines[index].partition(":")
+    if TRAILING_COMMENT.sub("", inline).strip():
+        return inline_permissions(inline, path)
+    return mapping_block(lines, index, indent)
+
+
 def workflow_permissions(path: Path) -> dict[str, dict[str, str] | None]:
     """Each job in `path` mapped to the permissions it actually runs with.
 
@@ -359,7 +431,7 @@ def workflow_permissions(path: Path) -> dict[str, dict[str, str] | None]:
     in_jobs = False
     for index, line in enumerate(lines):
         if line.startswith("permissions:"):
-            top = mapping_block(lines, index, 2)
+            top = permissions_at(lines, index, 2, path)
             continue
         if line.startswith("jobs:"):
             in_jobs = True
@@ -375,10 +447,72 @@ def workflow_permissions(path: Path) -> dict[str, dict[str, str] | None]:
             jobs[current] = None
             continue
         if current is not None and line.startswith("    permissions:"):
-            jobs[current] = mapping_block(lines, index, 6)
+            jobs[current] = permissions_at(lines, index, 6, path)
     if not jobs:
         raise DocClaimError(f"{path.name} declares no jobs")
     return {name: (declared if declared is not None else top) for name, declared in jobs.items()}
+
+
+def workflow_job_lines(path: Path) -> dict[str, list[str]]:
+    """Each job in `path` mapped to its own lines, comments dropped.
+
+    Attribution is by line rather than by step because a step needs no
+    `name:`, and `workflow_steps` finds steps by their name. An unnamed step
+    runs exactly as much as a named one, so a scan that only walked named
+    steps would have a hole shaped like a `- run:` with no `name:` above it.
+    """
+    lines = path.read_text().splitlines()
+    jobs: dict[str, list[str]] = {}
+    current: str | None = None
+    in_jobs = False
+    for line in lines:
+        if line.startswith("jobs:"):
+            in_jobs = True
+            continue
+        if line and not line.startswith(" ") and not line.startswith("#"):
+            in_jobs = False
+            current = None
+            continue
+        if not in_jobs:
+            continue
+        match = JOB_KEY.match(line)
+        if match:
+            current = match.group("name")
+            jobs[current] = []
+            continue
+        if current is not None and not line.strip().startswith("#"):
+            jobs[current].append(line)
+    return jobs
+
+
+def push_targets(argv: str, path: Path) -> set[str]:
+    """The branches one `git push` argv writes to.
+
+    A push with no refspec writes to whatever the current branch tracks, which
+    is not readable from the workflow text. That is raised rather than skipped:
+    an unreadable destination is the one case where staying quiet would let a
+    push to the protected branch pass as a push to nowhere.
+    """
+    words = [word for word in argv.split() if not word.startswith("-")]
+    refspecs = words[1:]
+    if not refspecs:
+        raise DocClaimError(
+            f"{path.name}: `git push{argv}` names no refspec, so the branch it "
+            "writes to cannot be read from the workflow"
+        )
+    return {spec.rpartition(":")[2].removeprefix("refs/heads/") for spec in refspecs}
+
+
+def branch_pushes(branch: str) -> set[tuple[str, str]]:
+    """(workflow, job) for every job in the tree that pushes to `branch`."""
+    found: set[tuple[str, str]] = set()
+    for path in workflow_paths():
+        for job, lines in workflow_job_lines(path).items():
+            for line in lines:
+                for match in GIT_PUSH.finditer(line):
+                    if branch in push_targets(match.group("argv"), path):
+                        found.add((path.name, job))
+    return found
 
 
 def workflow_triggers(path: Path) -> str:
@@ -777,18 +911,35 @@ class MainWritePathTests(unittest.TestCase):
 
     def test_it_pushes_to_the_branch_the_document_names(self) -> None:
         pushes = [
-            line.strip()
+            (line.strip(), push_targets(match.group("argv"), self.workflow))
             for _name, body in workflow_steps(self.workflow)
             for line in body
-            if line.strip().startswith("git push ")
+            for match in [GIT_PUSH.search(line)]
+            if match
         ]
         self.assertTrue(pushes, f"{self.workflow.name} pushes nothing")
-        for push in pushes:
+        for push, targets in pushes:
             with self.subTest(push=push):
-                self.assertTrue(
-                    push.endswith(f"HEAD:{self.branch}"),
+                self.assertEqual(
+                    targets,
+                    {self.branch},
                     f"{self.workflow.name} pushes somewhere other than {self.branch}: {push}",
                 )
+
+    def test_no_other_job_pushes_to_the_branch(self) -> None:
+        """The claim is "exactly one", which is a claim about every other job.
+
+        Reading only the named workflow leaves the count unchecked: a second
+        job can take `contents: write`, be documented in the same bullet as a
+        write path, and push to the branch, and every other assertion here
+        still passes while "exactly one" has stopped being true.
+        """
+        self.assertEqual(
+            branch_pushes(self.branch),
+            {(self.workflow.name, self.job)},
+            f"docs/SECURITY-AI.md claims exactly one automated push to "
+            f"{self.branch}, but these jobs push to it",
+        )
 
     def test_it_verifies_before_it_pushes(self) -> None:
         self.assertIn("verifies before pushing", self.bullet)
