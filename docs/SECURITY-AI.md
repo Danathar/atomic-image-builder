@@ -78,13 +78,16 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   stops an unpinned action reaching generated repositories.
 - Default workflow token permissions are read-only; a workflow needing more
   declares it explicitly.
-- Actions cannot create pull requests in this repository. There is exactly
-  one automated write path, and it is worth knowing rather than glossing:
-  `update-homebrew-formula.yml` takes `contents: write` on a published release
-  and pushes the formula update straight to `main`. It exists because Actions
-  cannot open a pull request here, and what it pushes is a single
-  machine-generated sha256 that the job verifies before pushing. Treat a
-  change to that workflow as Tier 4.
+- Actions cannot create pull requests in this repository. Jobs with automated
+  repository-contents write paths declare `contents: write`. There is exactly
+  one automated push to `main`: `update-homebrew-formula.yml` / `update` takes
+  that permission on a published release and pushes a single machine-generated
+  sha256 that it verifies before pushing. It exists because Actions cannot open
+  a pull request here. `ci.yml` / `publish-coverage` commits and pushes the
+  coverage badge and trend only to the orphan `coverage-data` branch after a
+  push to `main`. `publish-wrapper.yml` / `publish` pushes no commits; it
+  attaches the release-bound `aib` wrapper and `aib.sha256` checksum to the
+  published release. Treat a change to the formula workflow as Tier 4.
 
 ## Reporting
 

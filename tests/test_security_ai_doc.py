@@ -52,6 +52,9 @@ MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 USES = re.compile(r"^\s*(?:-\s+)?uses:\s*(?P<action>[^@\s]+)@(?P<ref>\S+)")
 JOB_KEY = re.compile(r"^  (?P<name>[A-Za-z_][A-Za-z0-9_-]*):\s*(?:#.*)?$")
 MAPPING_ENTRY = re.compile(r"^(?P<indent> *)(?P<key>[a-z][a-z-]*):\s*(?P<value>\S+)\s*(?:#.*)?$")
+WRITE_JOB_MENTION = re.compile(
+    r"`(?P<workflow>[^`]+\.ya?ml)`\s*/\s*`(?P<job>[A-Za-z_][A-Za-z0-9_-]*)`"
+)
 
 # Literals the document has to keep naming. Each anchors an assertion below;
 # without this set, deleting the sentence that carries one turns its assertion
@@ -708,37 +711,64 @@ class WorkflowPermissionTests(unittest.TestCase):
             with self.subTest(workflow=path.name):
                 self.assertNotIn("gh pr create", text)
 
+    def test_every_contents_write_job_is_named_in_the_enforcement_section(self) -> None:
+        bullet = bullet_naming(enforcement_bullets(), "write path")
+        documented = {
+            (match.group("workflow"), match.group("job"))
+            for match in WRITE_JOB_MENTION.finditer(bullet)
+        }
+        actual = {
+            (path.name, job)
+            for path in workflow_paths()
+            for job, permissions in workflow_permissions(path).items()
+            if (permissions or {}).get("contents") == "write"
+        }
+        self.assertEqual(
+            documented,
+            actual,
+            "docs/SECURITY-AI.md's enforcement section and the workflow jobs "
+            "granted contents: write disagree",
+        )
 
-class WritePathTests(unittest.TestCase):
-    """`update-homebrew-formula.yml` takes `contents: write` on a published
-    release and pushes the formula update straight to `main`."""
+
+class MainWritePathTests(unittest.TestCase):
+    """Exactly one automated write path pushes straight to `main`."""
 
     def setUp(self) -> None:
         self.bullet = bullet_naming(enforcement_bullets(), "write path")
-        names = [
-            literal
-            for literal in BACKTICKED.findall(self.bullet)
-            if literal.endswith((".yml", ".yaml"))
-        ]
-        if len(names) != 1:
+        claim = re.search(
+            r"exactly one automated push to `(?P<branch>[^`]+)`: "
+            r"`(?P<workflow>[^`]+\.ya?ml)`\s*/\s*`(?P<job>[A-Za-z_][A-Za-z0-9_-]*)`",
+            self.bullet,
+        )
+        if claim is None:
             raise DocClaimError(
-                f"the write-path bullet names {len(names)} workflows; this module joins one"
+                "the write-path bullet does not identify the one automated push "
+                "as `branch`: `workflow` / `job`"
             )
-        self.workflow = WORKFLOWS / names[0]
+        self.branch = claim.group("branch")
+        self.workflow = WORKFLOWS / claim.group("workflow")
+        self.job = claim.group("job")
         self.permission = next(
             literal for literal in BACKTICKED.findall(self.bullet) if ":" in literal
         )
 
-    def test_the_named_workflow_exists(self) -> None:
+    def test_the_named_workflow_and_job_exist(self) -> None:
         self.assertTrue(self.workflow.is_file(), f"{self.workflow} does not exist")
+        self.assertIn(
+            self.job,
+            workflow_permissions(self.workflow),
+            f"{self.workflow.name} has no {self.job} job",
+        )
 
     def test_it_takes_the_permission_the_document_names(self) -> None:
         key, _, value = self.permission.partition(":")
-        granted = {
-            (permissions or {}).get(key.strip())
-            for permissions in workflow_permissions(self.workflow).values()
-        }
-        self.assertIn(value.strip(), granted, f"{self.workflow.name} no longer takes {self.permission}")
+        granted = workflow_permissions(self.workflow)[self.job] or {}
+        self.assertEqual(
+            granted.get(key.strip()),
+            value.strip(),
+            f"{self.workflow.name}'s {self.job} job no longer takes {self.permission}",
+        )
 
     def test_it_runs_on_a_published_release(self) -> None:
         triggers = workflow_triggers(self.workflow)
@@ -746,8 +776,6 @@ class WritePathTests(unittest.TestCase):
         self.assertIn("published", triggers)
 
     def test_it_pushes_to_the_branch_the_document_names(self) -> None:
-        branch = "main"
-        self.assertIn(f"`{branch}`", self.bullet)
         pushes = [
             line.strip()
             for _name, body in workflow_steps(self.workflow)
@@ -758,8 +786,8 @@ class WritePathTests(unittest.TestCase):
         for push in pushes:
             with self.subTest(push=push):
                 self.assertTrue(
-                    push.endswith(f"HEAD:{branch}"),
-                    f"{self.workflow.name} pushes somewhere other than {branch}: {push}",
+                    push.endswith(f"HEAD:{self.branch}"),
+                    f"{self.workflow.name} pushes somewhere other than {self.branch}: {push}",
                 )
 
     def test_it_verifies_before_it_pushes(self) -> None:
