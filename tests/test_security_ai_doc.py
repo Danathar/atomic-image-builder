@@ -159,6 +159,12 @@ READ_DENY_CATEGORIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("secrets file", ".env", (".env", ".env.*")),
 )
 
+# `python3`, `python`, `python3.13` -- the interpreter itself, however it is
+# spelled. Used to find the `allow` rules where the effect table below is
+# describing the module named in the rule rather than the file the module is
+# pointed at.
+INTERPRETER = re.compile(r"python[\d.]*")
+
 # What a permitted command can reach. `mutates-remote` is the document's
 # "outward-facing": it changes something other people see. An entry here is a
 # claim about the command, so an unrecognised one raises rather than being
@@ -763,6 +769,47 @@ class SettingsEnforcementTests(unittest.TestCase):
                         argv,
                         f"{rule} covers the denied command {' '.join(forbidden)}",
                     )
+
+    def test_no_allow_rule_hands_the_interpreter_an_arbitrary_target(self) -> None:
+        """A `python3 -m ...` rule has to name its whole argument list.
+
+        `Bash(python3 -m coverage:*)` and `Bash(python3 -m unittest:*)` were
+        both on the allow list, and both read as a claim about the tool: the
+        effect table above calls them `reads`, because running the test suite
+        and reporting on it reads. The trailing `:*` does not permit the tool,
+        though, it permits whatever the tool is pointed at.
+        `python3 -m coverage run some_script.py` executes that script, and
+        `python3 -m unittest some.module` imports it, module-level side
+        effects and all -- neither one is confined to `tests/`.
+
+        Arbitrary Python is a superset of every command the deny list names. A
+        force push, a hard reset, `podman system prune`, reading `cosign.key`:
+        each is a `subprocess.run` or an `open` inside a file the interpreter
+        is handed, and no Bash rule ever sees the command it forms. That makes
+        the denials advisory, which is the one thing the enforcement section
+        of the document says they are not.
+
+        Naming the full argument list is what closes it: the rule then permits
+        exactly the unit gate CONTRIBUTING.md documents, and anything else --
+        another `--rcfile`, another discovery root, a bare script path -- falls
+        through to being asked about. `Bash(python3 format_markdown_tables.py
+        --check)` is not in the same position and is deliberately not matched
+        here: the interpreter is handed a tracked file that the rule itself
+        names, not a target chosen at call time.
+        """
+        for rule in self.rules["allow"]:
+            tool, argument = parse_rule(rule)
+            if tool != "Bash":
+                continue
+            argv = bash_argv(argument)
+            if not INTERPRETER.fullmatch(argv[0].rsplit("/", 1)[-1]) or argv[1:2] != ("-m",):
+                continue
+            with self.subTest(rule=rule):
+                self.assertFalse(
+                    argument.endswith(":*"),
+                    f"{rule} lets the interpreter be pointed at any file, so what it "
+                    "permits is arbitrary code rather than the module it names",
+                )
 
 
 class PinTableEnforcementTests(unittest.TestCase):
