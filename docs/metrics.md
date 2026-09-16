@@ -32,7 +32,7 @@ which for the maintenance-audit tier would mean manufacturing the live
 failures it exists to observe.
 
 ```bash
-gh run download <run-id>       # coverage-unit, coverage-shell, coverage-e2e
+gh run download <run-id>       # coverage-e2e, coverage-shell, coverage-maintenance-audit, coverage-homebrew-release
 ```
 
 ## Pull request throughput
