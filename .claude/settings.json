@@ -1,8 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3 -m unittest:*)",
-      "Bash(python3 -m coverage:*)",
+      "Bash(python3 -m unittest discover -s tests)",
+      "Bash(python3 -m coverage run -m unittest discover -s tests)",
+      "Bash(python3 -m coverage report)",
       "Bash(ruff check:*)",
       "Bash(shellcheck:*)",
       "Bash(hadolint:*)",
