@@ -3,10 +3,14 @@ __pycache__/
 # artifacts underneath it are versioned deliberately -- see
 # .claude/skills/README.md and .claude/memory/README.md. Git will not descend
 # into an excluded directory, so the directory itself has to be re-included
-# before anything inside it can be.
+# before anything inside it can be. .claude/hooks/ is versioned for a stronger
+# reason than the rest: settings.json registers the hook in it, and a
+# registration pointing at a file the repository does not ship is a permission
+# check that silently does not run.
 .claude/*
 !.claude/skills/
 !.claude/memory/
+!.claude/hooks/
 !.claude/settings.json
 !.claude/checkpoint.md
 .venv/

@@ -73,6 +73,14 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   key or `.env`, denies force-push, hard reset, broad Podman and Buildah
   cleanup, repository deletion and host rebase, and asks before anything
   outward-facing. A denial is the answer, not an obstacle to route around.
+- [`.claude/hooks/gate_git_diff.py`](../.claude/hooks/gate_git_diff.py) refuses
+  the `git` arguments that reach a file the index does not hold: `--no-index`,
+  `--output`, `--ext-diff`, `-O`, an operand that is absolute or climbs out of
+  the checkout, and the `-c` and `GIT_EXTERNAL_DIFF` forms that change what
+  `git` runs. Without it the always-allowed `git diff` is a file reader:
+  `git diff --no-index /dev/null ./cosign.key` prints the key the rule above
+  denies, because that rule gates the Read tool and never sees a path handed
+  to Bash.
 - `maintenance_audit.py` fails when a workflow action is not covered by the
   pin tables, or when a pinned SHA disagrees with them. That check is what
   stops an unpinned action reaching generated repositories.

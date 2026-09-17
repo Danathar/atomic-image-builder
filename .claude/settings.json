@@ -54,5 +54,18 @@
       "Read(**/id_rsa)",
       "Read(**/id_ed25519)"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/gate_git_diff.py\""
+          }
+        ]
+      }
+    ]
   }
 }
