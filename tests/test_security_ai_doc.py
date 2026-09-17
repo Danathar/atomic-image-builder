@@ -181,6 +181,11 @@ COMMAND_EFFECTS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("actionlint",), "reads"),
     (("just", "--fmt", "--check"), "reads"),
     (("git", "status"), "reads"),
+    # "reads" is true of these two only because `.claude/hooks/gate_git_diff.py`
+    # refuses the arguments that make them something else: `--no-index` reads
+    # any path on disk, `--output` writes one. Drop the hook and this row
+    # becomes the file's own claim that an arbitrary file read is a read of
+    # the repository. tests/test_git_diff_gate.py holds the pair together.
     (("git", "diff"), "reads"),
     (("git", "log"), "reads"),
     (("git", "push"), "mutates-remote"),
