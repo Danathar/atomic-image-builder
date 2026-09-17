@@ -28,9 +28,10 @@ trim_trailing_whitespace = false
 # template_snapshots/ is a pinned copy of upstream (ublue-os/image-template
 # and blue-build/template). It is refreshed as a unit and never hand-edited --
 # see .github/copilot-instructions.md -- so nothing here should tidy it. Its
-# Justfile is tab-indented because that is what upstream ships; saying so
-# stops an editor "fixing" it into a diff against a snapshot that has to match
-# upstream.
+# Justfile carries no rule of its own because it is space-indented, like
+# everything else upstream ships here, which is what the [*] defaults above
+# already say. A section claiming otherwise would not describe the file: it
+# would convert it, into the diff against upstream this section prevents.
 # `unset` and not `false`: in EditorConfig, false means "ensure the file does
 # NOT end with a newline", which would strip the trailing newline from the 21
 # snapshot files that have one -- causing the exact drift this section exists
@@ -38,6 +39,3 @@ trim_trailing_whitespace = false
 [template_snapshots/**]
 trim_trailing_whitespace = unset
 insert_final_newline = unset
-
-[template_snapshots/containerfile/Justfile]
-indent_style = tab
