@@ -111,6 +111,28 @@ where these documents are actually read -- a terminal, a pager, a diff. A test
 enforces it, so run `python3 format_markdown_tables.py` rather than padding
 cells by hand.
 
+### Writing issues, PRs and comments
+
+A person who was not in your head will read what you write. Write for them.
+
+- **Start with a plain summary**: two or three short sentences saying what
+  changed (or what is wrong), why it matters, and what the reader should look
+  at or do. Someone who reads only that should still get the point.
+- In a PR, put the rest under the pull request template's headings. What a PR
+  description must cover is in `AGENTS.md` under *Pull request explanations*;
+  this section is about how it reads.
+- Short sentences. One idea per bullet. No nested dash-clauses.
+- Use this project's own words. If you coin a term, define it the first time
+  you use it.
+- Tell the reader what they can check themselves: the command to run, the file
+  to open, the number to compare.
+- Keep the body under about 300 words unless the change genuinely needs more.
+  Long evidence (mutation lists, full test output, logs) goes in a collapsed
+  `<details>` block.
+- Issues: state the problem as a user would see it, then the evidence, then the
+  proposed fix. The title says what is wrong, not what kind of finding it is;
+  keep any prefix the tooling requires.
+
 ## Mechanical limits
 
 `.claude/settings.json` is committed and shared. It is the part of this
