@@ -254,32 +254,37 @@ class RefusalTests(unittest.TestCase):
     def test_every_valued_short_option_is_one_git_reads_a_value_for(self) -> None:
         # VALUED_SHORT is the one place a wrong entry opens a gap: a boolean
         # letter listed there would stop the walk before an `O` behind it.
-        # Each entry is checked against git's own parsing of `-<letter>Oorder1`.
-        # A boolean letter leaves `-Oorder1` to be read next, and the order
-        # file reorders the output; a value-taking one swallows `Oorder1` as
-        # its value and the output keeps git's own order, or the value is
-        # rejected. Both spellings of the order file exist so the boolean
-        # reading cannot fail for want of the file and pass by accident.
+        # Each entry is checked against git's own parsing of `-<letter>Omissing`
+        # with no such file present. A boolean letter leaves `-Omissing` to be
+        # read next and git fails to open the order file, whatever else the
+        # command does; a value-taking one swallows `Omissing` as its value and
+        # never looks for the file. The order-file complaint is the signal, not
+        # the output or the exit code: a boolean like `-s` also fails for
+        # clashing with an output format, and an empty stdout would pass it.
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             subprocess.run(["git", "init", "-q", str(repo)], check=True)
             (repo / "a.txt").write_text("a\n")
-            (repo / "b.txt").write_text("b\n")
-            (repo / "order1").write_text("b.txt\n")
-            (repo / "Oorder1").write_text("b.txt\n")
-            subprocess.run(["git", "-C", str(repo), "add", "a.txt", "b.txt"], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "a.txt"], check=True)
+
+            def probe(letter: str) -> str:
+                return subprocess.run(
+                    ["git", "-C", str(repo), "diff", "--cached", f"-{letter}Omissing"],
+                    capture_output=True,
+                    text=True,
+                ).stderr
+
+            # `-a` is a boolean, so this is what the signal looks like when it
+            # fires. If git rewords the message, this fails rather than every
+            # check below passing for the wrong reason.
+            self.assertIn("orderfile", probe("a"))
             for letter in sorted(gate.VALUED_SHORT - {"O"}):
                 with self.subTest(letter=letter):
-                    result = subprocess.run(
-                        ["git", "-C", str(repo), "diff", "--cached", f"-{letter}Oorder1", "--name-only"],
-                        capture_output=True,
-                        text=True,
-                    )
-                    self.assertNotEqual(
-                        result.stdout.split(),
-                        ["b.txt", "a.txt"],
-                        f"git read an order file after -{letter}, so -{letter} does not take "
-                        "a value and must leave VALUED_SHORT",
+                    self.assertNotIn(
+                        "orderfile",
+                        probe(letter),
+                        f"git looked for an order file after -{letter}, so -{letter} does "
+                        "not take a value and must leave VALUED_SHORT",
                     )
 
     def test_a_global_option_is_read_only_before_the_subcommand(self) -> None:
