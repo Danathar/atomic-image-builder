@@ -63,6 +63,9 @@ REFUSED_COMMANDS = (
     ("git diff --output=/tmp/out --no-index a b", "writes any file"),
     ("git log --output=/tmp/out -1", "writes any file"),
     ("git diff -O/tmp/orderfile", "reads a further path"),
+    ("git diff -aOorder1 --name-only", "reads a further path, with -O clustered behind -a"),
+    ("git diff -aO order1", "reads a further path, with -O last in a cluster"),
+    ("git log -pO order1", "reads a further path from git log, clustered"),
     ("git diff --ext-diff", "runs a configured external program"),
     ("git diff -- ../sibling/cosign.key", "names a path outside the checkout"),
     ("git diff -- /etc/shadow", "names an absolute path"),
@@ -87,6 +90,10 @@ ALLOWED_COMMANDS = (
     "git diff HEAD~1",
     "git diff -C -M",
     "git log --oneline -20",
+    "git log -SOAuth -p",
+    "git log -GOpen --oneline",
+    "git log -L:Open:docs/quality.md",
+    "git diff -U0 -w",
     "git log -p --stat HEAD..main",
     "git log -c -p",
     "git status --porcelain",
@@ -138,6 +145,36 @@ class ReachTests(unittest.TestCase):
         self.assertIsNotNone(
             gate.refusal(f"git diff --no-index /dev/null {secret}"),
             "the command just shown to read an arbitrary file is not refused",
+        )
+
+
+    def test_git_reads_the_order_file_from_a_cluster_of_short_options(self) -> None:
+        # `-aOorder1` is one shell word, and git reads it as `-a -O order1`.
+        # A gate that matches only the start of the word passes it, and git
+        # opens the order file all the same (#329). Staged files, no commit,
+        # so no identity is needed in the temporary repository.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            (repo / "a.txt").write_text("a\n")
+            (repo / "b.txt").write_text("b\n")
+            (repo / "order1").write_text("b.txt\n")
+            subprocess.run(["git", "-C", str(repo), "add", "a.txt", "b.txt"], check=True)
+            result = subprocess.run(
+                ["git", "-C", str(repo), "diff", "--cached", "-aOorder1", "--name-only"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(
+                result.stdout.split(),
+                ["b.txt", "a.txt"],
+                "git no longer honors -O when it is clustered behind another short "
+                "option; the cluster walk in refused_short() may be more than is needed",
+            )
+        self.assertIsNotNone(
+            gate.refusal("git diff --cached -aOorder1 --name-only"),
+            "the command just shown to read an order file is not refused",
         )
 
 
@@ -199,6 +236,51 @@ class RefusalTests(unittest.TestCase):
         for token in ("--output-indicator-new=x", "--no-indent-heuristic", "--", "--stat"):
             with self.subTest(token=token):
                 self.assertFalse(gate.refused_long(token))
+
+    def test_a_clustered_short_option_is_refused_like_its_bare_spelling(self) -> None:
+        # git bundles single-letter options into one word, so `-O` can sit
+        # behind any boolean letter and still name an order file.
+        for token in ("-O", "-Oorder1", "-aO", "-aOorder1", "-pRO/tmp/order"):
+            with self.subTest(token=token):
+                self.assertTrue(gate.refused_short(token))
+
+    def test_a_value_that_contains_the_letter_is_not_an_option(self) -> None:
+        # The first value-taking letter ends the options; what follows it is
+        # that option's value, so the `O` in `-SOAuth` is text to search for.
+        for token in ("-SOAuth", "-GOpen", "-L:Open:file", "-U0", "-20", "--output", "-", "a"):
+            with self.subTest(token=token):
+                self.assertFalse(gate.refused_short(token))
+
+    def test_every_valued_short_option_is_one_git_reads_a_value_for(self) -> None:
+        # VALUED_SHORT is the one place a wrong entry opens a gap: a boolean
+        # letter listed there would stop the walk before an `O` behind it.
+        # Each entry is checked against git's own parsing of `-<letter>Oorder1`.
+        # A boolean letter leaves `-Oorder1` to be read next, and the order
+        # file reorders the output; a value-taking one swallows `Oorder1` as
+        # its value and the output keeps git's own order, or the value is
+        # rejected. Both spellings of the order file exist so the boolean
+        # reading cannot fail for want of the file and pass by accident.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            (repo / "a.txt").write_text("a\n")
+            (repo / "b.txt").write_text("b\n")
+            (repo / "order1").write_text("b.txt\n")
+            (repo / "Oorder1").write_text("b.txt\n")
+            subprocess.run(["git", "-C", str(repo), "add", "a.txt", "b.txt"], check=True)
+            for letter in sorted(gate.VALUED_SHORT - {"O"}):
+                with self.subTest(letter=letter):
+                    result = subprocess.run(
+                        ["git", "-C", str(repo), "diff", "--cached", f"-{letter}Oorder1", "--name-only"],
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertNotEqual(
+                        result.stdout.split(),
+                        ["b.txt", "a.txt"],
+                        f"git read an order file after -{letter}, so -{letter} does not take "
+                        "a value and must leave VALUED_SHORT",
+                    )
 
     def test_a_global_option_is_read_only_before_the_subcommand(self) -> None:
         # `git -c x=y diff` injects configuration; `git log -c` is a diff

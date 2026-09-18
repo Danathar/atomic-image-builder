@@ -10,7 +10,9 @@ and the two SSH key patterns. Those two statements are only consistent while
   printing both whole when one of them is `/dev/null`.
 * `git diff --output=<path>` and `git log --output=<path>` create or truncate
   an arbitrary file, which makes "reads" the wrong word for the command.
-* `-O<path>` names an order file, a third path outside the index.
+* `-O<path>` names an order file, a third path outside the index, and
+  arrives as `-aO<path>` as readily as on its own: git bundles short
+  options into one word.
 
 A `Read(...)` rule gates the Read tool and never sees a path that arrives as
 an argument to Bash, and every form above matches the allowed prefix, so none
@@ -42,8 +44,18 @@ import sys
 # costs nothing -- git rejects those itself.
 REFUSED_LONG = ("no-index", "output", "ext-diff")
 
-# Short options that take a path. `-O` is the order file.
-REFUSED_SHORT = ("-O",)
+# Short options that take a path, by letter. `O` is the order file.
+REFUSED_SHORT = frozenset("O")
+
+# Short options of `git diff` and `git log` that take a value. git bundles
+# single-letter options into one word and reads the value of the first
+# value-taking letter from whatever follows it in that word, so `-aOorder`
+# is `-a -O order` while `-SOrder` is `-S Order`. This set is where the walk
+# in refused_short() stops reading letters as options. A letter missing from
+# it is walked past as a boolean, which can only over-refuse -- the value
+# of an unlisted option gets read as more options -- and never lets an `O`
+# through; a letter wrongly listed here would.
+VALUED_SHORT = frozenset("BCGILMOSUXln")
 
 # Options git takes *before* a subcommand, which move the repository it acts
 # on or inject configuration into it. `-c diff.external=<command>` is the
@@ -98,9 +110,21 @@ def refused_long(token: str) -> bool:
 
 
 def refused_short(token: str) -> bool:
-    return any(
-        token.startswith(short) and not token.startswith("--") for short in REFUSED_SHORT
-    )
+    """Does this token carry a refused short option, alone or in a cluster?
+
+    Only the letters up to and including the first value-taking one are
+    options; the rest of the word is that option's value. Matching the start
+    of the token alone would pass `-aOorder`, which git reads exactly as
+    `-O order` with `-a` in front.
+    """
+    if not token.startswith("-") or token.startswith("--"):
+        return False
+    for letter in token[1:]:
+        if letter in REFUSED_SHORT:
+            return True
+        if letter in VALUED_SHORT:
+            return False
+    return False
 
 
 def unsafe_operand(token: str) -> bool:
