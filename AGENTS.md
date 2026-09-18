@@ -305,6 +305,23 @@ reason about the solution without reconstructing it from the diff. Do not use a
 file list, commit log, test-command dump, generic template text, or
 agent-specific jargon as the explanation.
 
+### Writing for the reader
+
+A person who was not in your head will read what you write. Write for them.
+This applies to issues and review comments as much as to pull request
+descriptions.
+
+- Short sentences. One idea per bullet. No nested dash-clauses.
+- Use this project's own words. If you coin a term, define it the first time
+  you use it.
+- Tell the reader what they can check themselves: the command to run, the file
+  to open, the number to compare.
+- Keep the body under about 300 words unless the change genuinely needs more.
+  Long evidence (mutation lists, full test output, logs) goes in a collapsed
+  `<details>` block.
+- Issues: state the problem as a user would see it, then the evidence, then the
+  proposed fix. The title names the problem, not the finding category.
+
 ### Review and publication rules
 
 - A request to review means read-only analysis unless the user also asks for
