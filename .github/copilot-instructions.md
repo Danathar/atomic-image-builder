@@ -130,7 +130,8 @@ A person who was not in your head will read what you write. Write for them.
   Long evidence (mutation lists, full test output, logs) goes in a collapsed
   `<details>` block.
 - Issues: state the problem as a user would see it, then the evidence, then the
-  proposed fix. The title names the problem, not the finding category.
+  proposed fix. The title says what is wrong, not what kind of finding it is;
+  keep any prefix the tooling requires.
 
 ## Mechanical limits
 
