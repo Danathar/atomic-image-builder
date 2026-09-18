@@ -10,18 +10,19 @@ below is greppable.
 
 ## Repository map
 
-| Path                      | What it is                                                                                                                                                                    |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `atomic_image_builder.py` | The whole tool. One module, standard library only.                                                                                                                            |
-| `template_snapshots/`     | Pinned copies of `ublue-os/image-template` and `blue-build/template`. Inputs, not examples — each carries a `.template-source` recording its upstream revision.               |
-| `maintenance_audit.py`    | Weekly consistency check: snapshot drift, action pin coverage and freshness. It does not touch the Homebrew formula — `maintenance-audit.yml` checks that in a separate step. |
-| `snapshot_drift_issue.py` | Keeps the audit's sub-threshold drift tracking issue in sync.                                                                                                                 |
-| `homebrew_formula.py`     | Points `Formula/atomic-image-builder.rb` at a release, and verifies that pin under `--check` — which is what the weekly audit workflow runs.                                  |
-| `coverage_badge.py`       | Writes the coverage badge endpoint and trend CSV.                                                                                                                             |
-| `contrib/aib`             | Host-side wrapper that runs the published container image.                                                                                                                    |
-| `container/entrypoint.sh` | Entrypoint baked into that image.                                                                                                                                             |
-| `tests/`                  | `unittest` suites; the shell entrypoints have their own `.sh` harnesses.                                                                                                      |
-| `maintenance_notes.txt`   | Operational knowledge that outlives any one change — read it before touching the patchers or base-image detection.                                                            |
+| Path                        | What it is                                                                                                                                                                    |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `atomic_image_builder.py`   | The whole tool. One module, standard library only.                                                                                                                            |
+| `template_snapshots/`       | Pinned copies of `ublue-os/image-template` and `blue-build/template`. Inputs, not examples — each carries a `.template-source` recording its upstream revision.               |
+| `maintenance_audit.py`      | Weekly consistency check: snapshot drift, action pin coverage and freshness. It does not touch the Homebrew formula — `maintenance-audit.yml` checks that in a separate step. |
+| `snapshot_drift_issue.py`   | Keeps the audit's sub-threshold drift tracking issue in sync.                                                                                                                 |
+| `homebrew_formula.py`       | Points `Formula/atomic-image-builder.rb` at a release, and verifies that pin under `--check` — which is what the weekly audit workflow runs.                                  |
+| `coverage_badge.py`         | Writes the coverage badge endpoint and trend CSV.                                                                                                                             |
+| `format_markdown_tables.py` | Aligns the tables in every tracked Markdown file, including this one. A test fails when one drifts; `template_snapshots/` is skipped as vendored.                             |
+| `contrib/aib`               | Host-side wrapper that runs the published container image.                                                                                                                    |
+| `container/entrypoint.sh`   | Entrypoint baked into that image.                                                                                                                                             |
+| `tests/`                    | `unittest` suites; the shell entrypoints have their own `.sh` harnesses.                                                                                                      |
+| `maintenance_notes.txt`     | Operational knowledge that outlives any one change — read it before touching the patchers or base-image detection.                                                            |
 
 ## Why one file
 
@@ -50,18 +51,18 @@ months earlier, and why a repo without that state file is never adopted.
 
 Regions, in file order:
 
-| Region                           | Contents                                                                                                                                                                                                             |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Constants                        | `VERSION`, `TOOL_SLUG`/`STATE_FILE` identity, UI colors and widths, template repo paths, `ACTION_PINS` and `ACTION_REF_PINS`, the validation regexes.                                                                |
-| Base images                      | `BaseImage`, the `BASE_IMAGES` catalog, and `determine_fedora_atomic_default_tag()`, which reads the host's `/etc/os-release` and falls back to `FEDORA_ATOMIC_FALLBACK_TAG`.                                        |
-| `Config`                         | The dataclass every screen writes into, plus `config_from_state_payload()` and the `validate_string_list`/`string_list`/`unique` helpers that read it back from a state file.                                        |
-| Small helpers                    | Slug and repo-name validation, YAML scalar quoting, image-reference normalization, `ghcr_package_exists()`, `command_exists()`.                                                                                      |
-| Action pinning                   | `pin_action_uses_line()` and `pinned_action()`, which rewrite `uses:` lines against the pin tables.                                                                                                                  |
-| Workflow patchers (module level) | `patch_workflow_steps()` and the `workflow_key`/`workflow_block_key` line classifiers underneath it, then `patch_workflow_signing_steps()`, `patch_cosign_compatibility()`, and `ensure_workflow_job_env_entries()`. |
-| Process plumbing                 | `CommandError`, `ScreenBack` (raised to pop back a screen), and `run()`.                                                                                                                                             |
-| `Gum`                            | Thin wrapper over the `gum` CLI: `choose`, `filter`, `input`, `confirm`, `write`, `pager`, `table`, `spinner*`, plus the styling and ANSI-fallback layer. Every prompt in the tool goes through here.                |
-| `App`                            | The application. See below.                                                                                                                                                                                          |
-| Entry point                      | `usage_text()` and `main()`.                                                                                                                                                                                         |
+| Region                           | Contents                                                                                                                                                                                                                             |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Constants                        | `VERSION`, `TOOL_SLUG`/`STATE_FILE` identity, UI colors and widths, template repo paths, `ACTION_PINS` and `ACTION_REF_PINS`, the validation regexes.                                                                                |
+| Base images                      | `BaseImage`, the `BASE_IMAGES` catalog, and `determine_fedora_atomic_default_tag()`, which reads the host's `/etc/os-release` and falls back to `FEDORA_ATOMIC_FALLBACK_TAG`.                                                        |
+| `Config`                         | The dataclass every screen writes into, plus `config_from_state_payload()` and the `validate_string_list`/`string_list`/`unique` helpers that read it back from a state file.                                                        |
+| Small helpers                    | Slug and repo-name validation, YAML scalar quoting, image-reference normalization, `ghcr_package_exists()`, `command_exists()`.                                                                                                      |
+| Action pinning                   | `pin_action_uses_line()` and `pinned_action()`, which rewrite `uses:` lines against the pin tables.                                                                                                                                  |
+| Workflow patchers (module level) | `patch_signing_step_block()` and `patch_workflow_steps()`, then `patch_workflow_signing_steps()`, the `workflow_key`/`workflow_block_key` line classifiers, `patch_cosign_compatibility()`, and `ensure_workflow_job_env_entries()`. |
+| Process plumbing                 | `CommandError`, `ScreenBack` (raised to pop back a screen), and `run()`.                                                                                                                                                             |
+| `Gum`                            | Thin wrapper over the `gum` CLI: `choose`, `filter`, `input`, `confirm`, `write`, `pager`, `table`, `spinner*`, plus the styling and ANSI-fallback layer. Every prompt in the tool goes through here.                                |
+| `App`                            | The application. See below.                                                                                                                                                                                                          |
+| Entry point                      | `usage_text()` and `main()`.                                                                                                                                                                                                         |
 
 ### The `App` class
 
