@@ -175,6 +175,52 @@ class BlockYamlTests(unittest.TestCase):
     def test_empty_document_is_none(self) -> None:
         self.assertIsNone(parse_block_yaml("---\n# nothing else\n"))
 
+    def test_a_folded_block_joins_its_lines_with_spaces(self) -> None:
+        # The issue forms write every long description as ">-", and a parser
+        # that kept the newlines would report a sentence no reader ever sees.
+        self.assertEqual(
+            parse_block_yaml("about: >-\n  Report privately,\n  not as a public issue.\n"),
+            {"about": "Report privately, not as a public issue."},
+        )
+
+    def test_a_blank_line_in_a_folded_block_is_a_paragraph_break(self) -> None:
+        self.assertEqual(
+            parse_block_yaml("value: >-\n  first para\n  still first\n\n  second para\n"),
+            {"value": "first para still first\nsecond para"},
+        )
+
+    def test_a_blank_line_in_a_literal_block_survives(self) -> None:
+        # The bug form's markdown block is two paragraphs. Dropping the blank
+        # line document-wide silently made it one.
+        self.assertEqual(
+            parse_block_yaml("value: |\n  first\n\n  second\nnext: 1\n"),
+            {"value": "first\n\nsecond", "next": 1},
+        )
+
+    def test_a_comment_inside_a_block_is_content_not_a_comment(self) -> None:
+        self.assertEqual(
+            parse_block_yaml("run: |\n  # explain the next line\n  echo hi\n"),
+            {"run": "# explain the next line\necho hi"},
+        )
+
+    def test_a_comment_outside_a_block_is_still_dropped(self) -> None:
+        self.assertEqual(
+            parse_block_yaml("run: |\n  echo hi\n# a real comment\nname: demo\n"),
+            {"run": "echo hi", "name": "demo"},
+        )
+
+    def test_a_keep_chomped_block_is_refused_rather_than_guessed(self) -> None:
+        # "|+" and ">+" preserve trailing newlines, which this parser
+        # normalises away -- so it must not claim to have read one.
+        with self.assertRaises(BlockYamlError):
+            parse_block_yaml("value: |+\n  text\n")
+
+    def test_a_more_indented_line_in_a_folded_block_is_refused(self) -> None:
+        # YAML keeps its line breaks literally there. Folding it to a space
+        # would hand back a string the file does not contain.
+        with self.assertRaises(BlockYamlError):
+            parse_block_yaml("value: >-\n  normal line\n    indented line\n")
+
 
 if __name__ == "__main__":
     unittest.main()
