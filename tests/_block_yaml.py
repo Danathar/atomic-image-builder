@@ -40,6 +40,11 @@ import re
 # rule rather than splitting on the first colon.
 _KEY_RE = re.compile(r"^(?P<key>[^\s:][^:]*):(?:[ ](?P<value>.*))?$")
 
+# A block scalar opens with "|" or ">" and an optional chomping indicator, as
+# the last thing on the line: `value: |`, `about: >-`, `- >`.
+_BLOCK_INDICATOR_RE = re.compile(r"(?:^|[:-][ ])(?P<style>[|>])(?P<chomp>[-+]?)$")
+_BLOCK_STYLES = frozenset({"|", "|-", ">", ">-"})
+
 # YAML 1.2's core schema resolves an unquoted scalar by its spelling: bare
 # null is not the string "null", and bare 123 is not the string "123". A
 # parser that handed every plain scalar back as a string could not tell a
@@ -63,17 +68,40 @@ class BlockYamlError(ValueError):
 
 def parse(text: str) -> object:
     """Parse ``text`` into dicts, lists and strings."""
-    lines = [
-        line.rstrip()
-        for line in text.splitlines()
-        if line.strip() and line.strip() != "---" and not line.lstrip().startswith("#")
-    ]
+    lines = _relevant_lines(text)
     if not lines:
         return None
     value, index = _parse_node(lines, 0, _indent(lines[0]))
     if index != len(lines):
         raise BlockYamlError(f"trailing content at line {index + 1}: {lines[index]!r}")
     return value
+
+
+def _relevant_lines(text: str) -> list[str]:
+    """Drop what YAML ignores, but only where YAML ignores it.
+
+    A blank line and a ``#`` line are document structure outside a block
+    scalar and *content* inside one: the paragraph break in an issue form's
+    ``value: |`` markdown and a comment inside a generated ``run: |`` body are
+    both part of the string. Dropping them document-wide would silently join
+    two paragraphs into one, so the block's interior is kept verbatim and the
+    filter resumes once a line returns to the key's own indent or further out.
+    """
+    lines: list[str] = []
+    block_indent: int | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if block_indent is not None:
+            if not stripped or _indent(line) > block_indent:
+                lines.append(line.rstrip())
+                continue
+            block_indent = None
+        if not stripped or stripped == "---" or stripped.startswith("#"):
+            continue
+        lines.append(line.rstrip())
+        if _BLOCK_INDICATOR_RE.search(stripped):
+            block_indent = _indent(line)
+    return lines
 
 
 def _indent(line: str) -> int:
@@ -139,9 +167,13 @@ def _parse_sequence(lines: list[str], index: int, indent: int) -> tuple[list[obj
 
 
 def _parse_value(lines: list[str], index: int, indent: int, raw: str) -> tuple[object, int]:
-    """Resolve a scalar written inline, a ``|`` block, or a nested block below."""
-    if raw == "|":
-        return _parse_literal_block(lines, index, indent)
+    """Resolve a scalar written inline, a block scalar, or a nested block below."""
+    if raw in _BLOCK_STYLES:
+        return _parse_block_scalar(lines, index, indent, raw)
+    if raw[:1] in {"|", ">"} and _BLOCK_INDICATOR_RE.match(raw) is not None:
+        # "|+"/">+" keep every trailing newline, and nothing here can tell that
+        # apart from the clipped spelling, so it is refused rather than guessed.
+        raise BlockYamlError(f"unsupported block scalar indicator: {raw!r}")
     if raw:
         return _scalar(raw), index
     if index < len(lines) and _indent(lines[index]) > indent:
@@ -152,10 +184,22 @@ def _parse_value(lines: list[str], index: int, indent: int, raw: str) -> tuple[o
     return None, index
 
 
-def _parse_literal_block(lines: list[str], index: int, indent: int) -> tuple[str, int]:
+def _parse_block_scalar(lines: list[str], index: int, indent: int, style: str) -> tuple[str, int]:
+    """Read a ``|`` literal or ``>`` folded block into one string.
+
+    Trailing newlines are normalised away for both styles -- the clipped
+    spellings (``|`` and ``>``) end with one in YAML and the stripped ones
+    (``|-``, ``>-``) end with none. No caller distinguishes the two, and the
+    ``+`` spellings that genuinely differ are refused in :func:`_parse_value`
+    rather than folded in here.
+    """
     block: list[str] = []
     block_indent: int | None = None
-    while index < len(lines) and _indent(lines[index]) > indent:
+    while index < len(lines) and (not lines[index].strip() or _indent(lines[index]) > indent):
+        if not lines[index].strip():
+            block.append("")
+            index += 1
+            continue
         if block_indent is None:
             block_indent = _indent(lines[index])
         elif _indent(lines[index]) < block_indent:
@@ -164,7 +208,39 @@ def _parse_literal_block(lines: list[str], index: int, indent: int) -> tuple[str
         index += 1
     if block_indent is None:
         raise BlockYamlError(f"empty literal block at line {index}")
-    return "\n".join(block), index
+    while block and not block[-1]:
+        block.pop()
+    if style[:1] == "|":
+        return "\n".join(block), index
+    return _fold(block, index), index
+
+
+def _fold(block: list[str], index: int) -> str:
+    """Join a folded block the way YAML does: line breaks become spaces.
+
+    A blank line is a real line break rather than a separator, so ``n`` of
+    them fold to ``n`` newlines. A line indented further than the block's own
+    indentation keeps its breaks literally in YAML; this parser has no caller
+    that writes one, so it is refused instead of folded to a space.
+    """
+    for line in block:
+        if line[:1] in {" ", "\t"}:
+            raise BlockYamlError(f"more-indented line in a folded block near line {index}: {line!r}")
+    folded: list[str] = []
+    paragraph: list[str] = []
+    breaks = 0
+    for line in block:
+        if not line:
+            breaks += 1
+            continue
+        if breaks:
+            folded.append(" ".join(paragraph))
+            folded.append("\n" * breaks)
+            paragraph = []
+            breaks = 0
+        paragraph.append(line)
+    folded.append(" ".join(paragraph))
+    return "".join(folded)
 
 
 def _scalar(raw: str) -> object:
