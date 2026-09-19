@@ -127,6 +127,21 @@ def refused_short(token: str) -> bool:
     return False
 
 
+def brace_word(token: str) -> bool:
+    """Does bash brace-expand this token before git ever sees it?
+
+    shlex does no brace expansion, so `--outpu{t,t}=/tmp/x` reaches this hook
+    as one word while bash hands git two: `--output=/tmp/x --output=/tmp/x`.
+    Every refused spelling can be reassembled this way -- `--no-inde{x,x}`,
+    `-aO{,}order`, `{/etc/passwd,x}` -- so the word the gate reads matches none
+    of the tests above while the words git runs do. A `{` or `}` in a git word
+    is refused rather than expanded here: modelling bash's expansion in full
+    (nesting, `{1..9}` sequences, quoting) is where the next hole hides, and no
+    ordinary `git diff` / `git log` argument carries an unquoted brace.
+    """
+    return "{" in token or "}" in token
+
+
 def unsafe_operand(token: str) -> bool:
     """A path that leaves the checkout, spelled without needing `--no-index`.
 
@@ -147,9 +162,18 @@ def tokenize(command: str) -> list[str]:
 
     `punctuation_chars` is what makes `&&` and `|` arrive as tokens of their
     own instead of being glued to the word beside them.
+
+    `commenters` is emptied because shlex treats `#` as a comment character by
+    default, even in the middle of a word, and drops everything after it -- but
+    bash only starts a comment at a `#` that begins a word. So `git diff HEAD^#x
+    /etc/passwd` reaches bash as three operands (`--no-index` is implied and it
+    reads `/etc/passwd`), while a lexer with the default comment character sees
+    only `git diff HEAD^` and lets the command through. The gate has to read the
+    same words bash runs, so the comment character is turned off.
     """
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
+    lexer.commenters = ""
     return list(lexer)
 
 
@@ -217,6 +241,13 @@ def refusal(command: str) -> str | None:
         names, command_name, arguments = split_segment(segment)
         if command_name != "git":
             continue
+        for token in segment:
+            if brace_word(token):
+                return (
+                    f"{token} carries a brace that bash expands before git runs, and "
+                    "the expansion can spell --output, --no-index, -O or a path outside "
+                    "the checkout that none of the other tests see in the word as typed"
+                )
         for name in names:
             if name in REFUSED_ENVIRONMENT:
                 return (
