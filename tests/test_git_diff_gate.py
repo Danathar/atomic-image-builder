@@ -78,6 +78,12 @@ REFUSED_COMMANDS = (
     ("git -c diff.external=/tmp/evil diff", "injects configuration"),
     ("git --git-dir=/tmp/other/.git log", "re-points the repository"),
     ("git diff --out=/tmp/out", "abbreviates a refused option"),
+    ("git diff --outpu{t,t}=/tmp/out HEAD", "brace-expands into --output before git runs"),
+    ("git diff --no-inde{x,x} a b", "brace-expands into --no-index before git runs"),
+    ("git diff -aO{,}order1", "brace-expands into a clustered -O before git runs"),
+    ("git diff {/etc/shadow,x}", "brace-expands into an absolute path before git runs"),
+    ("git diff HEAD^#x /etc/passwd", "hides an outside operand behind a mid-word #"),
+    ("git diff --stat#x /etc/passwd /dev/null", "hides --no-index operands behind a mid-word #"),
     ("git diff 'unterminated", "cannot be parsed, so it is not let through"),
 )
 
@@ -286,6 +292,27 @@ class RefusalTests(unittest.TestCase):
                         f"git looked for an order file after -{letter}, so -{letter} does "
                         "not take a value and must leave VALUED_SHORT",
                     )
+
+    def test_a_brace_word_is_refused_because_bash_expands_it_first(self) -> None:
+        # shlex does no brace expansion, so the gate reads `--outpu{t,t}=x` as
+        # one word while bash hands git `--output=x --output=x`. Any refused
+        # spelling can be reassembled this way, so a brace in a git word is
+        # refused rather than expanded.
+        for token in ("--outpu{t,t}=x", "-aO{,}order", "{/etc/passwd,x}", "--no-inde{x,x}"):
+            with self.subTest(token=token):
+                self.assertTrue(gate.brace_word(token))
+        for token in ("--output=x", "HEAD..main", "-aOorder", "docs/quality.md"):
+            with self.subTest(token=token):
+                self.assertFalse(gate.brace_word(token))
+
+    def test_a_mid_word_comment_char_does_not_hide_later_operands(self) -> None:
+        # bash starts a comment only at a `#` that begins a word; shlex's
+        # default comment character drops everything after any `#`. If the gate
+        # kept that default it would read `git diff HEAD^` and never see the
+        # `/etc/passwd` operand bash passes to git.
+        tokens = gate.tokenize("git diff HEAD^#x /etc/passwd")
+        self.assertIn("/etc/passwd", tokens)
+        self.assertIsNotNone(gate.refusal("git diff HEAD^#x /etc/passwd"))
 
     def test_a_global_option_is_read_only_before_the_subcommand(self) -> None:
         # `git -c x=y diff` injects configuration; `git log -c` is a diff
