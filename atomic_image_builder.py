@@ -1239,6 +1239,31 @@ def workflow_block_key(stripped_line: str) -> str | None:
     return match.group(1) if match else None
 
 
+def block_sequence_entry_indent(lines: list[str], key_index: int) -> str:
+    """Indent for a new entry in the block sequence under ``lines[key_index]``.
+
+    YAML asks only that a sequence's entries agree with each other, not that
+    they sit two spaces in from their key, and an editor's reformat is enough
+    to put them at four. An entry written at key indent plus two beside
+    entries at plus four mixes indentation inside one sequence, which Actions
+    rejects outright -- the repo stops building instead of merely missing an
+    ignore. So copy the indent of the first entry that follows the key, and
+    fall back to key indent plus two only when the list is empty.
+    """
+    key_line = lines[key_index]
+    key_indent = key_line[: len(key_line) - len(key_line.lstrip())]
+    for line in lines[key_index + 1 :]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = line[: len(line) - len(line.lstrip())]
+        # A sequence may also sit at its key's own indent; YAML allows both.
+        if len(indent) >= len(key_indent) and stripped.startswith("- "):
+            return indent
+        break
+    return key_indent + "  "
+
+
 # A key whose value is an inline flow sequence, "paths-ignore: ['**.md']",
 # with an optional trailing comment. The items group is non-greedy so the
 # comment's own brackets, if any, stay in the suffix.
@@ -5271,7 +5296,7 @@ class App:
         output: list[str] = []
         state_ignore_present = any(STATE_FILE in line for line in lines)
         paths_ignore_inserted = False
-        for line in lines:
+        for index, line in enumerate(lines):
             line = pin_action_uses_line(line)
             stripped = line.strip()
             if stripped.startswith("- cron:"):
@@ -5285,8 +5310,7 @@ class App:
                     paths_ignore_inserted = True
                     continue
                 output.append(line)
-                paths_ignore_indent = line[: len(line) - len(line.lstrip())] + "  "
-                output.append(f"{paths_ignore_indent}- '{STATE_FILE}'")
+                output.append(f"{block_sequence_entry_indent(lines, index)}- '{STATE_FILE}'")
                 paths_ignore_inserted = True
                 continue
             if stripped in {"- '**/README.md'", '- "**/README.md"'} and not state_ignore_present and not paths_ignore_inserted:
@@ -5730,7 +5754,7 @@ class App:
         output: list[str] = []
         state_ignore_present = any(STATE_FILE in line for line in lines)
         paths_ignore_inserted = False
-        for line in lines:
+        for index, line in enumerate(lines):
             line = pin_action_uses_line(line)
             stripped = line.strip()
             if stripped.startswith("- cron:"):
@@ -5744,8 +5768,7 @@ class App:
                     paths_ignore_inserted = True
                     continue
                 output.append(line)
-                paths_ignore_indent = line[: len(line) - len(line.lstrip())] + "  "
-                output.append(f"{paths_ignore_indent}- '{STATE_FILE}'")
+                output.append(f"{block_sequence_entry_indent(lines, index)}- '{STATE_FILE}'")
                 paths_ignore_inserted = True
                 continue
             if stripped in {'- "**.md"', "- '**.md'"} and not state_ignore_present and not paths_ignore_inserted:
