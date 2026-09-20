@@ -1222,6 +1222,34 @@ def workflow_block_key(stripped_line: str) -> str | None:
     return match.group(1) if match else None
 
 
+# A key whose value is an inline flow sequence, "paths-ignore: ['**.md']",
+# with an optional trailing comment. The items group is non-greedy so the
+# comment's own brackets, if any, stay in the suffix.
+WORKFLOW_FLOW_SEQUENCE_LINE_RE = re.compile(r"^(\s*[^\s#][^:]*:\s*)\[(.*?)\](\s*(?:#.*)?)$")
+
+
+def extend_flow_sequence_line(line: str, item: str) -> str | None:
+    """Return ``line`` with ``item`` appended to its inline flow sequence.
+
+    "paths-ignore: ['**.md']" is the same trigger filter as the block form
+    the bundled snapshots use, and a repository owner may well collapse it to
+    one line. Writing a block "- item" beneath it is not a list entry, it is
+    a parse error, and GitHub then runs nothing from the file at all - a
+    worse outcome than the no-op the other patchers fall back to. So the
+    sequence is extended in place instead. Returns None when the line is not
+    a flow sequence, so the caller can go on to the block-form insert. An
+    empty list becomes "[item]" rather than "[, item]". ``item`` is written
+    verbatim, so pass it already quoted. A trailing comment is kept: the
+    bundled BlueBuild snapshot carries one on this very key.
+    """
+    match = WORKFLOW_FLOW_SEQUENCE_LINE_RE.match(line)
+    if not match:
+        return None
+    prefix, items, suffix = match.groups()
+    items = items.strip()
+    return f"{prefix}[{items}, {item}]{suffix}" if items else f"{prefix}[{item}]{suffix}"
+
+
 def patch_cosign_compatibility(workflow_text: str) -> str:
     """Keep existing managed workflows compatible with Cosign 3.x."""
     lines = workflow_text.splitlines()
@@ -4992,17 +5020,12 @@ class App:
                 output.append(f"{indent}- cron: '{DEFAULT_GITHUB_BUILD_CRON}'")
                 continue
             if stripped.startswith("paths-ignore:") and not state_ignore_present and not paths_ignore_inserted:
-                output.append(line)
-                inline_match = re.match(r"^(\s*paths-ignore:\s*)\[(.*)\](\s*)$", line)
-                if inline_match:
-                    prefix, items, suffix = inline_match.groups()
-                    items = items.strip()
-                    if items:
-                        output[-1] = f"{prefix}[{items}, '{STATE_FILE}']{suffix}"
-                    else:
-                        output[-1] = f"{prefix}['{STATE_FILE}']{suffix}"
+                extended = extend_flow_sequence_line(line, f"'{STATE_FILE}'")
+                if extended is not None:
+                    output.append(extended)
                     paths_ignore_inserted = True
                     continue
+                output.append(line)
                 paths_ignore_indent = line[: len(line) - len(line.lstrip())] + "  "
                 output.append(f"{paths_ignore_indent}- '{STATE_FILE}'")
                 paths_ignore_inserted = True
@@ -5456,6 +5479,11 @@ class App:
                 output.append(f"{indent}- cron: '{DEFAULT_GITHUB_BUILD_CRON}'")
                 continue
             if stripped.startswith("paths-ignore:") and not state_ignore_present and not paths_ignore_inserted:
+                extended = extend_flow_sequence_line(line, f"'{STATE_FILE}'")
+                if extended is not None:
+                    output.append(extended)
+                    paths_ignore_inserted = True
+                    continue
                 output.append(line)
                 paths_ignore_indent = line[: len(line) - len(line.lstrip())] + "  "
                 output.append(f"{paths_ignore_indent}- '{STATE_FILE}'")
