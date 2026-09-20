@@ -4633,6 +4633,17 @@ class BuilderTests(unittest.TestCase):
             with self.assertRaises(CommandError):
                 gum.spinner_capture("Working...", ["true"])
 
+    @staticmethod
+    def run_spinner_without_gum(args, *, cwd=None, **_kwargs) -> subprocess.CompletedProcess[str]:
+        # Stands in for run() under the spinner helpers: drops the `gum spin
+        # ... --` prefix and runs the wrapped `bash -c` for real, so the
+        # redirects and the status file are exercised the way they are on a
+        # user's machine while CI, which has no gum, still runs the test.
+        # gum spin exits with its child's code, so this returns bash's.
+        child = list(args[args.index("--") + 1 :])
+        proc = subprocess.run(child, cwd=str(cwd) if cwd else None, text=True, capture_output=True, check=False)
+        return subprocess.CompletedProcess(list(args), proc.returncode, proc.stdout, proc.stderr)
+
     def test_gum_spinner_capture_returns_captured_output_on_success(self) -> None:
         gum = Gum()
         original_named_temporary_file = tempfile.NamedTemporaryFile
@@ -4643,16 +4654,122 @@ class BuilderTests(unittest.TestCase):
             created_paths.append(tmp.name)
             return tmp
 
-        def fake_run(_args, **_kwargs):
-            Path(created_paths[-1]).write_text("captured output\n")
-            return subprocess.CompletedProcess(["gum", "spin"], 0, "", "")
-
         with patch("atomic_image_builder.tempfile.NamedTemporaryFile", side_effect=fake_named_temporary_file):
-            with patch("atomic_image_builder.run", side_effect=fake_run):
-                output = gum.spinner_capture("Working...", ["true"])
+            with patch("atomic_image_builder.run", side_effect=self.run_spinner_without_gum):
+                output = gum.spinner_capture("Working...", ["bash", "-c", "echo captured output; echo noise >&2"])
 
         self.assertEqual(output, "captured output\n")
-        self.assertFalse(Path(created_paths[-1]).exists())
+        self.assertTrue(created_paths)
+        for path in created_paths:
+            self.assertFalse(Path(path).exists())
+
+    def test_gum_spinner_capture_error_carries_wrapped_command_stderr(self) -> None:
+        # #363: a `gh` 404 under the spinner used to surface as "command
+        # failed: gum spin --spinner dot --title ... -- bash -c ..." with gh's
+        # own message discarded. The user-facing error must carry what the
+        # wrapped command wrote and name that command, not the gum line.
+        gum = Gum()
+        with patch("atomic_image_builder.run", side_effect=self.run_spinner_without_gum):
+            with self.assertRaises(CommandError) as raised:
+                gum.spinner_capture("Loading repository...", ["bash", "-c", "echo 'gh: Not Found (HTTP 404)' >&2; exit 1"])
+
+        message = str(raised.exception)
+        self.assertIn("gh: Not Found (HTTP 404)", message)
+        self.assertIn("(command: bash -c ", message)
+        self.assertNotIn("gum spin", message)
+
+    def test_gum_spinner_error_carries_wrapped_command_stderr(self) -> None:
+        # Same as above for the no-output spinner, which `gh repo clone` and
+        # `gh repo create` run under.
+        gum = Gum()
+        with patch("atomic_image_builder.run", side_effect=self.run_spinner_without_gum):
+            with self.assertRaises(CommandError) as raised:
+                gum.spinner("Cloning owner/nope...", ["bash", "-c", "echo 'GraphQL: Could not resolve to a Repository' >&2; exit 1"])
+
+        message = str(raised.exception)
+        self.assertIn("Could not resolve to a Repository", message)
+        self.assertNotIn("gum spin", message)
+
+    def test_gum_spinner_error_falls_back_to_stdout_then_command_line(self) -> None:
+        # A command that fails silently on stderr still gets a useful message:
+        # its stdout if it wrote any, else the bare "command failed" line with
+        # the wrapped command, never the gum invocation.
+        gum = Gum()
+        with patch("atomic_image_builder.run", side_effect=self.run_spinner_without_gum):
+            with self.assertRaisesRegex(CommandError, r"^only on stdout \(command: bash -c "):
+                gum.spinner("Working...", ["bash", "-c", "echo only on stdout; exit 3"])
+            with self.assertRaisesRegex(CommandError, r"^command failed: false$"):
+                gum.spinner("Working...", ["false"])
+
+    def test_gum_spinner_error_reports_missing_wrapped_command(self) -> None:
+        # bash itself writes the reason when the command does not exist, and
+        # that reason is what the user should read.
+        gum = Gum()
+        with patch("atomic_image_builder.run", side_effect=self.run_spinner_without_gum):
+            with self.assertRaises(CommandError) as raised:
+                gum.spinner_capture("Working...", ["definitely-not-a-command-8675309"])
+        self.assertIn("command not found", str(raised.exception))
+
+    def test_gum_spinner_succeeds_when_wrapped_command_writes_stderr_and_exits_zero(self) -> None:
+        # `gh repo clone` narrates progress on stderr and exits 0. Noise on
+        # stderr is not failure; only the exit status decides.
+        gum = Gum()
+        with patch("atomic_image_builder.run", side_effect=self.run_spinner_without_gum):
+            gum.spinner("Cloning...", ["bash", "-c", "echo 'Cloning into ...' >&2"])
+
+    def test_gum_spinner_helpers_keep_the_wrapped_commands_ctrl_c_an_interrupt(self) -> None:
+        # Before #363 the command went straight to gum spin, which exits with
+        # its child's code, so `gh` taking the Ctrl+C (exit 130) reached
+        # require_spinner_success() as gum's 130 and became KeyboardInterrupt
+        # -- exit 130 from main(). The bash wrapper now ends in the status
+        # printf, so bash and gum exit 0 and the 130 sits in the status file:
+        # it must still come out as an interrupt, not as a CommandError that
+        # reports an interrupted clone as a failed one and exits 1.
+        gum = Gum()
+        with patch("atomic_image_builder.run", side_effect=self.run_spinner_without_gum):
+            with self.assertRaises(KeyboardInterrupt):
+                gum.spinner("Cloning...", ["bash", "-c", "exit 130"])
+            with self.assertRaises(KeyboardInterrupt):
+                gum.spinner_capture("Loading...", ["bash", "-c", "echo partial; exit 130"])
+            # spinner_result() hands the status back for the caller to judge,
+            # as it always has; 130 is just a status there.
+            proc = gum.spinner_result("Checking...", ["bash", "-c", "exit 130"])
+        self.assertEqual(proc.returncode, 130)
+
+    def test_gum_spinner_helpers_share_one_bash_wrapper(self) -> None:
+        # require_spinner_success() may read a nonzero gum exit as "gum itself
+        # failed" only while every spinner ends its `bash -c` in the status
+        # printf, so bash exits 0 whatever the wrapped command did. Pin that
+        # for all three helpers so a future shortcut past spinner_result()
+        # cannot quietly bring #363 back.
+        gum = Gum()
+        seen: list[list[str]] = []
+
+        def record(args, **kwargs):
+            seen.append(list(args))
+            return self.run_spinner_without_gum(args, **kwargs)
+
+        with patch("atomic_image_builder.run", side_effect=record):
+            gum.spinner("a", ["true"])
+            gum.spinner_capture("b", ["true"])
+            gum.spinner_result("c", ["true"])
+        self.assertEqual(len(seen), 3)
+        for args in seen:
+            with self.subTest(args=args):
+                self.assertEqual(args[:2], ["gum", "spin"])
+                self.assertEqual(args[args.index("--") + 1 : -1], ["bash", "-c"])
+                self.assertRegex(args[-1], r"; printf '%s' \$\? > \S+$")
+
+    def test_gum_spinner_capture_error_carries_stderr_with_real_gum(self) -> None:
+        # Integration check against the actual binary, skipped when absent,
+        # for the exact reproduction in #363.
+        if shutil.which("gum") is None:
+            self.skipTest("gum is not installed")
+        with self.assertRaises(CommandError) as raised:
+            Gum().spinner_capture("t", ["bash", "-c", "echo ERR >&2; exit 7"])
+        message = str(raised.exception)
+        self.assertTrue(message.startswith("ERR (command: bash -c "), message)
+        self.assertNotIn("gum spin", message)
 
     def test_gum_spinner_result_raises_keyboard_interrupt_when_gum_itself_is_interrupted(self) -> None:
         gum = Gum()

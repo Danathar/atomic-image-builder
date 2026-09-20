@@ -1885,12 +1885,19 @@ def run(
         check=False,
     )
     if check and proc.returncode != 0:
-        stderr = proc.stderr.strip() if proc.stderr else ""
-        stdout = proc.stdout.strip() if proc.stdout else ""
-        body = stderr or stdout
-        detail = f"{body} (command: {' '.join(args)})" if body else f"command failed: {' '.join(args)}"
-        raise CommandError(detail)
+        raise CommandError(command_failure_detail(args, proc))
     return proc
+
+
+def command_failure_detail(args: Sequence[str], proc: subprocess.CompletedProcess[str]) -> str:
+    # The one place that decides what a failed command looks like to the user:
+    # the command's own stderr (or stdout when it wrote nothing there), then
+    # the command line for context. Both run() and the spinner helpers raise
+    # through here so a `gh` 404 reads the same whichever one ran it.
+    stderr = proc.stderr.strip() if proc.stderr else ""
+    stdout = proc.stdout.strip() if proc.stdout else ""
+    body = stderr or stdout
+    return f"{body} (command: {' '.join(args)})" if body else f"command failed: {' '.join(args)}"
 
 
 class Gum:
@@ -2223,8 +2230,12 @@ class Gum:
     ) -> subprocess.CompletedProcess[str]:
         # gum spin uses exit code 130 for Ctrl+C, same convention as the other
         # interactive widgets. Any other nonzero exit means the spinner itself
-        # failed to run (the wrapped command's own exit status, when captured,
-        # is reported separately and is not subject to this check).
+        # failed to run. That holds only because every spinner goes through
+        # spinner_result(), whose `bash -c` wrapper ends in a `printf` of the
+        # wrapped command's status, so bash -- and therefore gum, which exits
+        # with its child's code -- returns 0 however that command fared. The
+        # wrapped command's own status comes back in the status file and is
+        # judged by the caller, not here.
         if proc.returncode == 130:
             raise KeyboardInterrupt()
         if proc.returncode != 0:
@@ -2232,26 +2243,37 @@ class Gum:
         return proc
 
     def spinner(self, title: str, command: Sequence[str], *, cwd: Path | None = None) -> None:
-        args = ["gum", "spin", "--spinner", "dot", "--title", title, "--", *command]
-        self.require_spinner_success(run(args, cwd=cwd, capture=False, check=False), args)
+        self.spinner_capture(title, command, cwd=cwd)
 
     def spinner_capture(self, title: str, command: Sequence[str], *, cwd: Path | None = None) -> str:
-        # gum spin does not give us structured output directly, so we capture the
-        # command's stdout through a temporary file and then read it back.
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            output_path = tmp.name
-        try:
-            shell_command = f"{shlex.join(command)} > {shlex.quote(output_path)}"
-            args = ["gum", "spin", "--spinner", "dot", "--title", title, "--", "bash", "-c", shell_command]
-            self.require_spinner_success(run(args, cwd=cwd, capture=False, check=False), args)
-            return Path(output_path).read_text()
-        finally:
-            Path(output_path).unlink(missing_ok=True)
+        # Runs the command under a spinner and returns its stdout, raising
+        # CommandError if it failed. This used to hand the command straight to
+        # `gum spin`, which exits with the child's code and, on a TTY, shows
+        # none of its output. A `gh` 404 or an auth failure therefore surfaced
+        # as "command failed: gum spin --spinner dot --title ... -- bash -c
+        # ..." with the real reason discarded (#363). Capturing through
+        # spinner_result() keeps the child's stderr, so the error the user
+        # sees is the one `gh` wrote.
+        proc = self.spinner_result(title, command, cwd=cwd)
+        if proc.returncode == 130:
+            # The wrapped command took the Ctrl+C: `gh` exits 130 on SIGINT,
+            # as the shell convention has it. Handing the command straight to
+            # gum spin used to surface that as gum's own 130, which
+            # require_spinner_success() turns into KeyboardInterrupt and
+            # main() into exit 130. The bash wrapper now keeps that status in
+            # the file instead, so map it back here rather than report an
+            # interrupted clone as a failed one.
+            raise KeyboardInterrupt()
+        if proc.returncode != 0:
+            raise CommandError(command_failure_detail(command, proc))
+        return proc.stdout
 
     def spinner_result(self, title: str, command: Sequence[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-        # Same idea as spinner_capture(), but this version keeps stdout, stderr,
-        # and exit status so callers can inspect a command result after the
-        # spinner closes.
+        # gum spin does not give us structured output directly, so the command
+        # runs inside `bash -c` with stdout, stderr and exit status each
+        # redirected to a temporary file, and those are read back after the
+        # spinner closes. Callers inspect the result themselves; nothing is
+        # raised for a nonzero status.
         with ExitStack() as stack:
             with tempfile.NamedTemporaryFile(delete=False) as stdout_tmp:
                 stdout_path = stdout_tmp.name
