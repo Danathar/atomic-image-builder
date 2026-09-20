@@ -4248,6 +4248,22 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(results, {"bash": True, "nethock": False, "vim-enhanced.x86_64": True})
         self.assertEqual(app.installed_package_lookup_cache["nethock"], False)
 
+    def test_lookup_installed_host_packages_pins_rpm_to_the_c_locale(self) -> None:
+        # rpm translates both "package <spec> is not installed" and the
+        # "error:" prefix, so on a German or Japanese desktop the misses and
+        # failures would slip past the English-only parser and exit 1 would
+        # read as "everything is installed". The call has to pin the locale
+        # while keeping the rest of the environment (PATH, RPM_CONFIGDIR).
+        app = self.make_app()
+        completed = subprocess.CompletedProcess(["rpm"], 1, "package nethock is not installed\n", "")
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", return_value=completed) as run_mock:
+                with patch.dict(os.environ, {"LC_ALL": "de_DE.UTF-8", "LANG": "de_DE.UTF-8", "PATH": "/usr/bin"}):
+                    app.lookup_installed_host_packages(["nethock"])
+        env = run_mock.call_args.kwargs["env"]
+        self.assertEqual(env["LC_ALL"], "C")
+        self.assertEqual(env["PATH"], "/usr/bin")
+
     def test_lookup_installed_host_packages_treats_all_hits_as_installed(self) -> None:
         app = self.make_app()
         completed = subprocess.CompletedProcess(["rpm"], 0, "bash\ncoreutils\n", "")

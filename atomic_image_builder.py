@@ -4437,7 +4437,14 @@ class App:
                 self.installed_package_lookup_cache[package] = None
                 results[package] = None
             return results
-        proc = run(["rpm", "-q", "--qf", "%{name}\n", *to_check], check=False)
+        # Both the "not installed" line and the "error:" prefix are
+        # translated strings, so a host locale other than English would hide
+        # every miss and every failure from the checks below -- and with an
+        # exit status of 1 that reads as "everything is installed". Pin the
+        # locale so rpm speaks the English the parser expects.
+        env = os.environ.copy()
+        env["LC_ALL"] = "C"
+        proc = run(["rpm", "-q", "--qf", "%{name}\n", *to_check], env=env, check=False)
         # rpm exits 1 for "some of these are not installed" and, on a
         # database it cannot open, *also* exits 1 and reports every spec as
         # not installed. Only the "error:" line on stderr tells the two
