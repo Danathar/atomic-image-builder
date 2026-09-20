@@ -9491,6 +9491,53 @@ class BuilderTests(unittest.TestCase):
 
         self.assertEqual(diff, "")
 
+    def test_repo_full_diff_survives_a_non_utf8_byte_in_a_managed_file(self) -> None:
+        # A README.md hand-edited with a cp1252 editor carries a 0x92 curly
+        # quote, and `git diff` prints it back verbatim. Strict decoding of that
+        # output raised UnicodeDecodeError out of the "View full diff?" step,
+        # which main() does not catch, so the whole session died (#372). The
+        # diff has to come back readable instead, with the byte marked rather
+        # than the update abandoned.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+            readme = repo_dir / "README.md"
+            readme.write_text("# Image\n\nA plain line.\n")
+            subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo_dir, check=True)
+            readme.write_bytes(b"# Image\n\nIt\x92s a curly quote.\n")
+            (repo_dir / "notes.txt").write_bytes(b"untracked \x92 too\n")
+
+            summary = app.repo_diff_summary(repo_dir)
+            diff = app.repo_full_diff(repo_dir)
+
+        self.assertIn("README.md", summary)
+        self.assertIn("?? notes.txt", summary)
+        self.assertIn("-A plain line.", diff)
+        self.assertIn("+It�s a curly quote.", diff)
+        self.assertIn("+untracked � too", diff)
+
+    def test_run_replaces_undecodable_output_instead_of_raising(self) -> None:
+        # The helper is shared by every git and gh call in the file, so the
+        # guarantee belongs to it rather than to one caller: a subprocess may
+        # print any bytes it likes and run() still returns a str.
+        emit = "import sys; sys.stdout.buffer.write(b'ok \\x92 done'); sys.stderr.buffer.write(b'warn \\xff')"
+        proc = atomic_image_builder.run([sys.executable, "-c", emit])
+
+        self.assertEqual(proc.stdout, "ok � done")
+        self.assertEqual(proc.stderr, "warn �")
+
+    def test_run_reports_a_failing_command_whose_stderr_is_not_utf8(self) -> None:
+        # The failure path reads stderr to build the CommandError text. It has
+        # to survive the same bytes, or a git error message would turn into a
+        # traceback at exactly the moment the user needs to read it.
+        emit = "import sys; sys.stderr.buffer.write(b'fatal: bad \\x92 path\\n'); sys.exit(1)"
+        with self.assertRaisesRegex(CommandError, "fatal: bad � path"):
+            atomic_image_builder.run([sys.executable, "-c", emit])
+
     def test_contrib_wrapper_does_not_put_github_token_in_podman_argv(self) -> None:
         wrapper = (Path(__file__).resolve().parents[1] / "contrib/aib").read_text()
         self.assertIn("podman_args+=(-e GH_TOKEN)", wrapper)

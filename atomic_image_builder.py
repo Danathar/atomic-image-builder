@@ -1879,12 +1879,22 @@ def run(
     # This is the single subprocess helper used by most of the file. Keeping
     # command execution here centralizes our "raise CommandError with useful
     # text" behavior instead of repeating it around the app.
+    #
+    # Output is decoded leniently. The commands run here echo back content the
+    # tool does not control -- `git diff` over a managed repo prints whatever
+    # bytes a user's editor left in README.md, and a cp1252 curly quote is not
+    # UTF-8. With strict decoding that one byte raised UnicodeDecodeError out
+    # of the update flow's "View full diff?" step, which nothing in main()
+    # catches, so the session died and the pending update with it (#372).
+    # Showing U+FFFD in its place is the right outcome: the diff is still
+    # readable, and the byte is the user's to fix in their own repo.
     proc = subprocess.run(
         list(args),
         cwd=str(cwd) if cwd else None,
         env=env,
         input=stdin,
         text=True,
+        errors="replace",
         capture_output=capture,
         check=False,
     )
