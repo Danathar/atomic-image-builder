@@ -1833,7 +1833,17 @@ class Gum:
         # gum style disables ANSI when we capture stdout through a pipe. Reapply
         # the basic text styling ourselves so headings and helper text remain
         # visible in normal terminals.
-        if not sys.stdout.isatty() or not os.environ.get("TERM"):
+        #
+        # Only where gum itself would have coloured, though. gum honours the
+        # no-color.org convention (NO_COLOR set to any non-empty value means no
+        # colour) and treats TERM=dumb -- Emacs M-x shell, serial consoles --
+        # as a terminal that cannot render SGR codes, where they show up as
+        # literal "[1;38;5;33m" around every header. Because we always read gum
+        # through a pipe we never see its own decision, so mirror it here.
+        term = os.environ.get("TERM")
+        if not sys.stdout.isatty() or not term or term == "dumb":
+            return text
+        if os.environ.get("NO_COLOR"):
             return text
         codes: list[str] = []
         if opts.get("bold"):

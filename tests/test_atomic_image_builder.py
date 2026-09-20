@@ -14511,6 +14511,32 @@ class BuilderTests(unittest.TestCase):
                 result = gum.apply_ansi_fallback("hello", bold=False, align="center", width=40)
         self.assertEqual(result, "hello")
 
+    def test_apply_ansi_fallback_returns_plain_text_when_no_color_is_set(self) -> None:
+        # Issue #365: gum honours no-color.org, so the fallback that stands in
+        # for gum's own styling must too -- any non-empty value counts.
+        gum = Gum()
+        with patch("sys.stdout.isatty", return_value=True):
+            for value in ("1", "true", "0", " "):
+                with self.subTest(NO_COLOR=value):
+                    with patch.dict(os.environ, {"TERM": "xterm-256color", "NO_COLOR": value}):
+                        self.assertEqual(gum.apply_ansi_fallback("hello", bold=True, foreground=33), "hello")
+
+    def test_apply_ansi_fallback_treats_empty_no_color_as_unset(self) -> None:
+        # no-color.org: "when present and not an empty string". An empty
+        # NO_COLOR= must not switch colour off.
+        gum = Gum()
+        with patch("sys.stdout.isatty", return_value=True):
+            with patch.dict(os.environ, {"TERM": "xterm-256color", "NO_COLOR": ""}):
+                self.assertEqual(gum.apply_ansi_fallback("hello", bold=True), "\x1b[1mhello\x1b[0m")
+
+    def test_apply_ansi_fallback_returns_plain_text_for_dumb_terminal(self) -> None:
+        # Issue #365: TERM=dumb (Emacs M-x shell, serial consoles) cannot render
+        # SGR codes; they would print as literal "[1;38;5;33m" around headers.
+        gum = Gum()
+        with patch("sys.stdout.isatty", return_value=True):
+            with patch.dict(os.environ, {"TERM": "dumb"}, clear=True):
+                self.assertEqual(gum.apply_ansi_fallback("hello", bold=True, foreground=33), "hello")
+
     # ── Gum terminal sizing and widget plumbing ─────────────────────────
 
     def test_terminal_width_reads_shutil_terminal_size_columns(self) -> None:
