@@ -175,6 +175,11 @@ COMMAND_EFFECTS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("python3", "-m", "coverage"), "reads"),
     (("python3", "maintenance_audit.py", "--skip-upstream"), "reads"),
     (("python3", "format_markdown_tables.py", "--check"), "reads"),
+    # "reads" is true of these two only while their allow rules name the whole
+    # argument list: `ruff check -o <path>` truncates that path before it
+    # writes diagnostics into it, and `actionlint -shellcheck <path>` runs the
+    # program it is handed. CALLER_DIRECTED_ARGUMENTS below is what keeps the
+    # trailing `:*` off them.
     (("ruff", "check"), "reads"),
     (("shellcheck",), "reads"),
     (("hadolint",), "reads"),
@@ -215,6 +220,25 @@ COMMAND_EFFECTS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("gh", "release", "create"), "mutates-remote"),
     (("gh", "workflow", "run"), "mutates-remote"),
     (("gh", "repo", "delete"), "mutates-remote"),
+)
+
+# Commands that take an argument naming a file they write, or a program they
+# run: for these the trailing `:*` in an allow rule permits the target rather
+# than the tool, the way `Bash(python3 -m coverage:*)` permitted whatever the
+# interpreter was pointed at. Each entry carries the argument that earns it a
+# place, so a row can be checked against the tool's `--help` rather than
+# taken on trust.
+CALLER_DIRECTED_ARGUMENTS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("ruff", "check"),
+        "-o/--output-file creates or truncates the path it names, and --fix, "
+        "--fix-only and --add-noqa rewrite in place every file ruff parses",
+    ),
+    (
+        ("actionlint",),
+        "-shellcheck and -pyflakes each name the executable actionlint runs "
+        "on the scripts it finds",
+    ),
 )
 
 # Actions whose whole purpose is opening a pull request. The document says
@@ -814,6 +838,65 @@ class SettingsEnforcementTests(unittest.TestCase):
                     argument.endswith(":*"),
                     f"{rule} lets the interpreter be pointed at any file, so what it "
                     "permits is arbitrary code rather than the module it names",
+                )
+
+    def test_no_allow_rule_lets_a_linter_choose_what_it_writes_or_runs(self) -> None:
+        """A linter's allow rule has to name its whole argument list too.
+
+        The interpreter is not the only command whose arguments leave the
+        repository. `Bash(ruff check:*)` and `Bash(actionlint:*)` were both on
+        the allow list and both sit in COMMAND_EFFECTS as `reads`, which is
+        the claim the `Read(./cosign.key)`, `Read(./.env)` and `Read(**/*.pem)`
+        denials rest on. Neither claim survives the arguments the tools take:
+        `ruff check --output-file .claude/hooks/gate_git_diff.py <file>`
+        truncates the hook that makes the `git diff` and `git log` rows of the
+        same table true, and `actionlint -shellcheck <path>` runs whatever
+        `<path>` is -- a superset of every command the deny list names, none of
+        which is ever seen by a Bash rule.
+
+        The write and the execution both happen inside an allowed Bash call,
+        so no `Read`, `Edit` or `Write` rule is consulted and no prompt is
+        raised. Naming the whole argument list is the fix, exactly as it was
+        for the `python3 -m` rules above: every invocation in the tree is
+        argument-free (ci.yml, CONTRIBUTING.md, AGENTS.md and the
+        verify-change skill all run `ruff check` and `actionlint` bare, and
+        CONTRIBUTING.md says actionlint takes no file arguments on purpose),
+        so the exact rules cost nothing and anything else falls through to
+        being asked about.
+        """
+        for rule in self.rules["allow"]:
+            tool, argument = parse_rule(rule)
+            if tool != "Bash":
+                continue
+            argv = bash_argv(argument)
+            for prefix, reach in CALLER_DIRECTED_ARGUMENTS:
+                if argv[: len(prefix)] != prefix:
+                    continue
+                with self.subTest(rule=rule):
+                    self.assertFalse(
+                        argument.endswith(":*"),
+                        f"{rule} permits what the command is pointed at rather than the "
+                        f"command itself: {reach}",
+                    )
+
+    def test_every_caller_directed_command_is_still_on_the_allow_list(self) -> None:
+        """The table above is only a check while its rows match a rule.
+
+        A renamed or removed allow rule would leave an entry matching nothing,
+        and the test before this one would pass by iterating over an empty
+        intersection -- the failure mode that makes a gate look present when
+        it is not. If a command is deliberately dropped from the allow list,
+        its row here goes with it.
+        """
+        allowed = [
+            bash_argv(parse_rule(rule)[1]) for rule in self.rules["allow"] if parse_rule(rule)[0] == "Bash"
+        ]
+        for prefix, _reach in CALLER_DIRECTED_ARGUMENTS:
+            with self.subTest(command=" ".join(prefix)):
+                self.assertTrue(
+                    any(argv[: len(prefix)] == prefix for argv in allowed),
+                    f"CALLER_DIRECTED_ARGUMENTS describes {' '.join(prefix)}, which no "
+                    "allow rule names, so the rule this table guards is not being checked",
                 )
 
 

@@ -72,7 +72,9 @@ how the tool recognises repos it created. Renaming it orphans all of them.
 **The template patchers are indentation-sensitive and fail silently.** The
 `patch_workflow_*` and `ensure_workflow_job_env_entries` helpers match exact
 text from the bundled snapshots. When a snapshot refresh shifts their anchors
-they no-op rather than erroring. See maintenance_notes.txt.
+they no-op rather than erroring, with one exception: a job that reads a
+variable `ensure_workflow_job_env_entries` cannot define fails the update
+loudly, since the alternative is an unsigned image. See maintenance_notes.txt.
 
 **`template_snapshots/` is vendored.** It is a pinned copy of upstream
 (`ublue-os/image-template`, `blue-build/template`). Do not reformat it, fix its
