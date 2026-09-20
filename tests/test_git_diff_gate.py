@@ -296,14 +296,55 @@ class RefusalTests(unittest.TestCase):
     def test_a_brace_word_is_refused_because_bash_expands_it_first(self) -> None:
         # shlex does no brace expansion, so the gate reads `--outpu{t,t}=x` as
         # one word while bash hands git `--output=x --output=x`. Any refused
-        # spelling can be reassembled this way, so a brace in a git word is
-        # refused rather than expanded.
+        # spelling can be reassembled this way, so a brace bash would expand
+        # in a git word is refused rather than expanded.
         for token in ("--outpu{t,t}=x", "-aO{,}order", "{/etc/passwd,x}", "--no-inde{x,x}"):
             with self.subTest(token=token):
-                self.assertTrue(gate.brace_word(token))
+                self.assertTrue(gate.brace_would_expand(token))
         for token in ("--output=x", "HEAD..main", "-aOorder", "docs/quality.md"):
             with self.subTest(token=token):
-                self.assertFalse(gate.brace_word(token))
+                self.assertFalse(gate.brace_would_expand(token))
+
+    def test_a_brace_bash_would_not_expand_is_left_alone(self) -> None:
+        # Bash expands a brace only when a comma or a `..` range sits inside
+        # it; any other brace is a literal, and git's own `@{...}` revision
+        # syntax is spelled with exactly that. `git diff HEAD@{1}` is the
+        # ordinary diff against the previous commit and reaches none of the
+        # arguments this hook refuses, so a gate that refused it was a false
+        # positive with a real cost. The last case pins that a `..` *between*
+        # two literal braces is not a range inside one.
+        for command in (
+            "git diff HEAD@{1}",
+            "git diff HEAD@{1} -- docs/quality.md",
+            "git log main@{upstream} -1",
+            "git rev-parse @{-1}",
+            "git log @{2.days.ago} -1",
+            "git log HEAD@{2}..HEAD@{1}",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(
+                    gate.refusal(command),
+                    f"{command!r} is refused, and bash never expands its brace",
+                )
+
+    def test_the_brace_test_is_what_bash_would_expand_not_the_spelling(self) -> None:
+        # The line is drawn where bash draws it, and errs toward refusing.
+        # `@{1,2}` reads as revision syntax and is two words to bash; `{x..x}`
+        # is a one-element sequence that rebuilds the flag; a comma nested one
+        # level down still expands (`{{a,b}}` is `{a} {b}`); an unclosed `{`
+        # is a word this hook cannot finish reading; and `${VAR}` is a
+        # runtime-built argument it cannot inspect, refused as before.
+        for command in (
+            "git diff HEAD@{1,2}",
+            "git diff --no-inde{x..x} /dev/null ./LICENSE",
+            "git diff {{/dev/null,./cosign.key}}",
+            "git diff HEAD@{1",
+            "git diff ${SECRET} HEAD",
+        ):
+            with self.subTest(command=command):
+                reason = gate.refusal(command)
+                self.assertIsNotNone(reason, f"{command!r} is let through")
+                self.assertIn("brace", reason)
 
     def test_a_mid_word_comment_char_does_not_hide_later_operands(self) -> None:
         # bash starts a comment only at a `#` that begins a word; shlex's

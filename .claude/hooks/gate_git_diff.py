@@ -127,19 +127,46 @@ def refused_short(token: str) -> bool:
     return False
 
 
-def brace_word(token: str) -> bool:
+def brace_would_expand(token: str) -> bool:
     """Does bash brace-expand this token before git ever sees it?
 
     shlex does no brace expansion, so `--outpu{t,t}=/tmp/x` reaches this hook
     as one word while bash hands git two: `--output=/tmp/x --output=/tmp/x`.
     Every refused spelling can be reassembled this way -- `--no-inde{x,x}`,
     `-aO{,}order`, `{/etc/passwd,x}` -- so the word the gate reads matches none
-    of the tests above while the words git runs do. A `{` or `}` in a git word
-    is refused rather than expanded here: modelling bash's expansion in full
-    (nesting, `{1..9}` sequences, quoting) is where the next hole hides, and no
-    ordinary `git diff` / `git log` argument carries an unquoted brace.
+    of the tests above while the words git runs do. Such a word is refused
+    rather than expanded: modelling bash's expansion in full (nesting,
+    `{1..9}` sequences, quoting) is where the next hole hides.
+
+    Not every brace, though. Bash expands a brace only when a comma or a `..`
+    range sits inside it, and leaves any other brace as a literal -- which is
+    what git's own `@{...}` revision syntax relies on: `HEAD@{1}`,
+    `main@{upstream}`, `@{-1}`, `@{2.days.ago}`. Those reach git as typed and
+    touch none of the arguments this hook refuses, so refusing them blocked the
+    ordinary diff against the previous commit for nothing.
+
+    This expands nothing; it asks whether bash would, and errs toward yes. The
+    comma or `..` is looked for at any depth, since `{{a,b}}` is `{a} {b}` to
+    bash; a `{` that never closes counts; and `${VAR}` counts, as a runtime-
+    built argument this hook cannot inspect. Each of those over-counts is a
+    refusal. What it never does is call a word literal that bash would
+    rewrite: every expansion bash performs has a comma or `..` between a `{`
+    and a `}`. A `..` *between* two literal braces (`HEAD@{2}..HEAD@{1}`) is
+    not inside one and is left alone.
     """
-    return "{" in token or "}" in token
+    depth = 0
+    for index, char in enumerate(token):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(depth - 1, 0)
+        elif char == "," and depth > 0:
+            return True
+        elif char == "." and depth > 0 and token[index + 1 : index + 2] == ".":
+            return True
+        elif char == "$" and token[index + 1 : index + 2] == "{":
+            return True
+    return depth > 0
 
 
 def unsafe_operand(token: str) -> bool:
@@ -242,11 +269,13 @@ def refusal(command: str) -> str | None:
         if command_name != "git":
             continue
         for token in segment:
-            if brace_word(token):
+            if brace_would_expand(token):
                 return (
                     f"{token} carries a brace that bash expands before git runs, and "
                     "the expansion can spell --output, --no-index, -O or a path outside "
-                    "the checkout that none of the other tests see in the word as typed"
+                    "the checkout that none of the other tests see in the word as typed; "
+                    "a brace with no comma and no .. range inside it, such as HEAD@{1}, "
+                    "is a literal to bash and is not refused"
                 )
         for name in names:
             if name in REFUSED_ENVIRONMENT:
