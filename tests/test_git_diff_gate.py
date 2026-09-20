@@ -70,6 +70,30 @@ REFUSED_COMMANDS = (
     ("git diff -- ../sibling/cosign.key", "names a path outside the checkout"),
     ("git diff -- /etc/shadow", "names an absolute path"),
     ("git log > /tmp/anywhere", "redirects into a path outside the checkout"),
+    ("git diff HEAD >cosign.pub", "truncates the file the shell opens before git runs"),
+    ("git diff > out.patch", "truncates a file in the checkout the same way"),
+    ("git log -1 >> out", "appends to a file the shell opens before git runs"),
+    ("git diff 2>err", "opens a file for stderr before git runs"),
+    ("git diff &>/dev/null", "opens a path for both streams before git runs"),
+    ("git diff HEAD >| x", "opens a path past noclobber before git runs"),
+    ("git diff HEAD >&cosign.pub", "opens a path in the older &> spelling"),
+    ("git diff HEAD <>cosign.pub", "opens a path read-write, creating it"),
+    ("git diff HEAD > .claude/settings.json", "truncates the permission table"),
+    ("git diff HEAD 2>&1 >cosign.pub", "hides a writing redirection behind a descriptor one"),
+    (">cosign.pub git diff HEAD", "truncates the file with the redirection written first"),
+    ("git status; >cosign.pub git diff HEAD", "hides the redirection-first form behind an allowed prefix"),
+    ("2>err git log -1", "opens a file for stderr with the redirection written first"),
+    (">> out git show HEAD", "appends with the redirection written first"),
+    ("FOO=bar >out git diff HEAD", "writes with the redirection between an assignment and git"),
+    (">/tmp/anywhere git log", "redirects outside the checkout with the redirection written first"),
+    (
+        ">cosign.pub git diff --no-index /dev/null ./cosign.key",
+        "hid --no-index behind a redirection the scan took for the command name",
+    ),
+    ("git diff -- ~/.aws/credentials ~/.bashrc", "names two home files through a tilde bash expands"),
+    ("git diff ~/.bashrc ~/.aws/credentials", "names two home files through a tilde without --"),
+    ("git log -p -- ~/.ssh/config", "names a home file through a tilde in git log"),
+    ("git diff -- ~root/.bashrc ./LICENSE", "names another user's home file through a tilde"),
     ("git status && git diff --no-index a b", "hides behind an earlier command"),
     ("echo x | git diff --no-index a b", "hides in a pipeline"),
     ("x=$(git diff --no-index a b)", "hides in a command substitution"),
@@ -107,7 +131,24 @@ ALLOWED_COMMANDS = (
     "git log -p --stat HEAD..main",
     "git log -c -p",
     "git status --porcelain",
-    "git diff > out.patch",
+    "git diff HEAD 2>&1",
+    "git diff HEAD >&2",
+    "git diff HEAD 1>&2",
+    "git diff HEAD >&-",
+    "git diff HEAD <<<''",
+    "git diff HEAD | jq . > out",
+    "echo x > out; git diff HEAD",
+    "echo x >> out && git diff HEAD",
+    ">out echo x; git diff HEAD",
+    ">out cat f | git diff --stat",
+    "</dev/null git diff HEAD",
+    "2>&1 git diff HEAD",
+    ">&2 git diff HEAD",
+    "git diff HEAD@{1}",
+    "git diff -- 'lit~eral'",
+    "git diff HEAD -- x~",
+    "git show HEAD:~/x",
+    "ls ~/.bashrc; git diff HEAD",
     "git diff --output-indicator-new=x",
     "PAGER=cat git log",
     "git diff --stat | head -20",
@@ -218,6 +259,77 @@ class ReachTests(unittest.TestCase):
         )
 
 
+    def test_bash_truncates_the_target_of_a_redirection_written_before_the_command(self) -> None:
+        # Bash lets a redirection precede the command name, and the two
+        # spellings are the same command: `>victim git diff HEAD HEAD`
+        # truncates the file exactly as `git diff HEAD HEAD >victim` does.
+        # shlex hands the `>` back as the first token of the segment, and a
+        # scan that took the first token for the command name saw no `git`
+        # and checked nothing else in the segment either -- so `>cosign.pub
+        # git diff --no-index /dev/null ./cosign.key` passed whole. Shown
+        # against a stand-in in a throwaway repository.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            victim = repo / "victim"
+            victim.write_text("ORIGINAL-CONTENT\n")
+            subprocess.run(
+                [
+                    "bash",
+                    "--norc",
+                    "--noprofile",
+                    "-c",
+                    "git status --short >/dev/null; >victim git diff HEAD HEAD",
+                ],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            written = victim.read_text()
+        self.assertNotIn(
+            "ORIGINAL-CONTENT",
+            written,
+            "bash no longer truncates the target of a redirection written before the "
+            "command name; re-derive why split_segment() skips redirections",
+        )
+        self.assertIsNotNone(
+            gate.refusal("git status; >cosign.pub git diff HEAD"),
+            "the command just shown to truncate a file is not refused",
+        )
+
+    def test_git_reads_a_home_file_named_with_a_tilde(self) -> None:
+        # bash expands `~` to $HOME before git runs, so `git diff --
+        # ~/.aws/credentials ~/.bashrc` is a two-operand plain-file diff of
+        # two files outside the checkout that neither starts with `/` nor
+        # carries a `..` as typed. Run with a throwaway HOME, never the real
+        # one; the hook reads the `~` lexically and refuses it as an outside
+        # operand.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / ".aws").mkdir(parents=True)
+            (home / ".aws" / "credentials").write_text("STAND-IN-NOT-A-SECRET\n")
+            (home / ".bashrc").write_text("export FIXTURE=1\n")
+            result = subprocess.run(
+                ["bash", "--norc", "--noprofile", "-c", "git diff -- ~/.aws/credentials ~/.bashrc"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                env={"PATH": os.environ.get("PATH", ""), "HOME": str(home)},
+                check=False,
+            )
+        self.assertIn(
+            "STAND-IN-NOT-A-SECRET",
+            result.stdout,
+            "git diff no longer prints a home file named through ~; the tilde test in "
+            "unsafe_operand() may be more than is needed",
+        )
+        self.assertIsNotNone(
+            gate.refusal("git diff -- ~/.aws/credentials ~/.bashrc"),
+            "the command just shown to read a home file is not refused",
+        )
+
+
 class RefusalTests(unittest.TestCase):
     def test_each_reaching_command_is_refused(self) -> None:
         for command, reach in REFUSED_COMMANDS:
@@ -260,6 +372,54 @@ class RefusalTests(unittest.TestCase):
                     f"{command!r} is refused; a gate that blocks ordinary work gets removed",
                 )
 
+    def test_a_redirection_is_refused_for_what_the_shell_opens(self) -> None:
+        # The rule is the operator and the target's shape. Every operator with
+        # a `>` in it opens its target for writing, `<>` included; `>&` does
+        # too unless the target names a descriptor; the input forms open
+        # nothing for writing.
+        for operator, target in (
+            (">", "cosign.pub"),
+            (">>", "out"),
+            (">|", "x"),
+            ("&>", "/dev/null"),
+            ("&>>", "log"),
+            (">&", "cosign.pub"),
+            ("<>", "cosign.pub"),
+        ):
+            with self.subTest(operator=operator, target=target):
+                self.assertTrue(gate.redirection_writes_a_path(operator, target))
+        for operator, target in (
+            (">&", "1"),
+            (">&", "2"),
+            (">&", "-"),
+            ("<", "/dev/null"),
+            ("<<", "EOF"),
+            ("<<<", "x"),
+            ("<&", "0"),
+        ):
+            with self.subTest(operator=operator, target=target):
+                self.assertFalse(gate.redirection_writes_a_path(operator, target))
+
+    def test_a_redirection_before_the_command_does_not_hide_the_command(self) -> None:
+        # split_segment() has to see past a redirection, its target and a
+        # descriptor to the word that names the command, or every other
+        # refusal is skipped for the segment.
+        for segment, command in (
+            ([">", "cosign.pub", "git", "diff", "HEAD"], "git"),
+            (["2", ">", "err", "git", "log", "-1"], "git"),
+            (["FOO=bar", ">", "out", "git", "diff"], "git"),
+            (["<", "/dev/null", "git", "diff"], "git"),
+            ([">&", "2", "git", "diff"], "git"),
+            (["git", "diff", ">", "out"], "git"),
+            ([">", "out", "echo", "x"], "echo"),
+        ):
+            with self.subTest(segment=segment):
+                names, found, arguments = gate.split_segment(segment)
+                self.assertEqual(found, command)
+                self.assertEqual(arguments, segment[segment.index(command) + 1 :])
+        names, _, _ = gate.split_segment(["FOO=bar", ">", "out", "git", "diff"])
+        self.assertEqual(names, ["FOO"])
+
     def test_a_revision_range_is_not_a_parent_directory(self) -> None:
         # `..` is a path component in one and a range operator in the other.
         # Conflating them would refuse the commonest git log argument there is.
@@ -267,6 +427,20 @@ class RefusalTests(unittest.TestCase):
         self.assertFalse(gate.unsafe_operand("v1.0...v2.0"))
         self.assertTrue(gate.unsafe_operand("../sibling/file"))
         self.assertTrue(gate.unsafe_operand("docs/../../etc/passwd"))
+
+    def test_a_leading_tilde_is_outside_the_checkout(self) -> None:
+        # bash expands an unquoted leading `~` to a home directory before git
+        # runs, so as an operand it names a file outside the checkout without
+        # a `/` or a `..` in the spelling. A tilde anywhere else in the word
+        # is a character in a revision or a filename. shlex removes quotes,
+        # so `'~/x'` reaches the hook as `~/x` and is refused too, which is
+        # the over-refusing direction.
+        for token in ("~", "~/", "~/.aws/credentials", "~root/.bashrc", "~/.bashrc"):
+            with self.subTest(token=token):
+                self.assertTrue(gate.unsafe_operand(token))
+        for token in ("HEAD~1", "HEAD~2..HEAD~1", "lit~eral", "x~", "HEAD:~/x"):
+            with self.subTest(token=token):
+                self.assertFalse(gate.unsafe_operand(token))
 
     def test_an_abbreviated_option_is_refused_like_its_full_spelling(self) -> None:
         # git resolves any unambiguous prefix, so matching only the full

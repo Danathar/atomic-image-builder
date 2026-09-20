@@ -75,9 +75,15 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   outward-facing. A denial is the answer, not an obstacle to route around.
 - [`.claude/hooks/gate_git_diff.py`](../.claude/hooks/gate_git_diff.py) refuses
   the `git` arguments that reach a file the index does not hold: `--no-index`,
-  `--output`, `--ext-diff`, `-O`, an operand that is absolute or climbs out of
-  the checkout, and the `-c` and `GIT_EXTERNAL_DIFF` forms that change what
-  `git` runs. Without it the always-allowed `git diff` is a file reader:
+  `--output`, `--ext-diff`, `-O`, an operand that is absolute, climbs out of
+  the checkout or starts with a `~` bash would expand to a home directory,
+  and the `-c` and `GIT_EXTERNAL_DIFF` forms that change what `git` runs. It
+  also refuses an output redirection on the git command -- `git diff HEAD
+  >cosign.pub`, which is `--output` in the shell's spelling and truncates the
+  file before git runs, and `>cosign.pub git diff HEAD`, which bash reads as
+  the same command -- while `2>&1`, an input redirection and a redirection on
+  another command of the same string are left alone. Without it the
+  always-allowed `git diff` is a file reader:
   `git diff --no-index /dev/null ./cosign.key` prints the key the rule above
   denies, because that rule gates the Read tool and never sees a path handed
   to Bash.
