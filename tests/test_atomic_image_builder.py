@@ -75,6 +75,7 @@ from atomic_image_builder import (
     pin_action_uses_line,
     pinned_action,
     read_os_release_fields,
+    remote_replacement_list,
     string_list,
     workflow_job_ranges,
 )
@@ -6629,6 +6630,9 @@ class BuilderTests(unittest.TestCase):
         # One assertion per field rpm-ostree documents, because each is a
         # separate way for a customization to go missing and the defect was
         # that four of them were read as absent rather than as unsupported.
+        # The remote-replacements value is in the shape rpm-ostree actually
+        # writes, (from, packages) pairs; #230's version of this test used a
+        # flat list, which is why #353 got past it.
         app = self.make_app()
         self.assertEqual(
             app.unsupported_scan_customizations(
@@ -6636,7 +6640,7 @@ class BuilderTests(unittest.TestCase):
                     "requested-local-packages": ["local-1.0-1.x86_64"],
                     "requested-local-fileoverride-packages": ["fileoverride-1.0-1.x86_64"],
                     "requested-base-local-replacements": ["local-replacement-1.0-1.x86_64"],
-                    "requested-base-remote-replacements": ["remote-replacement-1.0-1.x86_64"],
+                    "requested-base-remote-replacements": [["repo=example-copr", ["remote-replacement"]]],
                     "initramfs-etc": ["/etc/crypttab"],
                     "initramfs-args": ["--arg"],
                     "regenerate-initramfs": True,
@@ -6646,10 +6650,98 @@ class BuilderTests(unittest.TestCase):
                 ("Locally installed RPMs", ["local-1.0-1.x86_64"]),
                 ("Local file overrides", ["fileoverride-1.0-1.x86_64"]),
                 ("Base packages replaced by a local RPM", ["local-replacement-1.0-1.x86_64"]),
-                ("Base packages replaced from a repository", ["remote-replacement-1.0-1.x86_64"]),
+                ("Base packages replaced from a repository", ["remote-replacement (from repo=example-copr)"]),
                 ("Files kept in the initramfs from /etc", ["/etc/crypttab"]),
                 ("Custom initramfs arguments", ["--arg"]),
                 ("A locally regenerated initramfs", []),
+            ],
+        )
+
+    def test_scan_os_reports_a_remote_override_in_the_shape_rpm_ostree_writes(self) -> None:
+        # The #353 case: a mesa override from a COPR, recorded by rpm-ostree as
+        # [[from, [package, ...]], ...]. Read as a flat string list it vanished,
+        # so the scan showed no "Cannot Be Carried Over" row, asked nothing,
+        # and the generated README recommended the reset that removes it.
+        rows: list[tuple[str, str]] = []
+        confirms: list[str] = []
+        stub = GumStub()
+        stub.table = lambda table_rows, **_kwargs: rows.extend(table_rows)
+
+        def confirm(prompt: str, default: bool = False) -> bool:
+            confirms.append(prompt)
+            return default
+
+        stub.confirm = confirm
+        result, app, stub = self.run_scan_with_status(
+            {
+                "container-image-reference": self.BLUEFIN,
+                "requested-packages": ["htop"],
+                "requested-base-removals": [],
+                "requested-base-remote-replacements": [
+                    ["repo=copr:copr.fedorainfracloud.org:example:mesa", ["mesa-dri-drivers", "mesa-va-drivers"]]
+                ],
+            },
+            gum=stub,
+        )
+        self.assertEqual(result, SCAN_CANCELLED)
+        self.assertIn(("Cannot Be Carried Over", "2"), rows)
+        self.assertEqual(confirms, ["Continue without these customizations?"])
+        self.assertTrue(
+            any(level == "warn" and "cannot be carried" in message for level, message in stub.messages),
+            stub.messages,
+        )
+        # The user sees which packages and which repository are at stake, and
+        # the package name leads so it survives the preview's truncation.
+        hints = [message for level, message in stub.messages if level == "hint"]
+        self.assertTrue(
+            any(hint.startswith("Base packages replaced from a repository: mesa-dri-drivers (from repo=copr:") for hint in hints),
+            hints,
+        )
+
+    def test_remote_replacement_list_flattens_the_real_rpm_ostree_shape(self) -> None:
+        # One entry per package, source attached, across several sources. The
+        # sum of these is the "Cannot Be Carried Over" count, so a pair must
+        # count for each package it names rather than for one.
+        self.assertEqual(
+            remote_replacement_list(
+                [
+                    ["repo=copr:example:mesa", ["mesa-dri-drivers", "mesa-va-drivers"]],
+                    ["repo=copr:example:kernel", ["kernel"]],
+                ]
+            ),
+            [
+                "mesa-dri-drivers (from repo=copr:example:mesa)",
+                "mesa-va-drivers (from repo=copr:example:mesa)",
+                "kernel (from repo=copr:example:kernel)",
+            ],
+        )
+
+    def test_remote_replacement_list_coerces_untrusted_json_values(self) -> None:
+        # Same contract as string_list(): a stale override file or a future
+        # schema change reaches the friendly path, not a TypeError. A bare
+        # string entry is kept as a package with no source; a pair whose
+        # package list is unreadable still names its repository, because an
+        # override with no readable packages is still one reset removes.
+        self.assertEqual(remote_replacement_list(None), [])
+        self.assertEqual(remote_replacement_list("repo=copr:example:mesa"), [])
+        self.assertEqual(remote_replacement_list({"repo=copr:example:mesa": ["mesa"]}), [])
+        self.assertEqual(
+            remote_replacement_list(
+                [
+                    "bare-package",
+                    ["repo=copr:example:mesa", "mesa-dri-drivers"],
+                    ["repo=copr:example:kernel", [1, "kernel", None]],
+                    [" ", ["unsourced"]],
+                    [None, []],
+                    ["too", "many", "items"],
+                    7,
+                ]
+            ),
+            [
+                "bare-package",
+                "repo=copr:example:mesa",
+                "kernel (from repo=copr:example:kernel)",
+                "unsourced",
             ],
         )
 
