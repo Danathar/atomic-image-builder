@@ -7984,12 +7984,45 @@ class BuilderTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 gum.pager("some long text")
 
-    def test_gum_pager_raises_screen_back_when_gum_fails(self) -> None:
+    def test_gum_pager_keeps_a_real_failure_as_a_command_error(self) -> None:
+        # The pager exits 0 for Esc as well as q, so a status other than 0 or
+        # 130 is never navigation: real gum v0.17.0 exits 1 with "unable to
+        # read stdin" when it has no terminal. That must stay the CommandError
+        # run() used to raise, not become ScreenBack -- main() turns ScreenBack
+        # into a silent exit 0, and push_update() would abandon the update
+        # without reporting anything (review of #394).
         gum = Gum()
+        for status in (1, 2):
+            with self.subTest(status=status):
+                completed = subprocess.CompletedProcess(["gum", "pager"], status, None, None)
+                with patch("atomic_image_builder.run", return_value=completed):
+                    with self.assertRaises(CommandError) as raised:
+                        gum.pager("some long text")
+                self.assertEqual(str(raised.exception), "command failed: gum pager")
+
+    def test_push_update_reports_a_pager_failure_instead_of_quietly_dropping_the_update(self) -> None:
+        # End to end: "View full diff?" answered yes, then the pager fails. The
+        # failure must reach main()'s CommandError handler (error banner, exit
+        # 1), not surface as a ScreenBack that push_update's callers read as
+        # the user backing out.
+        app = self.make_app()
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: True
+        stub.pager = Gum.pager.__get__(stub, GumStub)
+        app.gum = stub
         completed = subprocess.CompletedProcess(["gum", "pager"], 1, None, None)
-        with patch("atomic_image_builder.run", return_value=completed):
-            with self.assertRaises(ScreenBack):
-                gum.pager("some long text")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            with patch.object(app, "repo_default_branch", return_value="main"):
+                with patch.object(app, "write_project_files"):
+                    with patch.object(app, "repo_diff_summary", return_value=" M Containerfile"):
+                        with patch.object(app, "show_managed_repo_warning"):
+                            with patch.object(app, "repo_full_diff", return_value="diff --git a b"):
+                                with patch("atomic_image_builder.run", return_value=completed) as run_mock:
+                                    with redirect_stdout(io.StringIO()):
+                                        with self.assertRaises(CommandError):
+                                            app.push_update("example", "repo", repo_dir)
+        self.assertEqual(run_mock.call_args.args[0], ["gum", "pager"])
 
     def test_gum_enter_to_continue_shows_instruction_then_waits_for_input(self) -> None:
         gum = Gum()
