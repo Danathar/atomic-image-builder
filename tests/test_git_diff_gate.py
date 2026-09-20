@@ -90,6 +90,14 @@ REFUSED_COMMANDS = (
         ">cosign.pub git diff --no-index /dev/null ./cosign.key",
         "hid --no-index behind a redirection the scan took for the command name",
     ),
+    ("git diff ';' >cosign.pub", "hid the redirection behind a quoted separator"),
+    ("git diff '|' >cosign.pub", "hid the redirection behind a quoted pipe"),
+    ("git diff \\; >cosign.pub", "hid the redirection behind an escaped separator"),
+    ("git diff ';' --no-index /dev/null ./cosign.key", "hid --no-index behind a quoted separator"),
+    ("git status; {fd}>cosign.pub git diff HEAD", "hid the redirection behind a {name} descriptor"),
+    ("git diff HEAD {fd}>cosign.pub", "writes through a {name} descriptor"),
+    ("git status; >$(printf cosign.pub) git diff HEAD", "hid the redirection behind a $(...) target"),
+    ("git status; >`printf cosign.pub` git diff HEAD", "hid the redirection behind a backtick target"),
     ("git diff -- ~/.aws/credentials ~/.bashrc", "names two home files through a tilde bash expands"),
     ("git diff ~/.bashrc ~/.aws/credentials", "names two home files through a tilde without --"),
     ("git log -p -- ~/.ssh/config", "names a home file through a tilde in git log"),
@@ -141,6 +149,12 @@ ALLOWED_COMMANDS = (
     "echo x >> out && git diff HEAD",
     ">out echo x; git diff HEAD",
     ">out cat f | git diff --stat",
+    ">$(printf out) echo x; git diff HEAD",
+    "{fd}>out echo x; git diff HEAD",
+    "echo $(date) *.sh; git status",
+    'git commit -m "a; b" | cat',
+    "git diff -- 'a;b'",
+    'echo "x)" ; git diff HEAD',
     "</dev/null git diff HEAD",
     "2>&1 git diff HEAD",
     ">&2 git diff HEAD",
@@ -407,6 +421,10 @@ class RefusalTests(unittest.TestCase):
         for segment, command in (
             ([">", "cosign.pub", "git", "diff", "HEAD"], "git"),
             (["2", ">", "err", "git", "log", "-1"], "git"),
+            (["{fd}", ">", "err", "git", "log", "-1"], "git"),
+            ([">", "$", "git", "diff", "HEAD"], "git"),
+            ([">", "`printf", "cosign.pub`", "git", "diff", "HEAD"], "git"),
+            ([">", "`x`", "git", "diff", "HEAD"], "git"),
             (["FOO=bar", ">", "out", "git", "diff"], "git"),
             (["<", "/dev/null", "git", "diff"], "git"),
             ([">&", "2", "git", "diff"], "git"),
@@ -419,6 +437,25 @@ class RefusalTests(unittest.TestCase):
                 self.assertEqual(arguments, segment[segment.index(command) + 1 :])
         names, _, _ = gate.split_segment(["FOO=bar", ">", "out", "git", "diff"])
         self.assertEqual(names, ["FOO"])
+
+    def test_a_quoted_separator_is_a_word_of_its_command(self) -> None:
+        # shlex hands back the same `;` for `';'` and `;`, and bash treats
+        # only the second as a separator. The masked copy tells them apart
+        # without changing where the tokens fall.
+        for command, expected in (
+            ("git diff ';' >out", [["git", "diff", ";", ">", "out"]]),
+            ("git diff; >out", [["git", "diff"], [">", "out"]]),
+            ("echo 'a|b' | cat", [["echo", "a|b"], ["cat"]]),
+            ("x=$(git log -1) ; git diff", [["git", "log", "-1"], ["x=$"], ["git", "diff"]]),
+            (">$(printf out) git diff HEAD", [["printf", "out"], [">", "$", "git", "diff", "HEAD"]]),
+            ('echo "$(date)"', [["echo", "$(date)"]]),
+        ):
+            with self.subTest(command=command):
+                tokens = gate.tokenize(command)
+                masked = gate.tokenize(gate.mask_quotes(command))
+                self.assertEqual(len(tokens), len(masked))
+                self.assertEqual(gate.segments(tokens, masked), expected)
+        self.assertEqual(gate.mask_quotes(r"""a 'b c' \; "d\"e" f"""), "a QQQQQ QQ QQQQQQ f")
 
     def test_a_revision_range_is_not_a_parent_directory(self) -> None:
         # `..` is a path component in one and a range operator in the other.
