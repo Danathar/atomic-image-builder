@@ -1914,7 +1914,11 @@ class Gum:
         if no_limit:
             args.append("--no-limit")
         if selected:
-            args.extend(["--selected", ",".join(selected)])
+            # gum splits --selected on commas, so an entry that contains one
+            # arrives as two fragments and pre-selects nothing. Its parser
+            # honours a backslash before the separator; a plain backslash is
+            # kept as-is, so nothing else needs escaping.
+            args.extend(["--selected", ",".join(item.replace(",", "\\,") for item in selected)])
         if header:
             args.extend(["--header", header])
         if label_delimiter is not None:
@@ -2942,17 +2946,24 @@ class App:
                 self.gum.hint(f"Showing the first {PACKAGE_SEARCH_LIMIT} matches. Narrow the search term if you need something else.")
             print()
 
+            # With --label-delimiter, gum matches --selected against the label
+            # half of each line, not the value it prints. Passing the package
+            # names pre-ticks nothing, and everything below then reads the
+            # untouched matches as deliberate removals (#351).
             options: list[str] = []
+            selected_labels: list[str] = []
             for name, summary in results:
                 label = f"{name:<30} {self.truncate_label(summary or '(no summary available)', limit=60)}"
                 options.append(f"{label}\t{name}")
+                if name in self.config.packages:
+                    selected_labels.append(label)
 
             try:
                 picked = self.gum.choose(
                     options,
                     height=20,
                     no_limit=True,
-                    selected=self.config.packages,
+                    selected=selected_labels,
                     label_delimiter="\t",
                     selected_prefix="[x] ",
                     unselected_prefix="[ ] ",
