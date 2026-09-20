@@ -66,11 +66,13 @@ from atomic_image_builder import (
     Config,
     Gum,
     ScreenBack,
+    classic_ostree_origin,
     config_from_state_payload,
     determine_fedora_atomic_default_tag,
     ensure_trailing_newline,
     ensure_workflow_job_env_entries,
     extend_flow_sequence_line,
+    fedora_atomic_image_for_classic_origin,
     format_daily_rebuild_note,
     image_reference_tag_and_digest,
     is_valid_repo_name,
@@ -465,6 +467,98 @@ class BuilderTests(unittest.TestCase):
             normalize_container_image_reference("  ghcr.io/ublue-os/bazzite:stable  "),
             "ghcr.io/ublue-os/bazzite:stable",
         )
+
+    def test_classic_ostree_origin_reads_a_stock_fedora_origin(self) -> None:
+        # What `rpm-ostree status --json` reports for a Silverblue install
+        # that has never been rebased: the ostree remote, a colon, the ref.
+        self.assertEqual(
+            classic_ostree_origin("fedora:fedora/44/x86_64/silverblue"),
+            ("fedora", "fedora/44/x86_64/silverblue"),
+        )
+        # A deployment made without a remote reports the bare ref. The remote
+        # comes back empty rather than being guessed: the mapper is what
+        # decides that such a deployment is not Fedora's.
+        self.assertEqual(classic_ostree_origin("fedora/44/x86_64/kinoite"), ("", "fedora/44/x86_64/kinoite"))
+        # Any other remote is kept, so provenance is never read off the ref.
+        self.assertEqual(
+            classic_ostree_origin("corp:fedora/44/x86_64/silverblue"),
+            ("corp", "fedora/44/x86_64/silverblue"),
+        )
+
+    def test_classic_ostree_origin_is_none_for_every_container_spelling(self) -> None:
+        # Each form normalize_container_image_reference() accepts must be
+        # left to it: a Fedora host rebased to the quay.io image also has an
+        # `origin`, and misreading that as a classic ref would undo the
+        # remote-registry match that already works.
+        for reference in (
+            "ostree-remote-registry:fedora:quay.io/fedora-ostree-desktops/kinoite:43",
+            "ostree-remote-image:fedora:docker://quay.io/fedora-ostree-desktops/silverblue:43",
+            "ostree-unverified-registry:ghcr.io/ublue-os/bluefin:stable",
+            "ostree-unverified-image:docker://ghcr.io/ublue-os/aurora:stable",
+            "ostree-image-signed:docker://ghcr.io/ublue-os/bazzite:stable",
+            "docker://ghcr.io/ublue-os/bazzite:stable",
+            "registry:ghcr.io/ublue-os/bazzite:stable",
+            "ghcr.io/ublue-os/bazzite:stable",
+            "quay.io/fedora-ostree-desktops/silverblue",
+            "",
+            "   ",
+        ):
+            with self.subTest(reference=reference):
+                self.assertIsNone(classic_ostree_origin(reference))
+
+    def test_fedora_atomic_image_for_classic_origin_maps_every_curated_variant(self) -> None:
+        # The ref keeps the original codenames of the two variants Fedora
+        # renamed, so those must land on the renamed quay.io image. The tag
+        # is the host's own release, not the curated one: the existing tag
+        # check in scan_os is what offers the recommended tag.
+        for variant, repo in (
+            ("silverblue", "silverblue"),
+            ("kinoite", "kinoite"),
+            ("sericea", "sway-atomic"),
+            ("onyx", "budgie-atomic"),
+            ("cosmic-atomic", "cosmic-atomic"),
+        ):
+            with self.subTest(variant=variant):
+                self.assertEqual(
+                    fedora_atomic_image_for_classic_origin("fedora", f"fedora/43/x86_64/{variant}"),
+                    f"quay.io/fedora-ostree-desktops/{repo}:43",
+                )
+        self.assertEqual(
+            fedora_atomic_image_for_classic_origin("fedora", "fedora/rawhide/x86_64/kinoite"),
+            "quay.io/fedora-ostree-desktops/kinoite:rawhide",
+        )
+
+    def test_fedora_atomic_image_for_classic_origin_is_none_outside_fedora_desktops(self) -> None:
+        for ref in (
+            "fedora/44/x86_64/coreos",
+            "fedora/44/x86_64/iot",
+            "fedora/44/x86_64/bazzite",
+            "centos/9/x86_64/coreos",
+            "fedora/44/silverblue",
+            "fedora/44/x86_64/silverblue/extra",
+            "fedora//x86_64/silverblue",
+        ):
+            with self.subTest(ref=ref):
+                self.assertIsNone(fedora_atomic_image_for_classic_origin("fedora", ref))
+
+    def test_fedora_atomic_image_for_classic_origin_requires_fedoras_own_remote(self) -> None:
+        # Remote names are local configuration. A custom remote can serve a
+        # ref spelled exactly like Fedora's with different content behind it,
+        # so the Fedora-looking ref alone must not be taken as the official
+        # image -- that would swap the running base for quay.io's without
+        # saying so. A bare ref deployed with no remote is just as unknown.
+        for remote in ("corp", "fedora-mirror", "FEDORA", ""):
+            with self.subTest(remote=remote):
+                self.assertIsNone(fedora_atomic_image_for_classic_origin(remote, "fedora/44/x86_64/silverblue"))
+
+    def test_fedora_atomic_image_for_classic_origin_requires_the_published_architecture(self) -> None:
+        # The generated workflow publishes one native x86_64 image (#236).
+        # Dropping the arch segment mapped an aarch64 Kinoite onto that image
+        # and walked the user through building one their host cannot switch
+        # to, so anything but x86_64 has no image to offer.
+        for arch in ("aarch64", "ppc64le", "s390x"):
+            with self.subTest(arch=arch):
+                self.assertIsNone(fedora_atomic_image_for_classic_origin("fedora", f"fedora/44/{arch}/kinoite"))
 
     def test_image_reference_tag_and_digest_splits_every_reference_shape(self) -> None:
         digest = "sha256:" + "a" * 64
@@ -6551,6 +6645,208 @@ class BuilderTests(unittest.TestCase):
                 for level, message in stub.messages
             )
         )
+
+    def classic_fedora_status(self, origin: str, packages: list[str]) -> str:
+        # The shape rpm-ostree actually reports for a stock Fedora Atomic
+        # install: no container-image-reference at all, and a classic
+        # `remote:ref` origin. The test above uses a deployment with neither
+        # key, which real rpm-ostree never emits, so it could not catch the
+        # origin being mistaken for an image reference (#352).
+        return json.dumps(
+            {
+                "deployments": [
+                    {
+                        "booted": True,
+                        "origin": origin,
+                        "requested-packages": packages,
+                        "requested-base-removals": [],
+                    }
+                ]
+            }
+        )
+
+    def test_scan_os_maps_a_stock_silverblue_install_onto_the_curated_base(self) -> None:
+        # A Silverblue that was installed and never rebased was refused as
+        # "not one of the images this tool supports", with its layered
+        # packages read and then dropped. It is the primary Fedora Atomic
+        # install and the README lists it as supported.
+        app = self.make_app()
+        app.github_user = "example"
+        stub = GumStub()
+        stub.choose = lambda options, **_kwargs: list(options)
+        app.gum = stub
+        status_payload = self.classic_fedora_status(f"fedora:fedora/{FEDORA_ATOMIC_DEFAULT_TAG}/x86_64/silverblue", ["tmux", "distrobox"])
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["rpm-ostree"], 0, status_payload, ""),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    result = app.scan_os()
+
+        self.assertEqual(result, SCAN_OK)
+        self.assertEqual(app.config.base_image_name, "Fedora Silverblue")
+        self.assertEqual(app.config.base_image_uri, f"quay.io/fedora-ostree-desktops/silverblue:{FEDORA_ATOMIC_DEFAULT_TAG}")
+        self.assertEqual(app.config.scanned_packages, ["tmux", "distrobox"])
+        self.assertEqual(app.config.packages, ["tmux", "distrobox"])
+        self.assertEqual([m for level, m in stub.messages if level in ("warn", "error")], [])
+
+    def test_scan_os_maps_the_renamed_classic_refs_onto_their_new_images(self) -> None:
+        # Fedora's refs still say sericea and onyx; the images they correspond
+        # to are sway-atomic and budgie-atomic.
+        for variant, name in (("sericea", "Fedora Sway Atomic"), ("onyx", "Fedora Budgie Atomic"), ("kinoite", "Fedora Kinoite")):
+            with self.subTest(variant=variant):
+                app = self.make_app()
+                app.github_user = "example"
+                app.gum = GumStub()
+                status_payload = self.classic_fedora_status(f"fedora:fedora/{FEDORA_ATOMIC_DEFAULT_TAG}/x86_64/{variant}", [])
+                with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+                    with patch(
+                        "atomic_image_builder.run",
+                        return_value=subprocess.CompletedProcess(["rpm-ostree"], 0, status_payload, ""),
+                    ):
+                        with redirect_stdout(io.StringIO()):
+                            self.assertEqual(app.scan_os(), SCAN_OK)
+                self.assertEqual(app.config.base_image_name, name)
+
+    def test_scan_os_offers_the_recommended_tag_to_a_classic_install_on_an_older_release(self) -> None:
+        # The ref carries the host's release, so a host one release behind
+        # goes through the same tag check a rebased host does, and accepting
+        # the default lands on the curated tag rather than the old release.
+        app = self.make_app()
+        app.github_user = "example"
+        stub = GumStub()
+        prompts: list[str] = []
+
+        def confirm(prompt: str, default: bool = False) -> bool:
+            prompts.append(prompt)
+            return default
+
+        stub.confirm = confirm
+        app.gum = stub
+        older = str(int(FEDORA_ATOMIC_DEFAULT_TAG) - 1)
+        status_payload = self.classic_fedora_status(f"fedora:fedora/{older}/x86_64/kinoite", [])
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["rpm-ostree"], 0, status_payload, ""),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(app.scan_os(), SCAN_OK)
+
+        self.assertEqual(app.config.base_image_uri, f"quay.io/fedora-ostree-desktops/kinoite:{FEDORA_ATOMIC_DEFAULT_TAG}")
+        self.assertTrue(any(f"recommended :{FEDORA_ATOMIC_DEFAULT_TAG}" in prompt for prompt in prompts))
+        warnings = " ".join(m for level, m in stub.messages if level == "warn")
+        self.assertIn(f"running :{older}", warnings)
+
+    def test_scan_os_treats_an_unknown_classic_ref_as_no_image_to_build_on(self) -> None:
+        # A classic ref this tool has no image for is not a custom image
+        # somebody built: there is nothing to build on top of, so it is the
+        # "no container image reference" case rather than the refusal, and
+        # create_image goes on to offer a base by hand.
+        app = self.make_app()
+        app.github_user = "example"
+        stub = GumStub()
+        app.gum = stub
+        status_payload = self.classic_fedora_status("fedora:fedora/44/x86_64/iot", ["tmux"])
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["rpm-ostree"], 0, status_payload, ""),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    result = app.scan_os()
+
+        self.assertEqual(result, SCAN_UNAVAILABLE)
+        self.assertEqual(app.config.base_image_uri, "")
+        self.assertEqual(app.config.base_image_name, "")
+        errors = " ".join(m for level, m in stub.messages if level == "error")
+        self.assertIn("fedora/44/x86_64/iot", errors)
+        self.assertIn("not one of the images this tool supports", errors)
+        self.assertEqual([m for level, m in stub.messages if level == "warn"], [])
+
+    def test_scan_os_refuses_a_fedora_looking_ref_from_another_remote(self) -> None:
+        # `corp:fedora/44/x86_64/silverblue` is whatever the corp remote
+        # serves under that name, not Fedora's Silverblue. Mapping it onto
+        # quay.io would bypass the custom-base refusal and build on a base
+        # the host is not actually running, so it stops with the origin
+        # named in full -- remote included -- rather than the ref alone.
+        app = self.make_app()
+        app.github_user = "example"
+        stub = GumStub()
+        app.gum = stub
+        status_payload = self.classic_fedora_status("corp:fedora/44/x86_64/silverblue", ["tmux"])
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["rpm-ostree"], 0, status_payload, ""),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    result = app.scan_os()
+
+        self.assertEqual(result, SCAN_UNAVAILABLE)
+        self.assertEqual(app.config.base_image_uri, "")
+        self.assertEqual(app.config.base_image_name, "")
+        errors = " ".join(m for level, m in stub.messages if level == "error")
+        self.assertIn("corp:fedora/44/x86_64/silverblue", errors)
+        self.assertIn("not one of the images this tool supports", errors)
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertNotIn("only publishes", hints)
+
+    def test_scan_os_refuses_a_classic_install_on_an_unpublished_architecture(self) -> None:
+        # An aarch64 Kinoite is a supported variant on an architecture this
+        # tool publishes no image for. It must stop here rather than guide
+        # the user into building an x86_64 image, and it must say which of
+        # the two is the problem, since the supported list names Kinoite.
+        app = self.make_app()
+        app.github_user = "example"
+        stub = GumStub()
+        app.gum = stub
+        status_payload = self.classic_fedora_status("fedora:fedora/44/aarch64/kinoite", ["tmux"])
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["rpm-ostree"], 0, status_payload, ""),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    result = app.scan_os()
+
+        self.assertEqual(result, SCAN_UNAVAILABLE)
+        self.assertEqual(app.config.base_image_uri, "")
+        self.assertEqual(app.config.base_image_name, "")
+        errors = " ".join(m for level, m in stub.messages if level == "error")
+        self.assertIn("fedora:fedora/44/aarch64/kinoite", errors)
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertIn("only publishes x86_64 images", hints)
+        self.assertIn("aarch64 system", hints)
+
+    def test_create_image_starts_the_scanned_wizard_for_a_stock_silverblue_install(self) -> None:
+        # The reproduction from #352, end to end: every prompt answered with
+        # its default must reach the scanned wizard, not the "Start fresh from
+        # a supported base image instead?" question that defaults to stopping.
+        app = self.make_app()
+        app.github_user = "example"
+        stub = GumStub()
+        prompts: list[str] = []
+
+        def confirm(prompt: str, default: bool = False) -> bool:
+            prompts.append(prompt)
+            return default
+
+        stub.confirm = confirm
+        stub.choose = lambda options, **_kwargs: list(options)
+        app.gum = stub
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = Path(tmp) / "status.json"
+            status_path.write_text(self.classic_fedora_status("fedora:fedora/44/x86_64/silverblue", ["tmux", "distrobox"]))
+            with patch.dict(os.environ, {"AIB_RPM_OSTREE_STATUS_FILE": str(status_path)}):
+                with patch.object(app, "create_new_image") as create_mock:
+                    with redirect_stdout(io.StringIO()):
+                        app.create_image()
+
+        create_mock.assert_called_once_with(scanned=True)
+        self.assertEqual([p for p in prompts if "supported base image" in p or "Choose a base image" in p], [])
+        self.assertEqual(app.config.packages, ["tmux", "distrobox"])
 
     def test_scan_os_matches_fedora_atomic_remote_registry_origin(self) -> None:
         app = self.make_app()
