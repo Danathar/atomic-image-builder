@@ -130,6 +130,12 @@ EXPANDING_BRACE = re.compile(r"\{.*(?:,|\.\.).*\}", re.DOTALL)
 # are the process substitutions handled above. See redirection_writes_a_path().
 REDIRECTION = re.compile(r"^[<>&|]*[<>][<>&|]*$")
 
+# The descriptor bash reads off the front of a redirection when the token
+# before the operator has this shape: the digits of `2>err`, or the `{name}`
+# of `{fd}>file`, which allocates a descriptor into a variable. shlex splits
+# either off as a token of its own.
+DESCRIPTOR = re.compile(r"^(?:[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\})$")
+
 
 def refused_long(token: str) -> bool:
     """Is this token a long option that reaches outside the index?
@@ -236,6 +242,42 @@ def unsafe_operand(token: str) -> bool:
     return ".." in token.split("/")
 
 
+def mask_quotes(command: str) -> str:
+    """The command with every quoted or escaped character replaced by `Q`.
+
+    shlex removes the quotes as it splits, so the `;` of `git diff ';' >out`
+    arrives as the same token as the `;` of `git diff; >out`, and a split
+    that read it as a separator put the redirection in a segment with no
+    git in it while bash handed git a literal `;` and truncated the file
+    (review on #414). The masked copy keeps every quoted region the same
+    length and free of shell syntax, so splitting it with the same lexer
+    gives one token per real token, and a token that is a separator in
+    the masked copy is one bash would honour; a quoted one is not.
+    """
+    masked: list[str] = []
+    quote = ""
+    escaped = False
+    for char in command:
+        if escaped:
+            escaped = False
+            masked.append("Q")
+        elif quote:
+            if char == quote:
+                quote = ""
+            elif quote == '"' and char == "\\":
+                escaped = True
+            masked.append("Q")
+        elif char == "\\":
+            escaped = True
+            masked.append("Q")
+        elif char in "'\"":
+            quote = char
+            masked.append("Q")
+        else:
+            masked.append(char)
+    return "".join(masked)
+
+
 def tokenize(command: str) -> list[str]:
     """The command's words and shell operators, or a failure.
 
@@ -256,11 +298,33 @@ def tokenize(command: str) -> list[str]:
     return list(lexer)
 
 
-def segments(tokens: list[str]) -> list[list[str]]:
-    """The token list split into commands on shell operators."""
+def is_operator(token: str) -> bool:
+    return token in OPERATORS or bool(token) and set(token) <= {"&", "|", ";"}
+
+
+def segments(tokens: list[str], masked: list[str]) -> list[list[str]]:
+    """The token list split into commands on the shell operators bash honours.
+
+    `masked` is the same list lexed from mask_quotes(); a token is a
+    separator only when its masked twin is, so a quoted `;` or `|` stays a
+    word of its command. A `$(...)` is a nested command: its words become a
+    segment of their own, and the command around it goes on after the `)`
+    with the `$` still in place, so `>$(printf cosign.pub) git diff HEAD`
+    is one command whose redirection names a target built at runtime, and
+    a split that ended the command at the `(` had put that redirection in a
+    segment with no git in it (review on #414).
+    """
     found: list[list[str]] = [[]]
-    for token in tokens:
-        if token in OPERATORS or set(token) <= {"&", "|", ";"} and token:
+    outer: list[list[str]] = []
+    for token, twin in zip(tokens, masked, strict=True):
+        if twin == "(" and found[-1] and found[-1][-1].endswith("$"):
+            outer.append(found.pop())
+            found.append([])
+            continue
+        if twin == ")" and outer:
+            found.append(outer.pop())
+            continue
+        if is_operator(twin):
             found.append([])
             continue
         found[-1].append(token)
@@ -290,10 +354,13 @@ def split_segment(segment: list[str]) -> tuple[list[str], str, list[str]]:
     `>cosign.pub git diff HEAD` the first token is `>` and the command is
     still git; reading `>` as the name left the whole segment unchecked. A
     redirection is its operator, the token after it (the target), and a
-    token of digits right before it (the descriptor of `2>err`). shlex does
-    not say whether the digits touched the operator, so `2 >err git log` is
-    read the same way; that names a command called `2` as git, which can
-    only over-refuse.
+    descriptor right before it (the `2` of `2>err`, the `{fd}` of
+    `{fd}>file`). shlex does not say whether the descriptor touched the
+    operator, so `2 >err git log` is read the same way; that names a command
+    called `2` as git, which can only over-refuse. A target that opens a
+    backtick substitution runs to the token that closes it, since shlex
+    splits the substitution's words apart: `` >`printf x` git diff `` still
+    finds its name at git.
     """
     names: list[str] = []
     index = 0
@@ -305,10 +372,18 @@ def split_segment(segment: list[str]) -> tuple[list[str], str, list[str]]:
             index += 1
             continue
         if REDIRECTION.match(token):
-            index += 2  # the operator and its target
+            index += 1  # the operator
+            if index < len(segment):
+                target = segment[index]
+                index += 1  # the target
+                if target.startswith("`") and not (
+                    len(target) > 1 and target.endswith("`")
+                ):
+                    while index < len(segment) and not segment[index - 1].endswith("`"):
+                        index += 1
             continue
         if (
-            token.isdigit()
+            DESCRIPTOR.match(token)
             and index + 1 < len(segment)
             and REDIRECTION.match(segment[index + 1])
         ):
@@ -336,11 +411,16 @@ def refusal(command: str) -> str | None:
     """Why this command is blocked, or None when it is left alone."""
     try:
         tokens = tokenize(command)
+        masked = tokenize(mask_quotes(command))
     except ValueError:
         # Unbalanced quoting. What the shell would do with it cannot be read
         # here, so it is refused rather than guessed at.
         return "the command cannot be parsed as shell words, so its git arguments cannot be checked"
-    for segment in segments(tokens):
+    if len(tokens) != len(masked):
+        # The masked copy split differently, so which tokens are separators
+        # cannot be told; refused rather than guessed at.
+        return "the command's quoting cannot be matched to its words, so its git arguments cannot be checked"
+    for segment in segments(tokens, masked):
         names, command_name, arguments = split_segment(segment)
         if command_name != "git":
             continue
@@ -367,7 +447,9 @@ def refusal(command: str) -> str | None:
                 continue
             target = segment[index + 1] if index + 1 < len(segment) else ""
             descriptor = (
-                segment[index - 1] if index > 0 and segment[index - 1].isdigit() else ""
+                segment[index - 1]
+                if index > 0 and DESCRIPTOR.match(segment[index - 1])
+                else ""
             )
             if redirection_writes_a_path(token, target):
                 return (
