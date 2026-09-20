@@ -636,6 +636,18 @@ def normalize_container_image_reference(container_ref: str) -> str:
     return base
 
 
+def image_reference_tag_and_digest(image_ref: str) -> tuple[str, str]:
+    # "<repo>[:<tag>][@<digest>]" -> (tag, digest), each "" when absent. The
+    # digest comes off first: it carries a colon of its own ("@sha256:<hex>"),
+    # so splitting a digest-pinned ref on its last colon hands back the 64 hex
+    # characters as if they were a tag. The tag is then read from the last
+    # path component only, so a registry port ("localhost:5000/repo") is not
+    # mistaken for one either.
+    ref, _, digest = image_ref.partition("@")
+    _, _, tag = ref.rsplit("/", 1)[-1].partition(":")
+    return tag, digest
+
+
 def format_daily_rebuild_note(
     cron: str,
     *,
@@ -3407,12 +3419,22 @@ class App:
         # Warn when the host is running a non-standard tag (e.g. :testing,
         # :44) that differs from the curated image_uri.  Offer to use the
         # curated tag so the generated repo tracks a known-good stream.
-        scanned_tag = base.rsplit(":", 1)[-1] if ":" in base else ""
-        curated_tag = matched.image_uri.rsplit(":", 1)[-1] if ":" in matched.image_uri else ""
-        if scanned_tag and curated_tag and scanned_tag != curated_tag:
-            self.gum.warn(
-                f"Your system is running :{scanned_tag}, but this tool recommends :{curated_tag} for {matched.name}."
-            )
+        # A host pinned to a digest with no tag at all gets the same offer,
+        # worded for what it is: the digest is not a tag, and presenting its
+        # hex as one ("running :911d8f...") reads as a bug in the tool.
+        # Pinned to the curated tag ("...:stable@sha256:...") is not warned
+        # about: the tag matches, and the digest is what the host asked for.
+        scanned_tag, scanned_digest = image_reference_tag_and_digest(base)
+        curated_tag, _ = image_reference_tag_and_digest(matched.image_uri)
+        if curated_tag and scanned_tag != curated_tag and (scanned_tag or scanned_digest):
+            if scanned_tag:
+                self.gum.warn(
+                    f"Your system is running :{scanned_tag}, but this tool recommends :{curated_tag} for {matched.name}."
+                )
+            else:
+                self.gum.warn(
+                    f"Your system is pinned to a digest rather than a tag, but this tool recommends :{curated_tag} for {matched.name}."
+                )
             if self.gum.confirm(f"Use the recommended :{curated_tag} tag instead?", default=True):
                 self.config.base_image_uri = matched.image_uri
 
