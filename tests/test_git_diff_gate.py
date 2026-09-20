@@ -84,6 +84,10 @@ REFUSED_COMMANDS = (
     ("git diff {/etc/shadow,x}", "brace-expands into an absolute path before git runs"),
     ("git diff HEAD^#x /etc/passwd", "hides an outside operand behind a mid-word #"),
     ("git diff --stat#x /etc/passwd /dev/null", "hides --no-index operands behind a mid-word #"),
+    ("git diff <(true) ./cosign.key", "substitutes a /dev/fd path, so git diff implies --no-index"),
+    ("git diff <(true) /etc/passwd", "hides an absolute operand behind the ) of a substitution"),
+    ("git diff HEAD >(cat) -- README.md", "substitutes a /dev/fd path for git to write through"),
+    ("git log -p <(true)", "substitutes a /dev/fd path into git log"),
     ("git diff 'unterminated", "cannot be parsed, so it is not let through"),
 )
 
@@ -184,6 +188,36 @@ class ReachTests(unittest.TestCase):
         )
 
 
+    def test_git_reads_the_file_beside_a_process_substitution(self) -> None:
+        # bash replaces `<(true)` with `/dev/fd/N` before git runs. That is a
+        # path outside the checkout, so `git diff <(true) ./cosign.key`
+        # implies --no-index and prints the key whole, with neither the
+        # option nor an absolute path anywhere in the words as typed. shlex
+        # emits `<(` as a token of its own and reads the `)` as the end of
+        # the command, so before the substitution rule every word of the
+        # command passed the tests that catch --no-index and /dev/null.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            (repo / "cosign.key").write_text("STAND-IN-NOT-A-KEY\n")
+            result = subprocess.run(
+                ["bash", "--norc", "--noprofile", "-c", "git diff <(true) ./cosign.key"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn(
+                "STAND-IN-NOT-A-KEY",
+                result.stdout,
+                "git diff no longer prints the file beside a process substitution; the "
+                "substitution rule may be more than is needed",
+            )
+        self.assertIsNotNone(
+            gate.refusal("git diff <(true) ./cosign.key"),
+            "the command just shown to read an arbitrary file is not refused",
+        )
+
+
 class RefusalTests(unittest.TestCase):
     def test_each_reaching_command_is_refused(self) -> None:
         for command, reach in REFUSED_COMMANDS:
@@ -204,11 +238,14 @@ class RefusalTests(unittest.TestCase):
                 self.assertTrue(reason)
                 # An environment prefix is named by its variable, not by the
                 # value assigned to it, so both spellings count as naming it.
+                # A process substitution reaches the hook as its opening `<(`
+                # or `>(` alone, since shlex breaks the word there, so that
+                # opening is how the refusal names it.
                 words = [
                     part
                     for word in command.split()
                     if word not in {"git", "&&", "|"}
-                    for part in (word, word.split("=", 1)[0])
+                    for part in (word, word.split("=", 1)[0], word[:2])
                 ]
                 self.assertTrue(
                     any(word in reason for word in words),
@@ -443,6 +480,33 @@ class RefusalTests(unittest.TestCase):
             with self.subTest(word=word):
                 self.assertFalse(self.bash_expands(word), f"bash expands {word!r}")
                 self.assertIsNone(gate.refusal(f"git log {word} -1"))
+
+    def test_a_process_substitution_in_a_git_word_is_refused(self) -> None:
+        # bash hands git a `/dev/fd/N` path for `<(...)` and `>(...)`, which
+        # is outside the checkout however the word is spelled, and shlex
+        # breaks the word at the `(` so `<(` arrives as a token of its own
+        # with the `)` read as the end of the command. Both openings are
+        # refused wherever they sit in a git invocation, and the refusal
+        # names the substitution rather than the argument after it.
+        for command in (
+            "git diff <(true) ./cosign.key",
+            "git diff <(true) /etc/passwd",
+            "git diff -- <(true)",
+            "git diff HEAD >(cat) -- README.md",
+            "git log -p <(true)",
+            "git status && git diff <(true) ./cosign.key",
+        ):
+            with self.subTest(command=command):
+                reason = gate.refusal(command)
+                self.assertIsNotNone(reason, f"{command!r} is let through")
+                self.assertIn("process substitution", reason or "")
+
+    def test_a_process_substitution_outside_a_git_invocation_is_not_gated(self) -> None:
+        # The gate is about git's arguments; a diff of two other programs'
+        # output is not one, and the allow list never matches it anyway.
+        for command in ("diff <(ls a) <(ls b)", "cat <(echo x)"):
+            with self.subTest(command=command):
+                self.assertIsNone(gate.refusal(command))
 
     def test_a_brace_outside_a_git_invocation_is_not_gated(self) -> None:
         # The gate is about git's arguments; a jq or awk program is not one.
