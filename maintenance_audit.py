@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -48,12 +49,24 @@ GITHUB_REPO_URL_RE = re.compile(r"^(?:https://|git@)github\.com[/:](?P<slug>[^/]
 # runs that motivated #129 were 2, 3, 4 and 1 commits behind; this is roughly
 # a season of unattended drift, not a week of it.
 SNAPSHOT_DRIFT_FAILURE_COMMITS = 25
-# github_api_json() has passed timeout=20 since it was written; the subprocess
-# calls beside it had none, so a hung git or gh held the weekly job open until
-# GitHub's own six-hour limit killed it. Generous, because these are real
-# network round trips on a shared runner -- this is a hang guard, not a
-# latency budget.
+# Every urlopen() in this module passes this. It has been 20 since
+# github_api_json() was written; a name rather than a literal so a test can
+# shrink it and hit a real hanging socket instead of a patched urlopen.
+NETWORK_TIMEOUT_SECONDS = 20
+# The subprocess calls beside those urlopen() calls had no timeout at all, so
+# a hung git or gh held the weekly job open until GitHub's own six-hour limit
+# killed it. Generous, because these are real network round trips on a shared
+# runner -- this is a hang guard, not a latency budget.
 SUBPROCESS_TIMEOUT_SECONDS = 120
+# What a request can raise that is neither an HTTP status nor a URLError.
+# urllib wraps a failure to *connect* in URLError, but once the socket is up
+# a read that times out is builtins.TimeoutError and a peer that drops the
+# connection is ConnectionResetError -- both OSError, neither URLError -- and
+# a response cut short mid-body is http.client.IncompleteRead, which is not an
+# OSError at all. Every helper below caught URLError only, so one slow read
+# from api.github.com or ghcr.io escaped every caller's RuntimeError handling
+# and took the weekly audit down with a traceback instead of an advisory (#350).
+NETWORK_ERRORS = (OSError, http.client.HTTPException)
 # Every media type a registry may answer a manifest request with. Asking for
 # all four matters: ghcr.io serves the brew payload as an OCI image index, and
 # a request that does not accept indexes is answered with a converted
@@ -316,6 +329,13 @@ def audit_upstream_drift(source: TemplateSource) -> tuple[list[str], list[str]]:
     return ([drift.message], []) if drift.blocking else ([], [drift.message])
 
 
+def describe_network_error(exc: BaseException) -> str:
+    # URLError keeps the socket error in .reason and prints itself as
+    # "<urlopen error ...>", which is noise in an advisory. Everything else
+    # NETWORK_ERRORS covers says what happened in its own str().
+    return str(exc.reason) if isinstance(exc, urllib.error.URLError) else str(exc)
+
+
 def github_api_json(url: str) -> object:
     headers = {
         "Accept": "application/vnd.github+json",
@@ -326,15 +346,15 @@ def github_api_json(url: str) -> object:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(request, timeout=NETWORK_TIMEOUT_SECONDS) as response:
             return json.load(response)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise RuntimeError(f"Invalid JSON response from GitHub: {exc}") from exc
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace").strip()
         raise RuntimeError(detail or f"HTTP {exc.code}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(str(exc.reason)) from exc
+    except NETWORK_ERRORS as exc:
+        raise RuntimeError(describe_network_error(exc)) from exc
 
 
 def query_latest_github_semver_tag(action: str) -> str | None:
@@ -569,12 +589,12 @@ def fetch_sha256(url: str) -> str:
         url, headers={"User-Agent": "atomic-image-builder-maintenance-audit"}
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(request, timeout=NETWORK_TIMEOUT_SECONDS) as response:
             return hashlib.sha256(response.read()).hexdigest()
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"HTTP {exc.code}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(str(exc.reason)) from exc
+    except NETWORK_ERRORS as exc:
+        raise RuntimeError(describe_network_error(exc)) from exc
 
 
 def audit_container_trust_roots(repo_root: Path) -> list[str]:
@@ -646,10 +666,10 @@ def resolve_registry_tag_digest(registry: str, repository: str, tag: str) -> str
             response_headers = head_registry_manifest(url, {**headers, "Authorization": f"Bearer {token}"})
         except urllib.error.HTTPError as retry_exc:
             raise RuntimeError(f"HTTP {retry_exc.code}") from retry_exc
-        except urllib.error.URLError as retry_exc:
-            raise RuntimeError(str(retry_exc.reason)) from retry_exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(str(exc.reason)) from exc
+        except NETWORK_ERRORS as retry_exc:
+            raise RuntimeError(describe_network_error(retry_exc)) from retry_exc
+    except NETWORK_ERRORS as exc:
+        raise RuntimeError(describe_network_error(exc)) from exc
     digest = response_headers.get("Docker-Content-Digest")
     if not digest:
         raise RuntimeError(f"{registry} returned no Docker-Content-Digest for {repository}:{tag}")
@@ -660,7 +680,7 @@ def head_registry_manifest(url: str, headers: Mapping[str, str]) -> Mapping[str,
     # Lets urllib's own errors escape: the caller decides whether a 401 is a
     # failure or an invitation to fetch a token.
     request = urllib.request.Request(url, headers=dict(headers), method="HEAD")
-    with urllib.request.urlopen(request, timeout=20) as response:
+    with urllib.request.urlopen(request, timeout=NETWORK_TIMEOUT_SECONDS) as response:
         return response.headers
 
 
@@ -681,12 +701,12 @@ def fetch_registry_pull_token(challenge: str, registry: str, repository: str) ->
         headers={"User-Agent": USER_AGENT},
     )
     try:
-        with urllib.request.urlopen(token_request, timeout=20) as response:
+        with urllib.request.urlopen(token_request, timeout=NETWORK_TIMEOUT_SECONDS) as response:
             payload = json.load(response)
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"HTTP {exc.code} requesting a pull token") from exc
-    except (urllib.error.URLError, ValueError) as exc:
-        raise RuntimeError(str(exc)) from exc
+    except (*NETWORK_ERRORS, ValueError) as exc:
+        raise RuntimeError(describe_network_error(exc)) from exc
     token = None
     if isinstance(payload, dict):
         token = payload.get("token") or payload.get("access_token")

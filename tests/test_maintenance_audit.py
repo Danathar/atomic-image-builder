@@ -1,5 +1,6 @@
 import contextlib
 import hashlib
+import http.client
 import io
 import json
 import subprocess
@@ -9,7 +10,7 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
-from _local_http_server import closed_port_url, local_http_server
+from _local_http_server import closed_port_url, hanging_http_server, local_http_server
 from atomic_image_builder import (
     BOOTC_IMAGE_BUILDER_IMAGE_DIGEST,
     BOOTC_IMAGE_BUILDER_IMAGE_TAG,
@@ -490,6 +491,27 @@ class MaintenanceAuditTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             github_api_json(closed_port_url())
 
+    # A refused connection is the failure urllib wraps in URLError. A connection
+    # that is accepted and then never answered is the one it does not: the read
+    # times out with a bare builtins.TimeoutError, which escaped every helper
+    # here and took the weekly audit down with a traceback (#350). A real
+    # hanging socket, not a patched urlopen, so this proves the exception urllib
+    # actually raises is the one being caught.
+    def test_github_api_json_real_read_timeout_is_an_advisory_not_a_traceback(self) -> None:
+        with patch("maintenance_audit.NETWORK_TIMEOUT_SECONDS", 0.2):
+            with hanging_http_server() as url:
+                with self.assertRaisesRegex(RuntimeError, "timed out"):
+                    github_api_json(url)
+
+    def test_github_api_json_reports_a_response_cut_short(self) -> None:
+        # Same class of failure with the opposite symptom: the peer closes
+        # mid-body instead of going quiet. http.client reports that as
+        # IncompleteRead, which is not even an OSError.
+        cut_short = http.client.IncompleteRead(b"[{", 40)
+        with patch("maintenance_audit.urllib.request.urlopen", side_effect=cut_short):
+            with self.assertRaisesRegex(RuntimeError, "IncompleteRead"):
+                github_api_json("https://api.github.com/x")
+
     def test_query_latest_github_semver_tag_picks_highest_and_skips_noise(self) -> None:
         payload = [
             "not-a-dict",
@@ -582,6 +604,27 @@ class MaintenanceAuditTests(unittest.TestCase):
         # Pin drift must not fail the run -- a branch pin drifts constantly.
         self.assertEqual(findings, [])
         self.assertEqual(advisories, ["stale pin", "moved pin"])
+
+    def test_run_audit_turns_a_read_timeout_into_advisories_and_exits_zero(self) -> None:
+        # The shape of #350: one slow read from api.github.com or ghcr.io, and
+        # the whole weekly run died with a traceback, every later check
+        # skipped. Every network helper the --check-action-updates gate runs
+        # goes through urlopen, so one timing-out urlopen exercises all of
+        # them at once: the tag lookups, the ref lookups, the trust-root
+        # downloads and both registry reads.
+        repo_root = Path(__file__).resolve().parents[1]
+        stdout = io.StringIO()
+        with patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")):
+            findings, advisories = run_audit(repo_root, skip_upstream=True, check_action_updates=True)
+            with contextlib.redirect_stdout(stdout):
+                code = main(["--repo-root", str(repo_root), "--skip-upstream", "--check-action-updates"])
+        self.assertEqual(findings, [])
+        self.assertTrue(advisories)
+        for advisory in advisories:
+            self.assertIn("Unable to", advisory)
+            self.assertIn("timed out", advisory)
+        self.assertEqual(code, 0)
+        self.assertIn("Maintenance audit passed.", stdout.getvalue())
 
     def test_audit_action_pin_freshness_flags_a_moving_tag_that_left_the_pin_behind(self) -> None:
         # The exact case that shipped actions/checkout v7.0.0 in generated
@@ -804,6 +847,14 @@ class ContainerTrustRootAuditTests(unittest.TestCase):
     def test_fetch_sha256_reports_a_connection_failure(self) -> None:
         with self.assertRaises(RuntimeError):
             fetch_sha256(closed_port_url())
+
+    def test_fetch_sha256_reports_a_read_timeout_rather_than_raising_it(self) -> None:
+        # A key server that accepts and goes quiet. Until #350 this was the
+        # one network failure the trust-root check could not report.
+        with patch("maintenance_audit.NETWORK_TIMEOUT_SECONDS", 0.2):
+            with hanging_http_server() as url:
+                with self.assertRaisesRegex(RuntimeError, "timed out"):
+                    fetch_sha256(url)
 
     def test_a_pin_that_still_matches_upstream_says_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1059,6 +1110,31 @@ class BrewPayloadPinAuditTests(unittest.TestCase):
         with patch("urllib.request.urlopen", side_effect=[unauthorized(), urllib.error.URLError("no route")]):
             with self.assertRaisesRegex(RuntimeError, "no route"):
                 resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
+
+    def test_a_read_that_times_out_is_reported_at_every_step_of_the_flow(self) -> None:
+        # The registry flow has three reads -- the anonymous HEAD, the token
+        # exchange, the authorized HEAD -- and three places a bare
+        # TimeoutError used to escape (#350). The manifest URL is always
+        # https, so a loopback server cannot stand in for the registry here;
+        # the exception is the real one urllib raises on a read timeout.
+        flows = {
+            "anonymous manifest read": [TimeoutError("timed out")],
+            "token exchange": [unauthorized(), TimeoutError("timed out")],
+            "authorized manifest read": [unauthorized(), FakeResponse({"token": "t"}), TimeoutError("timed out")],
+        }
+        for step, responses in flows.items():
+            with self.subTest(step=step):
+                with patch("urllib.request.urlopen", side_effect=responses):
+                    with self.assertRaisesRegex(RuntimeError, "timed out"):
+                        resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
+
+    def test_fetch_registry_pull_token_real_read_timeout_is_reported(self) -> None:
+        # The token realm is whatever the challenge names, so this leg of the
+        # flow can be driven against a real hanging loopback socket.
+        with patch("maintenance_audit.NETWORK_TIMEOUT_SECONDS", 0.2):
+            with hanging_http_server() as realm:
+                with self.assertRaisesRegex(RuntimeError, "timed out"):
+                    fetch_registry_pull_token(f'Bearer realm="{realm}token"', "ghcr.io", "ublue-os/brew")
 
     def test_the_weekly_run_is_the_one_that_checks_the_payload_pin(self) -> None:
         with patch("maintenance_audit.audit_brew_image_pin", return_value=["moved"]) as checked:
