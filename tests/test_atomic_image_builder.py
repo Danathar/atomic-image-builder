@@ -89,6 +89,24 @@ from atomic_image_builder import (
     workflow_job_ranges,
 )
 
+# CI installs no PyYAML, so tests/_block_yaml.py is the oracle every generated
+# document is parsed with. When a libyaml-backed PyYAML happens to be on the
+# machine, the tests that exist because of a libyaml-only rejection (#360)
+# also run the real thing: pure-Python PyYAML accepts a surrogate \u escape,
+# libyaml -- like BlueBuild's serde-yaml and actionlint's go-yaml -- does not.
+try:
+    from yaml import CSafeLoader as _LIBYAML_LOADER
+    from yaml import load as _yaml_load
+except ImportError:  # no PyYAML, or one built without libyaml
+    _LIBYAML_LOADER = None
+
+
+def parse_with_libyaml(text: str) -> object | None:
+    """``text`` as libyaml reads it, or None when libyaml is not available."""
+    if _LIBYAML_LOADER is None:
+        return None
+    return _yaml_load(text, Loader=_LIBYAML_LOADER)
+
 
 class GumStub:
     """Shared test double for Gum — override only what you need per test."""
@@ -925,6 +943,30 @@ class BuilderTests(unittest.TestCase):
         # quoted, escaped scalar or the workflow stops parsing.
         self.assertIn('  IMAGE_DESC: "Doug: my \\"daily\\" image"', patched)
         self.assertEqual(app.patch_container_workflow(patched), patched)
+
+    def test_patch_container_workflow_writes_an_emoji_description_as_itself(self) -> None:
+        # The third place yaml_scalar() reaches a file, alongside the recipe
+        # and the from-scratch workflow (#360): the bundled template's env
+        # key. A description outside the BMP has to land as the character,
+        # not as the surrogate pair json.dumps writes by default.
+        app = self.make_app()
+        app.config.image_desc = "My 🚀 image"
+        workflow = textwrap.dedent(
+            """\
+            name: Build container image
+            env:
+              IMAGE_DESC: My Customized Bootc Image
+            jobs:
+              build_push:
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v4
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn('  IMAGE_DESC: "My 🚀 image"', patched)
+        self.assertNotIn("\\u", patched)
+        self.assertEqual(parse_block_yaml(patched)["env"]["IMAGE_DESC"], "My 🚀 image")
 
     def test_patch_container_workflow_adds_state_ignore_only_once(self) -> None:
         # Both the key branch and the README anchor can match the same
@@ -11583,6 +11625,24 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(document["image-version"], "stable")
         self.assertEqual([module["type"] for module in document["modules"]], ["files", "signing"])
 
+    def test_generate_recipe_keeps_an_emoji_in_the_description_a_single_scalar(self) -> None:
+        # "My 🚀 image" is ordinary input to the wizard's description prompt.
+        # json.dumps with its default ensure_ascii=True wrote the emoji as a
+        # pair of UTF-16 surrogate \u escapes, and a YAML \u escape has to
+        # name one scalar value: pure-Python PyYAML let it through, BlueBuild
+        # did not, so the repo was created and pushed and then every build
+        # failed to deserialize its recipe (#360). Characters inside the BMP
+        # never had the problem, so one of those rides along as the control.
+        app = self.make_bluebuild_app()
+        app.config.image_desc = "My 🚀 Ünïcødé 图像"
+        recipe = app.generate_recipe()
+        self.assertIn('description: "My 🚀 Ünïcødé 图像"', recipe)
+        self.assertNotIn("\\u", recipe)
+        self.assertEqual(self.recipe_document(app)["description"], "My 🚀 Ünïcødé 图像")
+        libyaml_document = parse_with_libyaml(recipe)
+        if libyaml_document is not None:
+            self.assertEqual(libyaml_document["description"], "My 🚀 Ünïcødé 图像")
+
     def test_generate_recipe_nests_packages_under_install_and_removals_under_remove(self) -> None:
         # Substring assertions cannot tell "install:" from "remove:": emitting
         # the install list under remove keeps every assertIn passing while the
@@ -15850,6 +15910,21 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(document["env"]["IMAGE_DESC"], 'A "quoted" description: with punctuation')
         self.assertEqual(document["env"]["DEFAULT_TAG"], "latest")
         self.assertEqual(document["concurrency"]["cancel-in-progress"], True)
+
+    def test_generated_workflow_keeps_an_emoji_in_the_image_description_a_single_scalar(self) -> None:
+        # The recipe's problem (#360) in the other generated document: a
+        # from-scratch build.yml whose IMAGE_DESC carried a surrogate pair was
+        # a workflow file GitHub could not load -- actionlint reports "found
+        # invalid Unicode character escape code" on the env line.
+        app = self.make_app()
+        app.config.image_desc = "My 🚀 image"
+        workflow = app.generate_container_workflow()
+        self.assertIn('  IMAGE_DESC: "My 🚀 image"', workflow)
+        self.assertNotIn("\\u", workflow)
+        self.assertEqual(parse_block_yaml(workflow)["env"]["IMAGE_DESC"], "My 🚀 image")
+        libyaml_document = parse_with_libyaml(workflow)
+        if libyaml_document is not None:
+            self.assertEqual(libyaml_document["env"]["IMAGE_DESC"], "My 🚀 image")
 
     def test_generated_workflow_signing_step_signs_the_pushed_digest(self) -> None:
         # The digest, not a tag. `latest` is rewritten by the daily rebuild, so

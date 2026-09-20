@@ -131,6 +131,37 @@ class BlockYamlTests(unittest.TestCase):
         with self.assertRaises(BlockYamlError):
             parse_block_yaml('a: "x\n')
 
+    def test_a_double_quoted_scalar_decodes_the_escapes_json_dumps_writes(self) -> None:
+        # yaml_scalar() is json.dumps, so these are the escapes the generators
+        # can emit; YAML 1.2 gives every one of them the same meaning.
+        self.assertEqual(
+            parse_block_yaml('a: "say \\"hi\\"\\t\\\\ \\/ \\n \\u00dc \\u56fe"\n'),
+            {"a": 'say "hi"\t\\ / \n Ü 图'},
+        )
+
+    def test_a_double_quoted_scalar_keeps_a_raw_emoji(self) -> None:
+        # A character outside the BMP written as itself is a printable YAML
+        # character and needs no escape at all. This is what yaml_scalar()
+        # emits for "My 🚀 image" since #360.
+        self.assertEqual(parse_block_yaml('a: "My 🚀 image"\n'), {"a": "My 🚀 image"})
+
+    def test_rejects_a_surrogate_unicode_escape(self) -> None:
+        # json.dumps(value) with its default ensure_ascii=True spells "🚀" as
+        # the UTF-16 pair "\ud83d\ude80". PyYAML's pure-Python loader accepts
+        # that, which is why a yaml.safe_load oracle would miss it; libyaml
+        # (and so BlueBuild's serde-yaml and actionlint's go-yaml) reports
+        # "found invalid Unicode character escape code". The oracle has to be
+        # at least as strict as the parsers that read the generated files.
+        with self.assertRaises(BlockYamlError):
+            parse_block_yaml('a: "My \\ud83d\\ude80 image"\n')
+        with self.assertRaises(BlockYamlError):
+            parse_block_yaml('a: ["x", "\\udc00"]\n')
+
+    def test_rejects_an_escape_the_generators_never_write(self) -> None:
+        for raw in ('"\\x41"', '"\\U0001F680"', '"\\q"', '"a\\"'):
+            with self.subTest(raw=raw), self.assertRaises(BlockYamlError):
+                parse_block_yaml(f"a: {raw}\n")
+
     def test_a_quote_inside_a_plain_scalar_is_an_ordinary_character(self) -> None:
         # Every Actions `if:` guard spells its literals with single quotes in
         # the middle of an otherwise plain scalar. Treating a quote as opening

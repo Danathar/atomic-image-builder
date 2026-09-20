@@ -607,8 +607,16 @@ def is_valid_repo_name(value: str) -> bool:
 
 def yaml_scalar(value: str) -> str:
     # JSON string quoting is valid YAML 1.2 and saves us from bringing in a
-    # YAML library just to safely escape a single scalar value.
-    return json.dumps(value)
+    # YAML library just to safely escape a single scalar value. Only with
+    # ensure_ascii=False, though: json.dumps otherwise writes anything outside
+    # the BMP -- every modern emoji -- as a UTF-16 surrogate pair, and a YAML
+    # \u escape must name a single scalar value. libyaml, go-yaml, serde-yaml
+    # and YamlDotNet all refuse the pair (see #360), so a description like
+    # "My 🚀 image" would produce a recipe BlueBuild cannot read and a
+    # workflow Actions cannot load. The characters that need escaping (quotes,
+    # backslashes, control characters) are still escaped; the rest is written
+    # as the UTF-8 the file is saved in anyway.
+    return json.dumps(value, ensure_ascii=False)
 
 
 def ensure_trailing_newline(text: str) -> str:
