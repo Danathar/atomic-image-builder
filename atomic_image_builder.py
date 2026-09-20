@@ -182,7 +182,16 @@ BLUEBUILD_RECIPE_SCHEMA = "https://schema.blue-build.org/recipe-v1.json"
 # These regexes are our low-cost safety rails. They do not prove a package or
 # service is real, but they do stop obviously unsafe values from becoming shell
 # script content later.
-PACKAGE_TOKEN_RE = re.compile(r"^[A-Za-z0-9._+:-]+$")
+#
+# The first character must be alphanumeric: a token such as "--version" or
+# "-y" is never a package name, and dnf5 reads it as an option wherever the
+# list lands -- the repoquery lookup (which then prints its version and
+# reports every real name in the batch as missing) and the generated
+# `dnf5 install -y` line. The regex is the only guard, because dnf5 has no
+# "--" end-of-options separator: 5.4.2.1 rejects it on repoquery, install and
+# remove with 'Unknown argument "--"', so emitting one would break every
+# lookup and every build.sh instead of hardening them.
+PACKAGE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+:-]*$")
 # What `dnf5 copr enable` takes: the owner is a username or a @groupname
 # (@caddy/caddy), and the project may be a project directory with colons
 # (owner/project:custom:123). The "@" is allowed only as the first character
