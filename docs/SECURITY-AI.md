@@ -82,7 +82,12 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   >cosign.pub`, which is `--output` in the shell's spelling and truncates the
   file before git runs, and `>cosign.pub git diff HEAD`, which bash reads as
   the same command -- while `2>&1`, an input redirection and a redirection on
-  another command of the same string are left alone. Without it the
+  another command of the same string are left alone. A git word bash would
+  rebuild before git runs is refused as well -- `$G`, `$(...)`, a backtick
+  substitution, `$'...'` -- because the gate reads words as typed and
+  `git diff $(echo /dev/null) ./cosign.key` is `--no-index` once bash has
+  rebuilt it; a single-quoted `$` (`--format='%h $x'`) is a literal and
+  passes. Without it the
   always-allowed `git diff` is a file reader:
   `git diff --no-index /dev/null ./cosign.key` prints the key the rule above
   denies, because that rule gates the Read tool and never sees a path handed
