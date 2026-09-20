@@ -1274,13 +1274,38 @@ def patch_cosign_compatibility(workflow_text: str) -> str:
     return "\n".join(lines)
 
 
+# A job ID under `jobs:`, bare or quoted, opening a block (no inline value):
+#   build_push:
+#   "build_push":   # quoting is legal YAML and some owners' editors emit it
+#   'build_push': # with a comment
+WORKFLOW_JOB_KEY_RE = re.compile(
+    r"""^(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_.-]*)):\s*(?:#.*)?$"""
+)
+
+
+def workflow_job_key(stripped_line: str) -> str | None:
+    """Return the job ID a stripped line under `jobs:` declares, if any.
+
+    workflow_key() only knows bare keys. A quoted job ID such as
+    `"build_push":` is equally valid, and a parser that does not see it
+    drops the whole job from workflow_job_ranges(): its guards still get
+    rewritten to test env.SIGNING_ENABLED, no job is found to define the
+    variable in, and the image ships unsigned on a green run.
+    """
+    match = WORKFLOW_JOB_KEY_RE.match(stripped_line)
+    if match is None:
+        return None
+    return next(group for group in match.groups() if group is not None)
+
+
 def workflow_job_ranges(lines: Sequence[str]) -> list[tuple[str, int, int]]:
     """Return (name, start, end) for every job in a workflow, as line indexes.
 
-    A job is a key at two-space indentation inside the top-level `jobs:`
-    block. Its range runs from that key up to the next job key, or to the
-    first line that leaves the block. Blank lines and comments end nothing,
-    so a job keeps the trailing blank line that separates it from the next.
+    A job is a key, bare or quoted, at two-space indentation inside the
+    top-level `jobs:` block. Its range runs from that key up to the next job
+    key, or to the first line that leaves the block. Blank lines and
+    comments end nothing, so a job keeps the trailing blank line that
+    separates it from the next.
     """
     ranges: list[tuple[str, int, int]] = []
     in_jobs = False
@@ -1298,7 +1323,7 @@ def workflow_job_ranges(lines: Sequence[str]) -> list[tuple[str, int, int]]:
             in_jobs = workflow_block_key(stripped) == "jobs"
             continue
         if in_jobs and indent == 2:
-            key = workflow_key(stripped)
+            key = workflow_job_key(stripped)
             if key is None:
                 continue
             if name is not None:
@@ -1323,8 +1348,11 @@ def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[
     A job that reads the variable but has neither an `env:` nor a `steps:`
     key at the expected indentation cannot be patched, and the only outcome
     of leaving it is the silent-unsigned one above. So that case fails
-    closed with a message saying what to add by hand. A workflow in which
-    no job reads the variable needs nothing and is returned untouched.
+    closed with a message saying what to add by hand. So does a reference
+    that sits outside every job this parser recognizes -- a job nested at
+    an indentation it does not expect, say -- because a reader the walk
+    cannot see is a reader that never gets its definition. A workflow in
+    which no job reads the variable needs nothing and is returned untouched.
     """
     lines = workflow_text.splitlines()
     changed = False
@@ -1334,9 +1362,21 @@ def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[
         # the same key fools the check into thinking the job-level one exists.
         wanted = f"      {name}: {value}"
         reads = re.compile(rf"\benv\.{re.escape(name)}\b")
+        ranges = workflow_job_ranges(lines)
+        covered = {index for _, start, end in ranges for index in range(start, end)}
+        for index, line in enumerate(lines):
+            if index in covered or line.lstrip().startswith("#") or not reads.search(line):
+                continue
+            raise CommandError(
+                f"This workflow refers to env.{name} on line {index + 1}, outside every job this "
+                f"tool recognizes under 'jobs:', so it cannot tell which job to define the variable "
+                f"in. Left undefined, every condition that tests it is false and the steps it guards "
+                f"are skipped. Add '{name}: {value}' under that job's 'env:' by hand, then run this "
+                f"update again."
+            )
         # Walk the jobs back to front so an insertion never shifts a range
         # that is still to be visited.
-        for job_name, start, end in reversed(workflow_job_ranges(lines)):
+        for job_name, start, end in reversed(ranges):
             job = lines[start:end]
             if not any(reads.search(line) for line in job if not line.lstrip().startswith("#")):
                 continue

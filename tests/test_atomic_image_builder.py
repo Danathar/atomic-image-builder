@@ -75,6 +75,7 @@ from atomic_image_builder import (
     pinned_action,
     read_os_release_fields,
     string_list,
+    workflow_job_ranges,
 )
 
 
@@ -1813,6 +1814,80 @@ class BuilderTests(unittest.TestCase):
         # update stops and says what to add by hand instead.
         workflow_text = "jobs:\n  build:\n      steps:\n        - if: env.FOO == 'true'\n          run: echo build\n"
         with self.assertRaisesRegex(CommandError, r"'build' job reads env\.FOO.*Add 'FOO: bar'"):
+            ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
+
+    def test_ensure_workflow_job_env_entries_recognizes_quoted_job_ids(self) -> None:
+        # `"build_push":` is as valid a job key as the bare form, and a walk
+        # that only knows bare keys drops the job: its guard is rewritten to
+        # test env.FOO, no job is found to define FOO in, and the workflow
+        # publishes unsigned while staying green. Both quote styles must be
+        # seen, and the bare-key sibling must still be left alone.
+        workflow_text = textwrap.dedent(
+            """\
+            jobs:
+              lint:
+                steps:
+                  - run: echo lint
+              "build_push":
+                steps:
+                  - if: env.FOO == 'true'
+                    run: echo build
+              'verify': # quoted, with a comment
+                env:
+                  OTHER: 1
+                steps:
+                  - if: env.FOO == 'true'
+                    run: echo verify
+            """
+        )
+        result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
+        self.assertEqual(
+            result,
+            textwrap.dedent(
+                """\
+                jobs:
+                  lint:
+                    steps:
+                      - run: echo lint
+                  "build_push":
+                    env:
+                      FOO: bar
+                    steps:
+                      - if: env.FOO == 'true'
+                        run: echo build
+                  'verify': # quoted, with a comment
+                    env:
+                      FOO: bar
+                      OTHER: 1
+                    steps:
+                      - if: env.FOO == 'true'
+                        run: echo verify
+                """
+            ),
+        )
+        self.assertEqual(ensure_workflow_job_env_entries(result, [("FOO", "bar")]), result)
+
+    def test_workflow_job_ranges_names_quoted_jobs_without_their_quotes(self) -> None:
+        lines = ["jobs:", '  "build_push":', "    steps: []", "  'verify':", "    steps: []", "  plain:", "    steps: []"]
+        self.assertEqual(
+            workflow_job_ranges(lines),
+            [("build_push", 1, 3), ("verify", 3, 5), ("plain", 5, 7)],
+        )
+
+    def test_ensure_workflow_job_env_entries_fails_closed_when_a_reader_is_outside_every_known_job(self) -> None:
+        # Jobs nested at four spaces are valid YAML the walk does not parse.
+        # The reference is still there, so returning the text unchanged is the
+        # silent-unsigned outcome again; the update must stop and say so.
+        workflow_text = textwrap.dedent(
+            """\
+            jobs:
+                build:
+                    steps:
+                      - if: env.FOO == 'true'
+                        run: echo build
+            """
+        )
+        with self.assertRaisesRegex(CommandError, r"env\.FOO on line 4, outside every job.*Add 'FOO: bar'"):
             ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
 
     def test_validate_config_rejects_unsupported_base_image(self) -> None:
