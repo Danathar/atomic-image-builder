@@ -8703,8 +8703,8 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(call_args[:4], ["gum", "choose", "--no-show-help", "--height"])
         self.assertIn("10", call_args)
         self.assertNotIn("--no-limit", call_args)
-        self.assertNotIn("--selected", call_args)
-        self.assertNotIn("--header", call_args)
+        self.assertFalse([arg for arg in call_args if arg.startswith("--selected=")])
+        self.assertFalse([arg for arg in call_args if arg.startswith("--header=")])
         self.assertEqual(kwargs["stdin"], "alpha\nbeta\ngamma\n")
 
     def test_gum_choose_includes_optional_flags_when_provided(self) -> None:
@@ -8724,18 +8724,27 @@ class BuilderTests(unittest.TestCase):
             )
         call_args = stdout_mock.call_args[0][0]
         self.assertIn("--no-limit", call_args)
-        self.assertIn("--selected", call_args)
-        self.assertIn("alpha", call_args[call_args.index("--selected") + 1])
-        self.assertIn("--header", call_args)
-        self.assertIn("Pick one", call_args)
-        self.assertIn("--label-delimiter", call_args)
-        self.assertIn("|", call_args)
-        self.assertIn("--cursor-prefix", call_args)
-        self.assertIn(">", call_args)
-        self.assertIn("--selected-prefix", call_args)
-        self.assertIn("[x]", call_args)
-        self.assertIn("--unselected-prefix", call_args)
-        self.assertIn("[ ]", call_args)
+        self.assertIn("--selected=alpha", call_args)
+        self.assertIn("--header=Pick one", call_args)
+        self.assertIn("--label-delimiter=|", call_args)
+        self.assertIn("--cursor-prefix=>", call_args)
+        self.assertIn("--selected-prefix=[x]", call_args)
+        self.assertIn("--unselected-prefix=[ ]", call_args)
+
+    def test_gum_choose_passes_text_flags_as_single_tokens_so_a_leading_dash_is_not_a_flag(self) -> None:
+        # A pre-selected entry or header that starts with "-" is, as a separate
+        # argv token, the next flag to gum's parser: it exits 80 with a usage
+        # error, and require_interactive_success() reports that as Esc. Joined
+        # with "=" the value is unambiguous however it starts. See #362.
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "choose"], 0, "", "")
+        with patch.object(Gum, "interactive_stdout", return_value=completed) as stdout_mock:
+            gum.choose(["- alpha", "beta"], selected=["- alpha"], header="- pick one")
+        call_args = stdout_mock.call_args[0][0]
+        self.assertIn("--selected=- alpha", call_args)
+        self.assertIn("--header=- pick one", call_args)
+        self.assertNotIn("- alpha", call_args)
+        self.assertNotIn("- pick one", call_args)
 
     def test_gum_choose_escapes_commas_inside_selected_entries(self) -> None:
         # gum splits --selected on commas. A label built from a package summary
@@ -8751,10 +8760,7 @@ class BuilderTests(unittest.TestCase):
                 label_delimiter="\t",
             )
         call_args = stdout_mock.call_args[0][0]
-        self.assertEqual(
-            call_args[call_args.index("--selected") + 1],
-            "editor\\, with extras,path\\to,plain",
-        )
+        self.assertIn("--selected=editor\\, with extras,path\\to,plain", call_args)
 
     def test_gum_choose_drops_blank_lines_from_output(self) -> None:
         gum = Gum()
@@ -8787,8 +8793,7 @@ class BuilderTests(unittest.TestCase):
         call_args = args[0]
         self.assertEqual(call_args[:3], ["gum", "filter", "--no-show-help"])
         self.assertIn("15", call_args)
-        self.assertIn("--placeholder", call_args)
-        self.assertIn("Type to search", call_args)
+        self.assertIn("--placeholder=Type to search", call_args)
         self.assertEqual(kwargs["stdin"], "alpha\nbeta\n")
 
     def test_gum_filter_raises_screen_back_when_cancelled(self) -> None:
@@ -15287,13 +15292,29 @@ class BuilderTests(unittest.TestCase):
             result = gum.input(prompt="Name: ", value="preset", placeholder="e.g. my-image", width=50)
         self.assertEqual(result, "typed")
         args = interactive_mock.call_args[0][0]
-        self.assertIn("--value", args)
-        self.assertEqual(args[args.index("--value") + 1], "preset")
-        self.assertIn("--placeholder", args)
-        self.assertEqual(args[args.index("--placeholder") + 1], "e.g. my-image")
+        self.assertIn("--prompt=Name: ", args)
+        self.assertIn("--value=preset", args)
+        self.assertIn("--placeholder=e.g. my-image", args)
         self.assertIn("--placeholder.foreground", args)
         self.assertIn("--width", args)
         self.assertEqual(args[args.index("--width") + 1], "50")
+
+    def test_input_passes_text_flags_as_single_tokens_so_a_leading_dash_is_not_a_flag(self) -> None:
+        # The description prompt shows the current description as its
+        # placeholder. As a separate argv token, "- Doug's daily driver" is the
+        # next flag to gum's parser, which exits 80 before drawing anything;
+        # require_interactive_success() reports that as Esc, so a description
+        # that starts with "-" could be entered once and never edited. See #362.
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "input"], 0, "typed\n", "")
+        with patch.object(Gum, "interactive_stdout", return_value=completed) as interactive_mock:
+            gum.input(prompt="- Description: ", value="--current", placeholder="- Doug's daily driver")
+        args = interactive_mock.call_args[0][0]
+        self.assertIn("--prompt=- Description: ", args)
+        self.assertIn("--value=--current", args)
+        self.assertIn("--placeholder=- Doug's daily driver", args)
+        for token in ("- Description: ", "--current", "- Doug's daily driver"):
+            self.assertNotIn(token, args)
 
     def test_write_passes_placeholder_height_and_width_and_strips_trailing_newline(self) -> None:
         gum = Gum()
@@ -15302,8 +15323,7 @@ class BuilderTests(unittest.TestCase):
             result = gum.write(placeholder="Describe your image", height=6, width=60)
         self.assertEqual(result, "typed text")
         args = interactive_mock.call_args[0][0]
-        self.assertIn("--placeholder", args)
-        self.assertEqual(args[args.index("--placeholder") + 1], "Describe your image")
+        self.assertIn("--placeholder=Describe your image", args)
         self.assertIn("--height", args)
         self.assertEqual(args[args.index("--height") + 1], "6")
         self.assertIn("--width", args)
