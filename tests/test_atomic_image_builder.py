@@ -707,6 +707,58 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(patch_cosign_compatibility(patched), patched, "not idempotent")
         return patched
 
+    def test_patch_cosign_compatibility_raises_only_releases_below_the_floor(self) -> None:
+        # The rewrite is a migration for repos generated against Cosign 2.x.
+        # Before it checked the version it rewrote every value to the floor,
+        # so an owner who bumped past it lost the bump on the next update.
+        for release in ("v2.6.3", "v3.0.0", "v3.1.1", "3.1.0"):
+            with self.subTest(release=release):
+                text = f"          cosign-release: '{release}'"
+                self.assertEqual(
+                    patch_cosign_compatibility(text), "          cosign-release: 'v3.1.2'"
+                )
+
+    def test_patch_cosign_compatibility_leaves_newer_releases_alone(self) -> None:
+        for release in ("v3.1.2", "v3.2.0", "v3.10.1", "v4.0.0"):
+            with self.subTest(release=release):
+                text = f"          cosign-release: '{release}'"
+                self.assertEqual(patch_cosign_compatibility(text), text)
+
+    def test_patch_cosign_compatibility_leaves_non_version_pins_alone(self) -> None:
+        # A branch name or a partial version is not something the floor can be
+        # compared against; guessing would overwrite a deliberate choice.
+        for release in ("main", "v3", "v3.2"):
+            with self.subTest(release=release):
+                text = f'          cosign-release: "{release}"'
+                self.assertEqual(patch_cosign_compatibility(text), text)
+
+    def test_patch_cosign_compatibility_keeps_quotes_and_trailing_comment(self) -> None:
+        text = '          cosign-release: "v2.6.3"  # bumped by hand'
+        self.assertEqual(
+            patch_cosign_compatibility(text), '          cosign-release: "v3.1.2"  # bumped by hand'
+        )
+
+    def test_patch_container_workflow_keeps_newer_cosign_release(self) -> None:
+        # Through the real generated-repo path: the signing flags still land,
+        # and the owner's newer pin survives the update.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build:
+                steps:
+                  - name: Install Cosign
+                    with:
+                      cosign-release: 'v4.0.0'
+                  - name: Sign
+                    run: cosign sign -y --key env://COSIGN_PRIVATE_KEY image:latest
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn("cosign-release: 'v4.0.0'", patched)
+        self.assertNotIn("v3.1.2", patched)
+        self.assertIn("--new-bundle-format=false", patched)
+
     def test_patch_cosign_compatibility_bundled_snapshot_shape(self) -> None:
         snapshot = (
             CONTAINERFILE_TEMPLATE_DIR / ".github" / "workflows" / "build.yml"

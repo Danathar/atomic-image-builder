@@ -1222,12 +1222,44 @@ def workflow_block_key(stripped_line: str) -> str | None:
     return match.group(1) if match else None
 
 
+# The oldest Cosign release the generated signing step works with. Workflows
+# pinned below it are raised to it; anything at or above it is the owner's
+# choice and stays. The bundled snapshot pins this same version.
+COSIGN_COMPATIBILITY_FLOOR = "v3.1.2"
+COSIGN_RELEASE_RE = re.compile(r"cosign-release:\s*['\"]([^'\"]*)['\"]")
+
+
+def cosign_release_tuple(release: str) -> tuple[int, int, int] | None:
+    """Parse a `cosign-release:` value like `v3.1.2` into (3, 1, 2).
+
+    Returns None for anything that is not a plain version, so the caller can
+    leave it alone rather than guess.
+    """
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", release.strip())
+    if match is None:
+        return None
+    major, minor, patch = (int(part) for part in match.groups())
+    return major, minor, patch
+
+
 def patch_cosign_compatibility(workflow_text: str) -> str:
-    """Keep existing managed workflows compatible with Cosign 3.x."""
+    """Keep existing managed workflows compatible with Cosign 3.x.
+
+    Only versions below COSIGN_COMPATIBILITY_FLOOR are raised. An unconditional
+    rewrite meant every update reverted an owner's deliberate bump to a newer
+    3.x or a 4.x release, so a security patch they applied was undone the next
+    time they ran the tool.
+    """
+    floor = cosign_release_tuple(COSIGN_COMPATIBILITY_FLOOR)
     lines = workflow_text.splitlines()
     for index, line in enumerate(lines):
-        if "cosign-release:" in line:
-            lines[index] = re.sub(r"(cosign-release:\s*['\"])v[^'\"]+(['\"])", r"\1v3.1.2\2", line)
+        match = COSIGN_RELEASE_RE.search(line)
+        if match is None:
+            continue
+        current = cosign_release_tuple(match.group(1))
+        if current is None or current >= floor:
+            continue
+        lines[index] = line[: match.start(1)] + COSIGN_COMPATIBILITY_FLOOR + line[match.end(1):]
 
     # `cosign sign` is routinely written across shell line continuations, so the
     # guard has to consider the whole logical command. Testing each physical
