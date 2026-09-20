@@ -1641,6 +1641,57 @@ class BuilderTests(unittest.TestCase):
         line = "        reuses: actions/checkout@v4"
         self.assertEqual(pin_action_uses_line(line), line)
 
+    def test_pin_action_uses_line_is_a_fixed_point_on_every_generated_pin(self) -> None:
+        # The generator writes ACTION_PINS' label; the patcher runs over that
+        # same text on every later update. If the two ever disagree on the
+        # label for a SHA, a repository generated from scratch gets a comment
+        # rewritten on its first update with no upstream change behind it --
+        # which is what #349 found for remove-unwanted-software, whose SHA
+        # ACTION_REF_PINS also carries under its older "v8" label.
+        for action in ACTION_PINS:
+            for prefix in ("        uses: ", "      - uses: "):
+                line = f"{prefix}{pinned_action(action)}"
+                with self.subTest(action=action, line=line):
+                    self.assertEqual(pin_action_uses_line(line), line)
+
+    def test_pin_action_uses_line_writes_the_generator_label_for_the_generator_sha(self) -> None:
+        # A ref-table entry may name the SHA ACTION_PINS holds under an older
+        # label; it stays so the freshness audit keeps watching that tag. The
+        # comment written into the workflow is still the generator's, whichever
+        # spelling the line arrived in -- so an unpinned tag lands on the same
+        # text in one pass, and a line already carrying the older label is
+        # brought into line rather than left to disagree forever.
+        sha = "a" * 40
+        with (
+            patch.dict(atomic_image_builder.ACTION_PINS, {"example/action": (sha, "main")}),
+            patch.dict(
+                atomic_image_builder.ACTION_REF_PINS,
+                {"example/action@v1": (sha, "v1"), f"example/action@{sha}": (sha, "v1")},
+            ),
+        ):
+            for line in (
+                "        uses: example/action@v1",
+                f"        uses: example/action@{sha} # v1",
+                f"        uses: example/action@{sha}",
+            ):
+                with self.subTest(line=line):
+                    self.assertEqual(pin_action_uses_line(line), f"        uses: example/action@{sha} # main")
+
+    def test_pin_action_uses_line_keeps_the_ref_table_label_for_another_sha(self) -> None:
+        # A ref-table entry that pins to a different SHA than ACTION_PINS holds
+        # a repository at that ref's own commit (sigstore/cosign-installer@v4.0.0
+        # is the live example). Its label follows its SHA, untouched.
+        pinned = "a" * 40
+        held = "b" * 40
+        with (
+            patch.dict(atomic_image_builder.ACTION_PINS, {"example/action": (pinned, "v2")}),
+            patch.dict(atomic_image_builder.ACTION_REF_PINS, {"example/action@v1": (held, "v1")}),
+        ):
+            self.assertEqual(
+                pin_action_uses_line("        uses: example/action@v1"),
+                f"        uses: example/action@{held} # v1",
+            )
+
     def test_ensure_workflow_job_env_entries_returns_unchanged_without_env_or_steps_anchor(self) -> None:
         workflow_text = "name: Build\njobs:\n  build:\n    name: build\n"
         result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
