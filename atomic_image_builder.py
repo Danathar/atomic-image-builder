@@ -256,10 +256,14 @@ INSTALLER_UNVERIFIED_SWITCH_COMMENT = (
     "# Signing Key section and repeat the enforced switch so later upgrades verify it.",
 )
 # dnf5 prints this when -C (cache-only) is used and no repository metadata has
-# been downloaded yet. Matched so package search can offer to fix it in place
-# instead of naming a command the user may have no shell to run.
+# been downloaded yet. Matched so package search and the exact-name check can
+# offer to fix it in place instead of naming a command the user may have no
+# shell to run.
 DNF5_NO_CACHE_MARKER = "cache-only enabled but no cache"
-PACKAGE_SEARCH_NEEDS_METADATA = "Package search needs local DNF metadata. Use exact-name entry instead."
+PACKAGE_SEARCH_NEEDS_METADATA = (
+    "Package search needs local DNF metadata. "
+    "Exact-name entry still works without it, but names are then only checked by the GitHub build."
+)
 DNF5_MISSING_MARKERS = (
     "no matches found",
     "no package matched",
@@ -343,6 +347,14 @@ class BaseImage:
     name: str
     description: str
     image_uri: str
+    # Whether the base runs a first-boot account wizard (gnome-initial-setup,
+    # or Fedora's desktop-neutral initial-setup) after Anaconda finishes.
+    # installer_profile() reads this to pick the ISO config: upstream's
+    # iso-gnome.toml disables Anaconda's Users module on the assumption that
+    # the wizard creates the account, so a base without one installs a system
+    # nobody can log in to (#361). No default on purpose -- a new entry has to
+    # say which it is, because the wrong guess is invisible until first boot.
+    first_boot_setup: bool
     # Other repositories the same desktop is published at, without a tag.
     # match_base_image() treats a host booted from one of these as this
     # curated image; image_uri stays the one the tool recommends and writes.
@@ -394,11 +406,11 @@ def determine_fedora_atomic_default_tag(
 FEDORA_ATOMIC_DEFAULT_TAG = determine_fedora_atomic_default_tag()
 
 
-def universal_blue_image(key: str, name: str, description: str, image_uri: str) -> BaseImage:
-    return BaseImage(key=key, provider="Universal Blue", name=name, description=description, image_uri=image_uri)
+def universal_blue_image(key: str, name: str, description: str, image_uri: str, *, first_boot_setup: bool) -> BaseImage:
+    return BaseImage(key=key, provider="Universal Blue", name=name, description=description, image_uri=image_uri, first_boot_setup=first_boot_setup)
 
 
-def fedora_atomic_image(key: str, name: str, description: str, variant: str, *, official_alias: bool = True) -> BaseImage:
+def fedora_atomic_image(key: str, name: str, description: str, variant: str, *, first_boot_setup: bool, official_alias: bool = True) -> BaseImage:
     # Fedora publishes each desktop twice: the long-standing
     # quay.io/fedora-ostree-desktops/<variant>, and the newer official bootc
     # location quay.io/fedora/fedora-<variant>. Both carry the same release
@@ -412,27 +424,33 @@ def fedora_atomic_image(key: str, name: str, description: str, variant: str, *, 
         name=name,
         description=description,
         image_uri=f"quay.io/fedora-ostree-desktops/{variant}:{FEDORA_ATOMIC_DEFAULT_TAG}",
+        first_boot_setup=first_boot_setup,
         aliases=aliases,
     )
 
 
+# first_boot_setup follows the desktop, not the provider: GNOME bases ship
+# gnome-initial-setup, and Fedora's Budgie and COSMIC variants ship the
+# desktop-neutral initial-setup. KDE bases have no wizard, and neither does
+# Sway Atomic -- it boots straight to sddm (checked against
+# quay.io/fedora-ostree-desktops/sway-atomic:44 on 2026-09-20; #361).
 BASE_IMAGES: tuple[BaseImage, ...] = (
-    universal_blue_image("bazzite", "Bazzite (KDE)", "KDE desktop for gaming systems and handheld-style setups", "ghcr.io/ublue-os/bazzite:stable"),
-    universal_blue_image("bazzite-gnome", "Bazzite (GNOME)", "GNOME desktop for gaming systems and handheld-style setups", "ghcr.io/ublue-os/bazzite-gnome:stable"),
-    universal_blue_image("bazzite-dx", "Bazzite DX (KDE)", "Bazzite plus extra developer tools on KDE", "ghcr.io/ublue-os/bazzite-dx:stable"),
-    universal_blue_image("bazzite-dx-gnome", "Bazzite DX (GNOME)", "Bazzite plus extra developer tools on GNOME", "ghcr.io/ublue-os/bazzite-dx-gnome:stable"),
-    universal_blue_image("aurora", "Aurora (KDE)", "KDE desktop for everyday use", "ghcr.io/ublue-os/aurora:stable"),
-    universal_blue_image("aurora-dx", "Aurora DX", "Aurora plus extra developer tools", "ghcr.io/ublue-os/aurora-dx:stable"),
-    universal_blue_image("bluefin", "Bluefin (GNOME)", "GNOME desktop for everyday use", "ghcr.io/ublue-os/bluefin:stable"),
-    universal_blue_image("bluefin-dx", "Bluefin DX", "Bluefin plus extra developer tools", "ghcr.io/ublue-os/bluefin-dx:stable"),
-    fedora_atomic_image("silverblue", "Fedora Silverblue", "GNOME desktop built from the official Fedora Atomic desktop image", "silverblue"),
-    fedora_atomic_image("kinoite", "Fedora Kinoite", "KDE Plasma desktop built from the official Fedora Atomic desktop image", "kinoite"),
-    fedora_atomic_image("sway-atomic", "Fedora Sway Atomic", "Sway desktop built from the official Fedora Atomic desktop image", "sway-atomic"),
-    fedora_atomic_image("budgie-atomic", "Fedora Budgie Atomic", "Budgie desktop built from the official Fedora Atomic desktop image", "budgie-atomic"),
+    universal_blue_image("bazzite", "Bazzite (KDE)", "KDE desktop for gaming systems and handheld-style setups", "ghcr.io/ublue-os/bazzite:stable", first_boot_setup=False),
+    universal_blue_image("bazzite-gnome", "Bazzite (GNOME)", "GNOME desktop for gaming systems and handheld-style setups", "ghcr.io/ublue-os/bazzite-gnome:stable", first_boot_setup=True),
+    universal_blue_image("bazzite-dx", "Bazzite DX (KDE)", "Bazzite plus extra developer tools on KDE", "ghcr.io/ublue-os/bazzite-dx:stable", first_boot_setup=False),
+    universal_blue_image("bazzite-dx-gnome", "Bazzite DX (GNOME)", "Bazzite plus extra developer tools on GNOME", "ghcr.io/ublue-os/bazzite-dx-gnome:stable", first_boot_setup=True),
+    universal_blue_image("aurora", "Aurora (KDE)", "KDE desktop for everyday use", "ghcr.io/ublue-os/aurora:stable", first_boot_setup=False),
+    universal_blue_image("aurora-dx", "Aurora DX", "Aurora plus extra developer tools", "ghcr.io/ublue-os/aurora-dx:stable", first_boot_setup=False),
+    universal_blue_image("bluefin", "Bluefin (GNOME)", "GNOME desktop for everyday use", "ghcr.io/ublue-os/bluefin:stable", first_boot_setup=True),
+    universal_blue_image("bluefin-dx", "Bluefin DX", "Bluefin plus extra developer tools", "ghcr.io/ublue-os/bluefin-dx:stable", first_boot_setup=True),
+    fedora_atomic_image("silverblue", "Fedora Silverblue", "GNOME desktop built from the official Fedora Atomic desktop image", "silverblue", first_boot_setup=True),
+    fedora_atomic_image("kinoite", "Fedora Kinoite", "KDE Plasma desktop built from the official Fedora Atomic desktop image", "kinoite", first_boot_setup=False),
+    fedora_atomic_image("sway-atomic", "Fedora Sway Atomic", "Sway desktop built from the official Fedora Atomic desktop image", "sway-atomic", first_boot_setup=False),
+    fedora_atomic_image("budgie-atomic", "Fedora Budgie Atomic", "Budgie desktop built from the official Fedora Atomic desktop image", "budgie-atomic", first_boot_setup=True),
     # quay.io/fedora/fedora-cosmic-atomic does not exist (checked against the
     # registry API on 2026-09-20; the other four variants do), so claiming
     # the alias here would match a reference no host can be booted from.
-    fedora_atomic_image("cosmic-atomic", "Fedora COSMIC Atomic", "COSMIC desktop built from the official Fedora Atomic desktop image", "cosmic-atomic", official_alias=False),
+    fedora_atomic_image("cosmic-atomic", "Fedora COSMIC Atomic", "COSMIC desktop built from the official Fedora Atomic desktop image", "cosmic-atomic", first_boot_setup=True, official_alias=False),
 )
 
 
@@ -605,10 +623,30 @@ def is_valid_repo_name(value: str) -> bool:
     return True
 
 
+# What json.dumps(ensure_ascii=False) leaves raw but YAML forbids in a
+# document: DEL and the C1 controls (U+007F-U+009F) and the two noncharacters
+# U+FFFE/U+FFFF. YAML 1.2's c-printable production stops there -- C0 controls
+# are already escaped by json.dumps, and everything else up to U+10FFFF is
+# printable. U+0085 (NEL) is technically printable but a 1.1 line break, which
+# PyYAML folds to a space, so it is escaped along with its neighbours.
+_YAML_UNPRINTABLE_RE = re.compile("[\x7f-\x9f￾￿]")
+
+
 def yaml_scalar(value: str) -> str:
     # JSON string quoting is valid YAML 1.2 and saves us from bringing in a
-    # YAML library just to safely escape a single scalar value.
-    return json.dumps(value)
+    # YAML library just to safely escape a single scalar value. Only with
+    # ensure_ascii=False, though: json.dumps otherwise writes anything outside
+    # the BMP -- every modern emoji -- as a UTF-16 surrogate pair, and a YAML
+    # \u escape must name a single scalar value. libyaml, go-yaml, serde-yaml
+    # and YamlDotNet all refuse the pair (see #360), so a description like
+    # "My 🚀 image" would produce a recipe BlueBuild cannot read and a
+    # workflow Actions cannot load. The characters that need escaping (quotes,
+    # backslashes, C0 controls) are still escaped; the rest is written as the
+    # UTF-8 the file is saved in anyway -- except the few code points YAML
+    # refuses to see raw anywhere in a document, which ensure_ascii=False
+    # would now pass through and libyaml would reject the whole file over.
+    # Those go back to the \u escape, which every parser reads as itself.
+    return _YAML_UNPRINTABLE_RE.sub(lambda m: f"\\u{ord(m.group()):04x}", json.dumps(value, ensure_ascii=False))
 
 
 def ensure_trailing_newline(text: str) -> str:
@@ -1851,12 +1889,19 @@ def run(
         check=False,
     )
     if check and proc.returncode != 0:
-        stderr = proc.stderr.strip() if proc.stderr else ""
-        stdout = proc.stdout.strip() if proc.stdout else ""
-        body = stderr or stdout
-        detail = f"{body} (command: {' '.join(args)})" if body else f"command failed: {' '.join(args)}"
-        raise CommandError(detail)
+        raise CommandError(command_failure_detail(args, proc))
     return proc
+
+
+def command_failure_detail(args: Sequence[str], proc: subprocess.CompletedProcess[str]) -> str:
+    # The one place that decides what a failed command looks like to the user:
+    # the command's own stderr (or stdout when it wrote nothing there), then
+    # the command line for context. Both run() and the spinner helpers raise
+    # through here so a `gh` 404 reads the same whichever one ran it.
+    stderr = proc.stderr.strip() if proc.stderr else ""
+    stdout = proc.stdout.strip() if proc.stdout else ""
+    body = stderr or stdout
+    return f"{body} (command: {' '.join(args)})" if body else f"command failed: {' '.join(args)}"
 
 
 class Gum:
@@ -2051,6 +2096,13 @@ class Gum:
         print(f"{label} {' | '.join(parts)}")
         print()
 
+    def write_controls(self) -> None:
+        # Every widget runs with --no-show-help, so this is the only place a
+        # user learns that `gum write` submits on Enter and needs Ctrl+J for a
+        # newline. Without it, "one per line" on screen plus Enter after the
+        # first name submitted a single entry with no explanation (#368).
+        self.controls("Ctrl+J new line", "Enter submit", "Esc back", "Ctrl+C quit")
+
     def confirm(self, prompt: str, *, default: bool = True) -> bool:
         args = ["gum", "confirm", "--no-show-help"]
         args.append("--default=true" if default else "--default=false")
@@ -2070,12 +2122,19 @@ class Gum:
         placeholder: str | None = None,
         width: int | None = None,
     ) -> str:
-        args = ["gum", "input", "--no-show-help", "--prompt", prompt]
+        # Text the caller supplies goes in as one --flag=value token. Split
+        # into two, a value that starts with a dash is read as the next flag
+        # and gum exits 80 without ever drawing the prompt. The description
+        # prompt shows the current description as its placeholder, so a
+        # description like "- Doug's daily driver" could be typed in once and
+        # never edited again: require_interactive_success() read the usage
+        # error as Esc and the menu came straight back. See #362.
+        args = ["gum", "input", "--no-show-help", f"--prompt={prompt}"]
         args.extend(["--prompt.foreground", str(ACCENT_COLOR), "--cursor.foreground", str(ACCENT_COLOR)])
         if value is not None:
-            args.extend(["--value", value])
+            args.append(f"--value={value}")
         if placeholder is not None:
-            args.extend(["--placeholder", placeholder])
+            args.append(f"--placeholder={placeholder}")
             args.extend(["--placeholder.foreground", str(MUTED_COLOR)])
         if width is not None:
             args.extend(["--width", str(width)])
@@ -2088,8 +2147,7 @@ class Gum:
                     "gum",
                     "write",
                     "--no-show-help",
-                    "--placeholder",
-                    placeholder,
+                    f"--placeholder={placeholder}",
                     "--placeholder.foreground",
                     str(MUTED_COLOR),
                     "--cursor.foreground",
@@ -2128,22 +2186,26 @@ class Gum:
         )
         if no_limit:
             args.append("--no-limit")
+        # The text flags are single --flag=value tokens for the reason given in
+        # input(): a pre-selected entry or a header that starts with a dash
+        # would otherwise be parsed as a flag and abort the chooser with exit
+        # 80, which reads as Esc.
         if selected:
             # gum splits --selected on commas, so an entry that contains one
             # arrives as two fragments and pre-selects nothing. Its parser
             # honours a backslash before the separator; a plain backslash is
             # kept as-is, so nothing else needs escaping.
-            args.extend(["--selected", ",".join(item.replace(",", "\\,") for item in selected)])
+            args.append("--selected=" + ",".join(item.replace(",", "\\,") for item in selected))
         if header:
-            args.extend(["--header", header])
+            args.append(f"--header={header}")
         if label_delimiter is not None:
-            args.extend(["--label-delimiter", label_delimiter])
+            args.append(f"--label-delimiter={label_delimiter}")
         if cursor_prefix is not None:
-            args.extend(["--cursor-prefix", cursor_prefix])
+            args.append(f"--cursor-prefix={cursor_prefix}")
         if selected_prefix is not None:
-            args.extend(["--selected-prefix", selected_prefix])
+            args.append(f"--selected-prefix={selected_prefix}")
         if unselected_prefix is not None:
-            args.extend(["--unselected-prefix", unselected_prefix])
+            args.append(f"--unselected-prefix={unselected_prefix}")
         proc = self.require_interactive_success(
             self.interactive_stdout(args, stdin="\n".join(options) + "\n"), stdin_inherited=False
         )
@@ -2159,8 +2221,7 @@ class Gum:
                     "--no-show-help",
                     "--height",
                     str(height),
-                    "--placeholder",
-                    placeholder,
+                    f"--placeholder={placeholder}",
                     "--prompt.foreground",
                     str(ACCENT_COLOR),
                     "--header.foreground",
@@ -2218,8 +2279,12 @@ class Gum:
     ) -> subprocess.CompletedProcess[str]:
         # gum spin uses exit code 130 for Ctrl+C, same convention as the other
         # interactive widgets. Any other nonzero exit means the spinner itself
-        # failed to run (the wrapped command's own exit status, when captured,
-        # is reported separately and is not subject to this check).
+        # failed to run. That holds only because every spinner goes through
+        # spinner_result(), whose `bash -c` wrapper ends in a `printf` of the
+        # wrapped command's status, so bash -- and therefore gum, which exits
+        # with its child's code -- returns 0 however that command fared. The
+        # wrapped command's own status comes back in the status file and is
+        # judged by the caller, not here.
         if proc.returncode == 130:
             raise KeyboardInterrupt()
         if proc.returncode != 0:
@@ -2227,26 +2292,37 @@ class Gum:
         return proc
 
     def spinner(self, title: str, command: Sequence[str], *, cwd: Path | None = None) -> None:
-        args = ["gum", "spin", "--spinner", "dot", "--title", title, "--", *command]
-        self.require_spinner_success(run(args, cwd=cwd, capture=False, check=False), args)
+        self.spinner_capture(title, command, cwd=cwd)
 
     def spinner_capture(self, title: str, command: Sequence[str], *, cwd: Path | None = None) -> str:
-        # gum spin does not give us structured output directly, so we capture the
-        # command's stdout through a temporary file and then read it back.
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            output_path = tmp.name
-        try:
-            shell_command = f"{shlex.join(command)} > {shlex.quote(output_path)}"
-            args = ["gum", "spin", "--spinner", "dot", "--title", title, "--", "bash", "-c", shell_command]
-            self.require_spinner_success(run(args, cwd=cwd, capture=False, check=False), args)
-            return Path(output_path).read_text()
-        finally:
-            Path(output_path).unlink(missing_ok=True)
+        # Runs the command under a spinner and returns its stdout, raising
+        # CommandError if it failed. This used to hand the command straight to
+        # `gum spin`, which exits with the child's code and, on a TTY, shows
+        # none of its output. A `gh` 404 or an auth failure therefore surfaced
+        # as "command failed: gum spin --spinner dot --title ... -- bash -c
+        # ..." with the real reason discarded (#363). Capturing through
+        # spinner_result() keeps the child's stderr, so the error the user
+        # sees is the one `gh` wrote.
+        proc = self.spinner_result(title, command, cwd=cwd)
+        if proc.returncode == 130:
+            # The wrapped command took the Ctrl+C: `gh` exits 130 on SIGINT,
+            # as the shell convention has it. Handing the command straight to
+            # gum spin used to surface that as gum's own 130, which
+            # require_spinner_success() turns into KeyboardInterrupt and
+            # main() into exit 130. The bash wrapper now keeps that status in
+            # the file instead, so map it back here rather than report an
+            # interrupted clone as a failed one.
+            raise KeyboardInterrupt()
+        if proc.returncode != 0:
+            raise CommandError(command_failure_detail(command, proc))
+        return proc.stdout
 
     def spinner_result(self, title: str, command: Sequence[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-        # Same idea as spinner_capture(), but this version keeps stdout, stderr,
-        # and exit status so callers can inspect a command result after the
-        # spinner closes.
+        # gum spin does not give us structured output directly, so the command
+        # runs inside `bash -c` with stdout, stderr and exit status each
+        # redirected to a temporary file, and those are read back after the
+        # spinner closes. Callers inspect the result themselves; nothing is
+        # raised for a nonzero status.
         with ExitStack() as stack:
             with tempfile.NamedTemporaryFile(delete=False) as stdout_tmp:
                 stdout_path = stdout_tmp.name
@@ -3127,7 +3203,7 @@ class App:
         # package names they want, and the tool does a lightweight local check
         # for obvious mistakes before the GitHub build does the final check.
         self.gum.header("Add Packages")
-        print()
+        self.gum.write_controls()
         self.menu_section(
             "What To Enter",
             "Enter exact RPM package names separated by spaces or newlines.",
@@ -3137,11 +3213,16 @@ class App:
         self.menu_section(
             "Validation",
             "This tool will try to catch obvious package-name mistakes here first.",
+            "That check uses local DNF metadata. If it is missing, this tool offers to download it.",
             "The GitHub build is still the final check.",
             "Leave this empty if you want to go back without adding anything.",
         )
         print()
-        raw = self.gum.write(placeholder="Enter package names...", height=6, width=self.gum.form_width(max_width=110))
+        raw = self.gum.write(
+            placeholder="Enter package names separated by spaces...",
+            height=6,
+            width=self.gum.form_width(max_width=110),
+        )
         packages = raw.replace(",", " ").split()
         if not packages:
             return
@@ -3340,18 +3421,21 @@ class App:
 
     def add_services_manually(self) -> None:
         self.gum.header("Add Services Manually")
-        print()
+        self.gum.write_controls()
         self.menu_section(
             "What To Enter",
-            "Type systemd service names like sshd.service or tailscaled.service.",
+            "Type systemd service names like sshd.service or tailscaled.service, separated by spaces or newlines.",
             "Leave this empty if you want to go back without adding anything.",
         )
         raw = self.gum.write(
-            placeholder="Enter service names, one per line...",
+            placeholder="Enter service names separated by spaces...",
             height=5,
             width=self.gum.form_width(max_width=80),
         )
-        services = unique(line.strip() for line in raw.splitlines())
+        # Same tokenising as package entry. Splitting on newlines alone meant a
+        # user who typed two names with a space -- the natural thing once Enter
+        # submits -- got one invalid "a b" token rejected instead of two services.
+        services = unique(raw.replace(",", " ").split())
         if not services:
             return
         try:
@@ -4342,8 +4426,9 @@ class App:
         # image runs this app as its entrypoint -- a `podman run` user has no
         # shell in which to go run dnf5. That is the same reason preflight()
         # walks people through `gh auth login` instead of telling them to.
-        self.gum.warn("Package search needs local DNF metadata, which is not available yet.")
+        self.gum.warn("Checking package names needs local DNF metadata, which is not available yet.")
         self.gum.hint("Refreshing downloads the repository metadata dnf5 uses to match package names.")
+        self.gum.hint("This is a large download: well over 100 MB for the standard Fedora repositories.")
         print()
         if not self.gum.confirm("Refresh package metadata now?"):
             return False
@@ -4360,18 +4445,26 @@ class App:
         self.gum.success("Package metadata refreshed.")
         return True
 
-    def lookup_host_packages(self, packages: Sequence[str]) -> dict[str, bool | None]:
+    def lookup_host_packages(self, packages: Sequence[str], *, allow_metadata_refresh: bool = True) -> dict[str, bool | None]:
         # Host-side dnf5 checks are a lightweight "spellcheck" for manual RPM
         # names. They are not a perfect model of the final image build, but they
         # catch obvious mistakes like typos before we create a repo.
         #
         # This checks every requested package in a single dnf5 invocation
         # rather than one invocation per package. dnf5's first repoquery call
-        # pays a real, human-perceptible cost to warm its metadata cache;
+        # pays a real, human-perceptible cost to load its metadata cache;
         # every call after that is fast. One call per package meant only the
         # first package's "Checking package name" spinner was ever visible
         # for more than a flash, even though every package genuinely was
         # being checked -- discovered by watching a real demo recording.
+        #
+        # The query is cache-only (-C), the same as search_host_packages().
+        # Without it, dnf5 fetches missing or expired repository metadata on
+        # its own -- about 160 MB on Fedora -- behind a spinner that says only
+        # "Checking package name" (#369). A missing cache is instead met with
+        # the same refresh offer the search path makes, and a declined offer
+        # leaves the names unchecked rather than blocking entry: the GitHub
+        # build checks them anyway.
         results: dict[str, bool | None] = {}
         to_check: list[str] = []
         for package in packages:
@@ -4398,6 +4491,7 @@ class App:
                 "env",
                 f"XDG_STATE_HOME={state_dir}",
                 "dnf5",
+                "-C",
                 "repoquery",
                 "--available",
                 "--qf",
@@ -4412,6 +4506,19 @@ class App:
         # multiple results print back to back with no separator at all.
         names = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
         detail = "\n".join(part for part in [proc.stdout, proc.stderr] if part).lower()
+        if proc.returncode != 0 and DNF5_NO_CACHE_MARKER in detail:
+            # Offer the fix, then check again. The retry has the offer
+            # disabled so a refresh that reports success without producing
+            # usable metadata cannot loop. Nothing is cached on this path:
+            # a declined download is not a verdict on the names, and a later
+            # accepted refresh (here or from search) must be able to check
+            # them for real.
+            if allow_metadata_refresh and self.refresh_package_metadata():
+                results.update(self.lookup_host_packages(to_check, allow_metadata_refresh=False))
+                return results
+            for package in to_check:
+                results[package] = None
+            return results
         has_missing_marker = any(marker in detail for marker in DNF5_MISSING_MARKERS)
         for package in to_check:
             if package in names:
@@ -4655,12 +4762,19 @@ class App:
             # over it (the caller clears the screen on its next iteration).
             self.gum.enter_to_continue("Press Enter to return to the menu...")
             return
+        # The two early exits below pause for the same reason the branch above
+        # does: run_screen_action pauses only on CommandError, so a plain
+        # return goes straight back into the menu loop and its header() clears
+        # the screen before the message can be read. podman is not a preflight
+        # requirement, so the second exit is reachable on any Homebrew install.
         if self.config.method != "containerfile":
             self.gum.hint("Local test build is Containerfile-only for now.")
+            self.gum.enter_to_continue("Press Enter to return to the menu...")
             return
         if not command_exists("podman"):
             self.gum.warn("podman is required to run a local test build.")
             self.gum.hint("Install podman, then try this again.")
+            self.gum.enter_to_continue("Press Enter to return to the menu...")
             return
 
         tag = f"{TOOL_SLUG}-local-test:dryrun"
@@ -5148,13 +5262,14 @@ class App:
             return
         selected = choice[0] if choice else "Back"
         if selected == "Add package names to remove":
+            self.gum.write_controls()
             self.menu_section(
                 "What To Enter",
                 "Enter exact RPM package names separated by spaces or newlines.",
                 "Leave this empty if you want to go back.",
             )
             raw = self.gum.write(
-                placeholder="Enter package names, one per line...",
+                placeholder="Enter package names separated by spaces...",
                 height=6,
                 width=self.gum.form_width(max_width=90),
             )
@@ -6082,8 +6197,16 @@ class App:
         return ensure_trailing_newline(text)
 
     def installer_profile(self) -> str:
+        # The profile names are upstream's file names, and they describe the
+        # desktop the config was written for rather than what it does.
+        # iso-gnome.toml leaves account creation to a first-boot wizard;
+        # iso-kde.toml has Anaconda ask for the user itself. That is the real
+        # split, and it is BaseImage.first_boot_setup, not the desktop: this
+        # used to key on a set of KDE names, which handed Sway Atomic the
+        # gnome config and an ISO that installs a system with no account
+        # (#361). A base the catalog does not know keeps the gnome config.
         matched = self.match_base_image(self.config.base_image_uri)
-        if matched and matched.key in {"bazzite", "bazzite-dx", "aurora", "aurora-dx", "kinoite"}:
+        if matched and not matched.first_boot_setup:
             return "kde"
         return "gnome"
 
@@ -6841,13 +6964,22 @@ def usage_text() -> str:
 
 
 def main() -> None:
-    first_argument = sys.argv[1] if len(sys.argv) > 1 else ""
-    if first_argument in ("--version", "-V"):
+    # Match the whole argument list, not just argv[1]: the tool is a guided
+    # wizard, so anything it does not recognise (`-v`, `-hV`, a typo, a stray
+    # trailing word, `--version --bogus`) must fail here rather than clear the
+    # screen and wait at a prompt inside a script or a `podman run`.
+    arguments = sys.argv[1:]
+    if arguments in (["--version"], ["-V"]):
         print(f"{TOOL_COMMAND} {VERSION}")
         raise SystemExit(0)
-    if first_argument in ("--help", "-h"):
+    if arguments in (["--help"], ["-h"]):
         print(usage_text())
         raise SystemExit(0)
+    if arguments:
+        print(f"{TOOL_COMMAND}: unrecognized arguments: {' '.join(arguments)}", file=sys.stderr)
+        print(file=sys.stderr)
+        print(usage_text(), file=sys.stderr)
+        raise SystemExit(2)
     app = App()
     try:
         app.run_main()
