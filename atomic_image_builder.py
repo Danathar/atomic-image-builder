@@ -267,6 +267,11 @@ DNF5_MISSING_MARKERS = (
     "matched no packages",
     "no matching packages",
 )
+# What `rpm -q` prints, on stdout, for each spec it was asked about that is
+# not installed. The spec comes back verbatim, so it is the key the removal
+# lookup matches against -- see lookup_installed_host_packages for why the
+# printed %{name} cannot be.
+RPM_NOT_INSTALLED_RE = re.compile(r"^package (.+) is not installed$")
 # GitHub Actions should be pinned to immutable SHAs instead of floating tags.
 # The human-readable tag is kept as a comment so maintainers can still tell what
 # upstream version the pin came from.
@@ -2260,6 +2265,7 @@ class App:
         self.github_user = ""
         self.generated_cosign_pub: str | None = None
         self.package_lookup_cache: dict[str, bool | None] = {}
+        self.installed_package_lookup_cache: dict[str, bool | None] = {}
         self.package_search_cache: dict[str, list[tuple[str, str]]] = {}
         self.package_lookup_warning_shown = False
         self.last_manual_package_check_had_missing = False
@@ -4204,7 +4210,7 @@ class App:
         else:
             missing_attr = "last_manual_removed_package_check_had_missing"
             warning_attr = "removed_package_lookup_warning_shown"
-            missing_hint = "They were skipped because no RPM package with that name was found in your current host repos."
+            missing_hint = "They were skipped because no RPM package with that name is installed here or found in your current host repos."
             unchecked_warn = "Could not fully check some package removals on this system."
             unchecked_hint = "The build will skip removals that are not installed in the base image."
 
@@ -4213,7 +4219,10 @@ class App:
         missing: list[str] = []
         missing_but_copr_may_provide: list[str] = []
         unchecked: list[str] = []
-        lookup_results = self.lookup_host_packages(packages)
+        if mode == "available":
+            lookup_results = self.lookup_host_packages(packages)
+        else:
+            lookup_results = self.lookup_removable_host_packages(packages)
         for package in packages:
             available = lookup_results[package]
             if available is True:
@@ -4375,6 +4384,78 @@ class App:
 
     def lookup_host_package(self, package: str) -> bool | None:
         return self.lookup_host_packages([package])[package]
+
+    def lookup_removable_host_packages(self, packages: Sequence[str]) -> dict[str, bool | None]:
+        # The question a removal asks is "is this in the base image?", and
+        # the repo query alone answers a different one. Bluefin, Bazzite and
+        # Aurora carry packages from Universal Blue's own repos (uupd, the
+        # ublue-os-* and bluefin-* sets) that `dnf5 repoquery --available`
+        # never lists on the host, because they are in neither fedora nor
+        # updates -- so the old check called a real base-image package a
+        # typo. The closest unprivileged model of the base image is the
+        # host's own rpmdb, so that is asked first.
+        #
+        # Only an installed answer is final. A name rpm does not know, or
+        # could not check, still goes to the repo query: the base image can
+        # carry a package the host has already overridden away, and a
+        # different base than the host's can carry one it never had. The
+        # repo answer for those is exactly the answer this screen gave
+        # before, so nothing that used to be accepted stops being accepted.
+        results = self.lookup_installed_host_packages(packages)
+        remaining = [package for package in unique(packages) if results[package] is not True]
+        if remaining:
+            results.update(self.lookup_host_packages(remaining))
+        return results
+
+    def lookup_installed_host_packages(self, packages: Sequence[str]) -> dict[str, bool | None]:
+        # `rpm -q`, not `dnf5 repoquery --installed`: the dnf5 form opens
+        # /var/lib/dnf/system-repo.lock and fails without root, while rpm
+        # reads the database as any user. Inside the tool container this is
+        # the container's own rpmdb rather than the host's, which is the same
+        # limitation the repo query already has there; a name it accepts by
+        # mistake is still gated by the build's own `rpm -q` before removal.
+        #
+        # Batched for the same reason as lookup_host_packages. Every spec
+        # rpm does not find is named back on stdout as "package <spec> is not
+        # installed" (exit 1), and those lines are what the misses are read
+        # from -- deliberately not the %{name} of the hits. rpm accepts
+        # name.arch and name-version specs and prints the bare name for
+        # them, so a hit for vim-enhanced.x86_64 would print vim-enhanced
+        # and never match what was asked. The "not installed" line echoes
+        # the spec verbatim.
+        results: dict[str, bool | None] = {}
+        to_check: list[str] = []
+        for package in packages:
+            if package in self.installed_package_lookup_cache:
+                results[package] = self.installed_package_lookup_cache[package]
+            elif package not in to_check:
+                to_check.append(package)
+        if not to_check:
+            return results
+        if not command_exists("rpm"):
+            for package in to_check:
+                self.installed_package_lookup_cache[package] = None
+                results[package] = None
+            return results
+        proc = run(["rpm", "-q", "--qf", "%{name}\n", *to_check], check=False)
+        # rpm exits 1 for "some of these are not installed" and, on a
+        # database it cannot open, *also* exits 1 and reports every spec as
+        # not installed. Only the "error:" line on stderr tells the two
+        # apart, so it is checked before the exit status is believed.
+        uncheckable = proc.returncode not in (0, 1) or "error:" in (proc.stderr or "").lower()
+        not_installed: set[str] = set()
+        for line in (proc.stdout or "").splitlines():
+            match = RPM_NOT_INSTALLED_RE.match(line.strip())
+            if match:
+                not_installed.add(match.group(1))
+        for package in to_check:
+            if uncheckable:
+                outcome: bool | None = None
+            else:
+                outcome = package not in not_installed
+            self.installed_package_lookup_cache[package] = outcome
+            results[package] = outcome
+        return results
 
     def search_host_packages(self, term: str, *, allow_metadata_refresh: bool = True) -> tuple[list[tuple[str, str]], bool, str | None]:
         normalized = " ".join(term.split())

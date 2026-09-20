@@ -3947,11 +3947,52 @@ class BuilderTests(unittest.TestCase):
     def test_add_removed_packages_to_config_accepts_valid_tokens(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
-            added = app.add_removed_packages_to_config(["vim-enhanced", "nano"], source_label="manual entry")
+        with patch.object(app, "lookup_installed_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
+            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+                added = app.add_removed_packages_to_config(["vim-enhanced", "nano"], source_label="manual entry")
         self.assertTrue(added)
         self.assertEqual(app.config.removed_packages, ["vim-enhanced", "nano"])
         self.assertTrue(any(level == "success" for level, _message in app.gum.messages))
+
+    def test_add_removed_packages_to_config_accepts_installed_package_missing_from_host_repos(self) -> None:
+        # uupd on Bluefin: in the base image, so `dnf5 remove` would take it,
+        # but shipped from Universal Blue's own repo and so absent from every
+        # repo the host has enabled. The repo-only check called it a typo.
+        app = self.make_app()
+        app.gum = GumStub()
+        completed = subprocess.CompletedProcess(["rpm"], 0, "uupd\n", "")
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", return_value=completed) as run_mock:
+                with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}) as repo_mock:
+                    added = app.add_removed_packages_to_config(["uupd"], source_label="manual entry")
+        self.assertEqual(run_mock.call_args.args[0][:2], ["rpm", "-q"])
+        repo_mock.assert_not_called()
+        self.assertTrue(added)
+        self.assertEqual(app.config.removed_packages, ["uupd"])
+        self.assertFalse(app.last_manual_removed_package_check_had_missing)
+        self.assertFalse(any(level == "error" for level, _message in app.gum.messages))
+
+    def test_add_removed_packages_to_config_hint_names_both_places_it_looked(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        with patch.object(app, "lookup_installed_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
+            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
+                added = app.add_removed_packages_to_config(["nethock"], source_label="manual entry")
+        self.assertFalse(added)
+        hints = [message for level, message in app.gum.messages if level == "hint"]
+        self.assertEqual(hints, ["They were skipped because no RPM package with that name is installed here or found in your current host repos."])
+
+    def test_add_packages_to_config_does_not_consult_the_rpmdb(self) -> None:
+        # Installed-on-the-host is evidence for a removal, not for an
+        # install: `dnf5 install` in the build resolves against repos, and a
+        # host-only package is exactly the kind it cannot find.
+        app = self.make_app()
+        app.gum = GumStub()
+        with patch.object(app, "lookup_installed_host_packages") as installed_mock:
+            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+                added = app.add_packages_to_config(["tmux"], source_label="manual entry")
+        installed_mock.assert_not_called()
+        self.assertTrue(added)
 
     def test_add_removed_packages_to_config_trusts_a_scanned_source(self) -> None:
         # The availability filter exists to catch typos in hand-typed names.
@@ -3987,8 +4028,9 @@ class BuilderTests(unittest.TestCase):
     def test_add_removed_packages_to_config_rejects_missing_manual_packages(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
-            added = app.add_removed_packages_to_config(["nethock"], source_label="manual entry")
+        with patch.object(app, "lookup_installed_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
+            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
+                added = app.add_removed_packages_to_config(["nethock"], source_label="manual entry")
         self.assertFalse(added)
         self.assertEqual(app.config.removed_packages, [])
         self.assertTrue(any(level == "error" and "not found" in message for level, message in app.gum.messages))
@@ -4185,6 +4227,121 @@ class BuilderTests(unittest.TestCase):
             result = app.lookup_host_package("tmux")
         mock.assert_called_once_with(["tmux"])
         self.assertTrue(result)
+
+    def test_lookup_installed_host_packages_reads_misses_off_rpm_output_in_one_call(self) -> None:
+        # Real `rpm -q` shape (rpm 6.0.2): hits print their %{name}, misses
+        # print "package <spec> is not installed" on stdout, exit 1. The
+        # arch-qualified hit prints the bare name, which is why the misses
+        # are what gets matched: matching hits by name would call
+        # vim-enhanced.x86_64 missing while rpm just said it was there.
+        app = self.make_app()
+        completed = subprocess.CompletedProcess(
+            ["rpm"], 1, "bash\npackage nethock is not installed\nvim-enhanced\n", ""
+        )
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", return_value=completed) as run_mock:
+                results = app.lookup_installed_host_packages(["bash", "nethock", "vim-enhanced.x86_64", "bash"])
+        run_mock.assert_called_once()
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command[:2], ["rpm", "-q"])
+        self.assertEqual(command[-3:], ["bash", "nethock", "vim-enhanced.x86_64"])
+        self.assertEqual(results, {"bash": True, "nethock": False, "vim-enhanced.x86_64": True})
+        self.assertEqual(app.installed_package_lookup_cache["nethock"], False)
+
+    def test_lookup_installed_host_packages_treats_all_hits_as_installed(self) -> None:
+        app = self.make_app()
+        completed = subprocess.CompletedProcess(["rpm"], 0, "bash\ncoreutils\n", "")
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", return_value=completed):
+                results = app.lookup_installed_host_packages(["bash", "coreutils"])
+        self.assertEqual(results, {"bash": True, "coreutils": True})
+
+    def test_lookup_installed_host_packages_returns_none_when_rpmdb_is_unreadable(self) -> None:
+        # Same exit status as an honest miss, and rpm still reports the spec
+        # as not installed; only the stderr line says the database never
+        # opened. Believing the stdout here would turn a broken rpmdb into a
+        # confident "typo" for every removal.
+        app = self.make_app()
+        completed = subprocess.CompletedProcess(
+            ["rpm"], 1, "package bash is not installed\n", "error: cannot open Packages database in /nonexistent/db\n"
+        )
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", return_value=completed):
+                results = app.lookup_installed_host_packages(["bash"])
+        self.assertEqual(results, {"bash": None})
+
+    def test_lookup_installed_host_packages_returns_none_on_unexpected_exit_status(self) -> None:
+        app = self.make_app()
+        completed = subprocess.CompletedProcess(["rpm"], 2, "", "")
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", return_value=completed):
+                results = app.lookup_installed_host_packages(["bash"])
+        self.assertEqual(results, {"bash": None})
+
+    def test_lookup_installed_host_packages_returns_none_without_rpm(self) -> None:
+        app = self.make_app()
+        with patch("atomic_image_builder.command_exists", return_value=False):
+            with patch("atomic_image_builder.run") as run_mock:
+                results = app.lookup_installed_host_packages(["bash", "uupd"])
+        run_mock.assert_not_called()
+        self.assertEqual(results, {"bash": None, "uupd": None})
+        self.assertEqual(app.installed_package_lookup_cache["uupd"], None)
+
+    def test_lookup_installed_host_packages_skips_already_cached_packages(self) -> None:
+        app = self.make_app()
+        app.installed_package_lookup_cache["bash"] = True
+        completed = subprocess.CompletedProcess(["rpm"], 0, "uupd\n", "")
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", return_value=completed) as run_mock:
+                results = app.lookup_installed_host_packages(["bash", "uupd"])
+        self.assertNotIn("bash", run_mock.call_args.args[0])
+        self.assertIn("uupd", run_mock.call_args.args[0])
+        self.assertEqual(results, {"bash": True, "uupd": True})
+
+    def test_lookup_installed_host_packages_does_not_run_rpm_when_everything_is_cached(self) -> None:
+        app = self.make_app()
+        app.installed_package_lookup_cache["bash"] = True
+        app.installed_package_lookup_cache["nethock"] = False
+        with patch("atomic_image_builder.run") as run_mock:
+            results = app.lookup_installed_host_packages(["bash", "nethock"])
+        run_mock.assert_not_called()
+        self.assertEqual(results, {"bash": True, "nethock": False})
+
+    def test_lookup_removable_host_packages_settles_installed_names_without_the_repo_query(self) -> None:
+        app = self.make_app()
+        with patch.object(app, "lookup_installed_host_packages", return_value={"uupd": True, "nethock": False}):
+            with patch.object(app, "lookup_host_packages", return_value={"nethock": False}) as repo_mock:
+                results = app.lookup_removable_host_packages(["uupd", "nethock"])
+        repo_mock.assert_called_once_with(["nethock"])
+        self.assertEqual(results, {"uupd": True, "nethock": False})
+
+    def test_lookup_removable_host_packages_falls_back_to_repos_for_names_not_installed_here(self) -> None:
+        # The host may have already `rpm-ostree override remove`d the very
+        # package the user wants gone from the image, or be running a
+        # different base than the one being built. Not installed here is
+        # not evidence that it is absent from the base image; the repo
+        # answer is the one this screen always gave for it.
+        app = self.make_app()
+        with patch.object(app, "lookup_installed_host_packages", return_value={"firefox": False}):
+            with patch.object(app, "lookup_host_packages", return_value={"firefox": True}):
+                results = app.lookup_removable_host_packages(["firefox"])
+        self.assertEqual(results, {"firefox": True})
+
+    def test_lookup_removable_host_packages_falls_back_to_repos_when_rpm_cannot_say(self) -> None:
+        app = self.make_app()
+        with patch.object(app, "lookup_installed_host_packages", return_value={"tmux": None, "htop": None}):
+            with patch.object(app, "lookup_host_packages", return_value={"tmux": True, "htop": None}) as repo_mock:
+                results = app.lookup_removable_host_packages(["tmux", "htop"])
+        repo_mock.assert_called_once_with(["tmux", "htop"])
+        self.assertEqual(results, {"tmux": True, "htop": None})
+
+    def test_lookup_removable_host_packages_skips_the_repo_query_when_everything_is_installed(self) -> None:
+        app = self.make_app()
+        with patch.object(app, "lookup_installed_host_packages", return_value={"uupd": True}):
+            with patch.object(app, "lookup_host_packages") as repo_mock:
+                results = app.lookup_removable_host_packages(["uupd"])
+        repo_mock.assert_not_called()
+        self.assertEqual(results, {"uupd": True})
 
     def test_search_host_packages_parses_results_and_limits_output(self) -> None:
         app = self.make_app()
@@ -12346,8 +12503,9 @@ class BuilderTests(unittest.TestCase):
         stub.choose = lambda _options, **_kwargs: ["Add package names to remove"]
         stub.write = lambda **_kwargs: "vim-enhanced"
         app.gum = stub
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
-            app.manage_removed_packages()
+        with patch.object(app, "lookup_installed_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
+            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+                app.manage_removed_packages()
         self.assertIn("vim-enhanced", app.config.removed_packages)
 
     def test_manage_removed_packages_add_flow_accepts_comma_separated_entry(self) -> None:
@@ -12356,8 +12514,9 @@ class BuilderTests(unittest.TestCase):
         stub.choose = lambda _options, **_kwargs: ["Add package names to remove"]
         stub.write = lambda **_kwargs: "vim-enhanced,nano"
         app.gum = stub
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
-            app.manage_removed_packages()
+        with patch.object(app, "lookup_installed_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
+            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+                app.manage_removed_packages()
         self.assertEqual(app.config.removed_packages, ["vim-enhanced", "nano"])
 
     def test_manage_removed_packages_remove_flow(self) -> None:
