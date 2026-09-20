@@ -16,6 +16,14 @@ and the two SSH key patterns. Those two statements are only consistent while
 * `git diff <(true) <path>` is `--no-index` again: bash replaces the
   process substitution with a `/dev/fd/N` path, which is outside the
   checkout, and git prints `<path>` whole beside it.
+* `git diff HEAD >cosign.pub` is `--output` in the shell's own spelling: bash
+  opens the target for writing before git starts, so the file is truncated
+  whatever git then prints, and `>>`, `>|`, `&>`, `2>err`, `>&file` and
+  `<>file` each open a path the same way. Bash also lets the redirection
+  precede the command name, so `>cosign.pub git diff HEAD` is the same
+  command -- and shlex hands that `>` back as the first token of the
+  segment, where a scan that took the first token for the command name saw
+  no `git` at all and checked nothing else in the segment either.
 
 A `Read(...)` rule gates the Read tool and never sees a path that arrives as
 an argument to Bash, and every form above matches the allowed prefix, so none
@@ -114,6 +122,14 @@ PROCESS_SUBSTITUTION = ("<(", ">(")
 # brace_would_expand().
 EXPANDING_BRACE = re.compile(r"\{.*(?:,|\.\.).*\}", re.DOTALL)
 
+# A redirection operator as shlex hands it back: `punctuation_chars` glues a
+# run of `<>&|` into one token, so `>`, `>>`, `>|`, `&>`, `&>>`, `>&`, `<`,
+# `<<`, `<<<`, `<&` and `<>` each arrive whole, and the descriptor of `2>err`
+# arrives as the token `2` before it. `|` and `&&` carry neither angle
+# bracket and stay the separators they are; `<(` and `>(` carry a `(` and
+# are the process substitutions handled above. See redirection_writes_a_path().
+REDIRECTION = re.compile(r"^[<>&|]*[<>][<>&|]*$")
+
 
 def refused_long(token: str) -> bool:
     """Is this token a long option that reaches outside the index?
@@ -186,6 +202,25 @@ def brace_would_expand(token: str) -> bool:
     return "${" in token or EXPANDING_BRACE.search(token) is not None
 
 
+def redirection_writes_a_path(operator: str, target: str) -> bool:
+    """Does this redirection make the shell open `target` for writing?
+
+    Every operator with a `>` in it does -- `>`, `>>`, `>|`, `&>`, `&>>`,
+    and `<>`, which opens read-write and creates the file -- and so does
+    `>&` when its target is a path (`>&file` is bash's older `&>file`). The
+    exception is a target that names a descriptor: `>&1`, `2>&1` and `>&-`
+    duplicate or close a descriptor and touch no path. `<`, `<<`, `<<<` and
+    `<&` open nothing for writing. `2>&file` is an ambiguous redirect to bash
+    and writes nothing, and is refused anyway: the rule is the operator and
+    the target's shape, not a model of bash's error paths.
+    """
+    if ">" not in operator:
+        return False
+    if operator.endswith("&") and (target.isdigit() or target == "-"):
+        return False
+    return True
+
+
 def unsafe_operand(token: str) -> bool:
     """A path that leaves the checkout, spelled without needing `--no-index`.
 
@@ -248,12 +283,36 @@ def assignment(token: str) -> str | None:
 
 
 def split_segment(segment: list[str]) -> tuple[list[str], str, list[str]]:
-    """A segment as (environment names, command, arguments)."""
+    """A segment as (environment names, command, arguments).
+
+    The command is the first token that is neither an assignment nor part of
+    a redirection. Bash lets a redirection precede the command name, so in
+    `>cosign.pub git diff HEAD` the first token is `>` and the command is
+    still git; reading `>` as the name left the whole segment unchecked. A
+    redirection is its operator, the token after it (the target), and a
+    token of digits right before it (the descriptor of `2>err`). shlex does
+    not say whether the digits touched the operator, so `2 >err git log` is
+    read the same way; that names a command called `2` as git, which can
+    only over-refuse.
+    """
     names: list[str] = []
-    for index, token in enumerate(segment):
+    index = 0
+    while index < len(segment):
+        token = segment[index]
         name = assignment(token)
         if name is not None:
             names.append(name)
+            index += 1
+            continue
+        if REDIRECTION.match(token):
+            index += 2  # the operator and its target
+            continue
+        if (
+            token.isdigit()
+            and index + 1 < len(segment)
+            and REDIRECTION.match(segment[index + 1])
+        ):
+            index += 1  # the descriptor; the operator is next
             continue
         return names, bare(token).rsplit("/", 1)[-1], segment[index + 1 :]
     return names, "", []
@@ -302,6 +361,23 @@ def refusal(command: str) -> str | None:
                     "HEAD@{1}, is a literal to bash and is not refused, while a .. "
                     "between two reflog entries (HEAD@{2}..HEAD@{1}) is refused with "
                     "the rest, so write HEAD~2..HEAD~1 instead"
+                )
+        for index, token in enumerate(segment):
+            if not REDIRECTION.match(token):
+                continue
+            target = segment[index + 1] if index + 1 < len(segment) else ""
+            descriptor = (
+                segment[index - 1] if index > 0 and segment[index - 1].isdigit() else ""
+            )
+            if redirection_writes_a_path(token, target):
+                return (
+                    f"{descriptor}{token}{target} makes the shell open {target or 'its target'} for "
+                    "writing before git runs, which truncates the file whatever git then "
+                    "prints -- the same write --output makes, in the shell's own spelling, "
+                    "and one bash accepts before the command name as readily as after it; "
+                    "git diff and git log print to stdout, so read that instead (2>&1, "
+                    ">&2, an input redirection, and a redirection on another command of "
+                    "the same string are not refused)"
                 )
         for name in names:
             if name in REFUSED_ENVIRONMENT:
