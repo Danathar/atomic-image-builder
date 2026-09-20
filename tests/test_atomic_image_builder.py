@@ -7965,9 +7965,31 @@ class BuilderTests(unittest.TestCase):
 
     def test_gum_pager_pipes_text_to_gum_pager(self) -> None:
         gum = Gum()
-        with patch("atomic_image_builder.run") as run_mock:
+        completed = subprocess.CompletedProcess(["gum", "pager"], 0, None, None)
+        with patch("atomic_image_builder.run", return_value=completed) as run_mock:
             gum.pager("some long text\nmore lines")
-        run_mock.assert_called_once_with(["gum", "pager"], capture=False, stdin="some long text\nmore lines")
+        # check=False is the point: run()'s default turns gum's exit 130 into a
+        # CommandError before require_interactive_success can see it.
+        run_mock.assert_called_once_with(
+            ["gum", "pager"], capture=False, check=False, stdin="some long text\nmore lines"
+        )
+
+    def test_gum_pager_raises_keyboard_interrupt_on_ctrl_c(self) -> None:
+        # Real gum v0.17.0 exits 130 on Ctrl+C in the pager, the same code as
+        # the other widgets; it used to reach the user as "command failed: gum
+        # pager" instead of quitting (#364).
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "pager"], 130, None, None)
+        with patch("atomic_image_builder.run", return_value=completed):
+            with self.assertRaises(KeyboardInterrupt):
+                gum.pager("some long text")
+
+    def test_gum_pager_raises_screen_back_when_gum_fails(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "pager"], 1, None, None)
+        with patch("atomic_image_builder.run", return_value=completed):
+            with self.assertRaises(ScreenBack):
+                gum.pager("some long text")
 
     def test_gum_enter_to_continue_shows_instruction_then_waits_for_input(self) -> None:
         gum = Gum()

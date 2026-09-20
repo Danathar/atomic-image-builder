@@ -1957,7 +1957,12 @@ class Gum:
         return proc.stdout.strip()
 
     def pager(self, text: str) -> None:
-        run(["gum", "pager"], capture=False, stdin=text)
+        # gum pager exits 0 for q and Esc and 130 for Ctrl+C, like every other
+        # widget. Left on run()'s default check=True, the 130 surfaced as
+        # "command failed: gum pager" -- the one screen where the Ctrl+C the
+        # hints promise would quit produced an error instead, and in the update
+        # flow that error aborted the update.
+        self.require_interactive_success(run(["gum", "pager"], capture=False, check=False, stdin=text))
 
     def table(self, rows: Sequence[Sequence[str]], *, columns: str, widths: str) -> None:
         # --print is what makes this a display widget. Without it `gum table` is
