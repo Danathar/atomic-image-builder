@@ -3880,7 +3880,7 @@ class BuilderTests(unittest.TestCase):
     def test_add_packages_to_config_accepts_valid_tokens(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: True for p in pkgs}):
             added = app.add_packages_to_config(["tmux", "ripgrep"], source_label="manual entry")
         self.assertTrue(added)
         self.assertEqual(app.config.packages, ["tmux", "ripgrep"])
@@ -3910,7 +3910,7 @@ class BuilderTests(unittest.TestCase):
     def test_add_packages_to_config_rejects_missing_manual_packages(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: False for p in pkgs}):
             added = app.add_packages_to_config(["nethock"], source_label="manual entry")
         self.assertFalse(added)
         self.assertEqual(app.config.packages, [])
@@ -3928,7 +3928,7 @@ class BuilderTests(unittest.TestCase):
     def test_add_packages_to_config_warns_when_manual_check_is_unavailable(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: None for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: None for p in pkgs}):
             added = app.add_packages_to_config(["tmux"], source_label="manual entry")
         self.assertTrue(added)
         self.assertEqual(app.config.packages, ["tmux"])
@@ -3938,7 +3938,7 @@ class BuilderTests(unittest.TestCase):
         app = self.make_app()
         app.config.copr_repos = ["foo/bar"]
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: False for p in pkgs}):
             added = app.add_packages_to_config(["nethock"], source_label="manual entry")
         self.assertTrue(added)
         self.assertEqual(app.config.packages, ["nethock"])
@@ -3947,7 +3947,7 @@ class BuilderTests(unittest.TestCase):
     def test_add_removed_packages_to_config_accepts_valid_tokens(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: True for p in pkgs}):
             added = app.add_removed_packages_to_config(["vim-enhanced", "nano"], source_label="manual entry")
         self.assertTrue(added)
         self.assertEqual(app.config.removed_packages, ["vim-enhanced", "nano"])
@@ -3987,7 +3987,7 @@ class BuilderTests(unittest.TestCase):
     def test_add_removed_packages_to_config_rejects_missing_manual_packages(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: False for p in pkgs}):
             added = app.add_removed_packages_to_config(["nethock"], source_label="manual entry")
         self.assertFalse(added)
         self.assertEqual(app.config.removed_packages, [])
@@ -4080,7 +4080,7 @@ class BuilderTests(unittest.TestCase):
 
     def test_lookup_host_packages_skips_already_cached_packages(self) -> None:
         app = self.make_app()
-        app.package_lookup_cache["tmux"] = True
+        app.package_lookup_cache["tmux", True] = True
         stub = GumStub()
         calls: list[list[str]] = []
 
@@ -4100,8 +4100,8 @@ class BuilderTests(unittest.TestCase):
 
     def test_lookup_host_packages_does_not_call_dnf5_when_everything_is_cached(self) -> None:
         app = self.make_app()
-        app.package_lookup_cache["tmux"] = True
-        app.package_lookup_cache["htop"] = False
+        app.package_lookup_cache["tmux", True] = True
+        app.package_lookup_cache["htop", True] = False
         stub = GumStub()
         stub.spinner_result = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not run dnf5"))
         app.gum = stub
@@ -4116,7 +4116,7 @@ class BuilderTests(unittest.TestCase):
         with patch("atomic_image_builder.command_exists", return_value=False):
             results = app.lookup_host_packages(["tmux", "htop"])
         self.assertEqual(results, {"tmux": None, "htop": None})
-        self.assertEqual(app.package_lookup_cache["tmux"], None)
+        self.assertEqual(app.package_lookup_cache["tmux", True], None)
 
     def test_lookup_host_packages_treats_returncode_zero_absence_as_missing(self) -> None:
         app = self.make_app()
@@ -4154,7 +4154,9 @@ class BuilderTests(unittest.TestCase):
             results = app.lookup_host_packages(["tmux"])
         self.assertEqual(results, {"tmux": None})
 
-    def _lookup_with_dnf5_stub(self, app, packages: list[str], answers: dict[str, str]) -> tuple[dict, list[list[str]]]:
+    def _lookup_with_dnf5_stub(
+        self, app, packages: list[str], answers: dict[str, str], *, resolve_provides: bool = True
+    ) -> tuple[dict, list[list[str]]]:
         # `answers` maps the tail of a repoquery command (what follows
         # --latest-limit 1) to the stdout dnf5 would print for it. The batch
         # is keyed by its joined names; a follow-up by "--whatprovides <spec>"
@@ -4171,7 +4173,7 @@ class BuilderTests(unittest.TestCase):
         stub.spinner_result = fake_spinner_result
         app.gum = stub
         with patch("atomic_image_builder.command_exists", return_value=True):
-            return app.lookup_host_packages(packages), calls
+            return app.lookup_host_packages(packages, resolve_provides=resolve_provides), calls
 
     def test_lookup_host_packages_accepts_a_name_that_resolves_through_provides(self) -> None:
         # The issue's reproduction: `dnf5 install vim` installs vim-enhanced
@@ -4187,7 +4189,7 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(results, {"htop": True, "vim": True})
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[1][-2:], ["--whatprovides", "vim"])
-        self.assertEqual(app.package_lookup_cache["vim"], True)
+        self.assertEqual(app.package_lookup_cache["vim", True], True)
 
     def test_lookup_host_packages_accepts_a_name_dot_arch_spec(self) -> None:
         # repoquery resolves vim-enhanced.x86_64 but prints the bare name,
@@ -4235,7 +4237,7 @@ class BuilderTests(unittest.TestCase):
         results, calls = self._lookup_with_dnf5_stub(app, ["python3-foo-typo"], {})
         self.assertEqual(results, {"python3-foo-typo": False})
         self.assertEqual(len(calls), 3)
-        self.assertEqual(app.package_lookup_cache["python3-foo-typo"], False)
+        self.assertEqual(app.package_lookup_cache["python3-foo-typo", True], False)
 
     def test_lookup_host_packages_follow_up_failure_is_unchecked_not_missing(self) -> None:
         # A dnf5 failure during the follow-up must not turn into "not found":
@@ -4287,6 +4289,126 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(kept, ["vim"])
         self.assertFalse(app.last_manual_package_check_had_missing)
         self.assertFalse(any(level == "error" for level, _message in stub.messages))
+
+    # ── removals: the rpm -q gate does not resolve Provides ─────────────
+    # The generated build.sh only removes a package after `rpm -q --quiet
+    # "$pkg"` succeeds, and rpm -q matches names and NEVRA forms, not
+    # Provides. Measured on a host with vim-enhanced (Provides: vim)
+    # installed: `rpm -q --quiet vim` exits 1, vim-enhanced.x86_64 and
+    # htop-3.4.1 exit 0. So a Provides that install accepts is, for a
+    # removal, a name the build would silently skip.
+
+    def test_removal_lookup_rejects_a_provides_name_without_asking_whatprovides(self) -> None:
+        app = self.make_app()
+        results, calls = self._lookup_with_dnf5_stub(
+            app,
+            ["htop", "vim"],
+            {"htop vim": "htop\n", "--whatprovides vim": "vim-enhanced\n"},
+            resolve_provides=False,
+        )
+        self.assertEqual(results, {"htop": True, "vim": False})
+        # The batch alone: "vim" has no NEVRA separator, so with Provides
+        # out of the picture there is nothing left to ask dnf5.
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(app.package_lookup_cache["vim", False], False)
+
+    def test_removal_lookup_still_accepts_a_nevra_form(self) -> None:
+        # rpm -q accepts name.arch and name-version, so the positional
+        # follow-up still runs for a removal; only --whatprovides is skipped.
+        app = self.make_app()
+        results, calls = self._lookup_with_dnf5_stub(
+            app,
+            ["vim-enhanced.x86_64", "htop-3.4.1"],
+            {"vim-enhanced.x86_64": "vim-enhanced\n", "htop-3.4.1": "htop\n"},
+            resolve_provides=False,
+        )
+        self.assertEqual(results, {"vim-enhanced.x86_64": True, "htop-3.4.1": True})
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all("--whatprovides" not in command for command in calls))
+        self.assertEqual(calls[1][-1], "vim-enhanced.x86_64")
+        self.assertEqual(calls[2][-1], "htop-3.4.1")
+
+    def test_removal_lookup_keeps_the_wrong_case_and_typo_answers(self) -> None:
+        app = self.make_app()
+        results, calls = self._lookup_with_dnf5_stub(
+            app,
+            ["Vim-Enhanced", "HTOP", "python3-foo-typo"],
+            {"Vim-Enhanced": "vim-enhanced\n"},
+            resolve_provides=False,
+        )
+        self.assertEqual(results, {"Vim-Enhanced": False, "HTOP": False, "python3-foo-typo": False})
+        # Batch, then one positional query for each spec with a separator;
+        # HTOP has none and needs no follow-up.
+        self.assertEqual(len(calls), 3)
+
+    def test_removal_lookup_nevra_follow_up_failure_is_unchecked_not_missing(self) -> None:
+        # For a single spec the batch and the positional follow-up are the
+        # same argv, so the stub answers by call order: the batch finds
+        # nothing, the follow-up is where dnf5 falls over.
+        app = self.make_app()
+        stub = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            calls.append(list(command))
+            if len(calls) == 2:
+                return subprocess.CompletedProcess(list(command), 1, "", "some unrelated dnf5 error")
+            return subprocess.CompletedProcess(list(command), 0, "", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            results = app.lookup_host_packages(["vim-enhanced.x86_64"], resolve_provides=False)
+        self.assertEqual(results, {"vim-enhanced.x86_64": None})
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("--whatprovides", calls[1])
+
+    def test_lookup_cache_keeps_the_install_and_removal_answers_apart(self) -> None:
+        # "vim" typed on the install screen is accepted through Provides. The
+        # same name typed on the removal screen afterwards must not inherit
+        # that answer from the cache: for a removal it is "not found".
+        app = self.make_app()
+        answers = {"vim": "", "--whatprovides vim": "vim-enhanced\n"}
+        install, install_calls = self._lookup_with_dnf5_stub(app, ["vim"], answers)
+        self.assertEqual(install, {"vim": True})
+        removal, removal_calls = self._lookup_with_dnf5_stub(app, ["vim"], answers, resolve_provides=False)
+        self.assertEqual(removal, {"vim": False})
+        self.assertEqual(len(removal_calls), 1)
+        self.assertEqual(app.package_lookup_cache, {("vim", True): True, ("vim", False): False})
+        # And the other way round: a removal's "not found" is not install's.
+        app = self.make_app()
+        removal, _calls = self._lookup_with_dnf5_stub(app, ["vim"], answers, resolve_provides=False)
+        install, install_calls = self._lookup_with_dnf5_stub(app, ["vim"], answers)
+        self.assertEqual((removal, install), ({"vim": False}, {"vim": True}))
+        self.assertEqual(install_calls[-1][-2:], ["--whatprovides", "vim"])
+
+    def test_manual_removal_entry_reports_a_provides_name_as_not_found(self) -> None:
+        # The user-visible half: on the Removed Base Packages screen, "vim"
+        # is refused with the same message as any other name the build
+        # would not find, instead of being saved and then skipped at build
+        # time with "not installed in the base image".
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.CompletedProcess(
+            list(command), 0, "vim-enhanced\n" if "--whatprovides" in command else "", ""
+        )
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            kept = app.filter_available_manual_removed_packages(["vim"])
+        self.assertEqual(kept, [])
+        self.assertTrue(app.last_manual_removed_package_check_had_missing)
+        self.assertTrue(any(level == "error" and "not found: vim" in message for level, message in stub.messages))
+
+    def test_filter_modes_ask_the_lookup_for_their_own_build_step(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        with patch.object(app, "lookup_host_packages", return_value={"vim": True}) as lookup:
+            app.filter_available_manual_packages(["vim"])
+            app.filter_available_manual_removed_packages(["vim"])
+        self.assertEqual(
+            [call.kwargs for call in lookup.call_args_list],
+            [{"resolve_provides": True}, {"resolve_provides": False}],
+        )
 
     def test_lookup_host_packages_uses_singular_title_for_one_package(self) -> None:
         app = self.make_app()
@@ -4769,7 +4891,7 @@ class BuilderTests(unittest.TestCase):
         stub = GumStub()
         stub.write = lambda **_kwargs: "tmux"
         app.gum = stub
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: True for p in pkgs}):
             app.manual_packages()
         self.assertEqual(app.config.packages, ["tmux"])
         self.assertEqual(app.gum.prompts, ["Added 1 package(s). Press Enter to return to the package menu..."])
@@ -4779,7 +4901,7 @@ class BuilderTests(unittest.TestCase):
         stub = GumStub()
         stub.write = lambda **_kwargs: "nethock"
         app.gum = stub
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: False for p in pkgs}):
             app.manual_packages()
         self.assertEqual(app.config.packages, [])
         self.assertEqual(app.gum.prompts, ["No packages were added. Press Enter to return to the package menu..."])
@@ -4789,7 +4911,7 @@ class BuilderTests(unittest.TestCase):
         stub = GumStub()
         stub.write = lambda **_kwargs: "tmux,htop, vim"
         app.gum = stub
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: True for p in pkgs}):
             app.manual_packages()
         self.assertEqual(app.config.packages, ["tmux", "htop", "vim"])
 
@@ -4807,7 +4929,7 @@ class BuilderTests(unittest.TestCase):
         stub = GumStub()
         stub.write = lambda **_kwargs: "tmux nethock"
         app.gum = stub
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {"tmux": True, "nethock": False}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {"tmux": True, "nethock": False}):
             app.manual_packages()
         self.assertEqual(app.config.packages, ["tmux"])
         self.assertEqual(
@@ -12485,7 +12607,7 @@ class BuilderTests(unittest.TestCase):
         stub.choose = lambda _options, **_kwargs: ["Add package names to remove"]
         stub.write = lambda **_kwargs: "vim-enhanced"
         app.gum = stub
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: True for p in pkgs}):
             app.manage_removed_packages()
         self.assertIn("vim-enhanced", app.config.removed_packages)
 
@@ -12495,7 +12617,7 @@ class BuilderTests(unittest.TestCase):
         stub.choose = lambda _options, **_kwargs: ["Add package names to remove"]
         stub.write = lambda **_kwargs: "vim-enhanced,nano"
         app.gum = stub
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: True for p in pkgs}):
             app.manage_removed_packages()
         self.assertEqual(app.config.removed_packages, ["vim-enhanced", "nano"])
 
@@ -12990,7 +13112,7 @@ class BuilderTests(unittest.TestCase):
 
         stub.input = fake_input
         app.gum = stub
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: True for p in pkgs}):
             app.add_copr()
         self.assertEqual(app.config.copr_repos, ["kwizart/fedy"])
         self.assertEqual(app.config.packages, ["tmux", "htop"])

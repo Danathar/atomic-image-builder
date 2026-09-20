@@ -2259,7 +2259,9 @@ class App:
         self.github_available = False
         self.github_user = ""
         self.generated_cosign_pub: str | None = None
-        self.package_lookup_cache: dict[str, bool | None] = {}
+        # Keyed by (spec, resolve_provides): "vim" is installable, through
+        # Provides, and not removable, so the two screens' answers differ.
+        self.package_lookup_cache: dict[tuple[str, bool], bool | None] = {}
         self.package_search_cache: dict[str, list[tuple[str, str]]] = {}
         self.package_lookup_warning_shown = False
         self.last_manual_package_check_had_missing = False
@@ -4213,7 +4215,11 @@ class App:
         missing: list[str] = []
         missing_but_copr_may_provide: list[str] = []
         unchecked: list[str] = []
-        lookup_results = self.lookup_host_packages(packages)
+        # A removal is gated by `rpm -q --quiet "$pkg"` in the generated
+        # build.sh, and rpm -q does not resolve Provides: with vim-enhanced
+        # installed, `rpm -q vim` fails and the removal is skipped. So a
+        # virtual name that install would accept is a typo here.
+        lookup_results = self.lookup_host_packages(packages, resolve_provides=mode == "available")
         for package in packages:
             available = lookup_results[package]
             if available is True:
@@ -4307,10 +4313,16 @@ class App:
         self.gum.success("Package metadata refreshed.")
         return True
 
-    def lookup_host_packages(self, packages: Sequence[str]) -> dict[str, bool | None]:
+    def lookup_host_packages(self, packages: Sequence[str], *, resolve_provides: bool = True) -> dict[str, bool | None]:
         # Host-side dnf5 checks are a lightweight "spellcheck" for manual RPM
         # names. They are not a perfect model of the final image build, but they
         # catch obvious mistakes like typos before we create a repo.
+        #
+        # resolve_provides says which build step the answer has to match.
+        # `dnf5 install` resolves a Provides such as vim to vim-enhanced; the
+        # removal loop's `rpm -q --quiet` gate does not, so for a removal a
+        # virtual name is "not found". NEVRA forms (vim-enhanced.x86_64,
+        # htop-3.4.1) are accepted by both and checked either way.
         #
         # This checks every requested package in a single dnf5 invocation
         # rather than one invocation per package. dnf5's first repoquery call
@@ -4322,15 +4334,15 @@ class App:
         results: dict[str, bool | None] = {}
         to_check: list[str] = []
         for package in packages:
-            if package in self.package_lookup_cache:
-                results[package] = self.package_lookup_cache[package]
+            if (package, resolve_provides) in self.package_lookup_cache:
+                results[package] = self.package_lookup_cache[package, resolve_provides]
             elif package not in to_check:
                 to_check.append(package)
         if not to_check:
             return results
         if not command_exists("dnf5"):
             for package in to_check:
-                self.package_lookup_cache[package] = None
+                self.package_lookup_cache[package, resolve_provides] = None
                 results[package] = None
             return results
         state_dir = self.dnf5_state_dir()
@@ -4352,11 +4364,11 @@ class App:
                 # settled everything it can.
                 unresolved.append(package)
                 continue
-            self.package_lookup_cache[package] = outcome
+            self.package_lookup_cache[package, resolve_provides] = outcome
             results[package] = outcome
         for package in unresolved:
-            outcome = self._resolve_package_spec(package, state_dir)
-            self.package_lookup_cache[package] = outcome
+            outcome = self._resolve_package_spec(package, state_dir, resolve_provides=resolve_provides)
+            self.package_lookup_cache[package, resolve_provides] = outcome
             results[package] = outcome
         return results
 
@@ -4390,7 +4402,7 @@ class App:
         uncheckable = proc.returncode != 0 and not has_missing_marker
         return names, uncheckable
 
-    def _resolve_package_spec(self, spec: str, state_dir: Path) -> bool | None:
+    def _resolve_package_spec(self, spec: str, state_dir: Path, *, resolve_provides: bool) -> bool | None:
         # The batch answers "is this exactly a package name?", and the
         # generated build.sh's `dnf5 install -y` accepts more than that: a
         # NEVRA form such as vim-enhanced.x86_64, or a Provides such as vim,
@@ -4401,16 +4413,23 @@ class App:
         # metadata cache the batch just warmed -- these calls are the fast
         # kind.
         title = f"Checking package name: {spec}"
-        # --whatprovides first. It is case-sensitive, like install's own
-        # resolution, and every package provides its own name, so this covers
-        # a plain name and a virtual one alike.
-        names, uncheckable = self._dnf5_repoquery_names(title, state_dir, ["--whatprovides", spec])
-        if names:
-            return True
-        if uncheckable:
-            return None
-        # A spec with no NEVRA separator can only be a name, and the Provides
-        # query already gave the case-exact answer for that.
+        if resolve_provides:
+            # --whatprovides first. It is case-sensitive, like install's own
+            # resolution, and every package provides its own name, so this
+            # covers a plain name and a virtual one alike.
+            names, uncheckable = self._dnf5_repoquery_names(title, state_dir, ["--whatprovides", spec])
+            if names:
+                return True
+            if uncheckable:
+                return None
+        # A spec with no NEVRA separator can only be a name. For install the
+        # Provides query already gave the case-exact answer; for a removal
+        # the batch did, since rpm -q wants the name itself. (The batch is
+        # positional and so matched ignoring case, but it printed the real
+        # name, which is what the spec was compared against.) Swapping a
+        # Provides for its provider instead would guess: `webserver` has
+        # three (caddy, httpd, lighttpd), and the state file would then hold
+        # a name the user never typed.
         if not any(separator in spec for separator in ".-:"):
             return False
         # NEVRA forms. dnf5 prints the bare %{name} for vim-enhanced.x86_64,

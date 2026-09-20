@@ -571,6 +571,20 @@ Vim-Enhanced, HTOP, nethock and python3-foo-typo do not. Binaries by bare name
 user who types one keeps the "not found" message and can enter the package
 name instead.
 
+The same lookup checks the Removed Base Packages screen, and there Provides
+must stay rejected. The generated build.sh only removes a package after
+`rpm -q --quiet "$pkg"` succeeds, and rpm -q matches names and NEVRA forms
+only: on a host with vim-enhanced (Provides: vim) installed, `rpm -q --quiet
+vim` exits 1 while vim-enhanced.x86_64 and htop-3.4.1 exit 0. Accepting `vim`
+as a removal would save it and then skip it at build time with "not
+installed in the base image". So lookup_host_packages() takes
+resolve_provides: the removal filter passes False, which skips the
+--whatprovides step and keeps the positional NEVRA follow-up, and the cache
+is keyed by (spec, resolve_provides) so `vim` accepted on the install screen
+does not leak into the removal screen. Swapping a Provides for its provider
+was not taken: `webserver` has three providers, and the state file would
+hold a name the user never typed.
+
 Chunkah Config and Output Cleanup: trap, not trailing rm commands
 ---------------------------------------------------------------
 The current recipe registers `trap 'rm -f "${CHUNKAH_CONFIG_FILE}"; rm -rf
