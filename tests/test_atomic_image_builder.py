@@ -51,6 +51,7 @@ from atomic_image_builder import (
     MANAGED_REPO_WARNING,
     METHOD_DISPLAY,
     PACKAGE_SEARCH_LIMIT,
+    PACKAGE_TOKEN_RE,
     SCAN_CANCELLED,
     SCAN_OK,
     SCAN_UNAVAILABLE,
@@ -2072,6 +2073,31 @@ class BuilderTests(unittest.TestCase):
         with self.assertRaisesRegex(CommandError, "Invalid package value"):
             app.validate_config()
 
+    def test_package_token_re_rejects_a_leading_dash_but_keeps_dashes_elsewhere(self) -> None:
+        # A leading "-" is the one character class dnf5 turns into an option,
+        # and there is no "--" separator to hide behind (dnf5 5.4.2.1 rejects
+        # it), so the regex is the whole guard. Everything else the old
+        # pattern accepted must still pass or a scan of a real host regresses.
+        for token in ("--version", "-y", "-", "--nogpgcheck", "-htop"):
+            self.assertIsNone(PACKAGE_TOKEN_RE.fullmatch(token), token)
+        for token in ("htop", "vim-enhanced", "gcc-c++", "python3-pip", "0ad", "libfoo.so.1", "a", "epel:", "trailing-"):
+            self.assertIsNotNone(PACKAGE_TOKEN_RE.fullmatch(token), token)
+
+    def test_validate_config_rejects_package_token_starting_with_dash(self) -> None:
+        # "-y" would otherwise be emitted as a bare option on the generated
+        # `dnf5 install -y` line, where shell_quote cannot help because the
+        # value contains nothing the shell treats specially.
+        app = self.make_app()
+        app.config.packages = ["htop", "-y"]
+        with self.assertRaisesRegex(CommandError, "Invalid package value.*-y"):
+            app.validate_config()
+
+    def test_validate_config_rejects_removed_package_token_starting_with_dash(self) -> None:
+        app = self.make_app()
+        app.config.removed_packages = ["firefox", "--version"]
+        with self.assertRaisesRegex(CommandError, "Invalid removed package value.*--version"):
+            app.validate_config()
+
     def test_base_image_picker_includes_supported_universal_blue_and_fedora_atomic_images(self) -> None:
         self.assertEqual(
             [image.key for image in BASE_IMAGES],
@@ -3868,6 +3894,19 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.config.packages, [])
         self.assertTrue(any(level == "error" and "Invalid package value" in message for level, message in app.gum.messages))
 
+    def test_add_packages_to_config_rejects_dash_token_before_the_dnf5_lookup(self) -> None:
+        # Once "--version" reached `dnf5 repoquery` it printed dnf5's version,
+        # exited 0, and every real name in the same batch was reported missing
+        # and dropped. The token has to be refused before the lookup runs.
+        app = self.make_app()
+        app.gum = GumStub()
+        with patch.object(app, "lookup_host_packages") as lookup_mock:
+            added = app.add_packages_to_config(["htop", "--version"], source_label="manual entry")
+        lookup_mock.assert_not_called()
+        self.assertFalse(added)
+        self.assertEqual(app.config.packages, [])
+        self.assertTrue(any(level == "error" and "Invalid package value(s): --version" in message for level, message in app.gum.messages))
+
     def test_add_packages_to_config_rejects_missing_manual_packages(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
@@ -3934,6 +3973,16 @@ class BuilderTests(unittest.TestCase):
         self.assertFalse(added)
         self.assertEqual(app.config.removed_packages, [])
         self.assertTrue(any(level == "error" and "Invalid removed package value" in message for level, message in app.gum.messages))
+
+    def test_add_removed_packages_to_config_rejects_dash_token_before_the_dnf5_lookup(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        with patch.object(app, "lookup_host_packages") as lookup_mock:
+            added = app.add_removed_packages_to_config(["vim-enhanced", "-y"], source_label="manual entry")
+        lookup_mock.assert_not_called()
+        self.assertFalse(added)
+        self.assertEqual(app.config.removed_packages, [])
+        self.assertTrue(any(level == "error" and "Invalid removed package value(s): -y" in message for level, message in app.gum.messages))
 
     def test_add_removed_packages_to_config_rejects_missing_manual_packages(self) -> None:
         app = self.make_app()
