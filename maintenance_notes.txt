@@ -29,7 +29,14 @@ patch_container_workflow / patch_bluebuild_workflow helpers in
 atomic_image_builder.py all depend on the exact indentation used by the bundled
 template snapshots (2-space step items; 4-space env:/steps: anchors; 6-space
 job-env entries).  ensure_workflow_job_env_entries silently returns the text
-unchanged when its anchor regex does not match.
+unchanged when neither a 4-space env: nor steps: key is present.  Indentation
+is the only thing it is strict about: the presence check is by key name at 6
+spaces, so an owner's differing value or trailing comment counts as defined and
+is left alone, and the env:/steps: anchors tolerate an inline comment.  The
+alternative was a duplicate mapping key, which GitHub refuses to parse (#345).
+An env: that already carries an inline value (env: { FOO: bar }) cannot take
+nested entries; that shape raises CommandError rather than writing a second
+env: key into the same job.
 
 maintenance_audit.py currently validates action pin coverage but does not run
 the patchers against the snapshots.  When refreshing a template snapshot, run

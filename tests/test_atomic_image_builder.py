@@ -1646,6 +1646,108 @@ class BuilderTests(unittest.TestCase):
         result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
         self.assertEqual(result, workflow_text)
 
+    def test_ensure_workflow_job_env_entries_counts_a_key_with_a_different_value_as_defined(self) -> None:
+        # The owner renamed the secret the value reads. The key is defined;
+        # writing ours next to it is a duplicate mapping key, which GitHub
+        # rejects and the repository stops building (#345). Their value stays.
+        workflow_text = "jobs:\n  build:\n    env:\n      FOO: theirs\n    steps:\n"
+        self.assertEqual(ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")]), workflow_text)
+
+    def test_ensure_workflow_job_env_entries_counts_a_commented_key_as_defined(self) -> None:
+        workflow_text = "jobs:\n  build:\n    env:\n      FOO: ours # why\n    steps:\n"
+        self.assertEqual(ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")]), workflow_text)
+
+    def test_ensure_workflow_job_env_entries_does_not_take_a_prefixed_key_for_the_wanted_one(self) -> None:
+        # `FOO_BAR:` is not `FOO:`, and `FOO:bar` is a scalar, not a key --
+        # the name match has to end at the colon-and-space.
+        workflow_text = "jobs:\n  build:\n    env:\n      FOO_BAR: x\n      FOO:bar\n    steps:\n"
+        result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")])
+        self.assertEqual(result.splitlines()[3], "      FOO: ours")
+
+    def test_ensure_workflow_job_env_entries_extends_a_commented_env_block(self) -> None:
+        # The old anchor was the literal "    env:\n"; a comment after the
+        # colon missed it and the fallback wrote a second `env:` above
+        # `steps:`, in the same job (#345).
+        for shape in ("    env: # build settings", "    env: "):
+            with self.subTest(shape=shape):
+                workflow_text = f"jobs:\n  build:\n{shape}\n      BAR: baz\n    steps:\n"
+                result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")])
+                self.assertEqual(
+                    result.splitlines(),
+                    ["jobs:", "  build:", shape, "      FOO: ours", "      BAR: baz", "    steps:"],
+                )
+
+    def test_ensure_workflow_job_env_entries_unwraps_an_empty_flow_mapping(self) -> None:
+        # `env: {}` is what a mapping emptied by hand (or by
+        # strip_permission_entries, for permissions) looks like. Nothing is
+        # inside it, so it becomes a block; an inline comment survives.
+        workflow_text = "jobs:\n  build:\n    env: {} # nothing yet\n    steps:\n"
+        result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")])
+        self.assertEqual(
+            result.splitlines(),
+            ["jobs:", "  build:", "    env: # nothing yet", "      FOO: ours", "    steps:"],
+        )
+
+    def test_ensure_workflow_job_env_entries_refuses_an_env_with_an_inline_value(self) -> None:
+        # Nested entries under `env: { BAR: baz }` are a parse error, and a
+        # second `env:` key in the job is one too. Neither can be published,
+        # so the update stops and says what to rewrite.
+        workflow_text = "jobs:\n  build:\n    env: { BAR: baz }\n    steps:\n"
+        with self.assertRaisesRegex(CommandError, r"inline value.*'FOO'.*block mapping"):
+            ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")])
+
+    def test_ensure_workflow_job_env_entries_opens_a_block_above_a_commented_steps_key(self) -> None:
+        workflow_text = "jobs:\n  build:\n    steps: # the work\n      - run: true\n"
+        result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")])
+        self.assertEqual(
+            result.splitlines(),
+            ["jobs:", "  build:", "    env:", "      FOO: ours", "    steps: # the work", "      - run: true"],
+        )
+
+    def test_patch_container_workflow_leaves_a_renamed_signing_secret_with_one_key(self) -> None:
+        """A generated repo whose owner renamed the guard's secret keeps one key.
+
+        Before #345 the update wrote a second `SIGNING_ENABLED:` beside the
+        owner's, GitHub refused the workflow (`'SIGNING_ENABLED' is already
+        defined`), and the repository stopped building until hand-edited.
+        """
+        app = self.make_app()
+        generated = app.generate_container_workflow()
+        renamed = generated.replace("secrets.SIGNING_SECRET != ''", "secrets.COSIGN_KEY != ''")
+        self.assertNotEqual(renamed, generated)
+        patched = app.patch_container_workflow(renamed)
+        self.assertEqual(
+            self.job_env_entries(patched),
+            ["SIGNING_ENABLED: ${{ secrets.COSIGN_KEY != '' }}"],
+        )
+        self.assertEqual(patched.count("SIGNING_ENABLED:"), 1)
+        self.assertEqual(app.patch_container_workflow(patched), patched)
+
+    def test_patch_container_workflow_extends_a_commented_env_block_in_a_legacy_repo(self) -> None:
+        """A legacy repo with `env: # comment` gains the guard under that key.
+
+        Modelled on a repo generated before the guard existed: no
+        `SIGNING_ENABLED` line, and the owner has annotated the job's `env:`.
+        The old anchor missed the comment and wrote a second `env:` block
+        into the same job, which the workflow parser rejects (#345).
+        """
+        app = self.make_app()
+        generated = app.generate_container_workflow()
+        legacy = "\n".join(
+            line for line in generated.splitlines() if not line.startswith("      SIGNING_ENABLED:")
+        ) + "\n"
+        self.assertIn("    env:\n", legacy)
+        legacy = legacy.replace("    env:\n", "    env: # build settings\n", 1)
+        patched = app.patch_container_workflow(legacy)
+        job_env_keys = [line for line in patched.splitlines() if line.startswith("    env:")]
+        self.assertEqual(job_env_keys, ["    env: # build settings"])
+        self.assertIn(
+            "    env: # build settings\n      SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}\n",
+            patched,
+        )
+        self.assertEqual(patched.count("SIGNING_ENABLED:"), 1)
+        self.assertEqual(app.patch_container_workflow(patched), patched)
+
     def test_validate_config_rejects_unsupported_base_image(self) -> None:
         app = self.make_app()
         app.config.base_image_uri = "ghcr.io/ublue-os/bazzite-deck:stable"
