@@ -8393,6 +8393,100 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("main/contrib/aib", (root / "docs/installing.md").read_text())
         self.assertIn("docs/installing.md", header)
 
+    def test_documented_wrapper_installs_create_the_target_directory(self) -> None:
+        # Neither Fedora Atomic nor Bluefin ships `~/.local/bin` in /etc/skel
+        # (only `.local/share`), and neither `install` without `-D` nor
+        # `curl -o` creates a missing parent. So on a fresh account the first
+        # command a new user ran failed -- `install: invalid target` or
+        # `curl: (23)` -- and both read as a broken download rather than a
+        # missing directory (#357). Every snippet that writes ~/.local/bin/aib
+        # has to create the directory: `install -D` in the release snippet,
+        # and an explicit `mkdir -p` earlier in the same block for the
+        # bleeding-edge `curl -o` one.
+        root = Path(__file__).resolve().parents[1]
+        sources = {
+            "README.md": (root / "README.md").read_text(),
+            "docs/installing.md": (root / "docs/installing.md").read_text(),
+            "contrib/aib header": (root / "contrib/aib").read_text().split("set -euo pipefail", 1)[0],
+        }
+        target = "~/.local/bin/aib"
+        for name, source in sources.items():
+            lines = [line.strip().lstrip("#").strip() for line in source.splitlines()]
+            writes = [
+                (index, line)
+                for index, line in enumerate(lines)
+                if target in line and line.startswith(("install ", "curl "))
+            ]
+            self.assertTrue(writes, f"{name}: no line installs {target}")
+            for index, line in writes:
+                if line.startswith("install "):
+                    self.assertIn(
+                        " -D ", line, f"{name}: {line!r} does not create ~/.local/bin when it is missing"
+                    )
+                    continue
+                # The block this line sits in starts at the nearest code fence
+                # above it (a fence is what a shell user copies as one unit).
+                block_start = max(i for i in range(index) if lines[i].startswith("```"))
+                self.assertIn(
+                    "mkdir -p ~/.local/bin",
+                    lines[block_start:index],
+                    f"{name}: {line!r} is not preceded by mkdir -p ~/.local/bin in its block",
+                )
+
+    def test_documented_wrapper_installs_work_without_an_existing_local_bin(self) -> None:
+        # The assertion above checks spelling; this runs the documented lines
+        # the way the issue's reproduction did, in a HOME that has no `.local`
+        # at all. It executes the text from installing.md rather than a copy,
+        # so a rewrite there cannot pass here by accident. `curl` is a stub
+        # that writes the wrapper where `-o` points, which is the only part
+        # of the network the snippet's failure mode depended on.
+        root = Path(__file__).resolve().parents[1]
+        installing = (root / "docs/installing.md").read_text()
+        release = "https://github.com/Danathar/atomic-image-builder/releases/latest/download"
+        main = "https://raw.githubusercontent.com/Danathar/atomic-image-builder/main/contrib/aib"
+        blocks = re.findall(r"```bash\n(.*?)```", installing, flags=re.S)
+        release_block = next(b for b in blocks if f"{release}/aib" in b)
+        main_block = next(b for b in blocks if main in b)
+        install_line = next(
+            line for line in release_block.splitlines() if line.startswith("install ")
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            stub_bin = Path(tmp) / "bin"
+            stub_bin.mkdir()
+            env = {**os.environ, "HOME": str(home), "PATH": f"{stub_bin}{os.pathsep}{os.environ['PATH']}"}
+
+            # Release snippet: the two curls have been checked by hand at this
+            # point (the tests above cover their chaining), so only the line
+            # that puts the checked file on PATH runs, against a copy of the
+            # wrapper in the working directory exactly as `curl -fsSLO` leaves it.
+            shutil.copy(root / "contrib/aib", home / "aib")
+            self.assertFalse((home / ".local").exists())
+            result = subprocess.run(
+                ["bash", "-c", install_line], cwd=home, env=env, capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            installed = home / ".local/bin/aib"
+            self.assertTrue(installed.is_file(), install_line)
+            self.assertTrue(os.access(installed, os.X_OK))
+            self.assertFalse((home / "aib").exists(), "`&& rm aib` did not run after install")
+
+            # Bleeding-edge snippet: the whole block, with curl stubbed.
+            shutil.rmtree(home / ".local")
+            (stub_bin / "curl").write_text(
+                "#!/usr/bin/env bash\n"
+                'while [ $# -gt 0 ]; do case $1 in -o) out=$2; shift;; esac; shift; done\n'
+                f'cp {root / "contrib/aib"} "$out"\n'
+            )
+            (stub_bin / "curl").chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-c", main_block], cwd=home, env=env, capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(installed.is_file(), main_block)
+            self.assertTrue(os.access(installed, os.X_OK))
+
     def test_docs_document_pulling_a_newer_image_for_container_runs(self) -> None:
         root = Path(__file__).resolve().parents[1]
         installing = (root / "docs/installing.md").read_text()
