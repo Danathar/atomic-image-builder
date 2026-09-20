@@ -601,6 +601,41 @@ does not leak into the removal screen. Swapping a Provides for its provider
 was not taken: `webserver` has three providers, and the state file would
 hold a name the user never typed.
 
+Removal Entry Asks the rpmdb Before the Repos (lookup_removable_host_packages)
+------------------------------------------------------------------------------
+The removed-package screen used the same `dnf5 repoquery --available` lookup
+as the install screen, which asks "is this in an enabled repo?" when the
+question is "is this in the base image?". Universal Blue images ship
+packages from their own repos (uupd, ublue-os-*, bluefin-*) that are in
+neither fedora nor updates, so on a Bluefin host `uupd` was reported as a
+typo and dropped, even though the generated build.sh would have removed it
+fine (#371). lookup_removable_host_packages() now asks
+lookup_installed_host_packages() first -- one `rpm -q` over the batch -- and
+sends only the names rpm did not confirm on to the repo query, with
+resolve_provides=False for the reason given above. Installed is final; not-installed and could-not-check both fall through, because the
+host may have overridden the package away already, or be running a
+different base than the one being built, and the repo answer for those is
+the one the screen always gave. Nothing that was accepted before is rejected
+now.
+
+Two details of the rpm call are load-bearing. It is `rpm -q`, not `dnf5
+repoquery --installed`: the dnf5 form opens /var/lib/dnf/system-repo.lock
+and fails for an unprivileged user (confirmed on Bluefin DX 44). And the
+misses are parsed off rpm's own "package <spec> is not installed" stdout
+lines rather than by matching the printed %{name} of the hits: rpm accepts
+name.arch and name-version specs and prints the bare name for them, so a
+hit for vim-enhanced.x86_64 prints "vim-enhanced" and would never match the
+spec that was asked. The miss line echoes the spec verbatim. A database rpm
+cannot open produces the same exit 1 *and* a "not installed" line per spec,
+distinguishable only by the "error:" line on stderr, so that is checked
+first and turns the whole batch into "could not check" rather than a
+confident typo verdict for every removal.
+
+The rpm results are cached separately (installed_package_lookup_cache) from
+the repo results (package_lookup_cache). They answer different questions:
+installed-on-the-host is evidence for a removal, not for an install, and the
+install screen deliberately never consults it.
+
 Chunkah Config and Output Cleanup: trap, not trailing rm commands
 ---------------------------------------------------------------
 The current recipe registers `trap 'rm -f "${CHUNKAH_CONFIG_FILE}"; rm -rf
