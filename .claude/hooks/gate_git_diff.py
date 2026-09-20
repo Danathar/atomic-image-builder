@@ -13,6 +13,9 @@ and the two SSH key patterns. Those two statements are only consistent while
 * `-O<path>` names an order file, a third path outside the index, and
   arrives as `-aO<path>` as readily as on its own: git bundles short
   options into one word.
+* `git diff <(true) <path>` is `--no-index` again: bash replaces the
+  process substitution with a `/dev/fd/N` path, which is outside the
+  checkout, and git prints `<path>` whole beside it.
 
 A `Read(...)` rule gates the Read tool and never sees a path that arrives as
 an argument to Bash, and every form above matches the allowed prefix, so none
@@ -94,6 +97,17 @@ REFUSED_ENVIRONMENT = (
 OPERATORS = frozenset({"&&", "||", ";", "|", "&", "(", ")", "{", "}", "\n"})
 
 VERB_PREFIXES = ("$(", "(", "`", "<(", ">(")
+
+# Process substitution. bash replaces `<(command)` and `>(command)` with a
+# `/dev/fd/N` path before git runs, so `git diff <(true) ./cosign.key` hands
+# git an operand outside the checkout that neither starts with `/` nor
+# carries a `..`, and git diff implies --no-index and prints the key beside
+# it. shlex breaks the word at the `(`, emitting `<(` as a token of its own,
+# and the `)` that closes it is read as the end of the command, so an operand
+# after the substitution (`git diff <(true) /etc/passwd`) is not even in the
+# segment unsafe_operand() reads. A word that opens either way is refused in
+# any git invocation; the segment it lands in is the one being checked.
+PROCESS_SUBSTITUTION = ("<(", ">(")
 
 # The shape of every brace expansion bash performs: a `{`, then a `,` or a
 # `..` somewhere after it, then a `}` somewhere after that. See
@@ -272,6 +286,13 @@ def refusal(command: str) -> str | None:
         if command_name != "git":
             continue
         for token in segment:
+            if token.startswith(PROCESS_SUBSTITUTION):
+                return (
+                    f"{token} opens a process substitution, which bash replaces with a "
+                    "/dev/fd path before git runs; that names a file outside the "
+                    "checkout without spelling --no-index or an absolute path, and the ) "
+                    "that closes it hides every later operand from this check"
+                )
             if brace_would_expand(token):
                 return (
                     f"{token} carries a brace that bash expands before git runs, and "
