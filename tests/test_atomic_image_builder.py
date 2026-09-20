@@ -1,14 +1,19 @@
 import contextlib
+import fcntl
 import http.client
 import io
 import json
 import os
+import pty
 import re
+import select
 import shutil
 import subprocess
 import sys
 import tempfile
+import termios
 import textwrap
+import time
 import unittest
 import urllib.error
 from contextlib import redirect_stdout
@@ -141,6 +146,59 @@ class GumStub:
 
     def spinner(self, _title: str, _command, *, cwd=None) -> None:
         pass
+
+
+def drive_real_gum(args, *, stdin: str | None, keys: list[bytes], timeout: float = 15.0) -> subprocess.CompletedProcess[str]:
+    """Run the argv Gum built against the real gum binary, typing ``keys``.
+
+    A drop-in for Gum.interactive_stdout. gum reads its options from the
+    stdin pipe, draws on stderr and takes keystrokes from /dev/tty, so the
+    child gets a pseudo-terminal as its controlling terminal and each key is
+    typed only after the previous redraw has gone quiet. Only the plumbing
+    differs from the real call: the argv is untouched, which is the point --
+    a stub that returns the names it was handed cannot tell whether gum
+    would have pre-selected them (#351).
+    """
+    master, slave = pty.openpty()
+
+    def controlling_tty() -> None:
+        os.setsid()
+        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+    proc = subprocess.Popen(
+        list(args),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=slave,
+        env={**os.environ, "TERM": "xterm-256color"},
+        preexec_fn=controlling_tty,
+        pass_fds=(slave,),
+    )
+    os.close(slave)
+    assert proc.stdin is not None and proc.stdout is not None
+    proc.stdin.write((stdin or "").encode())
+    proc.stdin.close()
+    pending = list(keys)
+    drawn = False
+    deadline = time.monotonic() + timeout
+    while proc.poll() is None:
+        if time.monotonic() > deadline:
+            proc.kill()
+            raise AssertionError(f"gum did not exit within {timeout}s; keys left: {pending!r}")
+        ready, _, _ = select.select([master], [], [], 0.1)
+        if ready:
+            try:
+                os.read(master, 65536)
+            except OSError:
+                # The slave side is gone: gum has exited and poll() will see it.
+                continue
+            drawn = True
+        elif drawn and pending:
+            os.write(master, pending.pop(0))
+    stdout = proc.stdout.read().decode()
+    proc.stdout.close()
+    os.close(master)
+    return subprocess.CompletedProcess(list(args), proc.returncode, stdout, "")
 
 
 # Captured before setUp() patches the module attribute, so the tests that
@@ -7185,9 +7243,14 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.config.packages, [])
         self.assertFalse(any("Added" in prompt for prompt in stub.prompts))
 
-    def test_search_packages_uses_value_delimiter_for_selected_results(self) -> None:
+    def test_search_packages_preselects_configured_matches_by_label(self) -> None:
+        # Under --label-delimiter gum compares --selected with the label half
+        # of each line, never the value after the tab. The earlier form of
+        # this test pinned the bare names in `selected`, which is exactly the
+        # argv that pre-ticked nothing and turned every untouched match into a
+        # removal (#351).
         app = self.make_app()
-        app.config.packages = ["fish"]
+        app.config.packages = ["fish", "htop"]
         choose_selected: list[str] = []
         choose_options: list[str] = []
         choose_label_delimiter: list[str | None] = [None]
@@ -7202,14 +7265,62 @@ class BuilderTests(unittest.TestCase):
 
         stub.choose = fake_choose
         app.gum = stub
-        with patch.object(app, "search_host_packages", return_value=([("fish", "Friendly, interactive shell, with extras")], False, None)):
+        results = [("fish", "Friendly, interactive shell, with extras"), ("fisher", "Plugin manager for fish")]
+        with patch.object(app, "search_host_packages", return_value=(results, False, None)):
             with patch.object(app, "add_packages_to_config", return_value=False):
                 app.search_packages()
 
-        self.assertEqual(choose_selected, ["fish"])
         self.assertEqual(choose_label_delimiter[0], "\t")
-        self.assertTrue(choose_options)
-        self.assertIn("\tfish", choose_options[0])
+        self.assertEqual(len(choose_options), 2)
+        fish_label, fish_value = choose_options[0].split("\t")
+        self.assertEqual(fish_value, "fish")
+        self.assertTrue(fish_label.startswith("fish "))
+        # Only the configured match is pre-ticked, as its label; "fisher" is
+        # not configured and "htop" is not in the results.
+        self.assertEqual(choose_selected, [fish_label])
+
+    # Package search against the real gum binary. The stubbed tests above
+    # prove what argv the tool builds; these prove gum reads it the way the
+    # tool assumes. Skipped where gum is absent (CI does not install it), the
+    # same way test_gum_style_survives_real_gum_with_dash_text is.
+    REAL_GUM_SEARCH_RESULTS = [
+        # The comma in this summary is deliberate: it is the separator gum
+        # splits --selected on, and a label carrying one must still pre-tick.
+        ("vim-enhanced", "A version of the VIM editor, with extras"),
+        ("vim-minimal", "A minimal version of the VIM editor"),
+    ]
+
+    def search_with_real_gum(self, keys: list[bytes]) -> App:
+        if shutil.which("gum") is None:
+            self.skipTest("gum is not installed")
+        app = self.make_app()
+        app.config.packages = ["vim-enhanced", "htop"]
+        real_gum = Gum()
+        real_gum.interactive_stdout = lambda args, *, stdin=None: drive_real_gum(args, stdin=stdin, keys=keys)
+        stub = GumStub()
+        stub.input = lambda **_kwargs: "vim"
+        stub.choose = real_gum.choose
+        app.gum = stub
+        with patch.object(app, "search_host_packages", return_value=(self.REAL_GUM_SEARCH_RESULTS, False, None)):
+            with redirect_stdout(io.StringIO()):
+                app.search_packages()
+        return app
+
+    def test_search_packages_untouched_enter_leaves_config_unchanged_with_real_gum(self) -> None:
+        # Enter with nothing toggled is the "keep what I have" gesture. Before
+        # the fix it dropped vim-enhanced, because gum had not pre-selected
+        # it and the tool read that as the user unticking it.
+        app = self.search_with_real_gum(keys=[b"\r"])
+        self.assertEqual(app.config.packages, ["vim-enhanced", "htop"])
+        self.assertEqual(app.gum.prompts, ["No package changes were made. Press Enter to return to the package menu..."])
+
+    def test_search_packages_adding_a_match_keeps_configured_matches_with_real_gum(self) -> None:
+        # The reproduction from #351: Down, x, Enter ticks vim-minimal. The
+        # result must be an addition only -- vim-enhanced stays, and the
+        # summary line does not claim a removal.
+        app = self.search_with_real_gum(keys=[b"\x1b[B", b"x", b"\r"])
+        self.assertEqual(sorted(app.config.packages), ["htop", "vim-enhanced", "vim-minimal"])
+        self.assertEqual(app.gum.prompts, ["Added 1 package(s). Press Enter to return to the package menu..."])
 
     def test_render_containerfile_preserves_existing_text_when_no_from_line_is_patchable(self) -> None:
         app = self.make_app()
@@ -7903,6 +8014,25 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("[x]", call_args)
         self.assertIn("--unselected-prefix", call_args)
         self.assertIn("[ ]", call_args)
+
+    def test_gum_choose_escapes_commas_inside_selected_entries(self) -> None:
+        # gum splits --selected on commas. A label built from a package summary
+        # such as "A version of the VIM editor, with extras" would arrive as
+        # two fragments and match nothing, so the join has to escape the
+        # separator and leave every other byte alone.
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "choose"], 0, "", "")
+        with patch.object(Gum, "interactive_stdout", return_value=completed) as stdout_mock:
+            gum.choose(
+                ["editor, with extras\ta", "path\\to\tb", "plain\tc"],
+                selected=["editor, with extras", "path\\to", "plain"],
+                label_delimiter="\t",
+            )
+        call_args = stdout_mock.call_args[0][0]
+        self.assertEqual(
+            call_args[call_args.index("--selected") + 1],
+            "editor\\, with extras,path\\to,plain",
+        )
 
     def test_gum_choose_drops_blank_lines_from_output(self) -> None:
         gum = Gum()
