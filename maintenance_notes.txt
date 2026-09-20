@@ -28,8 +28,31 @@ patch_workflow_signing_steps, ensure_workflow_job_env_entries, and the per-line
 patch_container_workflow / patch_bluebuild_workflow helpers in
 atomic_image_builder.py all depend on the exact indentation used by the bundled
 template snapshots (2-space step items; 4-space env:/steps: anchors; 6-space
-job-env entries).  ensure_workflow_job_env_entries silently returns the text
-unchanged when its anchor regex does not match.
+job-env entries).  ensure_workflow_job_env_entries defines a variable in
+each job that reads it (a line referring to env.<NAME>), never in "the first
+job": job env does not cross jobs, and a guard in build_push testing a variable
+defined in an owner's earlier lint job is false forever -- the silent-unsigned
+outcome (#344).  When the reading job has no env:/steps: anchor at the expected
+indentation it raises CommandError rather than returning the text unchanged,
+because that no-op is exactly the failure this section warns about.  When no
+job reads the variable it does nothing, which is the shape of a workflow whose
+owner removed the signing steps.  Indentation is the only thing it is strict
+about within a job: the presence check is by key name among the 6-space
+entries directly under the job's env: block, so an owner's differing value or
+trailing comment counts as defined and is left alone, and the env:/steps:
+anchors tolerate an inline comment.  The alternative was a duplicate mapping
+key, which GitHub refuses to parse (#345).  An env: that already carries an
+inline value (env: { FOO: bar }) cannot take nested entries; that shape raises
+CommandError rather than writing a second env: key into the same job.
+
+The paths-ignore state-file entry is the exception to "no match, no change":
+it is inserted as a new sequence item, so a shape mismatch corrupts the file
+rather than leaving it alone.  A managed repository may write the list inline
+("paths-ignore: ['**.md']"), where a block "- item" beneath it is a parse
+error and GitHub runs nothing from the workflow.  Both patchers therefore go
+through extend_flow_sequence_line first, which extends an inline list in place
+(keeping a trailing comment, and not doubling a trailing comma) and returns
+None for the block form — see #358.
 
 maintenance_audit.py currently validates action pin coverage but does not run
 the patchers against the snapshots.  When refreshing a template snapshot, run
