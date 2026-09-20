@@ -25,7 +25,7 @@ unrelated reversions in the pull request.
 `--no-track` stops the release branch adopting `main` as its upstream, which
 would make a stray `git pull` merge `main` into it.
 
-**2. Bump the version.** One line, in `atomic_image_builder.py` (line 37):
+**2. Bump the version.** One line, in `atomic_image_builder.py`:
 
 ```python
 VERSION = "0.9.1"
