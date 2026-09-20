@@ -8575,9 +8575,80 @@ class BuilderTests(unittest.TestCase):
     def test_gum_input_raises_screen_back_when_interactive_command_aborts(self) -> None:
         gum = Gum()
         completed = subprocess.CompletedProcess(["gum", "input"], 1, "", "")
-        with patch.object(Gum, "interactive_stdout", return_value=completed):
+        with patch.object(Gum, "terminal_available", return_value=True):
+            with patch.object(Gum, "interactive_stdout", return_value=completed):
+                with self.assertRaises(ScreenBack):
+                    gum.input(prompt="Repository name: ")
+
+    # ── require_interactive_success: navigation vs gum failing ──────────
+    # Measured against gum v0.17.0: Esc exits 1 ("nothing selected", "not
+    # submitted"), Ctrl+C exits 130, a flag value it cannot parse exits 80,
+    # and "could not open a new TTY" exits 1 -- the same code as Esc. The
+    # last two used to become ScreenBack, which main() turns into exit 0, so
+    # a run with no terminal reported success to whatever started it (#367).
+
+    def test_require_interactive_success_exit_one_with_a_terminal_is_esc(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "choose", "--no-show-help"], 1, "", "")
+        with patch.object(Gum, "terminal_available", return_value=True):
             with self.assertRaises(ScreenBack):
-                gum.input(prompt="Repository name: ")
+                gum.require_interactive_success(completed)
+
+    def test_require_interactive_success_exit_one_without_a_terminal_is_a_failure(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "input", "--no-show-help"], 1, "", "")
+        with patch.object(Gum, "terminal_available", return_value=False):
+            with self.assertRaises(CommandError) as raised:
+                gum.require_interactive_success(completed)
+        # gum has already printed "could not open a new TTY" above this line,
+        # so the widget's name is enough; its flags would only add noise.
+        self.assertEqual(str(raised.exception), "gum input needs a terminal to read from, and this session has none")
+
+    def test_require_interactive_success_other_statuses_are_failures_whatever_the_terminal(self) -> None:
+        # 80 is gum's usage error (#362); 2 stands in for anything else it
+        # might exit with. Neither is a key the user pressed, so the terminal
+        # question is not even asked.
+        gum = Gum()
+        for status in (80, 2):
+            with self.subTest(status=status):
+                completed = subprocess.CompletedProcess(["gum", "input", "--placeholder=x"], status, "", "")
+                with patch.object(Gum, "terminal_available", side_effect=AssertionError("not consulted")):
+                    with self.assertRaises(CommandError) as raised:
+                        gum.require_interactive_success(completed)
+                self.assertEqual(
+                    str(raised.exception),
+                    f"command failed with exit status {status}: gum input --placeholder=x",
+                )
+
+    def test_require_interactive_success_keeps_ctrl_c_and_success_as_they_were(self) -> None:
+        gum = Gum()
+        with patch.object(Gum, "terminal_available", side_effect=AssertionError("not consulted")):
+            with self.assertRaises(KeyboardInterrupt):
+                gum.require_interactive_success(subprocess.CompletedProcess(["gum", "input"], 130, "", ""))
+            ok = subprocess.CompletedProcess(["gum", "input"], 0, "value\n", "")
+            self.assertIs(gum.require_interactive_success(ok), ok)
+
+    def test_terminal_available_prefers_a_terminal_on_stdin(self) -> None:
+        gum = Gum()
+        with patch("atomic_image_builder.sys.stdin") as stdin:
+            stdin.isatty.return_value = True
+            with patch("atomic_image_builder.os.open", side_effect=AssertionError("not needed")):
+                self.assertTrue(gum.terminal_available())
+
+    def test_terminal_available_falls_back_to_dev_tty(self) -> None:
+        # bubbletea opens /dev/tty when stdin is not a terminal, which is how
+        # `tool </dev/null` still works from a shell. That open fails with
+        # ENXIO when the process has no controlling terminal at all.
+        gum = Gum()
+        with patch("atomic_image_builder.sys.stdin") as stdin:
+            stdin.isatty.return_value = False
+            with patch("atomic_image_builder.os.open", return_value=7) as open_mock:
+                with patch("atomic_image_builder.os.close") as close_mock:
+                    self.assertTrue(gum.terminal_available())
+            open_mock.assert_called_once_with("/dev/tty", os.O_RDWR)
+            close_mock.assert_called_once_with(7)
+            with patch("atomic_image_builder.os.open", side_effect=OSError(6, "No such device or address")):
+                self.assertFalse(gum.terminal_available())
 
     def test_gum_input_raises_keyboard_interrupt_on_ctrl_c(self) -> None:
         gum = Gum()
@@ -8669,9 +8740,10 @@ class BuilderTests(unittest.TestCase):
     def test_gum_choose_raises_screen_back_when_cancelled(self) -> None:
         gum = Gum()
         completed = subprocess.CompletedProcess(["gum", "choose"], 1, "", "")
-        with patch.object(Gum, "interactive_stdout", return_value=completed):
-            with self.assertRaises(ScreenBack):
-                gum.choose(["alpha", "beta"])
+        with patch.object(Gum, "terminal_available", return_value=True):
+            with patch.object(Gum, "interactive_stdout", return_value=completed):
+                with self.assertRaises(ScreenBack):
+                    gum.choose(["alpha", "beta"])
 
     def test_gum_choose_raises_keyboard_interrupt_on_ctrl_c(self) -> None:
         gum = Gum()
@@ -8697,9 +8769,10 @@ class BuilderTests(unittest.TestCase):
     def test_gum_filter_raises_screen_back_when_cancelled(self) -> None:
         gum = Gum()
         completed = subprocess.CompletedProcess(["gum", "filter"], 1, "", "")
-        with patch.object(Gum, "interactive_stdout", return_value=completed):
-            with self.assertRaises(ScreenBack):
-                gum.filter(["alpha", "beta"])
+        with patch.object(Gum, "terminal_available", return_value=True):
+            with patch.object(Gum, "interactive_stdout", return_value=completed):
+                with self.assertRaises(ScreenBack):
+                    gum.filter(["alpha", "beta"])
 
     def test_gum_table_builds_args_and_stdin_from_rows(self) -> None:
         gum = Gum()
@@ -12817,6 +12890,51 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("gh auth status", output)
         self.assertNotIn("Missing host tools:", output)
         self.assertNotIn("rpm-ostree", output)
+
+    def test_preflight_failure_still_exits_one_when_esc_ends_the_exit_prompt(self) -> None:
+        # Esc at "Press Enter to exit to the terminal..." raised ScreenBack out
+        # of render_preflight_failure(), so preflight() never reached its
+        # SystemExit(1) and main() exited 0: a missing tool reported success
+        # to the wrapper that ran it (#367). Esc and Enter mean the same
+        # thing here -- leave -- and the exit status is the point.
+        app = self.make_app()
+        stub = GumStub()
+        stub.ensure_available = lambda: None
+
+        def esc(placeholder: str = "Press Enter to continue...") -> None:
+            stub.prompts.append(placeholder)
+            raise ScreenBack()
+
+        stub.enter_to_continue = esc
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name != "cosign"):
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gh"], 0, "", "")):
+                with patch.object(app, "github_login_name", return_value="octocat"):
+                    with redirect_stdout(io.StringIO()):
+                        with self.assertRaises(SystemExit) as raised:
+                            app.preflight()
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(stub.prompts, ["Press Enter to exit to the terminal..."])
+
+    def test_preflight_failure_lets_a_prompt_failure_and_ctrl_c_through(self) -> None:
+        # Only Esc is absorbed. gum failing to draw the prompt at all (no
+        # terminal) stays a CommandError so main() reports it and exits 1,
+        # and Ctrl+C stays the interrupt main() turns into 130.
+        for outcome in (CommandError("gum input needs a terminal"), KeyboardInterrupt()):
+            with self.subTest(outcome=type(outcome).__name__):
+                app = self.make_app()
+                stub = GumStub()
+                stub.ensure_available = lambda: None
+
+                def fail(placeholder: str = "Press Enter to continue...", _exc: BaseException = outcome) -> None:
+                    raise _exc
+
+                stub.enter_to_continue = fail
+                app.gum = stub
+                with patch("atomic_image_builder.command_exists", return_value=True):
+                    with redirect_stdout(io.StringIO()):
+                        with self.assertRaises(type(outcome)):
+                            app.render_preflight_failure(missing_tools=["cosign"])
 
     def test_manage_services_remove_calls_choose_to_remove(self) -> None:
         app = self.make_app()

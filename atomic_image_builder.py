@@ -1878,15 +1878,43 @@ class Gum:
         right = max(min_right, self.content_width(max_width=max_width, reserve=0) - left - 4)
         return f"{left},{right}"
 
+    def terminal_available(self) -> bool:
+        # Mirrors how gum (bubbletea) finds its keyboard: stdin when that is a
+        # terminal, otherwise /dev/tty. A process with no controlling terminal
+        # -- a wrapper started it with setsid, a cron job, a CI step -- has
+        # neither, and every widget then fails before it draws anything.
+        if sys.stdin.isatty():
+            return True
+        try:
+            fd = os.open("/dev/tty", os.O_RDWR)
+        except OSError:
+            return False
+        os.close(fd)
+        return True
+
     def require_interactive_success(self, proc: subprocess.CompletedProcess[str]) -> subprocess.CompletedProcess[str]:
-        # gum uses exit code 130 for Ctrl+C and non-zero for "cancel/back".
-        # Converting those to Python exceptions lets the rest of the app reason
-        # about navigation instead of raw exit codes.
+        # gum v0.17.0 exits 130 for Ctrl+C and 1 for Esc ("nothing selected",
+        # "not submitted"). Converting those to Python exceptions lets the rest
+        # of the app reason about navigation instead of raw exit codes.
+        #
+        # Not every non-zero status is navigation, though, and reading one as
+        # Esc hides it: main() turns ScreenBack into a quiet exit 0, so gum
+        # failing outright looked like success to whatever ran the tool (#367).
+        # gum exits 80 for a usage error (a flag value it could not parse,
+        # #362) and 1 -- the same code as Esc -- when it has no terminal to
+        # read from ("could not open a new TTY"). The exit code alone cannot
+        # tell the second case from Esc, so ask the question gum asked: is
+        # there a terminal? If not, nobody pressed anything.
         if proc.returncode == 130:
             raise KeyboardInterrupt()
-        if proc.returncode != 0:
-            raise ScreenBack()
-        return proc
+        if proc.returncode == 0:
+            return proc
+        command = [str(part) for part in proc.args]
+        if proc.returncode == 1:
+            if self.terminal_available():
+                raise ScreenBack()
+            raise CommandError(f"{' '.join(command[:2])} needs a terminal to read from, and this session has none")
+        raise CommandError(f"command failed with exit status {proc.returncode}: {' '.join(command)}")
 
     def clear(self) -> None:
         if sys.stdout.isatty() and os.environ.get("TERM"):
@@ -2477,7 +2505,15 @@ class App:
                     "This tool expects a supported rpm-ostree / bootc desktop image with dnf5 and rpm-ostree available.",
                 )
                 print()
-            self.gum.enter_to_continue("Press Enter to exit to the terminal...")
+            try:
+                self.gum.enter_to_continue("Press Enter to exit to the terminal...")
+            except ScreenBack:
+                # Esc at this prompt means the same as Enter: leave. Left to
+                # propagate, it skipped the SystemExit(1) preflight() raises
+                # after this returns, and main() turned it into exit 0 -- a
+                # failed preflight that reported success to the wrapper,
+                # CI job or container entrypoint that ran it (#367).
+                pass
             return
 
         print()

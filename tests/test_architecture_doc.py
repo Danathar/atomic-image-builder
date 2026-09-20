@@ -509,7 +509,10 @@ class RegionTable(unittest.TestCase):
             and node.func.id == "input"
         ]
         self.assertEqual(direct, [])
-        self.assertNotIn("sys.stdin", TOOL_PATH.read_text())
+        # The one thing the tool may do with stdin is ask whether it is a
+        # terminal: Gum.terminal_available() needs that to tell gum's "no TTY"
+        # exit 1 from Esc. Reading from it is still a prompt that bypasses gum.
+        self.assertNotRegex(TOOL_PATH.read_text(), r"sys\.stdin(?!\.isatty\(\))")
 
 
 class AppTable(unittest.TestCase):
