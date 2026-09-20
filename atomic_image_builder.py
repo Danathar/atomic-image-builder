@@ -2028,12 +2028,19 @@ class Gum:
         placeholder: str | None = None,
         width: int | None = None,
     ) -> str:
-        args = ["gum", "input", "--no-show-help", "--prompt", prompt]
+        # Text the caller supplies goes in as one --flag=value token. Split
+        # into two, a value that starts with a dash is read as the next flag
+        # and gum exits 80 without ever drawing the prompt. The description
+        # prompt shows the current description as its placeholder, so a
+        # description like "- Doug's daily driver" could be typed in once and
+        # never edited again: require_interactive_success() read the usage
+        # error as Esc and the menu came straight back. See #362.
+        args = ["gum", "input", "--no-show-help", f"--prompt={prompt}"]
         args.extend(["--prompt.foreground", str(ACCENT_COLOR), "--cursor.foreground", str(ACCENT_COLOR)])
         if value is not None:
-            args.extend(["--value", value])
+            args.append(f"--value={value}")
         if placeholder is not None:
-            args.extend(["--placeholder", placeholder])
+            args.append(f"--placeholder={placeholder}")
             args.extend(["--placeholder.foreground", str(MUTED_COLOR)])
         if width is not None:
             args.extend(["--width", str(width)])
@@ -2046,8 +2053,7 @@ class Gum:
                     "gum",
                     "write",
                     "--no-show-help",
-                    "--placeholder",
-                    placeholder,
+                    f"--placeholder={placeholder}",
                     "--placeholder.foreground",
                     str(MUTED_COLOR),
                     "--cursor.foreground",
@@ -2086,22 +2092,26 @@ class Gum:
         )
         if no_limit:
             args.append("--no-limit")
+        # The text flags are single --flag=value tokens for the reason given in
+        # input(): a pre-selected entry or a header that starts with a dash
+        # would otherwise be parsed as a flag and abort the chooser with exit
+        # 80, which reads as Esc.
         if selected:
             # gum splits --selected on commas, so an entry that contains one
             # arrives as two fragments and pre-selects nothing. Its parser
             # honours a backslash before the separator; a plain backslash is
             # kept as-is, so nothing else needs escaping.
-            args.extend(["--selected", ",".join(item.replace(",", "\\,") for item in selected)])
+            args.append("--selected=" + ",".join(item.replace(",", "\\,") for item in selected))
         if header:
-            args.extend(["--header", header])
+            args.append(f"--header={header}")
         if label_delimiter is not None:
-            args.extend(["--label-delimiter", label_delimiter])
+            args.append(f"--label-delimiter={label_delimiter}")
         if cursor_prefix is not None:
-            args.extend(["--cursor-prefix", cursor_prefix])
+            args.append(f"--cursor-prefix={cursor_prefix}")
         if selected_prefix is not None:
-            args.extend(["--selected-prefix", selected_prefix])
+            args.append(f"--selected-prefix={selected_prefix}")
         if unselected_prefix is not None:
-            args.extend(["--unselected-prefix", unselected_prefix])
+            args.append(f"--unselected-prefix={unselected_prefix}")
         proc = self.require_interactive_success(self.interactive_stdout(args, stdin="\n".join(options) + "\n"))
         output = proc.stdout.strip("\n")
         return [line for line in output.splitlines() if line]
@@ -2115,8 +2125,7 @@ class Gum:
                     "--no-show-help",
                     "--height",
                     str(height),
-                    "--placeholder",
-                    placeholder,
+                    f"--placeholder={placeholder}",
                     "--prompt.foreground",
                     str(ACCENT_COLOR),
                     "--header.foreground",
