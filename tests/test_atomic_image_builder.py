@@ -10198,19 +10198,59 @@ class BuilderTests(unittest.TestCase):
         )
         self.assertNotIn("COSIGN_PASSWORD", workflow)
 
-    def test_installer_profile_maps_kde_and_gnome_base_images_correctly(self) -> None:
+    def test_installer_profile_follows_first_boot_setup_not_desktop(self) -> None:
+        # iso-gnome.toml disables Anaconda's Users module because a first-boot
+        # wizard creates the account; a base without one installs a system
+        # nobody can log in to (#361). So the profile is decided by
+        # BaseImage.first_boot_setup, and this asserts that property rather
+        # than a list of keys, so a new entry cannot be mis-profiled by
+        # falling through a hard-coded set.
         app = self.make_app()
-        kde_bases = {"bazzite", "bazzite-dx", "aurora", "aurora-dx", "kinoite"}
-        gnome_bases = {"bazzite-gnome", "bazzite-dx-gnome", "bluefin", "bluefin-dx", "silverblue", "sway-atomic", "budgie-atomic", "cosmic-atomic"}
         for bi in BASE_IMAGES:
             app.config.base_image_uri = bi.image_uri
-            profile = app.installer_profile()
-            if bi.key in kde_bases:
-                self.assertEqual(profile, "kde", f"{bi.key} should map to kde")
-            elif bi.key in gnome_bases:
-                self.assertEqual(profile, "gnome", f"{bi.key} should map to gnome")
-            else:
-                self.fail(f"Base image {bi.key} is not covered by this test")
+            expected = "gnome" if bi.first_boot_setup else "kde"
+            self.assertEqual(app.installer_profile(), expected, f"{bi.key} should map to {expected}")
+
+    def test_base_image_catalog_first_boot_setup_matches_what_each_base_ships(self) -> None:
+        # The catalog's claim about each base, checked against the images on
+        # 2026-09-20: GNOME bases carry gnome-initial-setup, Budgie and COSMIC
+        # carry Fedora's initial-setup, and the KDE bases and Sway Atomic
+        # carry nothing -- Sway boots straight to sddm. Pinning the answers
+        # here is what turns a wrong flag on a new entry into a failing test
+        # instead of an ISO nobody can log in to.
+        without_wizard = {"bazzite", "bazzite-dx", "aurora", "aurora-dx", "kinoite", "sway-atomic"}
+        with_wizard = {"bazzite-gnome", "bazzite-dx-gnome", "bluefin", "bluefin-dx", "silverblue", "budgie-atomic", "cosmic-atomic"}
+        self.assertEqual({bi.key for bi in BASE_IMAGES}, without_wizard | with_wizard)
+        self.assertEqual({bi.key for bi in BASE_IMAGES if not bi.first_boot_setup}, without_wizard)
+        self.assertEqual({bi.key for bi in BASE_IMAGES if bi.first_boot_setup}, with_wizard)
+
+    def test_installer_profile_keeps_users_module_for_sway_atomic_iso(self) -> None:
+        # End to end for the reported case: the iso.toml a Sway Atomic repo
+        # gets must be the one that leaves Anaconda's Users module enabled.
+        app = self.make_app()
+        app.config.base_image_uri = next(bi.image_uri for bi in BASE_IMAGES if bi.key == "sway-atomic")
+        self.assertEqual(app.installer_config_name(), "iso-kde.toml")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            iso_toml = (repo_dir / "disk_config/iso.toml").read_text()
+        self.assertNotIn("org.fedoraproject.Anaconda.Modules.Users", self.disabled_installer_modules(iso_toml))
+
+    def test_installer_profile_keeps_gnome_config_for_unknown_base(self) -> None:
+        # A base the catalog does not know has no first_boot_setup to read,
+        # so it keeps the config it always got rather than switching profiles.
+        app = self.make_app()
+        app.config.base_image_uri = "ghcr.io/example/custom-desktop:latest"
+        self.assertEqual(app.installer_profile(), "gnome")
+
+    @staticmethod
+    def disabled_installer_modules(iso_toml: str) -> list[str]:
+        # CI runs on 3.10, which has no tomllib; the block is a flat string
+        # array, so a regex over it is exact enough.
+        block = re.search(r"^disable = \[(.*?)^\]", iso_toml, re.DOTALL | re.MULTILINE)
+        assert block is not None, iso_toml
+        return re.findall(r'"([^"]+)"', block.group(1))
 
     def test_write_project_files_updates_readme_when_config_changes(self) -> None:
         app = self.make_app()

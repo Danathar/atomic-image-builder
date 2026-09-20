@@ -343,6 +343,14 @@ class BaseImage:
     name: str
     description: str
     image_uri: str
+    # Whether the base runs a first-boot account wizard (gnome-initial-setup,
+    # or Fedora's desktop-neutral initial-setup) after Anaconda finishes.
+    # installer_profile() reads this to pick the ISO config: upstream's
+    # iso-gnome.toml disables Anaconda's Users module on the assumption that
+    # the wizard creates the account, so a base without one installs a system
+    # nobody can log in to (#361). No default on purpose -- a new entry has to
+    # say which it is, because the wrong guess is invisible until first boot.
+    first_boot_setup: bool
     # Other repositories the same desktop is published at, without a tag.
     # match_base_image() treats a host booted from one of these as this
     # curated image; image_uri stays the one the tool recommends and writes.
@@ -394,11 +402,11 @@ def determine_fedora_atomic_default_tag(
 FEDORA_ATOMIC_DEFAULT_TAG = determine_fedora_atomic_default_tag()
 
 
-def universal_blue_image(key: str, name: str, description: str, image_uri: str) -> BaseImage:
-    return BaseImage(key=key, provider="Universal Blue", name=name, description=description, image_uri=image_uri)
+def universal_blue_image(key: str, name: str, description: str, image_uri: str, *, first_boot_setup: bool) -> BaseImage:
+    return BaseImage(key=key, provider="Universal Blue", name=name, description=description, image_uri=image_uri, first_boot_setup=first_boot_setup)
 
 
-def fedora_atomic_image(key: str, name: str, description: str, variant: str, *, official_alias: bool = True) -> BaseImage:
+def fedora_atomic_image(key: str, name: str, description: str, variant: str, *, first_boot_setup: bool, official_alias: bool = True) -> BaseImage:
     # Fedora publishes each desktop twice: the long-standing
     # quay.io/fedora-ostree-desktops/<variant>, and the newer official bootc
     # location quay.io/fedora/fedora-<variant>. Both carry the same release
@@ -412,27 +420,33 @@ def fedora_atomic_image(key: str, name: str, description: str, variant: str, *, 
         name=name,
         description=description,
         image_uri=f"quay.io/fedora-ostree-desktops/{variant}:{FEDORA_ATOMIC_DEFAULT_TAG}",
+        first_boot_setup=first_boot_setup,
         aliases=aliases,
     )
 
 
+# first_boot_setup follows the desktop, not the provider: GNOME bases ship
+# gnome-initial-setup, and Fedora's Budgie and COSMIC variants ship the
+# desktop-neutral initial-setup. KDE bases have no wizard, and neither does
+# Sway Atomic -- it boots straight to sddm (checked against
+# quay.io/fedora-ostree-desktops/sway-atomic:44 on 2026-09-20; #361).
 BASE_IMAGES: tuple[BaseImage, ...] = (
-    universal_blue_image("bazzite", "Bazzite (KDE)", "KDE desktop for gaming systems and handheld-style setups", "ghcr.io/ublue-os/bazzite:stable"),
-    universal_blue_image("bazzite-gnome", "Bazzite (GNOME)", "GNOME desktop for gaming systems and handheld-style setups", "ghcr.io/ublue-os/bazzite-gnome:stable"),
-    universal_blue_image("bazzite-dx", "Bazzite DX (KDE)", "Bazzite plus extra developer tools on KDE", "ghcr.io/ublue-os/bazzite-dx:stable"),
-    universal_blue_image("bazzite-dx-gnome", "Bazzite DX (GNOME)", "Bazzite plus extra developer tools on GNOME", "ghcr.io/ublue-os/bazzite-dx-gnome:stable"),
-    universal_blue_image("aurora", "Aurora (KDE)", "KDE desktop for everyday use", "ghcr.io/ublue-os/aurora:stable"),
-    universal_blue_image("aurora-dx", "Aurora DX", "Aurora plus extra developer tools", "ghcr.io/ublue-os/aurora-dx:stable"),
-    universal_blue_image("bluefin", "Bluefin (GNOME)", "GNOME desktop for everyday use", "ghcr.io/ublue-os/bluefin:stable"),
-    universal_blue_image("bluefin-dx", "Bluefin DX", "Bluefin plus extra developer tools", "ghcr.io/ublue-os/bluefin-dx:stable"),
-    fedora_atomic_image("silverblue", "Fedora Silverblue", "GNOME desktop built from the official Fedora Atomic desktop image", "silverblue"),
-    fedora_atomic_image("kinoite", "Fedora Kinoite", "KDE Plasma desktop built from the official Fedora Atomic desktop image", "kinoite"),
-    fedora_atomic_image("sway-atomic", "Fedora Sway Atomic", "Sway desktop built from the official Fedora Atomic desktop image", "sway-atomic"),
-    fedora_atomic_image("budgie-atomic", "Fedora Budgie Atomic", "Budgie desktop built from the official Fedora Atomic desktop image", "budgie-atomic"),
+    universal_blue_image("bazzite", "Bazzite (KDE)", "KDE desktop for gaming systems and handheld-style setups", "ghcr.io/ublue-os/bazzite:stable", first_boot_setup=False),
+    universal_blue_image("bazzite-gnome", "Bazzite (GNOME)", "GNOME desktop for gaming systems and handheld-style setups", "ghcr.io/ublue-os/bazzite-gnome:stable", first_boot_setup=True),
+    universal_blue_image("bazzite-dx", "Bazzite DX (KDE)", "Bazzite plus extra developer tools on KDE", "ghcr.io/ublue-os/bazzite-dx:stable", first_boot_setup=False),
+    universal_blue_image("bazzite-dx-gnome", "Bazzite DX (GNOME)", "Bazzite plus extra developer tools on GNOME", "ghcr.io/ublue-os/bazzite-dx-gnome:stable", first_boot_setup=True),
+    universal_blue_image("aurora", "Aurora (KDE)", "KDE desktop for everyday use", "ghcr.io/ublue-os/aurora:stable", first_boot_setup=False),
+    universal_blue_image("aurora-dx", "Aurora DX", "Aurora plus extra developer tools", "ghcr.io/ublue-os/aurora-dx:stable", first_boot_setup=False),
+    universal_blue_image("bluefin", "Bluefin (GNOME)", "GNOME desktop for everyday use", "ghcr.io/ublue-os/bluefin:stable", first_boot_setup=True),
+    universal_blue_image("bluefin-dx", "Bluefin DX", "Bluefin plus extra developer tools", "ghcr.io/ublue-os/bluefin-dx:stable", first_boot_setup=True),
+    fedora_atomic_image("silverblue", "Fedora Silverblue", "GNOME desktop built from the official Fedora Atomic desktop image", "silverblue", first_boot_setup=True),
+    fedora_atomic_image("kinoite", "Fedora Kinoite", "KDE Plasma desktop built from the official Fedora Atomic desktop image", "kinoite", first_boot_setup=False),
+    fedora_atomic_image("sway-atomic", "Fedora Sway Atomic", "Sway desktop built from the official Fedora Atomic desktop image", "sway-atomic", first_boot_setup=False),
+    fedora_atomic_image("budgie-atomic", "Fedora Budgie Atomic", "Budgie desktop built from the official Fedora Atomic desktop image", "budgie-atomic", first_boot_setup=True),
     # quay.io/fedora/fedora-cosmic-atomic does not exist (checked against the
     # registry API on 2026-09-20; the other four variants do), so claiming
     # the alias here would match a reference no host can be booted from.
-    fedora_atomic_image("cosmic-atomic", "Fedora COSMIC Atomic", "COSMIC desktop built from the official Fedora Atomic desktop image", "cosmic-atomic", official_alias=False),
+    fedora_atomic_image("cosmic-atomic", "Fedora COSMIC Atomic", "COSMIC desktop built from the official Fedora Atomic desktop image", "cosmic-atomic", first_boot_setup=True, official_alias=False),
 )
 
 
@@ -6044,8 +6058,16 @@ class App:
         return ensure_trailing_newline(text)
 
     def installer_profile(self) -> str:
+        # The profile names are upstream's file names, and they describe the
+        # desktop the config was written for rather than what it does.
+        # iso-gnome.toml leaves account creation to a first-boot wizard;
+        # iso-kde.toml has Anaconda ask for the user itself. That is the real
+        # split, and it is BaseImage.first_boot_setup, not the desktop: this
+        # used to key on a set of KDE names, which handed Sway Atomic the
+        # gnome config and an ISO that installs a system with no account
+        # (#361). A base the catalog does not know keeps the gnome config.
         matched = self.match_base_image(self.config.base_image_uri)
-        if matched and matched.key in {"bazzite", "bazzite-dx", "aurora", "aurora-dx", "kinoite"}:
+        if matched and not matched.first_boot_setup:
             return "kde"
         return "gnome"
 
