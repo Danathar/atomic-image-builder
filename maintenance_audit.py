@@ -44,6 +44,11 @@ CONTAINERFILE = Path("Containerfile")
 WRAPPER_RELEASE_REPO = "Danathar/atomic-image-builder"
 WRAPPER_SOURCE = Path("contrib/aib")
 WRAPPER_ASSET = "aib"
+# The install pipes this into `sha256sum -c`, so it has to exist and name the
+# downloaded `aib` with the right digest, or the install fails before the
+# wrapper is ever run. publish-wrapper.yml writes it with `sha256sum aib`.
+WRAPPER_CHECKSUM_ASSET = "aib.sha256"
+WRAPPER_CHECKSUM_LINE_RE = re.compile(r"^(?P<digest>[0-9a-f]{64})\s+\*?(?P<name>\S+)$")
 # `curl … -o <dest> <url>`, after backslash continuations are folded, and the
 # `"<digest>  <dest>"` line that pins what that download must contain. Both
 # forms the Containerfile uses -- `echo "…" >` and `printf '%s\n' "…" …` --
@@ -837,9 +842,17 @@ def audit_wrapper_release(repo_root: Path) -> tuple[list[str], list[str]]:
     as everywhere else: blocking on a rate limit is how a rate limit becomes
     a red audit.
 
-    A release with no `aib` asset at all is also a failure. The install docs
-    fetch it by name, so the recommended install fails outright, and the fix
-    is a workflow dispatch rather than a release.
+    A release the install cannot complete from is also a failure: no `aib`
+    asset, no `aib.sha256` beside it, or a checksum that does not name the
+    `aib` it sits beside with the digest of it. The install docs fetch both by
+    name and pipe the second into `sha256sum -c`, so any of those is a
+    recommended install that stops with a 404 or a checksum mismatch, and
+    a green audit over it would be reporting on a wrapper nobody can install.
+    Which repair the finding names depends on the tag: publish-wrapper.yml's
+    dispatch packages the tag's own contrib/aib, so it repairs the release
+    only while that is still the wrapper on this checkout; otherwise the
+    dispatch would attach an outdated wrapper and the next audit would trade
+    this finding for the digest mismatch above, and a release is the fix.
     """
     source = repo_root / WRAPPER_SOURCE
     try:
@@ -850,17 +863,31 @@ def audit_wrapper_release(repo_root: Path) -> tuple[list[str], list[str]]:
         tag, assets = query_latest_release(WRAPPER_RELEASE_REPO)
     except RuntimeError as exc:
         return [], [f"Unable to query the latest release of {WRAPPER_RELEASE_REPO}: {exc}"]
-    url = assets.get(WRAPPER_ASSET)
-    if url is None:
+    missing = [name for name in (WRAPPER_ASSET, WRAPPER_CHECKSUM_ASSET) if name not in assets]
+    if missing:
+        names = " or ".join(f"`{name}`" for name in missing)
         return [
-            f"Release {tag} of {WRAPPER_RELEASE_REPO} carries no `{WRAPPER_ASSET}` asset, so the "
-            "recommended wrapper install in README.md fails. Attach it with "
-            f"`gh workflow run publish-wrapper.yml -f tag={tag}`."
+            f"Release {tag} of {WRAPPER_RELEASE_REPO} carries no {names} asset, so the recommended "
+            f"wrapper install in README.md fails. {describe_wrapper_release_repair(tag, expected)}"
         ], []
     try:
-        published = fetch_sha256(url)
+        published = hashlib.sha256(fetch_bytes(assets[WRAPPER_ASSET])).hexdigest()
+        checksum = fetch_bytes(assets[WRAPPER_CHECKSUM_ASSET]).decode("utf-8", errors="replace")
     except RuntimeError as exc:
-        return [], [f"Unable to download {url}: {exc}"]
+        return [], [f"Unable to download the `{WRAPPER_ASSET}` release assets: {exc}"]
+    recorded = parse_wrapper_checksum(checksum)
+    if recorded is None:
+        return [
+            f"The `{WRAPPER_CHECKSUM_ASSET}` attached to release {tag} does not record a sha256 for a "
+            f"file named `{WRAPPER_ASSET}`, so the recommended install's `sha256sum -c` fails. "
+            f"{describe_wrapper_release_repair(tag, expected)}"
+        ], []
+    if recorded != published:
+        return [
+            f"The `{WRAPPER_CHECKSUM_ASSET}` attached to release {tag} records {recorded}, but the "
+            f"`{WRAPPER_ASSET}` beside it hashes to {published}, so the recommended install's "
+            f"`sha256sum -c` fails. {describe_wrapper_release_repair(tag, expected)}"
+        ], []
     if published == expected:
         return [], []
     return [
@@ -869,6 +896,68 @@ def audit_wrapper_release(repo_root: Path) -> tuple[list[str], list[str]]:
         "serves the release, so new users are running a wrapper the docs no longer describe. "
         'Cut a release -- maintainer_docs/MAINTAINER.md, "Cutting a release".'
     ], []
+
+
+def fetch_bytes(url: str) -> bytes:
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "atomic-image-builder-maintenance-audit"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(str(exc.reason)) from exc
+
+
+def parse_wrapper_checksum(text: str) -> str | None:
+    """Return the digest `sha256sum -c` would check the downloaded `aib` against.
+
+    The install saves the download under the asset's own name and runs the
+    checksum file through `sha256sum -c`, which looks up each line's file by
+    the name on that line. A line for any other name -- `contrib/aib`, say,
+    from a checksum written outside publish-wrapper.yml -- is a file that
+    does not exist, and the check fails. None when no line names `aib`.
+    """
+    for line in text.splitlines():
+        match = WRAPPER_CHECKSUM_LINE_RE.match(line.strip())
+        if match and match.group("name") == WRAPPER_ASSET:
+            return match.group("digest")
+    return None
+
+
+def describe_wrapper_release_repair(tag: str, expected: str) -> str:
+    """Say what repairs a release the wrapper install cannot complete from.
+
+    publish-wrapper.yml's dispatch checks out the tag it is given and attaches
+    that tag's contrib/aib, so it is the repair only while the tag's wrapper
+    is still the one on this checkout. When `main` has moved on, the dispatch
+    would attach an outdated wrapper, and the next audit would swap this
+    finding for the digest mismatch -- a release is the only thing that
+    clears both. When the tag's wrapper cannot be fetched, the release is
+    the repair that cannot be wrong.
+    """
+    url = f"https://raw.githubusercontent.com/{WRAPPER_RELEASE_REPO}/{tag}/{WRAPPER_SOURCE.as_posix()}"
+    try:
+        tagged = hashlib.sha256(fetch_bytes(url)).hexdigest()
+    except RuntimeError as exc:
+        return (
+            f"Unable to download {url} to tell whether the tag's {WRAPPER_SOURCE} is this "
+            f"checkout's ({exc}). Cut a release -- maintainer_docs/MAINTAINER.md, "
+            '"Cutting a release"; a `publish-wrapper.yml` dispatch on the tag would attach '
+            "whatever wrapper the tag has."
+        )
+    if tagged == expected:
+        return (
+            f"Run `gh workflow run publish-wrapper.yml -f tag={tag}`, which attaches the tag's "
+            f"{WRAPPER_SOURCE} and a checksum written from it."
+        )
+    return (
+        f"The {WRAPPER_SOURCE} at tag {tag} (sha256 {tagged}) is not this checkout's ({expected}) "
+        "either, so a `publish-wrapper.yml` dispatch on the tag would attach an outdated wrapper. "
+        'Cut a release -- maintainer_docs/MAINTAINER.md, "Cutting a release".'
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

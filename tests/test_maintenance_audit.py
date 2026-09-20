@@ -20,6 +20,7 @@ from maintenance_audit import (
     SNAPSHOT_DRIFT_FAILURE_COMMITS,
     SUBPROCESS_TIMEOUT_SECONDS,
     WRAPPER_ASSET,
+    WRAPPER_CHECKSUM_ASSET,
     WRAPPER_RELEASE_REPO,
     WRAPPER_SOURCE,
     TemplateSource,
@@ -34,6 +35,8 @@ from maintenance_audit import (
     audit_wrapper_release,
     describe_pin_drift,
     describe_snapshot_drift,
+    describe_wrapper_release_repair,
+    fetch_bytes,
     fetch_registry_pull_token,
     fetch_sha256,
     github_api_json,
@@ -44,6 +47,7 @@ from maintenance_audit import (
     load_template_source,
     main,
     parse_version_tag,
+    parse_wrapper_checksum,
     query_github_comparison,
     query_github_ref_sha,
     query_latest_github_semver_tag,
@@ -1163,17 +1167,37 @@ class WrapperReleaseAuditTests(unittest.TestCase):
         (root / WRAPPER_SOURCE).write_bytes(wrapper)
         return root
 
+    @staticmethod
+    def _asset_url(tag: str, name: str) -> str:
+        return f"https://github.com/{WRAPPER_RELEASE_REPO}/releases/download/{tag}/{name}"
+
+    @staticmethod
+    def _tag_url(tag: str) -> str:
+        return f"https://raw.githubusercontent.com/{WRAPPER_RELEASE_REPO}/{tag}/contrib/aib"
+
     def _release(self, tag: str = "v0.9.5", *, assets: dict[str, str] | None = None) -> tuple[str, dict[str, str]]:
         if assets is None:
-            assets = {WRAPPER_ASSET: f"https://github.com/{WRAPPER_RELEASE_REPO}/releases/download/{tag}/aib"}
+            assets = {name: self._asset_url(tag, name) for name in (WRAPPER_ASSET, WRAPPER_CHECKSUM_ASSET)}
         return tag, assets
+
+    @staticmethod
+    def _checksum(wrapper: bytes, name: str = WRAPPER_ASSET) -> bytes:
+        # What `sha256sum aib > aib.sha256` writes in publish-wrapper.yml.
+        return f"{hashlib.sha256(wrapper).hexdigest()}  {name}\n".encode()
+
+    def _served(self, tag: str, *, aib: bytes, checksum: bytes | None = None, tagged: bytes | None = None) -> dict[str, bytes]:
+        """URL -> body for the release assets and the tag's contrib/aib."""
+        served = {self._asset_url(tag, WRAPPER_ASSET): aib}
+        served[self._asset_url(tag, WRAPPER_CHECKSUM_ASSET)] = self._checksum(aib) if checksum is None else checksum
+        served[self._tag_url(tag)] = aib if tagged is None else tagged
+        return served
 
     def test_a_release_that_carries_this_checkouts_wrapper_says_nothing(self) -> None:
         wrapper = b"#!/usr/bin/env bash\ncosign verify\n"
         with tempfile.TemporaryDirectory() as tmp:
             root = self._checkout(tmp, wrapper)
             with patch("maintenance_audit.query_latest_release", return_value=self._release()):
-                with patch("maintenance_audit.fetch_sha256", return_value=hashlib.sha256(wrapper).hexdigest()):
+                with patch("maintenance_audit.fetch_bytes", side_effect=self._served("v0.9.5", aib=wrapper).__getitem__):
                     self.assertEqual(audit_wrapper_release(root), ([], []))
 
     def test_a_release_serving_an_older_wrapper_is_a_failure_carrying_both_digests(self) -> None:
@@ -1183,11 +1207,12 @@ class WrapperReleaseAuditTests(unittest.TestCase):
         # clears it. Both digests and the tag, so it can be acted on
         # without a checkout -- and the action is named.
         wrapper = b"#!/usr/bin/env bash\ncosign verify\n"
-        released = "b9e97913e1be620c85f75e1c599e8e4fd67ab4e6118af3d6a487515a4fa47cc8"
+        older = b"#!/usr/bin/env bash\npodman run\n"
+        released = hashlib.sha256(older).hexdigest()
         with tempfile.TemporaryDirectory() as tmp:
             root = self._checkout(tmp, wrapper)
             with patch("maintenance_audit.query_latest_release", return_value=self._release("v0.9.5")):
-                with patch("maintenance_audit.fetch_sha256", return_value=released):
+                with patch("maintenance_audit.fetch_bytes", side_effect=self._served("v0.9.5", aib=older).__getitem__):
                     findings, advisories = audit_wrapper_release(root)
 
         self.assertEqual(advisories, [])
@@ -1199,34 +1224,153 @@ class WrapperReleaseAuditTests(unittest.TestCase):
         self.assertIn("Cutting a release", finding)
 
     def test_the_digest_compared_is_of_the_asset_the_docs_download(self) -> None:
-        # The asset's own URL, not a guess at it: what is hashed has to be
-        # the bytes `curl -fsSLO .../releases/latest/download/aib` lands.
-        url = f"https://github.com/{WRAPPER_RELEASE_REPO}/releases/download/v0.9.5/aib"
+        # The assets' own URLs, not a guess at them: what is hashed has to be
+        # the bytes `curl -fsSLO .../releases/latest/download/aib` lands, and
+        # the checksum read has to be the one the docs pipe to `sha256sum -c`.
+        wrapper = b"x"
+        assets = {WRAPPER_ASSET: "https://example.invalid/wrapper", WRAPPER_CHECKSUM_ASSET: "https://example.invalid/sum"}
+        served = {assets[WRAPPER_ASSET]: wrapper, assets[WRAPPER_CHECKSUM_ASSET]: self._checksum(wrapper)}
         with tempfile.TemporaryDirectory() as tmp:
-            root = self._checkout(tmp, b"x")
-            with patch("maintenance_audit.query_latest_release", return_value=self._release(assets={WRAPPER_ASSET: url})):
-                with patch("maintenance_audit.fetch_sha256", return_value=hashlib.sha256(b"x").hexdigest()) as fetched:
-                    audit_wrapper_release(root)
-        fetched.assert_called_once_with(url)
+            root = self._checkout(tmp, wrapper)
+            with patch("maintenance_audit.query_latest_release", return_value=self._release(assets=assets)):
+                with patch("maintenance_audit.fetch_bytes", side_effect=served.__getitem__) as fetched:
+                    self.assertEqual(audit_wrapper_release(root), ([], []))
+        self.assertEqual(sorted(call.args[0] for call in fetched.call_args_list), sorted(served))
 
-    def test_a_release_with_no_wrapper_asset_is_a_failure_naming_the_dispatch(self) -> None:
+    def test_a_release_with_no_wrapper_asset_is_a_failure(self) -> None:
         # The docs fetch the asset by name, so a release without it is a
-        # recommended install that 404s. The fix is publish-wrapper.yml's
-        # dispatch fallback, not a new release, and the finding says which.
+        # recommended install that 404s. Nothing is downloaded from the
+        # release -- there is nothing to download -- and the finding names
+        # the repair.
+        wrapper = b"x"
         with tempfile.TemporaryDirectory() as tmp:
-            root = self._checkout(tmp, b"x")
+            root = self._checkout(tmp, wrapper)
             with patch(
                 "maintenance_audit.query_latest_release",
-                return_value=self._release("v0.9.6", assets={"aib.sha256": "https://example.invalid/aib.sha256"}),
+                return_value=self._release("v0.9.6", assets={WRAPPER_CHECKSUM_ASSET: "https://example.invalid/aib.sha256"}),
             ):
-                with patch("maintenance_audit.fetch_sha256") as fetched:
+                with patch("maintenance_audit.fetch_bytes", side_effect={self._tag_url("v0.9.6"): wrapper}.__getitem__) as fetched:
                     findings, advisories = audit_wrapper_release(root)
-        fetched.assert_not_called()
+        fetched.assert_called_once_with(self._tag_url("v0.9.6"))
         self.assertEqual(advisories, [])
         (finding,) = findings
         self.assertIn("v0.9.6", finding)
         self.assertIn("no `aib` asset", finding)
         self.assertIn("gh workflow run publish-wrapper.yml -f tag=v0.9.6", finding)
+
+    def test_a_release_with_no_checksum_asset_is_a_failure_too(self) -> None:
+        # The install downloads `aib` and then `aib.sha256` and stops at the
+        # first 404; a release with the wrapper and no checksum installs
+        # nothing, and an audit that only hashed `aib` would be green over it.
+        wrapper = b"x"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._checkout(tmp, wrapper)
+            with patch(
+                "maintenance_audit.query_latest_release",
+                return_value=self._release("v0.9.6", assets={WRAPPER_ASSET: self._asset_url("v0.9.6", WRAPPER_ASSET)}),
+            ):
+                with patch("maintenance_audit.fetch_bytes", side_effect={self._tag_url("v0.9.6"): wrapper}.__getitem__):
+                    findings, advisories = audit_wrapper_release(root)
+        self.assertEqual(advisories, [])
+        (finding,) = findings
+        self.assertIn("no `aib.sha256` asset", finding)
+        self.assertIn("gh workflow run publish-wrapper.yml -f tag=v0.9.6", finding)
+
+    def test_a_checksum_that_disagrees_with_the_wrapper_beside_it_is_a_failure(self) -> None:
+        # The pair is what the install verifies. A stale `aib.sha256` beside a
+        # current `aib` -- one asset re-uploaded by hand, say -- fails
+        # `sha256sum -c` for every user, while the wrapper alone matches main.
+        wrapper = b"#!/usr/bin/env bash\ncosign verify\n"
+        stale = self._checksum(b"#!/usr/bin/env bash\npodman run\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._checkout(tmp, wrapper)
+            with patch("maintenance_audit.query_latest_release", return_value=self._release("v0.9.6")):
+                served = self._served("v0.9.6", aib=wrapper, checksum=stale)
+                with patch("maintenance_audit.fetch_bytes", side_effect=served.__getitem__):
+                    findings, advisories = audit_wrapper_release(root)
+        self.assertEqual(advisories, [])
+        (finding,) = findings
+        self.assertIn("aib.sha256", finding)
+        self.assertIn("sha256sum -c", finding)
+        self.assertIn(stale.split()[0].decode(), finding)
+        self.assertIn(hashlib.sha256(wrapper).hexdigest(), finding)
+        self.assertIn("gh workflow run publish-wrapper.yml -f tag=v0.9.6", finding)
+
+    def test_a_checksum_that_names_another_file_is_a_failure(self) -> None:
+        # `sha256sum -c` looks the file up by the name on the line. A line for
+        # `contrib/aib` is right about the bytes and still fails, because the
+        # download is called `aib`.
+        wrapper = b"x"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._checkout(tmp, wrapper)
+            with patch("maintenance_audit.query_latest_release", return_value=self._release("v0.9.6")):
+                served = self._served("v0.9.6", aib=wrapper, checksum=self._checksum(wrapper, "contrib/aib"))
+                with patch("maintenance_audit.fetch_bytes", side_effect=served.__getitem__):
+                    findings, advisories = audit_wrapper_release(root)
+        self.assertEqual(advisories, [])
+        (finding,) = findings
+        self.assertIn("does not record a sha256 for a file named `aib`", finding)
+        self.assertIn("gh workflow run publish-wrapper.yml -f tag=v0.9.6", finding)
+
+    def test_parse_wrapper_checksum_reads_what_sha256sum_writes(self) -> None:
+        digest = "a" * 64
+        cases = {
+            f"{digest}  aib\n": digest,
+            f"{digest} *aib\r\n": digest,  # binary-mode marker, CRLF
+            f"{'b' * 64}  aib.sha256\n{digest}  aib\n": digest,
+            f"{digest}  contrib/aib\n": None,
+            f"{digest[:63]}  aib\n": None,
+            "": None,
+            "not a checksum": None,
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(parse_wrapper_checksum(text), expected)
+
+    def test_the_dispatch_is_recommended_only_while_the_tag_holds_this_wrapper(self) -> None:
+        # publish-wrapper.yml checks out the tag it is given and packages that
+        # tag's contrib/aib. When main has moved on, the dispatch attaches an
+        # outdated wrapper and the next audit trades the missing-asset
+        # finding for the digest mismatch. So: dispatch when the tag's
+        # wrapper is this one, a release when it is not, and a release when
+        # the tag cannot be read -- the repair that cannot be wrong.
+        wrapper = b"#!/usr/bin/env bash\ncosign verify\n"
+        older = b"#!/usr/bin/env bash\npodman run\n"
+        expected = hashlib.sha256(wrapper).hexdigest()
+        url = self._tag_url("v0.9.6")
+
+        with patch("maintenance_audit.fetch_bytes", side_effect={url: wrapper}.__getitem__):
+            current = describe_wrapper_release_repair("v0.9.6", expected)
+        self.assertIn("gh workflow run publish-wrapper.yml -f tag=v0.9.6", current)
+        self.assertNotIn("Cutting a release", current)
+
+        with patch("maintenance_audit.fetch_bytes", side_effect={url: older}.__getitem__):
+            moved = describe_wrapper_release_repair("v0.9.6", expected)
+        self.assertNotIn("gh workflow run", moved)
+        self.assertIn("outdated wrapper", moved)
+        self.assertIn(hashlib.sha256(older).hexdigest(), moved)
+        self.assertIn(expected, moved)
+        self.assertIn("Cutting a release", moved)
+
+        with patch("maintenance_audit.fetch_bytes", side_effect=RuntimeError("HTTP 503")):
+            unknown = describe_wrapper_release_repair("v0.9.6", expected)
+        self.assertNotIn("gh workflow run", unknown)
+        self.assertIn(url, unknown)
+        self.assertIn("HTTP 503", unknown)
+        self.assertIn("Cutting a release", unknown)
+
+    def test_a_missing_asset_stays_a_failure_when_the_tag_cannot_be_read(self) -> None:
+        # The install 404s whether or not the repair can be worked out; only
+        # the advice degrades.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._checkout(tmp, b"x")
+            with patch("maintenance_audit.query_latest_release", return_value=self._release("v0.9.6", assets={})):
+                with patch("maintenance_audit.fetch_bytes", side_effect=RuntimeError("HTTP 503")):
+                    findings, advisories = audit_wrapper_release(root)
+        self.assertEqual(advisories, [])
+        (finding,) = findings
+        self.assertIn("no `aib` or `aib.sha256` asset", finding)
+        self.assertIn("Cutting a release", finding)
 
     def test_an_api_that_cannot_be_reached_is_an_advisory_not_a_pass_or_a_failure(self) -> None:
         # Silence would read like a release that matches; a failure would be
@@ -1243,16 +1387,26 @@ class WrapperReleaseAuditTests(unittest.TestCase):
         self.assertIn("API rate limit exceeded", advisory)
 
     def test_an_asset_that_cannot_be_downloaded_is_an_advisory(self) -> None:
-        url = f"https://github.com/{WRAPPER_RELEASE_REPO}/releases/download/v0.9.5/aib"
         with tempfile.TemporaryDirectory() as tmp:
             root = self._checkout(tmp, b"x")
-            with patch("maintenance_audit.query_latest_release", return_value=self._release(assets={WRAPPER_ASSET: url})):
-                with patch("maintenance_audit.fetch_sha256", side_effect=RuntimeError("HTTP 503")):
+            with patch("maintenance_audit.query_latest_release", return_value=self._release()):
+                with patch("maintenance_audit.fetch_bytes", side_effect=RuntimeError("HTTP 503")):
                     findings, advisories = audit_wrapper_release(root)
         self.assertEqual(findings, [])
         (advisory,) = advisories
-        self.assertIn(f"Unable to download {url}", advisory)
+        self.assertIn("Unable to download the `aib` release assets", advisory)
         self.assertIn("HTTP 503", advisory)
+
+    def test_fetch_bytes_returns_what_the_server_sent_and_reports_failures_as_runtime_errors(self) -> None:
+        body = b"deadbeef  aib\n"
+        with local_http_server(status=200, body=body) as url:
+            self.assertEqual(fetch_bytes(url), body)
+        with local_http_server(status=404, body=b"nope") as url:
+            with self.assertRaises(RuntimeError) as caught:
+                fetch_bytes(url)
+        self.assertIn("404", str(caught.exception))
+        with self.assertRaises(RuntimeError):
+            fetch_bytes(closed_port_url())
 
     def test_a_checkout_without_the_wrapper_is_said_so_before_any_network_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

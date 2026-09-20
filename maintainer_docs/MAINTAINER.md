@@ -280,18 +280,29 @@ affected for as long as it lasts, and the fix is entirely yours — cut a
 release. Being unable to reach the API stays an advisory, like every other
 network check.
 
-`Release v0.9.6 … carries no aib asset` is the other shape: the release exists
-but `publish-wrapper.yml` never attached the wrapper, so the install URL 404s.
-That one wants the workflow's dispatch fallback, not a new release:
+`Release v0.9.6 … carries no aib asset` (or no `aib.sha256`), and `The
+aib.sha256 attached to release v0.9.6 records …, but the aib beside it hashes
+to …`, are the other shape: the release exists but the install cannot complete
+from it — the URL 404s, or `sha256sum -c` rejects the pair — because
+`publish-wrapper.yml` never ran for the tag, or one asset was replaced by hand.
+The finding says which repair applies, and it depends on the tag. The
+workflow's dispatch fallback checks out the tag it is given and attaches
+*that* tag's `contrib/aib`, so it is the fix only while the tag's wrapper is
+still the one on `main`:
 
 ```bash
 gh workflow run publish-wrapper.yml -f tag=v0.9.6
 ```
 
+When `contrib/aib` has changed since the tag, the finding says so and names
+the digests: a dispatch would attach an outdated wrapper and next week's audit
+would report the mismatch above instead. Cut a release.
+
 To check by hand, from a checkout of `main`:
 
 ```bash
 curl -fsSL https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib | sha256sum
+curl -fsSL https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib.sha256
 sha256sum contrib/aib
 ```
 
