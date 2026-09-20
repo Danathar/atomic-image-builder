@@ -1235,6 +1235,14 @@ def patch_cosign_compatibility(workflow_text: str) -> str:
     # has no `--key env://` and the key line has no `cosign sign` - and the
     # workflow was published still carrying the exact Cosign 3.x incompatibility
     # this function exists to remove.
+    #
+    # The verb has to be followed by whitespace or the end of the line, not a
+    # mere word boundary: a hyphen is one, so `\bcosign\s+sign\b` also matched
+    # the `sign` inside `cosign sign-blob`, and the flags were spliced into the
+    # middle of that subcommand's name. `cosign sign --new-bundle-format=false
+    # --use-signing-config=false-blob` is not a command, and an owner who signs
+    # an SBOM or ISO checksum with the same key found out on their next push.
+    verb_re = r"\bcosign(\s+)sign(?=\s|$)"
     index = 0
     while index < len(lines):
         start = index
@@ -1242,7 +1250,7 @@ def patch_cosign_compatibility(workflow_text: str) -> str:
             index += 1
         logical = " ".join(part.rstrip().rstrip("\\") for part in lines[start:index + 1])
         index += 1
-        if not re.search(r"\bcosign\s+sign\b", logical):
+        if not re.search(verb_re, logical):
             continue
         if "--key env://" not in logical or "--new-bundle-format=" in logical:
             continue
@@ -1253,7 +1261,7 @@ def patch_cosign_compatibility(workflow_text: str) -> str:
         # the guard above reported the line as needing a fix.
         for offset in range(start, index):
             patched, count = re.subn(
-                r"\bcosign(\s+)sign\b",
+                verb_re,
                 r"cosign\1sign --new-bundle-format=false --use-signing-config=false",
                 lines[offset],
                 count=1,

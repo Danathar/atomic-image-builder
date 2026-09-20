@@ -749,6 +749,78 @@ class BuilderTests(unittest.TestCase):
         with self.assertRaisesRegex(CommandError, "split across line continuations"):
             patch_cosign_compatibility(text)
 
+    # `cosign sign-blob` is how an owner signs a second artifact - an SBOM, an
+    # ISO checksum - with the same key. It shares the `--key env://` spelling
+    # the guard keys on, and a hyphen is a word boundary, so `\bcosign\s+sign\b`
+    # matched the `sign` inside it and spliced the flags into the middle of the
+    # subcommand name. The result was not a command, and the step failed on the
+    # owner's next push. Only the bare `sign` verb takes the flags.
+    SIGN_BLOB_LINE = (
+        "          cosign sign-blob -y --key env://COSIGN_PRIVATE_KEY --output-signature sbom.sig sbom.json"
+    )
+
+    def test_patch_cosign_compatibility_leaves_sign_blob_alone(self) -> None:
+        self.assertEqual(patch_cosign_compatibility(self.SIGN_BLOB_LINE), self.SIGN_BLOB_LINE)
+
+    def test_patch_cosign_compatibility_leaves_sign_blob_alone_across_continuations(self) -> None:
+        # Neither continuation shape is a `cosign sign` command, so neither is
+        # rewritten - and the split-verb one must not trip the fail-closed
+        # error either, since there is nothing here that needs the flags.
+        for text in (
+            (
+                "          cosign sign-blob -y \\\n"
+                "            --key env://COSIGN_PRIVATE_KEY \\\n"
+                "            --output-signature sbom.sig sbom.json"
+            ),
+            (
+                "          cosign \\\n"
+                "            sign-blob -y --key env://COSIGN_PRIVATE_KEY sbom.json"
+            ),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(patch_cosign_compatibility(text), text)
+
+    def test_patch_cosign_compatibility_patches_sign_but_not_sign_blob_beside_it(self) -> None:
+        # The realistic shape: an image-signing step followed by an SBOM step
+        # that reuses the key. The first still gets the flags; the second is
+        # untouched.
+        text = (
+            "          cosign sign -y --key env://COSIGN_PRIVATE_KEY ${IMAGE}\n"
+            f"{self.SIGN_BLOB_LINE}\n"
+        )
+        patched = self.assert_cosign_patched(text)
+        self.assertEqual(
+            patched.splitlines(),
+            [
+                "          cosign sign --new-bundle-format=false --use-signing-config=false"
+                " -y --key env://COSIGN_PRIVATE_KEY ${IMAGE}",
+                self.SIGN_BLOB_LINE,
+            ],
+        )
+
+    def test_patch_container_workflow_leaves_sign_blob_step_alone_end_to_end(self) -> None:
+        # The bundled snapshot with a "Sign SBOM" step added, through the real
+        # generated-repo path: the added step's command survives byte-for-byte.
+        app = self.make_app()
+        snapshot = (
+            CONTAINERFILE_TEMPLATE_DIR / ".github" / "workflows" / "build.yml"
+        ).read_text()
+        sbom_step = textwrap.indent(
+            textwrap.dedent(
+                """\
+                - name: Sign SBOM
+                  env:
+                    COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+                  run: |
+                    cosign sign-blob -y --key env://COSIGN_PRIVATE_KEY --output-signature sbom.sig sbom.json
+                """
+            ),
+            "      ",
+        )
+        patched = app.patch_container_workflow(snapshot.rstrip("\n") + "\n\n" + sbom_step)
+        self.assertIn("cosign sign-blob -y --key env://COSIGN_PRIVATE_KEY --output-signature sbom.sig sbom.json", patched)
+        self.assertNotIn("=false-blob", patched)
+
     def test_patch_container_workflow_patches_continuation_signing_end_to_end(self) -> None:
         # Exercise it through the real generated-repo path, not just the helper.
         app = self.make_app()
