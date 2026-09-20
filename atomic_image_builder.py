@@ -6788,13 +6788,22 @@ def usage_text() -> str:
 
 
 def main() -> None:
-    first_argument = sys.argv[1] if len(sys.argv) > 1 else ""
-    if first_argument in ("--version", "-V"):
+    # Match the whole argument list, not just argv[1]: the tool is a guided
+    # wizard, so anything it does not recognise (`-v`, `-hV`, a typo, a stray
+    # trailing word, `--version --bogus`) must fail here rather than clear the
+    # screen and wait at a prompt inside a script or a `podman run`.
+    arguments = sys.argv[1:]
+    if arguments in (["--version"], ["-V"]):
         print(f"{TOOL_COMMAND} {VERSION}")
         raise SystemExit(0)
-    if first_argument in ("--help", "-h"):
+    if arguments in (["--help"], ["-h"]):
         print(usage_text())
         raise SystemExit(0)
+    if arguments:
+        print(f"{TOOL_COMMAND}: unrecognized arguments: {' '.join(arguments)}", file=sys.stderr)
+        print(file=sys.stderr)
+        print(usage_text(), file=sys.stderr)
+        raise SystemExit(2)
     app = App()
     try:
         app.run_main()
