@@ -31,6 +31,12 @@ template snapshots (2-space step items; 4-space env:/steps: anchors; 6-space
 job-env entries).  ensure_workflow_job_env_entries silently returns the text
 unchanged when its anchor regex does not match.
 
+The one place a mismatch corrupts output rather than no-op'ing is the
+paths-ignore state-file entry: it is inserted as a new sequence item, and an
+item at the wrong indent makes the whole sequence unparseable.  Both patchers
+therefore copy the indent of the first existing entry (block_sequence_entry_indent)
+and only assume key indent plus two for an empty list — see #359.
+
 maintenance_audit.py currently validates action pin coverage but does not run
 the patchers against the snapshots.  When refreshing a template snapshot, run
 the test suite — the golden-file patcher tests in

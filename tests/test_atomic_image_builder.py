@@ -603,6 +603,34 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("      - '**/README.md'", patched)
         self.assertEqual(app.patch_container_workflow(patched), patched)
 
+    def test_patch_container_workflow_matches_four_space_paths_ignore_entries(self) -> None:
+        # A managed repo whose editor re-indented the list entries by four is
+        # still valid YAML. The state-file entry has to take the indent of the
+        # entries it joins: written at key indent plus two, it mixes
+        # indentation inside one sequence, and the repo stops building. See
+        # #359.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Build container image
+            on:
+              push:
+                paths-ignore:
+                    - '**/README.md'
+            jobs:
+              build_push:
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v4
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn(f"        - '{STATE_FILE}'\n        - '**/README.md'\n", patched)
+        self.assertEqual(patched.count(STATE_FILE), 1)
+        push = parse_block_yaml(patched)["on"]["push"]
+        self.assertEqual(push["paths-ignore"], [STATE_FILE, "**/README.md"])
+        self.assertEqual(app.patch_container_workflow(patched), patched)
+
     def test_patch_container_workflow_rewrites_image_desc_env_key(self) -> None:
         # The bundled snapshot carries IMAGE_DESC in image-template.env, but a
         # workflow that declares it as a YAML env key must still be rewritten
@@ -10018,6 +10046,35 @@ class BuilderTests(unittest.TestCase):
         template = '    paths-ignore:\n      - "**.md"\n'
         patched = app.patch_bluebuild_workflow(template)
         self.assertEqual(patched.count(STATE_FILE), 1)
+
+    def test_patch_bluebuild_workflow_matches_four_space_paths_ignore_entries(self) -> None:
+        # Same trap as the Containerfile patcher: entries re-indented by four
+        # are valid YAML, and a state-file entry at key indent plus two turns
+        # the sequence into one Actions rejects. See #359.
+        app = self.make_bluebuild_app()
+        template = textwrap.dedent(
+            """\
+            on:
+              push:
+                paths-ignore:
+                    - "**.md"
+            """
+        )
+        patched = app.patch_bluebuild_workflow(template)
+        self.assertIn(f"        - '{STATE_FILE}'\n        - \"**.md\"\n", patched)
+        self.assertEqual(patched.count(STATE_FILE), 1)
+        push = parse_block_yaml(patched)["on"]["push"]
+        self.assertEqual(push["paths-ignore"], [STATE_FILE, "**.md"])
+        self.assertEqual(app.patch_bluebuild_workflow(patched), patched)
+
+    def test_patch_bluebuild_workflow_keeps_empty_paths_ignore_at_two_spaces(self) -> None:
+        # With no entry to copy, key indent plus two is the only sensible
+        # choice, and it matches the indent the bundled snapshots use.
+        app = self.make_bluebuild_app()
+        template = "on:\n  push:\n    paths-ignore:\n  workflow_dispatch:\n"
+        patched = app.patch_bluebuild_workflow(template)
+        self.assertIn(f"    paths-ignore:\n      - '{STATE_FILE}'\n  workflow_dispatch:\n", patched)
+        self.assertEqual(parse_block_yaml(patched)["on"]["push"]["paths-ignore"], [STATE_FILE])
 
     def test_patch_bluebuild_workflow_adds_branch_filters_and_validation_only_inputs(self) -> None:
         app = self.make_bluebuild_app()
