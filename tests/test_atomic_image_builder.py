@@ -113,6 +113,9 @@ class GumStub:
     def controls(self, *_parts: str) -> None:
         pass
 
+    def write_controls(self) -> None:
+        self.messages.append(("controls", "write"))
+
     def success(self, message: str) -> None:
         self.messages.append(("success", message))
 
@@ -4002,10 +4005,33 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.config.services, ["sshd.service", "tailscaled.service"])
         self.assertTrue(any(level == "success" for level, _message in stub.messages))
 
+    def test_add_services_manually_accepts_space_and_comma_separated_entry(self) -> None:
+        # gum write submits on Enter, so "one per line" was never what a
+        # user could type without knowing Ctrl+J. Names separated the way
+        # package entry already accepts them must each become a service,
+        # instead of one invalid "a b" token that rejects the whole entry (#368).
+        app = self.make_app()
+        stub = GumStub()
+        stub.write = lambda **_kwargs: "sshd.service tailscaled.service, cups.service\nsshd.service\n"
+        app.gum = stub
+        app.add_services_manually()
+        self.assertEqual(app.config.services, ["sshd.service", "tailscaled.service", "cups.service"])
+        self.assertTrue(any(level == "success" for level, _message in stub.messages))
+
+    def test_add_services_manually_shows_the_write_widget_keys(self) -> None:
+        # The controls line is the only place the Enter-submits / Ctrl+J
+        # newline behaviour is explained, since the widget's own help is hidden.
+        app = self.make_app()
+        stub = GumStub()
+        stub.write = lambda **_kwargs: ""
+        app.gum = stub
+        app.add_services_manually()
+        self.assertIn(("controls", "write"), stub.messages)
+
     def test_add_services_manually_rejects_unsafe_tokens_immediately(self) -> None:
         app = self.make_app()
         stub = GumStub()
-        stub.write = lambda **_kwargs: "sshd.service\nfoo bar.service\n"
+        stub.write = lambda **_kwargs: "sshd.service\nfoo;bar.service\n"
         app.gum = stub
         app.add_services_manually()
         self.assertEqual(app.config.services, [])
@@ -4662,6 +4688,16 @@ class BuilderTests(unittest.TestCase):
         app.manual_packages()
         self.assertEqual(app.config.packages, [])
         self.assertEqual(app.gum.prompts, [])
+
+    def test_manual_packages_shows_the_write_widget_keys(self) -> None:
+        # See test_add_services_manually_shows_the_write_widget_keys: every
+        # screen that opens gum write has to say Enter submits (#368).
+        app = self.make_app()
+        stub = GumStub()
+        stub.write = lambda **_kwargs: ""
+        app.gum = stub
+        app.manual_packages()
+        self.assertIn(("controls", "write"), stub.messages)
 
     def test_manual_packages_pauses_with_missing_hint_when_some_packages_are_missing(self) -> None:
         app = self.make_app()
@@ -12360,6 +12396,18 @@ class BuilderTests(unittest.TestCase):
             app.manage_removed_packages()
         self.assertEqual(app.config.removed_packages, ["vim-enhanced", "nano"])
 
+    def test_manage_removed_packages_add_flow_shows_the_write_widget_keys(self) -> None:
+        # See test_add_services_manually_shows_the_write_widget_keys (#368).
+        # The keys line belongs to the Add branch only: the menu before it is
+        # a chooser, where Ctrl+J and "Enter submit" would be wrong.
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Add package names to remove"]
+        stub.write = lambda **_kwargs: ""
+        app.gum = stub
+        app.manage_removed_packages()
+        self.assertEqual(stub.messages.count(("controls", "write")), 1)
+
     def test_manage_removed_packages_remove_flow(self) -> None:
         """Choosing 'Stop removing listed packages' lets the user deselect
         previously listed removals."""
@@ -15061,6 +15109,40 @@ class BuilderTests(unittest.TestCase):
                 gum.controls("enter: select", "esc: back")
         style_mock.assert_called_once_with("Keys:", foreground=CONTROLS_COLOR, bold=True)
         self.assertEqual(out.getvalue(), "Keys: enter: select | esc: back\n\n")
+
+    def test_write_controls_names_the_newline_and_submit_keys(self) -> None:
+        # gum write runs with --no-show-help, so this line is the only hint
+        # that Enter submits and Ctrl+J starts a new line (#368). The real-gum
+        # tests below prove those two keys do what the line says.
+        gum = Gum()
+        with patch.object(Gum, "style", return_value="Keys:"):
+            with redirect_stdout(io.StringIO()) as out:
+                gum.write_controls()
+        self.assertEqual(out.getvalue(), "Keys: Ctrl+J new line | Enter submit | Esc back | Ctrl+C quit\n\n")
+
+    def write_with_real_gum(self, keys: list[bytes]) -> str:
+        if shutil.which("gum") is None:
+            self.skipTest("gum is not installed")
+        gum = Gum()
+        gum.interactive_stdout = lambda args, *, stdin=None: drive_real_gum(args, stdin=stdin, keys=keys)
+        return gum.write(placeholder="Enter service names separated by spaces...", height=5, width=60)
+
+    def test_write_enter_submits_after_the_first_line_with_real_gum(self) -> None:
+        # The reproduction from #368: a user following "one per line" pressed
+        # Enter after the first name and the widget returned only that name.
+        self.assertEqual(self.write_with_real_gum([b"sshd.service", b"\r", b"tailscaled.service", b"\r"]), "sshd.service")
+
+    def test_write_ctrl_j_inserts_a_newline_with_real_gum(self) -> None:
+        # Ctrl+J is the byte 0x0a; it must yield two lines, or the keys line
+        # in write_controls() is advertising a key that does not work.
+        self.assertEqual(
+            self.write_with_real_gum([b"sshd.service", b"\n", b"tailscaled.service", b"\r"]),
+            "sshd.service\ntailscaled.service",
+        )
+
+    def test_write_esc_raises_screen_back_with_real_gum(self) -> None:
+        with self.assertRaises(ScreenBack):
+            self.write_with_real_gum([b"sshd.service", b"\x1b"])
 
     def test_input_passes_value_placeholder_and_width_flags_through(self) -> None:
         gum = Gum()
