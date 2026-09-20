@@ -8006,6 +8006,36 @@ class BuilderTests(unittest.TestCase):
 
         self.assertTrue(any(level == "warn" and "podman" in message.lower() for level, message in stub.messages))
         run_mock.assert_not_called()
+        # Both callers redraw their menu with header() as soon as this returns,
+        # which clears the screen. Without a pause the warning is never read.
+        self.assertIn("Press Enter to return to the menu...", stub.prompts)
+
+    def test_every_test_build_locally_early_exit_pauses_before_the_menu_redraws(self) -> None:
+        # The three early exits drifted apart: the AIB_DISABLE_LOCAL_BUILD one
+        # paused, the other two did not, so "podman is required" flashed and
+        # vanished under the caller's next header(). They are only correct
+        # together, so assert them together (same defect as #64, other site).
+        cases = {
+            "disabled by env": ({"AIB_DISABLE_LOCAL_BUILD": "1"}, "containerfile", True),
+            "not containerfile": ({}, "bluebuild", True),
+            "podman missing": ({}, "containerfile", False),
+        }
+        for label, (env, method, podman_present) in cases.items():
+            with self.subTest(case=label):
+                app = self.make_app()
+                app.config.method = method
+                stub = GumStub()
+                app.gum = stub
+                with patch.dict("os.environ", env):
+                    if not env:
+                        # patch.dict restores this on exit; the two later exits
+                        # must not be short-circuited by a host that sets it.
+                        os.environ.pop("AIB_DISABLE_LOCAL_BUILD", None)
+                    with patch("atomic_image_builder.command_exists", return_value=podman_present):
+                        with patch.object(app, "seed_project_template") as seed_mock:
+                            app.test_build_locally()
+                seed_mock.assert_not_called()
+                self.assertEqual(stub.prompts, ["Press Enter to return to the menu..."])
 
     def test_test_build_locally_degrades_cleanly_when_disabled_by_env(self) -> None:
         app = self.make_app()
@@ -8059,6 +8089,7 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(
             any(level == "hint" and "Containerfile-only" in message for level, message in stub.messages)
         )
+        self.assertIn("Press Enter to return to the menu...", stub.prompts)
 
     def test_test_build_locally_reports_failure_with_stderr_tail(self) -> None:
         # A non-zero podman exit must be reported as a failure, with only the

@@ -4681,12 +4681,19 @@ class App:
             # over it (the caller clears the screen on its next iteration).
             self.gum.enter_to_continue("Press Enter to return to the menu...")
             return
+        # The two early exits below pause for the same reason the branch above
+        # does: run_screen_action pauses only on CommandError, so a plain
+        # return goes straight back into the menu loop and its header() clears
+        # the screen before the message can be read. podman is not a preflight
+        # requirement, so the second exit is reachable on any Homebrew install.
         if self.config.method != "containerfile":
             self.gum.hint("Local test build is Containerfile-only for now.")
+            self.gum.enter_to_continue("Press Enter to return to the menu...")
             return
         if not command_exists("podman"):
             self.gum.warn("podman is required to run a local test build.")
             self.gum.hint("Install podman, then try this again.")
+            self.gum.enter_to_continue("Press Enter to return to the menu...")
             return
 
         tag = f"{TOOL_SLUG}-local-test:dryrun"
