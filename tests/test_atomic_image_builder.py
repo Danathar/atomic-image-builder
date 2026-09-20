@@ -8671,9 +8671,64 @@ class BuilderTests(unittest.TestCase):
 
     def test_gum_pager_pipes_text_to_gum_pager(self) -> None:
         gum = Gum()
-        with patch("atomic_image_builder.run") as run_mock:
+        completed = subprocess.CompletedProcess(["gum", "pager"], 0, None, None)
+        with patch("atomic_image_builder.run", return_value=completed) as run_mock:
             gum.pager("some long text\nmore lines")
-        run_mock.assert_called_once_with(["gum", "pager"], capture=False, stdin="some long text\nmore lines")
+        # check=False is the point: run()'s default turns gum's exit 130 into a
+        # CommandError before require_interactive_success can see it.
+        run_mock.assert_called_once_with(
+            ["gum", "pager"], capture=False, check=False, stdin="some long text\nmore lines"
+        )
+
+    def test_gum_pager_raises_keyboard_interrupt_on_ctrl_c(self) -> None:
+        # Real gum v0.17.0 exits 130 on Ctrl+C in the pager, the same code as
+        # the other widgets; it used to reach the user as "command failed: gum
+        # pager" instead of quitting (#364).
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "pager"], 130, None, None)
+        with patch("atomic_image_builder.run", return_value=completed):
+            with self.assertRaises(KeyboardInterrupt):
+                gum.pager("some long text")
+
+    def test_gum_pager_keeps_a_real_failure_as_a_command_error(self) -> None:
+        # The pager exits 0 for Esc as well as q, so a status other than 0 or
+        # 130 is never navigation: real gum v0.17.0 exits 1 with "unable to
+        # read stdin" when it has no terminal. That must stay the CommandError
+        # run() used to raise, not become ScreenBack -- main() turns ScreenBack
+        # into a silent exit 0, and push_update() would abandon the update
+        # without reporting anything (review of #394).
+        gum = Gum()
+        for status in (1, 2):
+            with self.subTest(status=status):
+                completed = subprocess.CompletedProcess(["gum", "pager"], status, None, None)
+                with patch("atomic_image_builder.run", return_value=completed):
+                    with self.assertRaises(CommandError) as raised:
+                        gum.pager("some long text")
+                self.assertEqual(str(raised.exception), "command failed: gum pager")
+
+    def test_push_update_reports_a_pager_failure_instead_of_quietly_dropping_the_update(self) -> None:
+        # End to end: "View full diff?" answered yes, then the pager fails. The
+        # failure must reach main()'s CommandError handler (error banner, exit
+        # 1), not surface as a ScreenBack that push_update's callers read as
+        # the user backing out.
+        app = self.make_app()
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: True
+        stub.pager = Gum.pager.__get__(stub, GumStub)
+        app.gum = stub
+        completed = subprocess.CompletedProcess(["gum", "pager"], 1, None, None)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            with patch.object(app, "repo_default_branch", return_value="main"):
+                with patch.object(app, "write_project_files"):
+                    with patch.object(app, "repo_diff_summary", return_value=" M Containerfile"):
+                        with patch.object(app, "show_managed_repo_warning"):
+                            with patch.object(app, "repo_full_diff", return_value="diff --git a b"):
+                                with patch("atomic_image_builder.run", return_value=completed) as run_mock:
+                                    with redirect_stdout(io.StringIO()):
+                                        with self.assertRaises(CommandError):
+                                            app.push_update("example", "repo", repo_dir)
+        self.assertEqual(run_mock.call_args.args[0], ["gum", "pager"])
 
     def test_gum_enter_to_continue_shows_instruction_then_waits_for_input(self) -> None:
         gum = Gum()
