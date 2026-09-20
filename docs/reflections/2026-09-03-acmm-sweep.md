@@ -89,5 +89,5 @@ That is why there is not one.
 Checking whether a capability already existed, under another name or inline
 somewhere, before treating an issue as new work. That single check would have
 changed the shape of the first five issues, and it was carried into the
-`ai-fix-requested` intake comment added at the end of the sweep, which opens
+`ai-fix-requested` intake comment added at the end of the sweep, which closes
 by telling its reader to do exactly that.

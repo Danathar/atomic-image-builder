@@ -11,7 +11,7 @@ that gate a change, and the handful of things that are easy to get wrong in
 this repo specifically. It points on to ARCHITECTURE.md, CONTRIBUTING.md,
 MAINTAINER.md and maintenance_notes.txt.
 
-Two things in this directory are worth knowing about before you start:
+Three things in this directory are worth knowing about before you start:
 
 - [`.claude/skills/`](.claude/skills/) has packaged procedures. `verify-change`
   runs the local gate in the order that fails fastest and says what each result
