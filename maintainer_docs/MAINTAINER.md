@@ -10,6 +10,17 @@ End-user docs are in [README.md](../README.md); development workflows are in
 
 Four steps, all of them yours. Everything after the tag is automated.
 
+**A change to `contrib/aib` needs one.** The recommended install fetches the
+wrapper from the latest release, not from `main`, so a wrapper fix merged
+without a release reaches nobody who follows the docs — and the docs on `main`
+describe a wrapper users do not have. That happened once (#356): the wrapper
+gained its signature check and stopped forwarding the token to an unverified
+image, the install moved to the release URL, and no release followed, so for
+weeks every new install was the v0.9.5 wrapper, which did neither. The weekly
+audit now fails when the released `aib` is not `contrib/aib` (see
+[Reading the weekly audit](#reading-the-weekly-audit)); cutting the release is
+what clears it.
+
 **1. Branch from a current `main`.**
 
 ```bash
@@ -136,6 +147,11 @@ bug, ask which one they used.
 The container is always the freshest. Homebrew is deliberately behind, moving
 only when you cut a release.
 
+The first row is about the *image* the wrapper runs. The wrapper script itself
+is the opposite: the recommended install takes it from the latest release, so
+`contrib/aib` reaches users only when you cut one — see [Cutting a
+release](#cutting-a-release).
+
 ---
 
 ## What runs automatically
@@ -146,7 +162,7 @@ only when you cut a release.
 | `publish-image.yml`           | push to `main`, release, dispatch  | Builds and pushes to GHCR                                                                                                                       |
 | `update-homebrew-formula.yml` | release published, dispatch        | Points the formula at the release and pushes to `main`                                                                                          |
 | `publish-wrapper.yml`         | release published, dispatch        | Attaches `contrib/aib` and its sha256 to the release, which is what the recommended wrapper install downloads and verifies                      |
-| `maintenance-audit.yml`       | Mondays 06:00 UTC, dispatch        | Snapshot drift (and its tracking issue), action pin coverage, pin freshness, formula pin                                                        |
+| `maintenance-audit.yml`       | Mondays 06:00 UTC, dispatch        | Snapshot drift (and its tracking issue), action pin coverage, pin freshness, formula pin, released wrapper vs `contrib/aib`                     |
 | `nightly-compliance.yml`      | Daily 04:17 UTC, dispatch          | Rebuilds `main`'s image from scratch and re-runs the gate against it; a failure means something outside the repo moved                          |
 | `triage.yml`                  | Issue opened, dispatch             | Adds an `acmm-lN` label by title, and `security` when the text names cosign, a token, or prompt injection. Additive only; never removes a label |
 | `ai-fix.yml`                  | `ai-fix-requested` label, dispatch | Posts the current gate result on the issue as context. Read-only: no code writes, no pull request, no model                                     |
@@ -166,8 +182,9 @@ It distinguishes **failures** from **advisories**, and the difference matters.
 
 **Failures** (exit 1) mean the repo is internally inconsistent: a snapshot
 action not covered by the pin tables, a SHA that disagrees with them, a
-missing or malformed `.template-source`. The repo is contradicting itself and
-it is fixable here. Fix these.
+missing or malformed `.template-source`, a released `aib` that is not the
+`contrib/aib` on `main`. The repo is contradicting itself and it is fixable
+here. Fix these.
 
 **Advisories** do not fail the run. They mean something *outside* the repo
 moved — an action pin's tag or branch, or a bundled template snapshot's
@@ -243,6 +260,50 @@ will not pick it up on their own. Fix with:
 
 ```bash
 gh workflow run update-homebrew-formula.yml -f tag=v0.9.1
+```
+
+### Failure: the released wrapper is not `contrib/aib`
+
+```
+The `aib` attached to release v0.9.5 is not the contrib/aib on this checkout:
+release sha256 b9e97913…, checkout d1d00369…
+```
+
+means `contrib/aib` changed on `main` and no release followed, so everyone
+running the recommended install is getting the older wrapper while the docs
+describe the newer one. This is the failure the [release
+step](#cutting-a-release) warns about, and the mirror image of the formula
+advisory: there a release was cut and a channel did not follow; here the
+channel is release-bound and the release was never cut. A failure rather than
+an advisory because nothing outside the repo moved, every new install is
+affected for as long as it lasts, and the fix is entirely yours — cut a
+release. Being unable to reach the API stays an advisory, like every other
+network check.
+
+`Release v0.9.6 … carries no aib asset` (or no `aib.sha256`), and `The
+aib.sha256 attached to release v0.9.6 records …, but the aib beside it hashes
+to …`, are the other shape: the release exists but the install cannot complete
+from it — the URL 404s, or `sha256sum -c` rejects the pair — because
+`publish-wrapper.yml` never ran for the tag, or one asset was replaced by hand.
+The finding says which repair applies, and it depends on the tag. The
+workflow's dispatch fallback checks out the tag it is given and attaches
+*that* tag's `contrib/aib`, so it is the fix only while the tag's wrapper is
+still the one on `main`:
+
+```bash
+gh workflow run publish-wrapper.yml -f tag=v0.9.6
+```
+
+When `contrib/aib` has changed since the tag, the finding says so and names
+the digests: a dispatch would attach an outdated wrapper and next week's audit
+would report the mismatch above instead. Cut a release.
+
+To check by hand, from a checkout of `main`:
+
+```bash
+curl -fsSL https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib | sha256sum
+curl -fsSL https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib.sha256
+sha256sum contrib/aib
 ```
 
 ---

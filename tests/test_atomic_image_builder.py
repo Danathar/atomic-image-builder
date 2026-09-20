@@ -1,14 +1,19 @@
 import contextlib
+import fcntl
 import http.client
 import io
 import json
 import os
+import pty
 import re
+import select
 import shutil
 import subprocess
 import sys
 import tempfile
+import termios
 import textwrap
+import time
 import unittest
 import urllib.error
 from contextlib import redirect_stdout
@@ -69,6 +74,7 @@ from atomic_image_builder import (
     extend_flow_sequence_line,
     fedora_atomic_image_for_classic_origin,
     format_daily_rebuild_note,
+    image_reference_tag_and_digest,
     is_valid_repo_name,
     managed_path,
     normalize_container_image_reference,
@@ -77,6 +83,7 @@ from atomic_image_builder import (
     pin_action_uses_line,
     pinned_action,
     read_os_release_fields,
+    remote_replacement_list,
     string_list,
     workflow_job_ranges,
 )
@@ -143,6 +150,59 @@ class GumStub:
 
     def spinner(self, _title: str, _command, *, cwd=None) -> None:
         pass
+
+
+def drive_real_gum(args, *, stdin: str | None, keys: list[bytes], timeout: float = 15.0) -> subprocess.CompletedProcess[str]:
+    """Run the argv Gum built against the real gum binary, typing ``keys``.
+
+    A drop-in for Gum.interactive_stdout. gum reads its options from the
+    stdin pipe, draws on stderr and takes keystrokes from /dev/tty, so the
+    child gets a pseudo-terminal as its controlling terminal and each key is
+    typed only after the previous redraw has gone quiet. Only the plumbing
+    differs from the real call: the argv is untouched, which is the point --
+    a stub that returns the names it was handed cannot tell whether gum
+    would have pre-selected them (#351).
+    """
+    master, slave = pty.openpty()
+
+    def controlling_tty() -> None:
+        os.setsid()
+        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+    proc = subprocess.Popen(
+        list(args),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=slave,
+        env={**os.environ, "TERM": "xterm-256color"},
+        preexec_fn=controlling_tty,
+        pass_fds=(slave,),
+    )
+    os.close(slave)
+    assert proc.stdin is not None and proc.stdout is not None
+    proc.stdin.write((stdin or "").encode())
+    proc.stdin.close()
+    pending = list(keys)
+    drawn = False
+    deadline = time.monotonic() + timeout
+    while proc.poll() is None:
+        if time.monotonic() > deadline:
+            proc.kill()
+            raise AssertionError(f"gum did not exit within {timeout}s; keys left: {pending!r}")
+        ready, _, _ = select.select([master], [], [], 0.1)
+        if ready:
+            try:
+                os.read(master, 65536)
+            except OSError:
+                # The slave side is gone: gum has exited and poll() will see it.
+                continue
+            drawn = True
+        elif drawn and pending:
+            os.write(master, pending.pop(0))
+    stdout = proc.stdout.read().decode()
+    proc.stdout.close()
+    os.close(master)
+    return subprocess.CompletedProcess(list(args), proc.returncode, stdout, "")
 
 
 # Captured before setUp() patches the module attribute, so the tests that
@@ -499,6 +559,17 @@ class BuilderTests(unittest.TestCase):
         for arch in ("aarch64", "ppc64le", "s390x"):
             with self.subTest(arch=arch):
                 self.assertIsNone(fedora_atomic_image_for_classic_origin("fedora", f"fedora/44/{arch}/kinoite"))
+
+    def test_image_reference_tag_and_digest_splits_every_reference_shape(self) -> None:
+        digest = "sha256:" + "a" * 64
+        self.assertEqual(image_reference_tag_and_digest("ghcr.io/ublue-os/bazzite:stable"), ("stable", ""))
+        self.assertEqual(image_reference_tag_and_digest("ghcr.io/ublue-os/bazzite"), ("", ""))
+        # The digest's own colon must not be read as a tag separator.
+        self.assertEqual(image_reference_tag_and_digest(f"ghcr.io/ublue-os/bazzite@{digest}"), ("", digest))
+        self.assertEqual(image_reference_tag_and_digest(f"ghcr.io/ublue-os/bazzite:stable@{digest}"), ("stable", digest))
+        # A registry port is a colon before the last path component, not a tag.
+        self.assertEqual(image_reference_tag_and_digest("localhost:5000/bazzite"), ("", ""))
+        self.assertEqual(image_reference_tag_and_digest("localhost:5000/bazzite:testing"), ("testing", ""))
 
     def test_load_repo_config_rejects_repo_without_state_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2577,6 +2648,47 @@ class BuilderTests(unittest.TestCase):
         matched = app.match_base_image("quay.io/fedora-ostree-desktops/kinoite:44")
         self.assertIsNotNone(matched)
         self.assertEqual(matched.name, "Fedora Kinoite")
+
+    def test_match_base_image_accepts_fedora_official_bootc_locations(self) -> None:
+        # Fedora publishes the same desktops at quay.io/fedora/fedora-<variant>
+        # as well as quay.io/fedora-ostree-desktops/<variant>. A host rebased to
+        # the official location is running the curated image, not a custom one
+        # (#354). Every reference shape the scan can produce has to match.
+        app = self.make_app()
+        for variant, name in (
+            ("silverblue", "Fedora Silverblue"),
+            ("kinoite", "Fedora Kinoite"),
+            ("sway-atomic", "Fedora Sway Atomic"),
+            ("budgie-atomic", "Fedora Budgie Atomic"),
+        ):
+            for ref in (
+                f"quay.io/fedora/fedora-{variant}",
+                f"quay.io/fedora/fedora-{variant}:44",
+                f"quay.io/fedora/fedora-{variant}:43",
+                f"quay.io/fedora/fedora-{variant}@sha256:{'a' * 64}",
+            ):
+                with self.subTest(ref=ref):
+                    matched = app.match_base_image(ref)
+                    self.assertIsNotNone(matched)
+                    self.assertEqual(matched.name, name)
+                    # The alias identifies the desktop; the recommended URI is
+                    # still the curated one, so nothing downstream changes.
+                    self.assertTrue(matched.image_uri.startswith(f"quay.io/fedora-ostree-desktops/{variant}:"))
+
+    def test_match_base_image_does_not_invent_an_official_location_for_cosmic(self) -> None:
+        # quay.io/fedora/fedora-cosmic-atomic is not published, so the alias
+        # must not be claimed for it: a match here would be a reference no
+        # host can actually be booted from.
+        app = self.make_app()
+        self.assertIsNone(app.match_base_image("quay.io/fedora/fedora-cosmic-atomic:44"))
+        self.assertIsNotNone(app.match_base_image("quay.io/fedora-ostree-desktops/cosmic-atomic:44"))
+
+    def test_match_base_image_alias_requires_a_repository_boundary(self) -> None:
+        # A longer repository name that merely starts with the alias is a
+        # different image, the same way "kinoite-nightly" is not "kinoite".
+        app = self.make_app()
+        self.assertIsNone(app.match_base_image("quay.io/fedora/fedora-silverblue-nightly:44"))
+        self.assertIsNone(app.match_base_image("quay.io/fedora/fedora-silverbluex"))
 
     def test_ensure_signing_ready_requires_cosign(self) -> None:
         app = self.make_app()
@@ -6289,6 +6401,84 @@ class BuilderTests(unittest.TestCase):
         # Verify the warning was shown
         self.assertTrue(any("testing" in msg and "stable" in msg for _, msg in gum.messages))
 
+    def scan_ref(self, container_ref: str, gum: GumStub) -> App:
+        # Runs scan_os against a one-deployment host booted on container_ref,
+        # with no layered packages so nothing past the base-image check asks.
+        app = self.make_app()
+        app.github_user = "example"
+        status_payload = json.dumps(
+            {
+                "deployments": [
+                    {
+                        "booted": True,
+                        "container-image-reference": container_ref,
+                        "requested-packages": [],
+                        "requested-base-removals": [],
+                    }
+                ]
+            }
+        )
+        app.gum = gum
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["rpm-ostree", "status", "--json", "--booted"], 0, status_payload, ""),
+            ):
+                result = app.scan_os()
+        self.assertEqual(result, SCAN_OK)
+        return app
+
+    def test_scan_os_words_a_digest_pin_as_a_pin_and_not_as_a_tag(self) -> None:
+        # A digest-pinned host has no tag. Splitting the ref on its last colon
+        # used to present the 64 hex characters after "sha256:" as the tag the
+        # system was "running", which reads as a bug rather than a suggestion.
+        digest = "sha256:" + "9" * 64
+        gum = GumStub()
+        prompts: list[str] = []
+        gum.confirm = lambda prompt, default=False: prompts.append(prompt) or default
+
+        app = self.scan_ref(f"docker://ghcr.io/ublue-os/bluefin-dx@{digest}", gum)
+
+        warnings = [msg for kind, msg in gum.messages if kind == "warn" and "recommends" in msg]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("pinned to a digest", warnings[0])
+        self.assertIn(":stable for Bluefin DX", warnings[0])
+        self.assertNotIn("9" * 64, warnings[0])
+        self.assertNotIn("running :", warnings[0])
+        # The offer that follows is still the right action, and accepting it
+        # (the default) replaces the pin with the curated tag.
+        self.assertEqual([p for p in prompts if "recommended" in p], ["Use the recommended :stable tag instead?"])
+        self.assertEqual(app.config.base_image_uri, "ghcr.io/ublue-os/bluefin-dx:stable")
+
+    def test_scan_os_does_not_warn_about_a_digest_pinned_curated_tag(self) -> None:
+        digest = "sha256:" + "0" * 64
+        gum = GumStub()
+        prompts: list[str] = []
+        gum.confirm = lambda prompt, default=False: prompts.append(prompt) or default
+
+        app = self.scan_ref(f"docker://ghcr.io/ublue-os/bazzite:stable@{digest}", gum)
+
+        # The tag is the curated one, so there is nothing to recommend: no
+        # warning, no prompt, and the pinned ref the host booted stays put.
+        self.assertEqual([msg for kind, msg in gum.messages if kind == "warn" and "recommends" in msg], [])
+        self.assertEqual([p for p in prompts if "recommended" in p], [])
+        self.assertEqual(app.config.base_image_uri, f"ghcr.io/ublue-os/bazzite:stable@{digest}")
+        self.assertEqual(app.config.base_image_name, "Bazzite (KDE)")
+
+    def test_scan_os_names_the_tag_of_a_digest_pinned_non_curated_tag(self) -> None:
+        digest = "sha256:" + "f" * 64
+        gum = GumStub()
+        gum.confirm = lambda prompt, default=False: False if "recommended" in prompt else default
+
+        app = self.scan_ref(f"docker://ghcr.io/ublue-os/bazzite:testing@{digest}", gum)
+
+        warnings = [msg for kind, msg in gum.messages if kind == "warn" and "recommends" in msg]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("running :testing", warnings[0])
+        self.assertIn(":stable for Bazzite (KDE)", warnings[0])
+        self.assertNotIn("f" * 64, warnings[0])
+        self.assertEqual(app.config.base_image_uri, f"ghcr.io/ublue-os/bazzite:testing@{digest}")
+
     def test_scan_os_returns_false_when_rpm_ostree_is_missing(self) -> None:
         app = self.make_app()
         stub = GumStub()
@@ -6686,6 +6876,63 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.config.base_image_uri, "quay.io/fedora-ostree-desktops/kinoite:44")
         self.assertEqual(app.config.base_image_name, "Fedora Kinoite")
 
+    def scan_fedora_official_location(self, tag: str) -> App:
+        # A host rebased to Fedora's official bootc desktop image at
+        # quay.io/fedora/fedora-silverblue rather than the
+        # fedora-ostree-desktops location the curated entry names.
+        class ChoosingStub(GumStub):
+            def choose(self, items, **_kwargs):
+                return list(items)
+
+        app = self.make_app()
+        app.github_user = "example"
+        status_payload = json.dumps(
+            {
+                "deployments": [
+                    {
+                        "booted": True,
+                        "container-image-reference": f"ostree-unverified-registry:quay.io/fedora/fedora-silverblue:{tag}",
+                        "requested-packages": ["htop"],
+                        "requested-base-removals": ["firefox"],
+                    }
+                ]
+            }
+        )
+        app.gum = ChoosingStub()
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["rpm-ostree", "status", "--json", "--booted"], 0, status_payload, ""),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(app.scan_os(), SCAN_OK)
+        return app
+
+    def test_scan_os_recognises_fedora_official_location_as_the_curated_desktop(self) -> None:
+        # Reported in #354: this host was told it runs a custom, unsupported
+        # image. It runs Fedora Silverblue, and the scan has to say so and
+        # carry its customizations. On the current tag there is nothing to
+        # recommend, so the host's own reference is kept.
+        app = self.scan_fedora_official_location(FEDORA_ATOMIC_DEFAULT_TAG)
+
+        self.assertEqual(app.config.base_image_name, "Fedora Silverblue")
+        self.assertEqual(app.config.base_image_uri, f"quay.io/fedora/fedora-silverblue:{FEDORA_ATOMIC_DEFAULT_TAG}")
+        self.assertEqual(app.config.scanned_packages, ["htop"])
+        self.assertEqual(app.config.scanned_removed, ["firefox"])
+        warnings = [m for level, m in app.gum.messages if level == "warn"]
+        self.assertEqual(warnings, [])
+
+    def test_scan_os_offers_the_curated_tag_to_a_fedora_official_location_host(self) -> None:
+        # The tag comparison is against the curated entry the alias resolved
+        # to, so a host behind the recommended release is offered it exactly
+        # as one on fedora-ostree-desktops would be.
+        app = self.scan_fedora_official_location(str(int(FEDORA_ATOMIC_DEFAULT_TAG) - 1))
+
+        self.assertEqual(app.config.base_image_name, "Fedora Silverblue")
+        self.assertEqual(app.config.base_image_uri, f"quay.io/fedora-ostree-desktops/silverblue:{FEDORA_ATOMIC_DEFAULT_TAG}")
+        warnings = " ".join(m for level, m in app.gum.messages if level == "warn")
+        self.assertIn(f"recommends :{FEDORA_ATOMIC_DEFAULT_TAG} for Fedora Silverblue", warnings)
+
     def test_scan_os_refuses_an_image_that_is_not_a_supported_base(self) -> None:
         # choose_base_image already refuses an image that is not curated. The
         # scanned path has to agree: the same image must not be rejected when
@@ -6925,6 +7172,9 @@ class BuilderTests(unittest.TestCase):
         # One assertion per field rpm-ostree documents, because each is a
         # separate way for a customization to go missing and the defect was
         # that four of them were read as absent rather than as unsupported.
+        # The remote-replacements value is in the shape rpm-ostree actually
+        # writes, (from, packages) pairs; #230's version of this test used a
+        # flat list, which is why #353 got past it.
         app = self.make_app()
         self.assertEqual(
             app.unsupported_scan_customizations(
@@ -6932,7 +7182,7 @@ class BuilderTests(unittest.TestCase):
                     "requested-local-packages": ["local-1.0-1.x86_64"],
                     "requested-local-fileoverride-packages": ["fileoverride-1.0-1.x86_64"],
                     "requested-base-local-replacements": ["local-replacement-1.0-1.x86_64"],
-                    "requested-base-remote-replacements": ["remote-replacement-1.0-1.x86_64"],
+                    "requested-base-remote-replacements": [["repo=example-copr", ["remote-replacement"]]],
                     "initramfs-etc": ["/etc/crypttab"],
                     "initramfs-args": ["--arg"],
                     "regenerate-initramfs": True,
@@ -6942,10 +7192,98 @@ class BuilderTests(unittest.TestCase):
                 ("Locally installed RPMs", ["local-1.0-1.x86_64"]),
                 ("Local file overrides", ["fileoverride-1.0-1.x86_64"]),
                 ("Base packages replaced by a local RPM", ["local-replacement-1.0-1.x86_64"]),
-                ("Base packages replaced from a repository", ["remote-replacement-1.0-1.x86_64"]),
+                ("Base packages replaced from a repository", ["remote-replacement (from repo=example-copr)"]),
                 ("Files kept in the initramfs from /etc", ["/etc/crypttab"]),
                 ("Custom initramfs arguments", ["--arg"]),
                 ("A locally regenerated initramfs", []),
+            ],
+        )
+
+    def test_scan_os_reports_a_remote_override_in_the_shape_rpm_ostree_writes(self) -> None:
+        # The #353 case: a mesa override from a COPR, recorded by rpm-ostree as
+        # [[from, [package, ...]], ...]. Read as a flat string list it vanished,
+        # so the scan showed no "Cannot Be Carried Over" row, asked nothing,
+        # and the generated README recommended the reset that removes it.
+        rows: list[tuple[str, str]] = []
+        confirms: list[str] = []
+        stub = GumStub()
+        stub.table = lambda table_rows, **_kwargs: rows.extend(table_rows)
+
+        def confirm(prompt: str, default: bool = False) -> bool:
+            confirms.append(prompt)
+            return default
+
+        stub.confirm = confirm
+        result, app, stub = self.run_scan_with_status(
+            {
+                "container-image-reference": self.BLUEFIN,
+                "requested-packages": ["htop"],
+                "requested-base-removals": [],
+                "requested-base-remote-replacements": [
+                    ["repo=copr:copr.fedorainfracloud.org:example:mesa", ["mesa-dri-drivers", "mesa-va-drivers"]]
+                ],
+            },
+            gum=stub,
+        )
+        self.assertEqual(result, SCAN_CANCELLED)
+        self.assertIn(("Cannot Be Carried Over", "2"), rows)
+        self.assertEqual(confirms, ["Continue without these customizations?"])
+        self.assertTrue(
+            any(level == "warn" and "cannot be carried" in message for level, message in stub.messages),
+            stub.messages,
+        )
+        # The user sees which packages and which repository are at stake, and
+        # the package name leads so it survives the preview's truncation.
+        hints = [message for level, message in stub.messages if level == "hint"]
+        self.assertTrue(
+            any(hint.startswith("Base packages replaced from a repository: mesa-dri-drivers (from repo=copr:") for hint in hints),
+            hints,
+        )
+
+    def test_remote_replacement_list_flattens_the_real_rpm_ostree_shape(self) -> None:
+        # One entry per package, source attached, across several sources. The
+        # sum of these is the "Cannot Be Carried Over" count, so a pair must
+        # count for each package it names rather than for one.
+        self.assertEqual(
+            remote_replacement_list(
+                [
+                    ["repo=copr:example:mesa", ["mesa-dri-drivers", "mesa-va-drivers"]],
+                    ["repo=copr:example:kernel", ["kernel"]],
+                ]
+            ),
+            [
+                "mesa-dri-drivers (from repo=copr:example:mesa)",
+                "mesa-va-drivers (from repo=copr:example:mesa)",
+                "kernel (from repo=copr:example:kernel)",
+            ],
+        )
+
+    def test_remote_replacement_list_coerces_untrusted_json_values(self) -> None:
+        # Same contract as string_list(): a stale override file or a future
+        # schema change reaches the friendly path, not a TypeError. A bare
+        # string entry is kept as a package with no source; a pair whose
+        # package list is unreadable still names its repository, because an
+        # override with no readable packages is still one reset removes.
+        self.assertEqual(remote_replacement_list(None), [])
+        self.assertEqual(remote_replacement_list("repo=copr:example:mesa"), [])
+        self.assertEqual(remote_replacement_list({"repo=copr:example:mesa": ["mesa"]}), [])
+        self.assertEqual(
+            remote_replacement_list(
+                [
+                    "bare-package",
+                    ["repo=copr:example:mesa", "mesa-dri-drivers"],
+                    ["repo=copr:example:kernel", [1, "kernel", None]],
+                    [" ", ["unsourced"]],
+                    [None, []],
+                    ["too", "many", "items"],
+                    7,
+                ]
+            ),
+            [
+                "bare-package",
+                "repo=copr:example:mesa",
+                "kernel (from repo=copr:example:kernel)",
+                "unsourced",
             ],
         )
 
@@ -7481,9 +7819,14 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.config.packages, [])
         self.assertFalse(any("Added" in prompt for prompt in stub.prompts))
 
-    def test_search_packages_uses_value_delimiter_for_selected_results(self) -> None:
+    def test_search_packages_preselects_configured_matches_by_label(self) -> None:
+        # Under --label-delimiter gum compares --selected with the label half
+        # of each line, never the value after the tab. The earlier form of
+        # this test pinned the bare names in `selected`, which is exactly the
+        # argv that pre-ticked nothing and turned every untouched match into a
+        # removal (#351).
         app = self.make_app()
-        app.config.packages = ["fish"]
+        app.config.packages = ["fish", "htop"]
         choose_selected: list[str] = []
         choose_options: list[str] = []
         choose_label_delimiter: list[str | None] = [None]
@@ -7498,14 +7841,62 @@ class BuilderTests(unittest.TestCase):
 
         stub.choose = fake_choose
         app.gum = stub
-        with patch.object(app, "search_host_packages", return_value=([("fish", "Friendly, interactive shell, with extras")], False, None)):
+        results = [("fish", "Friendly, interactive shell, with extras"), ("fisher", "Plugin manager for fish")]
+        with patch.object(app, "search_host_packages", return_value=(results, False, None)):
             with patch.object(app, "add_packages_to_config", return_value=False):
                 app.search_packages()
 
-        self.assertEqual(choose_selected, ["fish"])
         self.assertEqual(choose_label_delimiter[0], "\t")
-        self.assertTrue(choose_options)
-        self.assertIn("\tfish", choose_options[0])
+        self.assertEqual(len(choose_options), 2)
+        fish_label, fish_value = choose_options[0].split("\t")
+        self.assertEqual(fish_value, "fish")
+        self.assertTrue(fish_label.startswith("fish "))
+        # Only the configured match is pre-ticked, as its label; "fisher" is
+        # not configured and "htop" is not in the results.
+        self.assertEqual(choose_selected, [fish_label])
+
+    # Package search against the real gum binary. The stubbed tests above
+    # prove what argv the tool builds; these prove gum reads it the way the
+    # tool assumes. Skipped where gum is absent (CI does not install it), the
+    # same way test_gum_style_survives_real_gum_with_dash_text is.
+    REAL_GUM_SEARCH_RESULTS = [
+        # The comma in this summary is deliberate: it is the separator gum
+        # splits --selected on, and a label carrying one must still pre-tick.
+        ("vim-enhanced", "A version of the VIM editor, with extras"),
+        ("vim-minimal", "A minimal version of the VIM editor"),
+    ]
+
+    def search_with_real_gum(self, keys: list[bytes]) -> App:
+        if shutil.which("gum") is None:
+            self.skipTest("gum is not installed")
+        app = self.make_app()
+        app.config.packages = ["vim-enhanced", "htop"]
+        real_gum = Gum()
+        real_gum.interactive_stdout = lambda args, *, stdin=None: drive_real_gum(args, stdin=stdin, keys=keys)
+        stub = GumStub()
+        stub.input = lambda **_kwargs: "vim"
+        stub.choose = real_gum.choose
+        app.gum = stub
+        with patch.object(app, "search_host_packages", return_value=(self.REAL_GUM_SEARCH_RESULTS, False, None)):
+            with redirect_stdout(io.StringIO()):
+                app.search_packages()
+        return app
+
+    def test_search_packages_untouched_enter_leaves_config_unchanged_with_real_gum(self) -> None:
+        # Enter with nothing toggled is the "keep what I have" gesture. Before
+        # the fix it dropped vim-enhanced, because gum had not pre-selected
+        # it and the tool read that as the user unticking it.
+        app = self.search_with_real_gum(keys=[b"\r"])
+        self.assertEqual(app.config.packages, ["vim-enhanced", "htop"])
+        self.assertEqual(app.gum.prompts, ["No package changes were made. Press Enter to return to the package menu..."])
+
+    def test_search_packages_adding_a_match_keeps_configured_matches_with_real_gum(self) -> None:
+        # The reproduction from #351: Down, x, Enter ticks vim-minimal. The
+        # result must be an addition only -- vim-enhanced stays, and the
+        # summary line does not claim a removal.
+        app = self.search_with_real_gum(keys=[b"\x1b[B", b"x", b"\r"])
+        self.assertEqual(sorted(app.config.packages), ["htop", "vim-enhanced", "vim-minimal"])
+        self.assertEqual(app.gum.prompts, ["Added 1 package(s). Press Enter to return to the package menu..."])
 
     def test_render_containerfile_preserves_existing_text_when_no_from_line_is_patchable(self) -> None:
         app = self.make_app()
@@ -8200,6 +8591,25 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("--unselected-prefix", call_args)
         self.assertIn("[ ]", call_args)
 
+    def test_gum_choose_escapes_commas_inside_selected_entries(self) -> None:
+        # gum splits --selected on commas. A label built from a package summary
+        # such as "A version of the VIM editor, with extras" would arrive as
+        # two fragments and match nothing, so the join has to escape the
+        # separator and leave every other byte alone.
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "choose"], 0, "", "")
+        with patch.object(Gum, "interactive_stdout", return_value=completed) as stdout_mock:
+            gum.choose(
+                ["editor, with extras\ta", "path\\to\tb", "plain\tc"],
+                selected=["editor, with extras", "path\\to", "plain"],
+                label_delimiter="\t",
+            )
+        call_args = stdout_mock.call_args[0][0]
+        self.assertEqual(
+            call_args[call_args.index("--selected") + 1],
+            "editor\\, with extras,path\\to,plain",
+        )
+
     def test_gum_choose_drops_blank_lines_from_output(self) -> None:
         gum = Gum()
         completed = subprocess.CompletedProcess(["gum", "choose"], 0, "alpha\n\nbeta\n", "")
@@ -8688,6 +9098,100 @@ class BuilderTests(unittest.TestCase):
         # repeating it.
         self.assertIn("main/contrib/aib", (root / "docs/installing.md").read_text())
         self.assertIn("docs/installing.md", header)
+
+    def test_documented_wrapper_installs_create_the_target_directory(self) -> None:
+        # Neither Fedora Atomic nor Bluefin ships `~/.local/bin` in /etc/skel
+        # (only `.local/share`), and neither `install` without `-D` nor
+        # `curl -o` creates a missing parent. So on a fresh account the first
+        # command a new user ran failed -- `install: invalid target` or
+        # `curl: (23)` -- and both read as a broken download rather than a
+        # missing directory (#357). Every snippet that writes ~/.local/bin/aib
+        # has to create the directory: `install -D` in the release snippet,
+        # and an explicit `mkdir -p` earlier in the same block for the
+        # bleeding-edge `curl -o` one.
+        root = Path(__file__).resolve().parents[1]
+        sources = {
+            "README.md": (root / "README.md").read_text(),
+            "docs/installing.md": (root / "docs/installing.md").read_text(),
+            "contrib/aib header": (root / "contrib/aib").read_text().split("set -euo pipefail", 1)[0],
+        }
+        target = "~/.local/bin/aib"
+        for name, source in sources.items():
+            lines = [line.strip().lstrip("#").strip() for line in source.splitlines()]
+            writes = [
+                (index, line)
+                for index, line in enumerate(lines)
+                if target in line and line.startswith(("install ", "curl "))
+            ]
+            self.assertTrue(writes, f"{name}: no line installs {target}")
+            for index, line in writes:
+                if line.startswith("install "):
+                    self.assertIn(
+                        " -D ", line, f"{name}: {line!r} does not create ~/.local/bin when it is missing"
+                    )
+                    continue
+                # The block this line sits in starts at the nearest code fence
+                # above it (a fence is what a shell user copies as one unit).
+                block_start = max(i for i in range(index) if lines[i].startswith("```"))
+                self.assertIn(
+                    "mkdir -p ~/.local/bin",
+                    lines[block_start:index],
+                    f"{name}: {line!r} is not preceded by mkdir -p ~/.local/bin in its block",
+                )
+
+    def test_documented_wrapper_installs_work_without_an_existing_local_bin(self) -> None:
+        # The assertion above checks spelling; this runs the documented lines
+        # the way the issue's reproduction did, in a HOME that has no `.local`
+        # at all. It executes the text from installing.md rather than a copy,
+        # so a rewrite there cannot pass here by accident. `curl` is a stub
+        # that writes the wrapper where `-o` points, which is the only part
+        # of the network the snippet's failure mode depended on.
+        root = Path(__file__).resolve().parents[1]
+        installing = (root / "docs/installing.md").read_text()
+        release = "https://github.com/Danathar/atomic-image-builder/releases/latest/download"
+        main = "https://raw.githubusercontent.com/Danathar/atomic-image-builder/main/contrib/aib"
+        blocks = re.findall(r"```bash\n(.*?)```", installing, flags=re.S)
+        release_block = next(b for b in blocks if f"{release}/aib" in b)
+        main_block = next(b for b in blocks if main in b)
+        install_line = next(
+            line for line in release_block.splitlines() if line.startswith("install ")
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            stub_bin = Path(tmp) / "bin"
+            stub_bin.mkdir()
+            env = {**os.environ, "HOME": str(home), "PATH": f"{stub_bin}{os.pathsep}{os.environ['PATH']}"}
+
+            # Release snippet: the two curls have been checked by hand at this
+            # point (the tests above cover their chaining), so only the line
+            # that puts the checked file on PATH runs, against a copy of the
+            # wrapper in the working directory exactly as `curl -fsSLO` leaves it.
+            shutil.copy(root / "contrib/aib", home / "aib")
+            self.assertFalse((home / ".local").exists())
+            result = subprocess.run(
+                ["bash", "-c", install_line], cwd=home, env=env, capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            installed = home / ".local/bin/aib"
+            self.assertTrue(installed.is_file(), install_line)
+            self.assertTrue(os.access(installed, os.X_OK))
+            self.assertFalse((home / "aib").exists(), "`&& rm aib` did not run after install")
+
+            # Bleeding-edge snippet: the whole block, with curl stubbed.
+            shutil.rmtree(home / ".local")
+            (stub_bin / "curl").write_text(
+                "#!/usr/bin/env bash\n"
+                'while [ $# -gt 0 ]; do case $1 in -o) out=$2; shift;; esac; shift; done\n'
+                f'cp {root / "contrib/aib"} "$out"\n'
+            )
+            (stub_bin / "curl").chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-c", main_block], cwd=home, env=env, capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(installed.is_file(), main_block)
+            self.assertTrue(os.access(installed, os.X_OK))
 
     def test_docs_document_pulling_a_newer_image_for_container_runs(self) -> None:
         root = Path(__file__).resolve().parents[1]

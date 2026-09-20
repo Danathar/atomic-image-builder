@@ -334,6 +334,10 @@ class BaseImage:
     name: str
     description: str
     image_uri: str
+    # Other repositories the same desktop is published at, without a tag.
+    # match_base_image() treats a host booted from one of these as this
+    # curated image; image_uri stays the one the tool recommends and writes.
+    aliases: tuple[str, ...] = ()
 
 
 def read_os_release_fields(path: Path = Path("/etc/os-release")) -> dict[str, str]:
@@ -385,13 +389,21 @@ def universal_blue_image(key: str, name: str, description: str, image_uri: str) 
     return BaseImage(key=key, provider="Universal Blue", name=name, description=description, image_uri=image_uri)
 
 
-def fedora_atomic_image(key: str, name: str, description: str, variant: str) -> BaseImage:
+def fedora_atomic_image(key: str, name: str, description: str, variant: str, *, official_alias: bool = True) -> BaseImage:
+    # Fedora publishes each desktop twice: the long-standing
+    # quay.io/fedora-ostree-desktops/<variant>, and the newer official bootc
+    # location quay.io/fedora/fedora-<variant>. Both carry the same release
+    # tags, and which one a host was rebased to is not the user's choice of
+    # base -- it is the same Silverblue either way. Without the alias a host
+    # on the official location was refused as a custom image (#354).
+    aliases = (f"quay.io/fedora/fedora-{variant}",) if official_alias else ()
     return BaseImage(
         key=key,
         provider="Fedora Atomic",
         name=name,
         description=description,
         image_uri=f"quay.io/fedora-ostree-desktops/{variant}:{FEDORA_ATOMIC_DEFAULT_TAG}",
+        aliases=aliases,
     )
 
 
@@ -408,7 +420,10 @@ BASE_IMAGES: tuple[BaseImage, ...] = (
     fedora_atomic_image("kinoite", "Fedora Kinoite", "KDE Plasma desktop built from the official Fedora Atomic desktop image", "kinoite"),
     fedora_atomic_image("sway-atomic", "Fedora Sway Atomic", "Sway desktop built from the official Fedora Atomic desktop image", "sway-atomic"),
     fedora_atomic_image("budgie-atomic", "Fedora Budgie Atomic", "Budgie desktop built from the official Fedora Atomic desktop image", "budgie-atomic"),
-    fedora_atomic_image("cosmic-atomic", "Fedora COSMIC Atomic", "COSMIC desktop built from the official Fedora Atomic desktop image", "cosmic-atomic"),
+    # quay.io/fedora/fedora-cosmic-atomic does not exist (checked against the
+    # registry API on 2026-09-20; the other four variants do), so claiming
+    # the alias here would match a reference no host can be booted from.
+    fedora_atomic_image("cosmic-atomic", "Fedora COSMIC Atomic", "COSMIC desktop built from the official Fedora Atomic desktop image", "cosmic-atomic", official_alias=False),
 )
 
 
@@ -443,7 +458,9 @@ SCAN_UNSUPPORTED_BASE = "unsupported-base"
 # generated image reproduces them. They were read as absent rather than as
 # unsupported, so a scan reported success and recommended `rpm-ostree reset`
 # while the new image silently omitted them. See the rpm-ostree administrator
-# handbook's "rpm-ostree status --json" section for the field list.
+# handbook's "rpm-ostree status --json" section for the field list. The first
+# three are string arrays; the remote one is a list of (from, packages) pairs
+# and needs remote_replacement_list() rather than string_list().
 UNSUPPORTED_SCAN_FIELDS: tuple[tuple[str, str], ...] = (
     ("requested-local-packages", "Locally installed RPMs"),
     ("requested-local-fileoverride-packages", "Local file overrides"),
@@ -520,6 +537,39 @@ def string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, str)]
+
+
+def remote_replacement_list(value: object) -> list[str]:
+    # requested-base-remote-replacements is the one scan field that is not a
+    # flat list of names. rpm-ostree records each `override replace --from
+    # repo=...` as a (from, packages) pair -- Vec<(String, Vec<String>)> in
+    # rust/src/daemon.rs -- so the JSON is [["repo=<id>", ["pkg", ...]], ...].
+    # string_list() kept only str items, which dropped every pair and read the
+    # override as absent: no "Cannot Be Carried Over" row, no confirm, and a
+    # README recommending the reset that removes it (#353). Flatten to one
+    # entry per package with its source attached, package name first so a long
+    # COPR id is what the preview truncates. Same coercion contract as
+    # string_list() otherwise: null, a bare string, or an entry of another
+    # shape is dropped rather than raised on.
+    if not isinstance(value, list):
+        return []
+    found: list[str] = []
+    for entry in value:
+        if isinstance(entry, str):
+            found.append(entry)
+            continue
+        if not isinstance(entry, list) or len(entry) != 2:
+            continue
+        source, packages = entry
+        source = source.strip() if isinstance(source, str) else ""
+        names = string_list(packages)
+        if names:
+            found.extend(f"{name} (from {source})" if source else name for name in names)
+        elif source:
+            # A source with no readable package list is still an override the
+            # image will not reproduce; naming the repository beats silence.
+            found.append(source)
+    return found
 
 
 def sanitize_slug(value: str, default: str = DEFAULT_REPO_NAME) -> str:
@@ -676,6 +726,18 @@ def fedora_atomic_image_for_classic_origin(remote: str, ref: str) -> str | None:
         if image.provider == "Fedora Atomic" and image.key == key:
             return f"{image.image_uri.rsplit(':', 1)[0]}:{release}"
     return None
+
+
+def image_reference_tag_and_digest(image_ref: str) -> tuple[str, str]:
+    # "<repo>[:<tag>][@<digest>]" -> (tag, digest), each "" when absent. The
+    # digest comes off first: it carries a colon of its own ("@sha256:<hex>"),
+    # so splitting a digest-pinned ref on its last colon hands back the 64 hex
+    # characters as if they were a tag. The tag is then read from the last
+    # path component only, so a registry port ("localhost:5000/repo") is not
+    # mistaken for one either.
+    ref, _, digest = image_ref.partition("@")
+    _, _, tag = ref.rsplit("/", 1)[-1].partition(":")
+    return tag, digest
 
 
 def format_daily_rebuild_note(
@@ -2006,7 +2068,11 @@ class Gum:
         if no_limit:
             args.append("--no-limit")
         if selected:
-            args.extend(["--selected", ",".join(selected)])
+            # gum splits --selected on commas, so an entry that contains one
+            # arrives as two fragments and pre-selects nothing. Its parser
+            # honours a backslash before the separator; a plain backslash is
+            # kept as-is, so nothing else needs escaping.
+            args.extend(["--selected", ",".join(item.replace(",", "\\,") for item in selected)])
         if header:
             args.extend(["--header", header])
         if label_delimiter is not None:
@@ -3034,17 +3100,24 @@ class App:
                 self.gum.hint(f"Showing the first {PACKAGE_SEARCH_LIMIT} matches. Narrow the search term if you need something else.")
             print()
 
+            # With --label-delimiter, gum matches --selected against the label
+            # half of each line, not the value it prints. Passing the package
+            # names pre-ticks nothing, and everything below then reads the
+            # untouched matches as deliberate removals (#351).
             options: list[str] = []
+            selected_labels: list[str] = []
             for name, summary in results:
                 label = f"{name:<30} {self.truncate_label(summary or '(no summary available)', limit=60)}"
                 options.append(f"{label}\t{name}")
+                if name in self.config.packages:
+                    selected_labels.append(label)
 
             try:
                 picked = self.gum.choose(
                     options,
                     height=20,
                     no_limit=True,
-                    selected=self.config.packages,
+                    selected=selected_labels,
                     label_delimiter="\t",
                     selected_prefix="[x] ",
                     unselected_prefix="[ ] ",
@@ -3468,12 +3541,22 @@ class App:
         # Warn when the host is running a non-standard tag (e.g. :testing,
         # :44) that differs from the curated image_uri.  Offer to use the
         # curated tag so the generated repo tracks a known-good stream.
-        scanned_tag = base.rsplit(":", 1)[-1] if ":" in base else ""
-        curated_tag = matched.image_uri.rsplit(":", 1)[-1] if ":" in matched.image_uri else ""
-        if scanned_tag and curated_tag and scanned_tag != curated_tag:
-            self.gum.warn(
-                f"Your system is running :{scanned_tag}, but this tool recommends :{curated_tag} for {matched.name}."
-            )
+        # A host pinned to a digest with no tag at all gets the same offer,
+        # worded for what it is: the digest is not a tag, and presenting its
+        # hex as one ("running :911d8f...") reads as a bug in the tool.
+        # Pinned to the curated tag ("...:stable@sha256:...") is not warned
+        # about: the tag matches, and the digest is what the host asked for.
+        scanned_tag, scanned_digest = image_reference_tag_and_digest(base)
+        curated_tag, _ = image_reference_tag_and_digest(matched.image_uri)
+        if curated_tag and scanned_tag != curated_tag and (scanned_tag or scanned_digest):
+            if scanned_tag:
+                self.gum.warn(
+                    f"Your system is running :{scanned_tag}, but this tool recommends :{curated_tag} for {matched.name}."
+                )
+            else:
+                self.gum.warn(
+                    f"Your system is pinned to a digest rather than a tag, but this tool recommends :{curated_tag} for {matched.name}."
+                )
             if self.gum.confirm(f"Use the recommended :{curated_tag} tag instead?", default=True):
                 self.config.base_image_uri = matched.image_uri
 
@@ -3568,7 +3651,9 @@ class App:
         # "one local RPM" is not enough to decide with.
         found: list[tuple[str, list[str]]] = []
         for status_key, label in UNSUPPORTED_SCAN_FIELDS + INITRAMFS_SCAN_FIELDS:
-            values = unique(string_list(booted.get(status_key)))
+            # Every field but one is a list of names; see remote_replacement_list.
+            reader = remote_replacement_list if status_key == "requested-base-remote-replacements" else string_list
+            values = unique(reader(booted.get(status_key)))
             if values:
                 found.append((label, values))
         if booted.get("regenerate-initramfs"):
@@ -3629,9 +3714,11 @@ class App:
 
     def match_base_image(self, value: str) -> BaseImage | None:
         for image in BASE_IMAGES:
-            image_repo = image.image_uri.rsplit(":", 1)[0]
-            if value == image.image_uri or value == image_repo or value.startswith(f"{image_repo}:") or value.startswith(f"{image_repo}@"):
+            if value == image.image_uri:
                 return image
+            for image_repo in (image.image_uri.rsplit(":", 1)[0], *image.aliases):
+                if value == image_repo or value.startswith(f"{image_repo}:") or value.startswith(f"{image_repo}@"):
+                    return image
         return None
 
     def carried_scan_customizations(self) -> bool:

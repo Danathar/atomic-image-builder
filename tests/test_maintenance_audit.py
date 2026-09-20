@@ -1,5 +1,6 @@
 import contextlib
 import hashlib
+import http.client
 import io
 import json
 import subprocess
@@ -9,7 +10,7 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
-from _local_http_server import closed_port_url, local_http_server
+from _local_http_server import closed_port_url, hanging_http_server, local_http_server
 from atomic_image_builder import (
     BOOTC_IMAGE_BUILDER_IMAGE_DIGEST,
     BOOTC_IMAGE_BUILDER_IMAGE_TAG,
@@ -19,6 +20,10 @@ from atomic_image_builder import (
 from maintenance_audit import (
     SNAPSHOT_DRIFT_FAILURE_COMMITS,
     SUBPROCESS_TIMEOUT_SECONDS,
+    WRAPPER_ASSET,
+    WRAPPER_CHECKSUM_ASSET,
+    WRAPPER_RELEASE_REPO,
+    WRAPPER_SOURCE,
     TemplateSource,
     audit_action_pin_freshness,
     audit_action_update_availability,
@@ -28,8 +33,11 @@ from maintenance_audit import (
     audit_local_snapshot,
     audit_pin_table_shapes,
     audit_upstream_drift,
+    audit_wrapper_release,
     describe_pin_drift,
     describe_snapshot_drift,
+    describe_wrapper_release_repair,
+    fetch_bytes,
     fetch_registry_pull_token,
     fetch_sha256,
     github_api_json,
@@ -40,9 +48,11 @@ from maintenance_audit import (
     load_template_source,
     main,
     parse_version_tag,
+    parse_wrapper_checksum,
     query_github_comparison,
     query_github_ref_sha,
     query_latest_github_semver_tag,
+    query_latest_release,
     query_remote_head,
     resolve_registry_tag_digest,
     run_audit,
@@ -490,6 +500,27 @@ class MaintenanceAuditTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             github_api_json(closed_port_url())
 
+    # A refused connection is the failure urllib wraps in URLError. A connection
+    # that is accepted and then never answered is the one it does not: the read
+    # times out with a bare builtins.TimeoutError, which escaped every helper
+    # here and took the weekly audit down with a traceback (#350). A real
+    # hanging socket, not a patched urlopen, so this proves the exception urllib
+    # actually raises is the one being caught.
+    def test_github_api_json_real_read_timeout_is_an_advisory_not_a_traceback(self) -> None:
+        with patch("maintenance_audit.NETWORK_TIMEOUT_SECONDS", 0.2):
+            with hanging_http_server() as url:
+                with self.assertRaisesRegex(RuntimeError, "timed out"):
+                    github_api_json(url)
+
+    def test_github_api_json_reports_a_response_cut_short(self) -> None:
+        # Same class of failure with the opposite symptom: the peer closes
+        # mid-body instead of going quiet. http.client reports that as
+        # IncompleteRead, which is not even an OSError.
+        cut_short = http.client.IncompleteRead(b"[{", 40)
+        with patch("maintenance_audit.urllib.request.urlopen", side_effect=cut_short):
+            with self.assertRaisesRegex(RuntimeError, "IncompleteRead"):
+                github_api_json("https://api.github.com/x")
+
     def test_query_latest_github_semver_tag_picks_highest_and_skips_noise(self) -> None:
         payload = [
             "not-a-dict",
@@ -564,12 +595,15 @@ class MaintenanceAuditTests(unittest.TestCase):
 
     def test_run_audit_returns_action_updates_as_advisories_not_failures(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
-        # The same gate also runs the trust-root downloads and the two image
-        # pin lookups. Stub them: they read the live registry, and this test
-        # went red the day ghcr.io/ublue-os/brew:latest moved past its pin.
+        # The same gate also runs the trust-root downloads, the two image
+        # pin lookups and the release-asset comparison. Stub them: they read
+        # the live registry and the live release, and this test went red the
+        # day ghcr.io/ublue-os/brew:latest moved past its pin.
         with patch("maintenance_audit.audit_container_trust_roots", return_value=[]), patch(
             "maintenance_audit.audit_brew_image_pin", return_value=[]
-        ), patch("maintenance_audit.audit_disk_builder_image_pin", return_value=[]):
+        ), patch("maintenance_audit.audit_disk_builder_image_pin", return_value=[]), patch(
+            "maintenance_audit.audit_wrapper_release", return_value=([], [])
+        ):
             with patch(
                 "maintenance_audit.audit_action_update_availability", return_value=["stale pin"]
             ):
@@ -582,6 +616,27 @@ class MaintenanceAuditTests(unittest.TestCase):
         # Pin drift must not fail the run -- a branch pin drifts constantly.
         self.assertEqual(findings, [])
         self.assertEqual(advisories, ["stale pin", "moved pin"])
+
+    def test_run_audit_turns_a_read_timeout_into_advisories_and_exits_zero(self) -> None:
+        # The shape of #350: one slow read from api.github.com or ghcr.io, and
+        # the whole weekly run died with a traceback, every later check
+        # skipped. Every network helper the --check-action-updates gate runs
+        # goes through urlopen, so one timing-out urlopen exercises all of
+        # them at once: the tag lookups, the ref lookups, the trust-root
+        # downloads and both registry reads.
+        repo_root = Path(__file__).resolve().parents[1]
+        stdout = io.StringIO()
+        with patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")):
+            findings, advisories = run_audit(repo_root, skip_upstream=True, check_action_updates=True)
+            with contextlib.redirect_stdout(stdout):
+                code = main(["--repo-root", str(repo_root), "--skip-upstream", "--check-action-updates"])
+        self.assertEqual(findings, [])
+        self.assertTrue(advisories)
+        for advisory in advisories:
+            self.assertIn("Unable to", advisory)
+            self.assertIn("timed out", advisory)
+        self.assertEqual(code, 0)
+        self.assertIn("Maintenance audit passed.", stdout.getvalue())
 
     def test_audit_action_pin_freshness_flags_a_moving_tag_that_left_the_pin_behind(self) -> None:
         # The exact case that shipped actions/checkout v7.0.0 in generated
@@ -805,6 +860,14 @@ class ContainerTrustRootAuditTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             fetch_sha256(closed_port_url())
 
+    def test_fetch_sha256_reports_a_read_timeout_rather_than_raising_it(self) -> None:
+        # A key server that accepts and goes quiet. Until #350 this was the
+        # one network failure the trust-root check could not report.
+        with patch("maintenance_audit.NETWORK_TIMEOUT_SECONDS", 0.2):
+            with hanging_http_server() as url:
+                with self.assertRaisesRegex(RuntimeError, "timed out"):
+                    fetch_sha256(url)
+
     def test_a_pin_that_still_matches_upstream_says_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -871,7 +934,7 @@ class ContainerTrustRootAuditTests(unittest.TestCase):
                 with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
                     with patch("maintenance_audit.audit_brew_image_pin", return_value=[]), patch(
                         "maintenance_audit.audit_disk_builder_image_pin", return_value=[]
-                    ):
+                    ), patch("maintenance_audit.audit_wrapper_release", return_value=([], [])):
                         repo_root = Path(__file__).resolve().parents[1]
                         run_audit(repo_root, skip_upstream=True, check_action_updates=False)
                         self.assertEqual(checked.call_count, 0)
@@ -1060,9 +1123,36 @@ class BrewPayloadPinAuditTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "no route"):
                 resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
 
+    def test_a_read_that_times_out_is_reported_at_every_step_of_the_flow(self) -> None:
+        # The registry flow has three reads -- the anonymous HEAD, the token
+        # exchange, the authorized HEAD -- and three places a bare
+        # TimeoutError used to escape (#350). The manifest URL is always
+        # https, so a loopback server cannot stand in for the registry here;
+        # the exception is the real one urllib raises on a read timeout.
+        flows = {
+            "anonymous manifest read": [TimeoutError("timed out")],
+            "token exchange": [unauthorized(), TimeoutError("timed out")],
+            "authorized manifest read": [unauthorized(), FakeResponse({"token": "t"}), TimeoutError("timed out")],
+        }
+        for step, responses in flows.items():
+            with self.subTest(step=step):
+                with patch("urllib.request.urlopen", side_effect=responses):
+                    with self.assertRaisesRegex(RuntimeError, "timed out"):
+                        resolve_registry_tag_digest("ghcr.io", "ublue-os/brew", "latest")
+
+    def test_fetch_registry_pull_token_real_read_timeout_is_reported(self) -> None:
+        # The token realm is whatever the challenge names, so this leg of the
+        # flow can be driven against a real hanging loopback socket.
+        with patch("maintenance_audit.NETWORK_TIMEOUT_SECONDS", 0.2):
+            with hanging_http_server() as realm:
+                with self.assertRaisesRegex(RuntimeError, "timed out"):
+                    fetch_registry_pull_token(f'Bearer realm="{realm}token"', "ghcr.io", "ublue-os/brew")
+
     def test_the_weekly_run_is_the_one_that_checks_the_payload_pin(self) -> None:
         with patch("maintenance_audit.audit_brew_image_pin", return_value=["moved"]) as checked:
-            with patch("maintenance_audit.audit_disk_builder_image_pin", return_value=[]):
+            with patch("maintenance_audit.audit_disk_builder_image_pin", return_value=[]), patch(
+                "maintenance_audit.audit_wrapper_release", return_value=([], [])
+            ):
                 with patch("maintenance_audit.audit_container_trust_roots", return_value=[]):
                     with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
                         with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
@@ -1118,7 +1208,9 @@ class DiskBuilderPinAuditTests(unittest.TestCase):
 
     def test_the_weekly_run_is_the_one_that_checks_the_builder_pin(self) -> None:
         with patch("maintenance_audit.audit_disk_builder_image_pin", return_value=["moved"]) as checked:
-            with patch("maintenance_audit.audit_brew_image_pin", return_value=[]):
+            with patch("maintenance_audit.audit_brew_image_pin", return_value=[]), patch(
+                "maintenance_audit.audit_wrapper_release", return_value=([], [])
+            ):
                 with patch("maintenance_audit.audit_container_trust_roots", return_value=[]):
                     with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
                         with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
@@ -1131,3 +1223,331 @@ class DiskBuilderPinAuditTests(unittest.TestCase):
                             )
                             self.assertEqual(checked.call_count, 1)
                             self.assertIn("moved", advisories)
+
+
+class WrapperReleaseAuditTests(unittest.TestCase):
+    """The wrapper the latest release serves is compared to contrib/aib weekly.
+
+    The recommended install fetches `aib` from the release and checks it
+    against the checksum published beside it, which proves the download is
+    what the release carries and nothing about whether the release carries
+    what `main` describes. For weeks it did not (#356): the docs described a
+    wrapper that verifies the image and withholds the token, and every user
+    following them installed the v0.9.5 one, which does neither. These cover
+    the check that reports that, and the bucket it reports it in.
+    """
+
+    def _checkout(self, tmp: str, wrapper: bytes) -> Path:
+        root = Path(tmp)
+        (root / WRAPPER_SOURCE).parent.mkdir(parents=True)
+        (root / WRAPPER_SOURCE).write_bytes(wrapper)
+        return root
+
+    @staticmethod
+    def _asset_url(tag: str, name: str) -> str:
+        return f"https://github.com/{WRAPPER_RELEASE_REPO}/releases/download/{tag}/{name}"
+
+    @staticmethod
+    def _tag_url(tag: str) -> str:
+        return f"https://raw.githubusercontent.com/{WRAPPER_RELEASE_REPO}/{tag}/contrib/aib"
+
+    def _release(self, tag: str = "v0.9.5", *, assets: dict[str, str] | None = None) -> tuple[str, dict[str, str]]:
+        if assets is None:
+            assets = {name: self._asset_url(tag, name) for name in (WRAPPER_ASSET, WRAPPER_CHECKSUM_ASSET)}
+        return tag, assets
+
+    @staticmethod
+    def _checksum(wrapper: bytes, name: str = WRAPPER_ASSET) -> bytes:
+        # What `sha256sum aib > aib.sha256` writes in publish-wrapper.yml.
+        return f"{hashlib.sha256(wrapper).hexdigest()}  {name}\n".encode()
+
+    def _served(self, tag: str, *, aib: bytes, checksum: bytes | None = None, tagged: bytes | None = None) -> dict[str, bytes]:
+        """URL -> body for the release assets and the tag's contrib/aib."""
+        served = {self._asset_url(tag, WRAPPER_ASSET): aib}
+        served[self._asset_url(tag, WRAPPER_CHECKSUM_ASSET)] = self._checksum(aib) if checksum is None else checksum
+        served[self._tag_url(tag)] = aib if tagged is None else tagged
+        return served
+
+    def test_a_release_that_carries_this_checkouts_wrapper_says_nothing(self) -> None:
+        wrapper = b"#!/usr/bin/env bash\ncosign verify\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._checkout(tmp, wrapper)
+            with patch("maintenance_audit.query_latest_release", return_value=self._release()):
+                with patch("maintenance_audit.fetch_bytes", side_effect=self._served("v0.9.5", aib=wrapper).__getitem__):
+                    self.assertEqual(audit_wrapper_release(root), ([], []))
+
+    def test_a_release_serving_an_older_wrapper_is_a_failure_carrying_both_digests(self) -> None:
+        # A failure, not an advisory: nothing outside the repository moved.
+        # This is its own release trailing its own main, every new install
+        # is affected for as long as it lasts, and only a release cut here
+        # clears it. Both digests and the tag, so it can be acted on
+        # without a checkout -- and the action is named.
+        wrapper = b"#!/usr/bin/env bash\ncosign verify\n"
+        older = b"#!/usr/bin/env bash\npodman run\n"
+        released = hashlib.sha256(older).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._checkout(tmp, wrapper)
+            with patch("maintenance_audit.query_latest_release", return_value=self._release("v0.9.5")):
+                with patch("maintenance_audit.fetch_bytes", side_effect=self._served("v0.9.5", aib=older).__getitem__):
+                    findings, advisories = audit_wrapper_release(root)
+
+        self.assertEqual(advisories, [])
+        (finding,) = findings
+        self.assertIn("v0.9.5", finding)
+        self.assertIn(released, finding)
+        self.assertIn(hashlib.sha256(wrapper).hexdigest(), finding)
+        self.assertIn(str(WRAPPER_SOURCE), finding)
+        self.assertIn("Cutting a release", finding)
+
+    def test_the_digest_compared_is_of_the_asset_the_docs_download(self) -> None:
+        # The assets' own URLs, not a guess at them: what is hashed has to be
+        # the bytes `curl -fsSLO .../releases/latest/download/aib` lands, and
+        # the checksum read has to be the one the docs pipe to `sha256sum -c`.
+        wrapper = b"x"
+        assets = {WRAPPER_ASSET: "https://example.invalid/wrapper", WRAPPER_CHECKSUM_ASSET: "https://example.invalid/sum"}
+        served = {assets[WRAPPER_ASSET]: wrapper, assets[WRAPPER_CHECKSUM_ASSET]: self._checksum(wrapper)}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._checkout(tmp, wrapper)
+            with patch("maintenance_audit.query_latest_release", return_value=self._release(assets=assets)):
+                with patch("maintenance_audit.fetch_bytes", side_effect=served.__getitem__) as fetched:
+                    self.assertEqual(audit_wrapper_release(root), ([], []))
+        self.assertEqual(sorted(call.args[0] for call in fetched.call_args_list), sorted(served))
+
+    def test_a_release_with_no_wrapper_asset_is_a_failure(self) -> None:
+        # The docs fetch the asset by name, so a release without it is a
+        # recommended install that 404s. Nothing is downloaded from the
+        # release -- there is nothing to download -- and the finding names
+        # the repair.
+        wrapper = b"x"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._checkout(tmp, wrapper)
+            with patch(
+                "maintenance_audit.query_latest_release",
+                return_value=self._release("v0.9.6", assets={WRAPPER_CHECKSUM_ASSET: "https://example.invalid/aib.sha256"}),
+            ):
+                with patch("maintenance_audit.fetch_bytes", side_effect={self._tag_url("v0.9.6"): wrapper}.__getitem__) as fetched:
+                    findings, advisories = audit_wrapper_release(root)
+        fetched.assert_called_once_with(self._tag_url("v0.9.6"))
+        self.assertEqual(advisories, [])
+        (finding,) = findings
+        self.assertIn("v0.9.6", finding)
+        self.assertIn("no `aib` asset", finding)
+        self.assertIn("gh workflow run publish-wrapper.yml -f tag=v0.9.6", finding)
+
+    def test_a_release_with_no_checksum_asset_is_a_failure_too(self) -> None:
+        # The install downloads `aib` and then `aib.sha256` and stops at the
+        # first 404; a release with the wrapper and no checksum installs
+        # nothing, and an audit that only hashed `aib` would be green over it.
+        wrapper = b"x"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._checkout(tmp, wrapper)
+            with patch(
+                "maintenance_audit.query_latest_release",
+                return_value=self._release("v0.9.6", assets={WRAPPER_ASSET: self._asset_url("v0.9.6", WRAPPER_ASSET)}),
+            ):
+                with patch("maintenance_audit.fetch_bytes", side_effect={self._tag_url("v0.9.6"): wrapper}.__getitem__):
+                    findings, advisories = audit_wrapper_release(root)
+        self.assertEqual(advisories, [])
+        (finding,) = findings
+        self.assertIn("no `aib.sha256` asset", finding)
+        self.assertIn("gh workflow run publish-wrapper.yml -f tag=v0.9.6", finding)
+
+    def test_a_checksum_that_disagrees_with_the_wrapper_beside_it_is_a_failure(self) -> None:
+        # The pair is what the install verifies. A stale `aib.sha256` beside a
+        # current `aib` -- one asset re-uploaded by hand, say -- fails
+        # `sha256sum -c` for every user, while the wrapper alone matches main.
+        wrapper = b"#!/usr/bin/env bash\ncosign verify\n"
+        stale = self._checksum(b"#!/usr/bin/env bash\npodman run\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._checkout(tmp, wrapper)
+            with patch("maintenance_audit.query_latest_release", return_value=self._release("v0.9.6")):
+                served = self._served("v0.9.6", aib=wrapper, checksum=stale)
+                with patch("maintenance_audit.fetch_bytes", side_effect=served.__getitem__):
+                    findings, advisories = audit_wrapper_release(root)
+        self.assertEqual(advisories, [])
+        (finding,) = findings
+        self.assertIn("aib.sha256", finding)
+        self.assertIn("sha256sum -c", finding)
+        self.assertIn(stale.split()[0].decode(), finding)
+        self.assertIn(hashlib.sha256(wrapper).hexdigest(), finding)
+        self.assertIn("gh workflow run publish-wrapper.yml -f tag=v0.9.6", finding)
+
+    def test_a_checksum_that_names_another_file_is_a_failure(self) -> None:
+        # `sha256sum -c` looks the file up by the name on the line. A line for
+        # `contrib/aib` is right about the bytes and still fails, because the
+        # download is called `aib`.
+        wrapper = b"x"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._checkout(tmp, wrapper)
+            with patch("maintenance_audit.query_latest_release", return_value=self._release("v0.9.6")):
+                served = self._served("v0.9.6", aib=wrapper, checksum=self._checksum(wrapper, "contrib/aib"))
+                with patch("maintenance_audit.fetch_bytes", side_effect=served.__getitem__):
+                    findings, advisories = audit_wrapper_release(root)
+        self.assertEqual(advisories, [])
+        (finding,) = findings
+        self.assertIn("does not record a sha256 for a file named `aib`", finding)
+        self.assertIn("gh workflow run publish-wrapper.yml -f tag=v0.9.6", finding)
+
+    def test_parse_wrapper_checksum_reads_what_sha256sum_writes(self) -> None:
+        digest = "a" * 64
+        cases = {
+            f"{digest}  aib\n": digest,
+            f"{digest} *aib\r\n": digest,  # binary-mode marker, CRLF
+            f"{'b' * 64}  aib.sha256\n{digest}  aib\n": digest,
+            f"{digest}  contrib/aib\n": None,
+            f"{digest[:63]}  aib\n": None,
+            "": None,
+            "not a checksum": None,
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(parse_wrapper_checksum(text), expected)
+
+    def test_the_dispatch_is_recommended_only_while_the_tag_holds_this_wrapper(self) -> None:
+        # publish-wrapper.yml checks out the tag it is given and packages that
+        # tag's contrib/aib. When main has moved on, the dispatch attaches an
+        # outdated wrapper and the next audit trades the missing-asset
+        # finding for the digest mismatch. So: dispatch when the tag's
+        # wrapper is this one, a release when it is not, and a release when
+        # the tag cannot be read -- the repair that cannot be wrong.
+        wrapper = b"#!/usr/bin/env bash\ncosign verify\n"
+        older = b"#!/usr/bin/env bash\npodman run\n"
+        expected = hashlib.sha256(wrapper).hexdigest()
+        url = self._tag_url("v0.9.6")
+
+        with patch("maintenance_audit.fetch_bytes", side_effect={url: wrapper}.__getitem__):
+            current = describe_wrapper_release_repair("v0.9.6", expected)
+        self.assertIn("gh workflow run publish-wrapper.yml -f tag=v0.9.6", current)
+        self.assertNotIn("Cutting a release", current)
+
+        with patch("maintenance_audit.fetch_bytes", side_effect={url: older}.__getitem__):
+            moved = describe_wrapper_release_repair("v0.9.6", expected)
+        self.assertNotIn("gh workflow run", moved)
+        self.assertIn("outdated wrapper", moved)
+        self.assertIn(hashlib.sha256(older).hexdigest(), moved)
+        self.assertIn(expected, moved)
+        self.assertIn("Cutting a release", moved)
+
+        with patch("maintenance_audit.fetch_bytes", side_effect=RuntimeError("HTTP 503")):
+            unknown = describe_wrapper_release_repair("v0.9.6", expected)
+        self.assertNotIn("gh workflow run", unknown)
+        self.assertIn(url, unknown)
+        self.assertIn("HTTP 503", unknown)
+        self.assertIn("Cutting a release", unknown)
+
+    def test_a_missing_asset_stays_a_failure_when_the_tag_cannot_be_read(self) -> None:
+        # The install 404s whether or not the repair can be worked out; only
+        # the advice degrades.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._checkout(tmp, b"x")
+            with patch("maintenance_audit.query_latest_release", return_value=self._release("v0.9.6", assets={})):
+                with patch("maintenance_audit.fetch_bytes", side_effect=RuntimeError("HTTP 503")):
+                    findings, advisories = audit_wrapper_release(root)
+        self.assertEqual(advisories, [])
+        (finding,) = findings
+        self.assertIn("no `aib` or `aib.sha256` asset", finding)
+        self.assertIn("Cutting a release", finding)
+
+    def test_an_api_that_cannot_be_reached_is_an_advisory_not_a_pass_or_a_failure(self) -> None:
+        # Silence would read like a release that matches; a failure would be
+        # blocking on an unknown, which is how a rate limit becomes a red
+        # weekly audit. Same bucket as every other unreachable upstream here.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._checkout(tmp, b"x")
+            with patch("maintenance_audit.query_latest_release", side_effect=RuntimeError("API rate limit exceeded")):
+                findings, advisories = audit_wrapper_release(root)
+        self.assertEqual(findings, [])
+        (advisory,) = advisories
+        self.assertIn("Unable to query the latest release", advisory)
+        self.assertIn(WRAPPER_RELEASE_REPO, advisory)
+        self.assertIn("API rate limit exceeded", advisory)
+
+    def test_an_asset_that_cannot_be_downloaded_is_an_advisory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._checkout(tmp, b"x")
+            with patch("maintenance_audit.query_latest_release", return_value=self._release()):
+                with patch("maintenance_audit.fetch_bytes", side_effect=RuntimeError("HTTP 503")):
+                    findings, advisories = audit_wrapper_release(root)
+        self.assertEqual(findings, [])
+        (advisory,) = advisories
+        self.assertIn("Unable to download the `aib` release assets", advisory)
+        self.assertIn("HTTP 503", advisory)
+
+    def test_fetch_bytes_returns_what_the_server_sent_and_reports_failures_as_runtime_errors(self) -> None:
+        body = b"deadbeef  aib\n"
+        with local_http_server(status=200, body=body) as url:
+            self.assertEqual(fetch_bytes(url), body)
+        with local_http_server(status=404, body=b"nope") as url:
+            with self.assertRaises(RuntimeError) as caught:
+                fetch_bytes(url)
+        self.assertIn("404", str(caught.exception))
+        with self.assertRaises(RuntimeError):
+            fetch_bytes(closed_port_url())
+
+    def test_a_checkout_without_the_wrapper_is_said_so_before_any_network_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("maintenance_audit.query_latest_release") as queried:
+                findings, advisories = audit_wrapper_release(Path(tmp))
+        queried.assert_not_called()
+        self.assertEqual(findings, [])
+        (advisory,) = advisories
+        self.assertIn(f"Unable to read {WRAPPER_SOURCE}", advisory)
+
+    def test_query_latest_release_extracts_the_tag_and_the_asset_urls(self) -> None:
+        payload = {
+            "tag_name": "v0.9.5",
+            "assets": [
+                {"name": "aib", "browser_download_url": "https://example.invalid/aib"},
+                {"name": "aib.sha256", "browser_download_url": "https://example.invalid/aib.sha256"},
+                "not-a-dict",
+                {"name": 7, "browser_download_url": "https://example.invalid/seven"},
+            ],
+        }
+        with patch("maintenance_audit.github_api_json", return_value=payload) as api:
+            tag, assets = query_latest_release("Danathar/atomic-image-builder")
+        api.assert_called_once_with("https://api.github.com/repos/Danathar/atomic-image-builder/releases/latest")
+        self.assertEqual(tag, "v0.9.5")
+        self.assertEqual(
+            assets,
+            {"aib": "https://example.invalid/aib", "aib.sha256": "https://example.invalid/aib.sha256"},
+        )
+
+    def test_query_latest_release_rejects_payloads_without_a_tag_or_assets(self) -> None:
+        payloads = (["not", "a", "dict"], {"assets": []}, {"tag_name": "", "assets": []}, {"tag_name": "v1", "assets": "x"})
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                with patch("maintenance_audit.github_api_json", return_value=payload):
+                    with self.assertRaisesRegex(RuntimeError, "Unexpected release payload"):
+                        query_latest_release("Danathar/atomic-image-builder")
+
+    def test_the_release_checked_is_the_one_the_install_docs_download_from(self) -> None:
+        # The constants are only right while they name what the docs fetch.
+        # A moved install URL, or a renamed asset, must fail here rather than
+        # leave the audit comparing against a release nobody installs from.
+        url = f"https://github.com/{WRAPPER_RELEASE_REPO}/releases/latest/download/{WRAPPER_ASSET}"
+        root = Path(__file__).resolve().parents[1]
+        for doc in ("README.md", "docs/installing.md"):
+            with self.subTest(doc=doc):
+                self.assertIn(url, (root / doc).read_text())
+        self.assertTrue((root / WRAPPER_SOURCE).is_file())
+
+    def test_the_weekly_run_is_the_one_that_checks_the_release(self) -> None:
+        # And its failures land in the failure bucket: run_audit() must not
+        # flatten the pair into advisories the way the other network checks
+        # are collected.
+        with patch("maintenance_audit.audit_wrapper_release", return_value=(["trailing"], ["unsure"])) as checked:
+            with patch("maintenance_audit.audit_disk_builder_image_pin", return_value=[]):
+                with patch("maintenance_audit.audit_brew_image_pin", return_value=[]):
+                    with patch("maintenance_audit.audit_container_trust_roots", return_value=[]):
+                        with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
+                            with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
+                                repo_root = Path(__file__).resolve().parents[1]
+                                run_audit(repo_root, skip_upstream=True, check_action_updates=False)
+                                self.assertEqual(checked.call_count, 0)
+
+                                findings, advisories = run_audit(
+                                    repo_root, skip_upstream=True, check_action_updates=True
+                                )
+        checked.assert_called_once_with(repo_root)
+        self.assertIn("trailing", findings)
+        self.assertIn("unsure", advisories)

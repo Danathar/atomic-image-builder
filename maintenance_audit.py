@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -35,6 +36,20 @@ WORKFLOW_DIRS: tuple[Path, ...] = (
     Path("template_snapshots/bluebuild/.github/workflows"),
 )
 CONTAINERFILE = Path("Containerfile")
+# The recommended wrapper install (README.md, docs/installing.md) fetches this
+# asset from `releases/latest`, so the release, not `main`, decides which
+# wrapper a new user runs as root with their GitHub login forwarded into it.
+# Spelled out rather than imported from the formula script, which records the
+# same slug: snapshot_drift_issue.py imports this module, and its step harness
+# copies exactly the chain it needs. A test ties the slug to the docs' URL.
+WRAPPER_RELEASE_REPO = "Danathar/atomic-image-builder"
+WRAPPER_SOURCE = Path("contrib/aib")
+WRAPPER_ASSET = "aib"
+# The install pipes this into `sha256sum -c`, so it has to exist and name the
+# downloaded `aib` with the right digest, or the install fails before the
+# wrapper is ever run. publish-wrapper.yml writes it with `sha256sum aib`.
+WRAPPER_CHECKSUM_ASSET = "aib.sha256"
+WRAPPER_CHECKSUM_LINE_RE = re.compile(r"^(?P<digest>[0-9a-f]{64})\s+\*?(?P<name>\S+)$")
 # `curl … -o <dest> <url>`, after backslash continuations are folded, and the
 # `"<digest>  <dest>"` line that pins what that download must contain. Both
 # forms the Containerfile uses -- `echo "…" >` and `printf '%s\n' "…" …` --
@@ -48,12 +63,24 @@ GITHUB_REPO_URL_RE = re.compile(r"^(?:https://|git@)github\.com[/:](?P<slug>[^/]
 # runs that motivated #129 were 2, 3, 4 and 1 commits behind; this is roughly
 # a season of unattended drift, not a week of it.
 SNAPSHOT_DRIFT_FAILURE_COMMITS = 25
-# github_api_json() has passed timeout=20 since it was written; the subprocess
-# calls beside it had none, so a hung git or gh held the weekly job open until
-# GitHub's own six-hour limit killed it. Generous, because these are real
-# network round trips on a shared runner -- this is a hang guard, not a
-# latency budget.
+# Every urlopen() in this module passes this. It has been 20 since
+# github_api_json() was written; a name rather than a literal so a test can
+# shrink it and hit a real hanging socket instead of a patched urlopen.
+NETWORK_TIMEOUT_SECONDS = 20
+# The subprocess calls beside those urlopen() calls had no timeout at all, so
+# a hung git or gh held the weekly job open until GitHub's own six-hour limit
+# killed it. Generous, because these are real network round trips on a shared
+# runner -- this is a hang guard, not a latency budget.
 SUBPROCESS_TIMEOUT_SECONDS = 120
+# What a request can raise that is neither an HTTP status nor a URLError.
+# urllib wraps a failure to *connect* in URLError, but once the socket is up
+# a read that times out is builtins.TimeoutError and a peer that drops the
+# connection is ConnectionResetError -- both OSError, neither URLError -- and
+# a response cut short mid-body is http.client.IncompleteRead, which is not an
+# OSError at all. Every helper below caught URLError only, so one slow read
+# from api.github.com or ghcr.io escaped every caller's RuntimeError handling
+# and took the weekly audit down with a traceback instead of an advisory (#350).
+NETWORK_ERRORS = (OSError, http.client.HTTPException)
 # Every media type a registry may answer a manifest request with. Asking for
 # all four matters: ghcr.io serves the brew payload as an OCI image index, and
 # a request that does not accept indexes is answered with a converted
@@ -316,6 +343,13 @@ def audit_upstream_drift(source: TemplateSource) -> tuple[list[str], list[str]]:
     return ([drift.message], []) if drift.blocking else ([], [drift.message])
 
 
+def describe_network_error(exc: BaseException) -> str:
+    # URLError keeps the socket error in .reason and prints itself as
+    # "<urlopen error ...>", which is noise in an advisory. Everything else
+    # NETWORK_ERRORS covers says what happened in its own str().
+    return str(exc.reason) if isinstance(exc, urllib.error.URLError) else str(exc)
+
+
 def github_api_json(url: str) -> object:
     headers = {
         "Accept": "application/vnd.github+json",
@@ -326,15 +360,15 @@ def github_api_json(url: str) -> object:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(request, timeout=NETWORK_TIMEOUT_SECONDS) as response:
             return json.load(response)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise RuntimeError(f"Invalid JSON response from GitHub: {exc}") from exc
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace").strip()
         raise RuntimeError(detail or f"HTTP {exc.code}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(str(exc.reason)) from exc
+    except NETWORK_ERRORS as exc:
+        raise RuntimeError(describe_network_error(exc)) from exc
 
 
 def query_latest_github_semver_tag(action: str) -> str | None:
@@ -503,6 +537,12 @@ def run_audit(
     upstream having moved this week; it is nobody having looked in months,
     while every generated repo ships the stale template. Red then means what
     red should mean, and it cannot recur weekly the way a flat comparison did.
+
+    One network check reports a failure outright: the `aib` attached to the
+    latest release not being the contrib/aib on this checkout. That is not
+    upstream moving, it is this repository's own release trailing its own
+    `main` while the docs describe the newer wrapper, and only a release
+    cut here clears it -- see audit_wrapper_release().
     """
     findings = audit_local_snapshot(repo_root)
     advisories: list[str] = []
@@ -538,6 +578,11 @@ def run_audit(
         # reads rather than downloads but age the same way.
         advisories.extend(audit_brew_image_pin())
         advisories.extend(audit_disk_builder_image_pin())
+        # Same gate, different bucket: the release asset trailing contrib/aib
+        # is the repo contradicting itself, so it fails rather than advises.
+        wrapper_findings, wrapper_advisories = audit_wrapper_release(repo_root)
+        findings.extend(wrapper_findings)
+        advisories.extend(wrapper_advisories)
     return findings, advisories
 
 
@@ -569,12 +614,12 @@ def fetch_sha256(url: str) -> str:
         url, headers={"User-Agent": "atomic-image-builder-maintenance-audit"}
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(request, timeout=NETWORK_TIMEOUT_SECONDS) as response:
             return hashlib.sha256(response.read()).hexdigest()
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"HTTP {exc.code}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(str(exc.reason)) from exc
+    except NETWORK_ERRORS as exc:
+        raise RuntimeError(describe_network_error(exc)) from exc
 
 
 def audit_container_trust_roots(repo_root: Path) -> list[str]:
@@ -646,10 +691,10 @@ def resolve_registry_tag_digest(registry: str, repository: str, tag: str) -> str
             response_headers = head_registry_manifest(url, {**headers, "Authorization": f"Bearer {token}"})
         except urllib.error.HTTPError as retry_exc:
             raise RuntimeError(f"HTTP {retry_exc.code}") from retry_exc
-        except urllib.error.URLError as retry_exc:
-            raise RuntimeError(str(retry_exc.reason)) from retry_exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(str(exc.reason)) from exc
+        except NETWORK_ERRORS as retry_exc:
+            raise RuntimeError(describe_network_error(retry_exc)) from retry_exc
+    except NETWORK_ERRORS as exc:
+        raise RuntimeError(describe_network_error(exc)) from exc
     digest = response_headers.get("Docker-Content-Digest")
     if not digest:
         raise RuntimeError(f"{registry} returned no Docker-Content-Digest for {repository}:{tag}")
@@ -660,7 +705,7 @@ def head_registry_manifest(url: str, headers: Mapping[str, str]) -> Mapping[str,
     # Lets urllib's own errors escape: the caller decides whether a 401 is a
     # failure or an invitation to fetch a token.
     request = urllib.request.Request(url, headers=dict(headers), method="HEAD")
-    with urllib.request.urlopen(request, timeout=20) as response:
+    with urllib.request.urlopen(request, timeout=NETWORK_TIMEOUT_SECONDS) as response:
         return response.headers
 
 
@@ -681,12 +726,12 @@ def fetch_registry_pull_token(challenge: str, registry: str, repository: str) ->
         headers={"User-Agent": USER_AGENT},
     )
     try:
-        with urllib.request.urlopen(token_request, timeout=20) as response:
+        with urllib.request.urlopen(token_request, timeout=NETWORK_TIMEOUT_SECONDS) as response:
             payload = json.load(response)
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"HTTP {exc.code} requesting a pull token") from exc
-    except (urllib.error.URLError, ValueError) as exc:
-        raise RuntimeError(str(exc)) from exc
+    except (*NETWORK_ERRORS, ValueError) as exc:
+        raise RuntimeError(describe_network_error(exc)) from exc
     token = None
     if isinstance(payload, dict):
         token = payload.get("token") or payload.get("access_token")
@@ -767,6 +812,174 @@ def audit_disk_builder_image_pin() -> list[str]:
     )
 
 
+def query_latest_release(repo: str) -> tuple[str, dict[str, str]]:
+    """Return (tag, {asset name: download URL}) for a repository's latest release.
+
+    The API's `latest` is the release `releases/latest/download/<asset>` --
+    the URL in the install docs -- redirects to: the newest published release
+    that is neither a draft nor a prerelease. Asking the API rather than
+    following that redirect is what puts the tag in the finding, so it can be
+    acted on without a browser.
+    """
+    payload = github_api_json(f"https://api.github.com/repos/{repo}/releases/latest")
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Unexpected release payload for {repo}")
+    tag = payload.get("tag_name")
+    assets = payload.get("assets")
+    if not isinstance(tag, str) or not tag or not isinstance(assets, list):
+        raise RuntimeError(f"Unexpected release payload for {repo}")
+    urls: dict[str, str] = {}
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        name = asset.get("name")
+        url = asset.get("browser_download_url")
+        if isinstance(name, str) and isinstance(url, str):
+            urls[name] = url
+    return tag, urls
+
+
+def audit_wrapper_release(repo_root: Path) -> tuple[list[str], list[str]]:
+    """Return (failures, advisories) for the wrapper the latest release serves.
+
+    The recommended install downloads `aib` from the latest release and checks
+    it against the `aib.sha256` published beside it. That check proves the
+    download is the file the release carries; nothing proved the release
+    carries the file `main` describes. It did not (#356): the install path
+    moved to the release URL without a release being cut, so for weeks the
+    docs described a wrapper that verifies the image and withholds the token
+    from an unverified one, while every user following them installed the
+    v0.9.5 wrapper, which does neither.
+
+    A failure, not an advisory, when the digests differ. The other network
+    checks advise because something outside this repository moved and nothing
+    is wrong at the moment they fire. Here nothing outside moved: this is the
+    repository's own release trailing its own `main`, every new install is
+    affected for as long as it lasts, and the one thing that clears it -- a
+    release -- is cut here. It cannot recur weekly on its own either, only
+    after a change to contrib/aib that nobody released, which is the neglect
+    a red audit exists to report. Being unable to check stays an advisory,
+    as everywhere else: blocking on a rate limit is how a rate limit becomes
+    a red audit.
+
+    A release the install cannot complete from is also a failure: no `aib`
+    asset, no `aib.sha256` beside it, or a checksum that does not name the
+    `aib` it sits beside with the digest of it. The install docs fetch both by
+    name and pipe the second into `sha256sum -c`, so any of those is a
+    recommended install that stops with a 404 or a checksum mismatch, and
+    a green audit over it would be reporting on a wrapper nobody can install.
+    Which repair the finding names depends on the tag: publish-wrapper.yml's
+    dispatch packages the tag's own contrib/aib, so it repairs the release
+    only while that is still the wrapper on this checkout; otherwise the
+    dispatch would attach an outdated wrapper and the next audit would trade
+    this finding for the digest mismatch above, and a release is the fix.
+    """
+    source = repo_root / WRAPPER_SOURCE
+    try:
+        expected = hashlib.sha256(source.read_bytes()).hexdigest()
+    except OSError as exc:
+        return [], [f"Unable to read {WRAPPER_SOURCE}: {exc}"]
+    try:
+        tag, assets = query_latest_release(WRAPPER_RELEASE_REPO)
+    except RuntimeError as exc:
+        return [], [f"Unable to query the latest release of {WRAPPER_RELEASE_REPO}: {exc}"]
+    missing = [name for name in (WRAPPER_ASSET, WRAPPER_CHECKSUM_ASSET) if name not in assets]
+    if missing:
+        names = " or ".join(f"`{name}`" for name in missing)
+        return [
+            f"Release {tag} of {WRAPPER_RELEASE_REPO} carries no {names} asset, so the recommended "
+            f"wrapper install in README.md fails. {describe_wrapper_release_repair(tag, expected)}"
+        ], []
+    try:
+        published = hashlib.sha256(fetch_bytes(assets[WRAPPER_ASSET])).hexdigest()
+        checksum = fetch_bytes(assets[WRAPPER_CHECKSUM_ASSET]).decode("utf-8", errors="replace")
+    except RuntimeError as exc:
+        return [], [f"Unable to download the `{WRAPPER_ASSET}` release assets: {exc}"]
+    recorded = parse_wrapper_checksum(checksum)
+    if recorded is None:
+        return [
+            f"The `{WRAPPER_CHECKSUM_ASSET}` attached to release {tag} does not record a sha256 for a "
+            f"file named `{WRAPPER_ASSET}`, so the recommended install's `sha256sum -c` fails. "
+            f"{describe_wrapper_release_repair(tag, expected)}"
+        ], []
+    if recorded != published:
+        return [
+            f"The `{WRAPPER_CHECKSUM_ASSET}` attached to release {tag} records {recorded}, but the "
+            f"`{WRAPPER_ASSET}` beside it hashes to {published}, so the recommended install's "
+            f"`sha256sum -c` fails. {describe_wrapper_release_repair(tag, expected)}"
+        ], []
+    if published == expected:
+        return [], []
+    return [
+        f"The `{WRAPPER_ASSET}` attached to release {tag} is not the {WRAPPER_SOURCE} on this "
+        f"checkout: release sha256 {published}, checkout {expected}. The recommended install "
+        "serves the release, so new users are running a wrapper the docs no longer describe. "
+        'Cut a release -- maintainer_docs/MAINTAINER.md, "Cutting a release".'
+    ], []
+
+
+def fetch_bytes(url: str) -> bytes:
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "atomic-image-builder-maintenance-audit"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(str(exc.reason)) from exc
+
+
+def parse_wrapper_checksum(text: str) -> str | None:
+    """Return the digest `sha256sum -c` would check the downloaded `aib` against.
+
+    The install saves the download under the asset's own name and runs the
+    checksum file through `sha256sum -c`, which looks up each line's file by
+    the name on that line. A line for any other name -- `contrib/aib`, say,
+    from a checksum written outside publish-wrapper.yml -- is a file that
+    does not exist, and the check fails. None when no line names `aib`.
+    """
+    for line in text.splitlines():
+        match = WRAPPER_CHECKSUM_LINE_RE.match(line.strip())
+        if match and match.group("name") == WRAPPER_ASSET:
+            return match.group("digest")
+    return None
+
+
+def describe_wrapper_release_repair(tag: str, expected: str) -> str:
+    """Say what repairs a release the wrapper install cannot complete from.
+
+    publish-wrapper.yml's dispatch checks out the tag it is given and attaches
+    that tag's contrib/aib, so it is the repair only while the tag's wrapper
+    is still the one on this checkout. When `main` has moved on, the dispatch
+    would attach an outdated wrapper, and the next audit would swap this
+    finding for the digest mismatch -- a release is the only thing that
+    clears both. When the tag's wrapper cannot be fetched, the release is
+    the repair that cannot be wrong.
+    """
+    url = f"https://raw.githubusercontent.com/{WRAPPER_RELEASE_REPO}/{tag}/{WRAPPER_SOURCE.as_posix()}"
+    try:
+        tagged = hashlib.sha256(fetch_bytes(url)).hexdigest()
+    except RuntimeError as exc:
+        return (
+            f"Unable to download {url} to tell whether the tag's {WRAPPER_SOURCE} is this "
+            f"checkout's ({exc}). Cut a release -- maintainer_docs/MAINTAINER.md, "
+            '"Cutting a release"; a `publish-wrapper.yml` dispatch on the tag would attach '
+            "whatever wrapper the tag has."
+        )
+    if tagged == expected:
+        return (
+            f"Run `gh workflow run publish-wrapper.yml -f tag={tag}`, which attaches the tag's "
+            f"{WRAPPER_SOURCE} and a checksum written from it."
+        )
+    return (
+        f"The {WRAPPER_SOURCE} at tag {tag} (sha256 {tagged}) is not this checkout's ({expected}) "
+        "either, so a `publish-wrapper.yml` dispatch on the tag would attach an outdated wrapper. "
+        'Cut a release -- maintainer_docs/MAINTAINER.md, "Cutting a release".'
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Audit bundled template snapshot drift and workflow action pin coverage.")
     parser.add_argument(
@@ -785,7 +998,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "Also query upstream and report action pins that trail newer semver tags or no "
-            "longer match the tag or branch they name. Reported as advisories, not failures."
+            "longer match the tag or branch they name. Reported as advisories, not failures. "
+            "Also fails if the `aib` attached to the latest release is not contrib/aib."
         ),
     )
     args = parser.parse_args(argv)

@@ -243,6 +243,8 @@ Both report as **advisories**: they print, but they do not fail the run. A pin t
 
 This matters more than it looks. Generated repos ship `.github/dependabot.yml`, so a stale pin here becomes a Dependabot PR in someone's brand-new repo within a minute of creating it.
 
+The same flag also downloads the `aib` attached to the latest release and compares it to `contrib/aib`, after checking that the `aib.sha256` beside it exists and matches — the recommended install verifies the pair, so a release the install cannot complete from fails too. The digest comparison **fails** the run when they differ: the recommended install fetches the wrapper from the release, so a wrapper change merged without a release leaves every new user running the old one while the docs describe the new one (see [#356](https://github.com/Danathar/atomic-image-builder/issues/356)). Nothing outside the repo moved and only a release clears it, which is what makes it a failure rather than an advisory. `maintainer_docs/MAINTAINER.md`'s *Cutting a release* says what to do.
+
 The audit runs weekly and on demand through `.github/workflows/maintenance-audit.yml`, with `--check-action-updates` enabled and the output written to the run summary.
 
 ## Releases and the Homebrew Formula

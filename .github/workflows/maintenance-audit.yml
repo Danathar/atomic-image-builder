@@ -47,7 +47,8 @@ jobs:
       # which is neglect rather than movement and cannot recur weekly. What
       # else fails here is the repo contradicting itself -- an action outside
       # the pin tables, a workflow SHA that disagrees with them, a missing
-      # .template-source.
+      # .template-source, a latest release whose `aib` asset is not the
+      # contrib/aib the docs describe (#356).
       - name: Run maintenance audit
         env:
           GH_TOKEN: ${{ github.token }}

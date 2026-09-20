@@ -9,7 +9,7 @@
 # Install:
 #   curl -fsSLO https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib &&
 #   curl -fsSL  https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib.sha256 | sha256sum -c - &&
-#   install -m 755 aib ~/.local/bin/aib && rm aib
+#   install -D -m 755 aib ~/.local/bin/aib && rm aib
 #
 #   Checked, not merely downloaded, and the `&&` is what makes the difference:
 #   pasted as three unchained lines, a `FAILED` checksum is printed and then

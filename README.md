@@ -33,7 +33,7 @@ aib-tool
 ```bash
 curl -fsSLO https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib &&
 curl -fsSL  https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib.sha256 | sha256sum -c - &&
-install -m 755 aib ~/.local/bin/aib && rm aib
+install -D -m 755 aib ~/.local/bin/aib && rm aib
 aib
 ```
 

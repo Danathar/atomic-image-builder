@@ -35,6 +35,7 @@ naming a denied file.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import sys
 
@@ -94,6 +95,11 @@ OPERATORS = frozenset({"&&", "||", ";", "|", "&", "(", ")", "{", "}", "\n"})
 
 VERB_PREFIXES = ("$(", "(", "`", "<(", ">(")
 
+# The shape of every brace expansion bash performs: a `{`, then a `,` or a
+# `..` somewhere after it, then a `}` somewhere after that. See
+# brace_would_expand().
+EXPANDING_BRACE = re.compile(r"\{.*(?:,|\.\.).*\}", re.DOTALL)
+
 
 def refused_long(token: str) -> bool:
     """Is this token a long option that reaches outside the index?
@@ -127,19 +133,43 @@ def refused_short(token: str) -> bool:
     return False
 
 
-def brace_word(token: str) -> bool:
+def brace_would_expand(token: str) -> bool:
     """Does bash brace-expand this token before git ever sees it?
 
     shlex does no brace expansion, so `--outpu{t,t}=/tmp/x` reaches this hook
     as one word while bash hands git two: `--output=/tmp/x --output=/tmp/x`.
     Every refused spelling can be reassembled this way -- `--no-inde{x,x}`,
     `-aO{,}order`, `{/etc/passwd,x}` -- so the word the gate reads matches none
-    of the tests above while the words git runs do. A `{` or `}` in a git word
-    is refused rather than expanded here: modelling bash's expansion in full
-    (nesting, `{1..9}` sequences, quoting) is where the next hole hides, and no
-    ordinary `git diff` / `git log` argument carries an unquoted brace.
+    of the tests above while the words git runs do. Such a word is refused
+    rather than expanded: modelling bash's expansion in full (nesting,
+    `{1..9}` sequences, quoting) is where the next hole hides.
+
+    Not every brace, though. Bash expands a brace only when a comma or a `..`
+    range sits inside it, and leaves any other brace as a literal -- which is
+    what git's own `@{...}` revision syntax relies on: `HEAD@{1}`,
+    `main@{upstream}`, `@{-1}`, `@{2.days.ago}`. Those reach git as typed and
+    touch none of the arguments this hook refuses, so refusing them blocked the
+    ordinary diff against the previous commit for nothing. A `{` that never
+    closes is a literal to bash as well, and passes.
+
+    The test is deliberately cruder than bash's: a `{`, then a `,` or a `..`
+    anywhere after it, then a `}` anywhere after that. No nesting or matching
+    is tracked. A depth counter that closed a brace at the first `}` missed
+    the comma in `{--src-prefix=x},--no-index}`, which bash expands to
+    `--src-prefix=x}` and `--no-index` because it pairs the `{` with the
+    *last* `}` it can; every refinement toward bash's real rule is a chance
+    to disagree with it in some other direction. Over-refusing is the safe
+    direction: `HEAD@{2}..HEAD@{1}` is refused too, though bash would leave
+    it alone, and the refusal says to write `HEAD~2..HEAD~1`. `${VAR}` is
+    refused as a runtime-built argument this hook cannot inspect.
+
+    The token is bash's word with the quote marks removed, which is what
+    shlex hands back. Removing quotes never removes a brace, a comma or a
+    dot, so a quoted comma (`{a",",b}`) or a quoted operator (`{a';',b}`) --
+    both of which bash still expands -- cannot hide the shape; a fully
+    quoted `"{a,b}"`, which bash leaves alone, is refused as the price.
     """
-    return "{" in token or "}" in token
+    return "${" in token or EXPANDING_BRACE.search(token) is not None
 
 
 def unsafe_operand(token: str) -> bool:
@@ -242,11 +272,15 @@ def refusal(command: str) -> str | None:
         if command_name != "git":
             continue
         for token in segment:
-            if brace_word(token):
+            if brace_would_expand(token):
                 return (
                     f"{token} carries a brace that bash expands before git runs, and "
                     "the expansion can spell --output, --no-index, -O or a path outside "
-                    "the checkout that none of the other tests see in the word as typed"
+                    "the checkout that none of the other tests see in the word as typed; "
+                    "a brace with no comma and no .. after it before a }, such as "
+                    "HEAD@{1}, is a literal to bash and is not refused, while a .. "
+                    "between two reflog entries (HEAD@{2}..HEAD@{1}) is refused with "
+                    "the rest, so write HEAD~2..HEAD~1 instead"
                 )
         for name in names:
             if name in REFUSED_ENVIRONMENT:
