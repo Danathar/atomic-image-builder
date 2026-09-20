@@ -183,7 +183,13 @@ BLUEBUILD_RECIPE_SCHEMA = "https://schema.blue-build.org/recipe-v1.json"
 # service is real, but they do stop obviously unsafe values from becoming shell
 # script content later.
 PACKAGE_TOKEN_RE = re.compile(r"^[A-Za-z0-9._+:-]+$")
-COPR_REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+# What `dnf5 copr enable` takes: the owner is a username or a @groupname
+# (@caddy/caddy), and the project may be a project directory with colons
+# (owner/project:custom:123). The "@" is allowed only as the first character
+# and the colons only after the slash, so this stays a repo spec and not a
+# shell or YAML surprise -- shell_quote and yaml_scalar quote it downstream
+# regardless.
+COPR_REPO_RE = re.compile(r"^@?[A-Za-z0-9._-]+/[A-Za-z0-9._:-]+$")
 SERVICE_TOKEN_RE = re.compile(r"^[A-Za-z0-9@._:+-]+$")
 # The repo name becomes the image name in ghcr.io/<owner>/<repo>, so it has to
 # satisfy the container-reference grammar as well as GitHub's naming rules.
@@ -2685,7 +2691,8 @@ class App:
             "When To Use COPR",
             "COPR is an extra community package source outside the normal Fedora and image-provider repos.",
             "Most users can skip this. Only use it if you know a package you need comes from that COPR.",
-            "Example: kwizart/fedy. Leave the repo field empty if you want to go back.",
+            "Example: kwizart/fedy. A group-owned COPR starts with @, like @caddy/caddy.",
+            "Leave the repo field empty if you want to go back.",
         )
         print()
         repo = self.gum.input(
@@ -2697,7 +2704,7 @@ class App:
         if not repo:
             return
         if not COPR_REPO_RE.fullmatch(repo):
-            self.gum.error("Enter the COPR repo as owner/project.")
+            self.gum.error("Enter the COPR repo as owner/project or @group/project.")
             return
         proposed_copr_repos = unique([*self.config.copr_repos, repo])
         print()
