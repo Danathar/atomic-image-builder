@@ -1274,38 +1274,91 @@ def patch_cosign_compatibility(workflow_text: str) -> str:
     return "\n".join(lines)
 
 
-def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[str, str]]) -> str:
-    lines = workflow_text.splitlines()
-    missing_lines: list[str] = []
-    # Job-level env is at 6 spaces (4 for job indent + 2 for key).  We must
-    # check at this exact indentation, otherwise a step-level env entry with
-    # the same key fools the check into thinking the job-level one exists.
-    job_env_prefix = "      "  # 6 spaces
-    for name, value in entries:
-        wanted = f"{name}: {value}"
-        if not any(line == f"{job_env_prefix}{wanted}" for line in lines):
-            missing_lines.append(f"{job_env_prefix}{wanted}")
-    if not missing_lines:
-        return workflow_text
+def workflow_job_ranges(lines: Sequence[str]) -> list[tuple[str, int, int]]:
+    """Return (name, start, end) for every job in a workflow, as line indexes.
 
-    insertion = "".join(f"{line}\n" for line in missing_lines)
-    if re.search(r"^    env:\n", workflow_text, flags=re.MULTILINE):
-        return re.sub(
-            r"^    env:\n",
-            "    env:\n" + insertion,
-            workflow_text,
-            count=1,
-            flags=re.MULTILINE,
-        )
-    if re.search(r"^    steps:\n", workflow_text, flags=re.MULTILINE):
-        return re.sub(
-            r"^    steps:\n",
-            "    env:\n" + insertion + "    steps:\n",
-            workflow_text,
-            count=1,
-            flags=re.MULTILINE,
-        )
-    return workflow_text
+    A job is a key at two-space indentation inside the top-level `jobs:`
+    block. Its range runs from that key up to the next job key, or to the
+    first line that leaves the block. Blank lines and comments end nothing,
+    so a job keeps the trailing blank line that separates it from the next.
+    """
+    ranges: list[tuple[str, int, int]] = []
+    in_jobs = False
+    name: str | None = None
+    start = 0
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent == 0:
+            if name is not None:
+                ranges.append((name, start, index))
+                name = None
+            in_jobs = workflow_block_key(stripped) == "jobs"
+            continue
+        if in_jobs and indent == 2:
+            key = workflow_key(stripped)
+            if key is None:
+                continue
+            if name is not None:
+                ranges.append((name, start, index))
+            name, start = key, index
+    if name is not None:
+        ranges.append((name, start, len(lines)))
+    return ranges
+
+
+def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[str, str]]) -> str:
+    """Define each variable, at job level, in every job that reads it.
+
+    A job reads a variable when one of its lines refers to `env.<NAME>` --
+    the shape of the signing guard's step condition. Defining the variable
+    anywhere else does nothing: job env does not reach across jobs, so a
+    guard in `build_push` testing a variable defined in a `lint` job the
+    owner added ahead of it is false forever, both cosign steps are skipped,
+    and the image is published unsigned while the run stays green. That is
+    what searching the whole file for the first `env:` did (#344).
+
+    A job that reads the variable but has neither an `env:` nor a `steps:`
+    key at the expected indentation cannot be patched, and the only outcome
+    of leaving it is the silent-unsigned one above. So that case fails
+    closed with a message saying what to add by hand. A workflow in which
+    no job reads the variable needs nothing and is returned untouched.
+    """
+    lines = workflow_text.splitlines()
+    changed = False
+    for name, value in entries:
+        # Job-level env is at 6 spaces (4 for job indent + 2 for key).  We must
+        # check at this exact indentation, otherwise a step-level env entry with
+        # the same key fools the check into thinking the job-level one exists.
+        wanted = f"      {name}: {value}"
+        reads = re.compile(rf"\benv\.{re.escape(name)}\b")
+        # Walk the jobs back to front so an insertion never shifts a range
+        # that is still to be visited.
+        for job_name, start, end in reversed(workflow_job_ranges(lines)):
+            job = lines[start:end]
+            if not any(reads.search(line) for line in job if not line.lstrip().startswith("#")):
+                continue
+            if wanted in job:
+                continue
+            if "    env:" in job:
+                lines.insert(start + job.index("    env:") + 1, wanted)
+            elif "    steps:" in job:
+                steps_at = start + job.index("    steps:")
+                lines[steps_at:steps_at] = ["    env:", wanted]
+            else:
+                raise CommandError(
+                    f"This workflow's '{job_name}' job reads env.{name}, but the job has no 'env:' "
+                    f"or 'steps:' key where this tool expects one, so it cannot define the variable "
+                    f"there. Left undefined, every condition that tests it is false and the steps "
+                    f"it guards are skipped. Add '{name}: {value}' under that job's 'env:' by hand, "
+                    f"then run this update again."
+                )
+            changed = True
+    if not changed:
+        return workflow_text
+    return "\n".join(lines) + ("\n" if workflow_text.endswith("\n") else "")
 
 
 class CommandError(RuntimeError):

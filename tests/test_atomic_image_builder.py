@@ -511,16 +511,16 @@ class BuilderTests(unittest.TestCase):
                     uses: actions/checkout@v4
                   - name: Install Cosign
                     uses: sigstore/cosign-installer@v3
-                    if: github.event_name != 'pull_request' && env.COSIGN_PRIVATE_KEY != ''
+                    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.COSIGN_PRIVATE_KEY != ''
                   - name: Sign container image
-                    if: github.event_name != 'pull_request' && env.COSIGN_PRIVATE_KEY != ''
+                    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.COSIGN_PRIVATE_KEY != ''
                     run: cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/example/test:latest
                     env:
                       COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
             """
         )
         patched = app.patch_container_workflow(workflow)
-        # The job-level env block must now contain COSIGN_PRIVATE_KEY
+        # The job-level env block must now contain SIGNING_ENABLED
         job_env_lines = []
         in_job_env = False
         for line in patched.splitlines():
@@ -899,6 +899,79 @@ class BuilderTests(unittest.TestCase):
             migrated.splitlines(),
         )
         self.assertEqual(app.patch_container_workflow(migrated), migrated)
+
+    @staticmethod
+    def job_env_entries_by_job(workflow: str) -> dict[str, list[str]]:
+        """Job-level env entries keyed by job name, compared by whole line.
+
+        job_env_entries() reads the first `env:` block in the file, which is
+        the right question for a one-job workflow and the wrong one here: the
+        bug under test is precisely that the entry lands in the first job.
+        """
+        entries: dict[str, list[str]] = {}
+        job: str | None = None
+        inside = False
+        for line in workflow.splitlines():
+            if line.startswith("  ") and not line.startswith("   ") and line.rstrip().endswith(":"):
+                job = line.strip()[:-1]
+                entries[job] = []
+                inside = False
+                continue
+            if job is None:
+                continue
+            if line == "    env:":
+                inside = True
+                continue
+            if inside and line.startswith("      ") and ":" in line:
+                entries[job].append(line.strip())
+            elif inside:
+                inside = False
+        return entries
+
+    def test_signing_guard_is_defined_in_the_job_that_reads_it_not_the_first_job(self) -> None:
+        # An owner adding a job ahead of build_push -- a lint job is the
+        # everyday case -- is the shape that published unsigned images (#344).
+        # Job env does not reach across jobs, so a SIGNING_ENABLED defined in
+        # `lint` leaves both guards in build_push false: cosign never runs,
+        # the run stays green, and the presence check then finds the misplaced
+        # line and reports nothing to do on every later update.
+        app = self.make_app()
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        lint_with_env = textwrap.dedent(
+            """\
+              lint:
+                runs-on: ubuntu-latest
+                env:
+                  LINT_LEVEL: strict
+                steps:
+                  - run: echo lint
+
+            """
+        )
+        lint_without_env = textwrap.dedent(
+            """\
+              lint:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: echo lint
+
+            """
+        )
+        for label, lint in (("env: present", lint_with_env), ("env: absent", lint_without_env)):
+            with self.subTest(preceding_job=label):
+                workflow = snapshot.replace("jobs:\n", "jobs:\n" + textwrap.indent(lint, "  "), 1)
+                patched = app.patch_container_workflow(workflow)
+                by_job = self.job_env_entries_by_job(patched)
+                self.assertEqual(
+                    by_job["build_push"],
+                    ["SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}"],
+                    by_job,
+                )
+                self.assertNotIn("SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}", by_job["lint"])
+                self.assertEqual(patched.count("env.SIGNING_ENABLED == 'true'"), 2)
+                # The lint job is the owner's, and the update must not touch it.
+                self.assertIn(textwrap.indent(lint, "  "), patched)
+                self.assertEqual(app.patch_container_workflow(patched), patched)
 
     def test_strip_job_env_entries_leaves_step_level_entries_alone(self) -> None:
         # Six spaces is the job level and eight or more is a step's. Matching
@@ -1641,10 +1714,106 @@ class BuilderTests(unittest.TestCase):
         line = "        reuses: actions/checkout@v4"
         self.assertEqual(pin_action_uses_line(line), line)
 
-    def test_ensure_workflow_job_env_entries_returns_unchanged_without_env_or_steps_anchor(self) -> None:
-        workflow_text = "name: Build\njobs:\n  build:\n    name: build\n"
+    def test_ensure_workflow_job_env_entries_returns_unchanged_when_no_job_reads_the_variable(self) -> None:
+        # Nothing tests env.FOO, so there is nothing an undefined FOO can break
+        # and nothing to add. This is also the shape of a workflow whose owner
+        # removed the signing steps: an update must keep working there.
+        workflow_text = "name: Build\njobs:\n  build:\n    name: build\n    steps:\n      - run: echo hi\n"
         result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
         self.assertEqual(result, workflow_text)
+
+    def test_ensure_workflow_job_env_entries_defines_the_variable_in_each_job_that_reads_it(self) -> None:
+        # Two jobs ahead of the reader: one with an env: block, one without.
+        # Neither may receive the entry, and the reader gets it whichever
+        # anchor it has. The second reader shares the variable and gets its
+        # own copy, because job env is per job.
+        workflow_text = textwrap.dedent(
+            """\
+            name: Build
+            jobs:
+              lint:
+                env:
+                  LINT_LEVEL: strict
+                steps:
+                  - run: echo lint
+              plain:
+                steps:
+                  - run: echo plain
+              build:
+                steps:
+                  - if: env.FOO == 'true'
+                    run: echo build
+              verify:
+                env:
+                  OTHER: 1
+                steps:
+                  - if: env.FOO == 'true'
+                    run: echo verify
+            """
+        )
+        result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
+        self.assertEqual(
+            result,
+            textwrap.dedent(
+                """\
+                name: Build
+                jobs:
+                  lint:
+                    env:
+                      LINT_LEVEL: strict
+                    steps:
+                      - run: echo lint
+                  plain:
+                    steps:
+                      - run: echo plain
+                  build:
+                    env:
+                      FOO: bar
+                    steps:
+                      - if: env.FOO == 'true'
+                        run: echo build
+                  verify:
+                    env:
+                      FOO: bar
+                      OTHER: 1
+                    steps:
+                      - if: env.FOO == 'true'
+                        run: echo verify
+                """
+            ),
+        )
+        self.assertEqual(ensure_workflow_job_env_entries(result, [("FOO", "bar")]), result)
+
+    def test_ensure_workflow_job_env_entries_ignores_a_copy_in_the_wrong_job(self) -> None:
+        # The shape an earlier update left behind: the entry in the first job,
+        # the guard in a later one. The presence check used to find this copy
+        # and report nothing to do, forever. The reader must still get its own.
+        workflow_text = textwrap.dedent(
+            """\
+            jobs:
+              lint:
+                env:
+                  FOO: bar
+                steps:
+                  - run: echo lint
+              build:
+                steps:
+                  - if: env.FOO == 'true'
+                    run: echo build
+            """
+        )
+        result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
+        self.assertIn("  build:\n    env:\n      FOO: bar\n    steps:\n", result)
+
+    def test_ensure_workflow_job_env_entries_fails_closed_when_the_reading_job_has_no_anchor(self) -> None:
+        # A job that reads the variable but offers nowhere to define it is the
+        # silent-unsigned outcome waiting to happen: the guard is false, the
+        # steps are skipped, the run is green. Returning the text unchanged
+        # here is what maintenance_notes.txt warns is hard to notice, so the
+        # update stops and says what to add by hand instead.
+        workflow_text = "jobs:\n  build:\n      steps:\n        - if: env.FOO == 'true'\n          run: echo build\n"
+        with self.assertRaisesRegex(CommandError, r"'build' job reads env\.FOO.*Add 'FOO: bar'"):
+            ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
 
     def test_validate_config_rejects_unsupported_base_image(self) -> None:
         app = self.make_app()
