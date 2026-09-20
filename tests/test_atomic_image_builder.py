@@ -76,6 +76,7 @@ from atomic_image_builder import (
     pinned_action,
     read_os_release_fields,
     string_list,
+    workflow_job_ranges,
 )
 
 
@@ -512,16 +513,16 @@ class BuilderTests(unittest.TestCase):
                     uses: actions/checkout@v4
                   - name: Install Cosign
                     uses: sigstore/cosign-installer@v3
-                    if: github.event_name != 'pull_request' && env.COSIGN_PRIVATE_KEY != ''
+                    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.COSIGN_PRIVATE_KEY != ''
                   - name: Sign container image
-                    if: github.event_name != 'pull_request' && env.COSIGN_PRIVATE_KEY != ''
+                    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.COSIGN_PRIVATE_KEY != ''
                     run: cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/example/test:latest
                     env:
                       COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
             """
         )
         patched = app.patch_container_workflow(workflow)
-        # The job-level env block must now contain COSIGN_PRIVATE_KEY
+        # The job-level env block must now contain SIGNING_ENABLED
         job_env_lines = []
         in_job_env = False
         for line in patched.splitlines():
@@ -783,6 +784,7 @@ class BuilderTests(unittest.TestCase):
               build:
                 steps:
                   - name: Install Cosign
+                    uses: sigstore/cosign-installer@v3
                     with:
                       cosign-release: 'v2.6.3'
                   - name: Sign
@@ -809,6 +811,108 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("--use-signing-config=false", patched)
         self.assertEqual(patch_cosign_compatibility(patched), patched, "not idempotent")
         return patched
+
+    @staticmethod
+    def cosign_installer_step(release_line: str) -> str:
+        """The installer step as the snapshot writes it, around one input line."""
+        return (
+            "    steps:\n"
+            "      - name: Install Cosign\n"
+            "        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2\n"
+            "        with:\n"
+            "          # be careful when upgrading major versions\n"
+            f"{release_line}"
+        )
+
+    def test_patch_cosign_compatibility_raises_only_releases_below_the_floor(self) -> None:
+        # The rewrite is a migration for repos generated against Cosign 2.x.
+        # Before it checked the version it rewrote every value to the floor,
+        # so an owner who bumped past it lost the bump on the next update.
+        for release in ("v2.6.3", "v3.0.0", "v3.1.1", "3.1.0"):
+            with self.subTest(release=release):
+                text = self.cosign_installer_step(f"          cosign-release: '{release}'")
+                self.assertEqual(
+                    patch_cosign_compatibility(text),
+                    self.cosign_installer_step("          cosign-release: 'v3.1.2'"),
+                )
+
+    def test_patch_cosign_compatibility_leaves_newer_releases_alone(self) -> None:
+        for release in ("v3.1.2", "v3.2.0", "v3.10.1", "v4.0.0"):
+            with self.subTest(release=release):
+                text = self.cosign_installer_step(f"          cosign-release: '{release}'")
+                self.assertEqual(patch_cosign_compatibility(text), text)
+
+    def test_patch_cosign_compatibility_leaves_non_version_pins_alone(self) -> None:
+        # A branch name or a partial version is not something the floor can be
+        # compared against; guessing would overwrite a deliberate choice.
+        for release in ("main", "v3", "v3.2"):
+            with self.subTest(release=release):
+                text = self.cosign_installer_step(f'          cosign-release: "{release}"')
+                self.assertEqual(patch_cosign_compatibility(text), text)
+
+    def test_patch_cosign_compatibility_keeps_quotes_and_trailing_comment(self) -> None:
+        text = self.cosign_installer_step('          cosign-release: "v2.6.3"  # bumped by hand')
+        self.assertEqual(
+            patch_cosign_compatibility(text),
+            self.cosign_installer_step('          cosign-release: "v3.1.2"  # bumped by hand'),
+        )
+
+    def test_patch_cosign_compatibility_leaves_the_input_name_alone_outside_the_installer_step(self) -> None:
+        # The workflow is patched in place. Text that merely mentions the
+        # input -- an owner's shell command, a comment, another action that
+        # takes an input of that name -- is not the installer's pin, and
+        # rewriting it edits what the owner wrote. Only the installer step's
+        # own `with:` block is fair game; the below-floor pin there still moves.
+        workflow_text = textwrap.dedent(
+            """\
+            jobs:
+              build:
+                steps:
+                  - name: Say so
+                    run: echo "cosign-release: '2.6.3'"
+                  - name: Other tool
+                    uses: example/other-installer@v1
+                    with:
+                      cosign-release: '2.6.3'
+                  - name: Install Cosign
+                    uses: sigstore/cosign-installer@v3
+                    # cosign-release: '2.6.3' was the old pin
+                    with:
+                      cosign-release: '2.6.3'
+                    env:
+                      NOTE: "cosign-release: '2.6.3'"
+            """
+        )
+        patched = patch_cosign_compatibility(workflow_text)
+        expected = workflow_text.replace(
+            "        with:\n          cosign-release: '2.6.3'\n        env:",
+            "        with:\n          cosign-release: 'v3.1.2'\n        env:",
+        )
+        self.assertNotEqual(expected, workflow_text, "the fixture must carry the installer's pin")
+        self.assertEqual(patched, expected.rstrip("\n"))
+        self.assertEqual(patched.count("cosign-release: '2.6.3'"), 4)
+
+    def test_patch_container_workflow_keeps_newer_cosign_release(self) -> None:
+        # Through the real generated-repo path: the signing flags still land,
+        # and the owner's newer pin survives the update.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build:
+                steps:
+                  - name: Install Cosign
+                    uses: sigstore/cosign-installer@v3
+                    with:
+                      cosign-release: 'v4.0.0'
+                  - name: Sign
+                    run: cosign sign -y --key env://COSIGN_PRIVATE_KEY image:latest
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn("cosign-release: 'v4.0.0'", patched)
+        self.assertNotIn("v3.1.2", patched)
+        self.assertIn("--new-bundle-format=false", patched)
 
     def test_patch_cosign_compatibility_bundled_snapshot_shape(self) -> None:
         snapshot = (
@@ -861,6 +965,7 @@ class BuilderTests(unittest.TestCase):
               build:
                 steps:
                   - name: Install Cosign
+                    uses: sigstore/cosign-installer@v3
                     with:
                       cosign-release: 'v2.6.3'
                   - name: Sign
@@ -1002,6 +1107,79 @@ class BuilderTests(unittest.TestCase):
             migrated.splitlines(),
         )
         self.assertEqual(app.patch_container_workflow(migrated), migrated)
+
+    @staticmethod
+    def job_env_entries_by_job(workflow: str) -> dict[str, list[str]]:
+        """Job-level env entries keyed by job name, compared by whole line.
+
+        job_env_entries() reads the first `env:` block in the file, which is
+        the right question for a one-job workflow and the wrong one here: the
+        bug under test is precisely that the entry lands in the first job.
+        """
+        entries: dict[str, list[str]] = {}
+        job: str | None = None
+        inside = False
+        for line in workflow.splitlines():
+            if line.startswith("  ") and not line.startswith("   ") and line.rstrip().endswith(":"):
+                job = line.strip()[:-1]
+                entries[job] = []
+                inside = False
+                continue
+            if job is None:
+                continue
+            if line == "    env:":
+                inside = True
+                continue
+            if inside and line.startswith("      ") and ":" in line:
+                entries[job].append(line.strip())
+            elif inside:
+                inside = False
+        return entries
+
+    def test_signing_guard_is_defined_in_the_job_that_reads_it_not_the_first_job(self) -> None:
+        # An owner adding a job ahead of build_push -- a lint job is the
+        # everyday case -- is the shape that published unsigned images (#344).
+        # Job env does not reach across jobs, so a SIGNING_ENABLED defined in
+        # `lint` leaves both guards in build_push false: cosign never runs,
+        # the run stays green, and the presence check then finds the misplaced
+        # line and reports nothing to do on every later update.
+        app = self.make_app()
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        lint_with_env = textwrap.dedent(
+            """\
+              lint:
+                runs-on: ubuntu-latest
+                env:
+                  LINT_LEVEL: strict
+                steps:
+                  - run: echo lint
+
+            """
+        )
+        lint_without_env = textwrap.dedent(
+            """\
+              lint:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: echo lint
+
+            """
+        )
+        for label, lint in (("env: present", lint_with_env), ("env: absent", lint_without_env)):
+            with self.subTest(preceding_job=label):
+                workflow = snapshot.replace("jobs:\n", "jobs:\n" + textwrap.indent(lint, "  "), 1)
+                patched = app.patch_container_workflow(workflow)
+                by_job = self.job_env_entries_by_job(patched)
+                self.assertEqual(
+                    by_job["build_push"],
+                    ["SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}"],
+                    by_job,
+                )
+                self.assertNotIn("SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}", by_job["lint"])
+                self.assertEqual(patched.count("env.SIGNING_ENABLED == 'true'"), 2)
+                # The lint job is the owner's, and the update must not touch it.
+                self.assertIn(textwrap.indent(lint, "  "), patched)
+                self.assertEqual(app.patch_container_workflow(patched), patched)
 
     def test_strip_job_env_entries_leaves_step_level_entries_alone(self) -> None:
         # Six spaces is the job level and eight or more is a step's. Matching
@@ -1744,10 +1922,180 @@ class BuilderTests(unittest.TestCase):
         line = "        reuses: actions/checkout@v4"
         self.assertEqual(pin_action_uses_line(line), line)
 
-    def test_ensure_workflow_job_env_entries_returns_unchanged_without_env_or_steps_anchor(self) -> None:
-        workflow_text = "name: Build\njobs:\n  build:\n    name: build\n"
+    def test_ensure_workflow_job_env_entries_returns_unchanged_when_no_job_reads_the_variable(self) -> None:
+        # Nothing tests env.FOO, so there is nothing an undefined FOO can break
+        # and nothing to add. This is also the shape of a workflow whose owner
+        # removed the signing steps: an update must keep working there.
+        workflow_text = "name: Build\njobs:\n  build:\n    name: build\n    steps:\n      - run: echo hi\n"
         result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
         self.assertEqual(result, workflow_text)
+
+    def test_ensure_workflow_job_env_entries_defines_the_variable_in_each_job_that_reads_it(self) -> None:
+        # Two jobs ahead of the reader: one with an env: block, one without.
+        # Neither may receive the entry, and the reader gets it whichever
+        # anchor it has. The second reader shares the variable and gets its
+        # own copy, because job env is per job.
+        workflow_text = textwrap.dedent(
+            """\
+            name: Build
+            jobs:
+              lint:
+                env:
+                  LINT_LEVEL: strict
+                steps:
+                  - run: echo lint
+              plain:
+                steps:
+                  - run: echo plain
+              build:
+                steps:
+                  - if: env.FOO == 'true'
+                    run: echo build
+              verify:
+                env:
+                  OTHER: 1
+                steps:
+                  - if: env.FOO == 'true'
+                    run: echo verify
+            """
+        )
+        result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
+        self.assertEqual(
+            result,
+            textwrap.dedent(
+                """\
+                name: Build
+                jobs:
+                  lint:
+                    env:
+                      LINT_LEVEL: strict
+                    steps:
+                      - run: echo lint
+                  plain:
+                    steps:
+                      - run: echo plain
+                  build:
+                    env:
+                      FOO: bar
+                    steps:
+                      - if: env.FOO == 'true'
+                        run: echo build
+                  verify:
+                    env:
+                      FOO: bar
+                      OTHER: 1
+                    steps:
+                      - if: env.FOO == 'true'
+                        run: echo verify
+                """
+            ),
+        )
+        self.assertEqual(ensure_workflow_job_env_entries(result, [("FOO", "bar")]), result)
+
+    def test_ensure_workflow_job_env_entries_ignores_a_copy_in_the_wrong_job(self) -> None:
+        # The shape an earlier update left behind: the entry in the first job,
+        # the guard in a later one. The presence check used to find this copy
+        # and report nothing to do, forever. The reader must still get its own.
+        workflow_text = textwrap.dedent(
+            """\
+            jobs:
+              lint:
+                env:
+                  FOO: bar
+                steps:
+                  - run: echo lint
+              build:
+                steps:
+                  - if: env.FOO == 'true'
+                    run: echo build
+            """
+        )
+        result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
+        self.assertIn("  build:\n    env:\n      FOO: bar\n    steps:\n", result)
+
+    def test_ensure_workflow_job_env_entries_fails_closed_when_the_reading_job_has_no_anchor(self) -> None:
+        # A job that reads the variable but offers nowhere to define it is the
+        # silent-unsigned outcome waiting to happen: the guard is false, the
+        # steps are skipped, the run is green. Returning the text unchanged
+        # here is what maintenance_notes.txt warns is hard to notice, so the
+        # update stops and says what to add by hand instead.
+        workflow_text = "jobs:\n  build:\n      steps:\n        - if: env.FOO == 'true'\n          run: echo build\n"
+        with self.assertRaisesRegex(CommandError, r"'build' job reads env\.FOO.*Add 'FOO: bar'"):
+            ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
+
+    def test_ensure_workflow_job_env_entries_recognizes_quoted_job_ids(self) -> None:
+        # `"build_push":` is as valid a job key as the bare form, and a walk
+        # that only knows bare keys drops the job: its guard is rewritten to
+        # test env.FOO, no job is found to define FOO in, and the workflow
+        # publishes unsigned while staying green. Both quote styles must be
+        # seen, and the bare-key sibling must still be left alone.
+        workflow_text = textwrap.dedent(
+            """\
+            jobs:
+              lint:
+                steps:
+                  - run: echo lint
+              "build_push":
+                steps:
+                  - if: env.FOO == 'true'
+                    run: echo build
+              'verify': # quoted, with a comment
+                env:
+                  OTHER: 1
+                steps:
+                  - if: env.FOO == 'true'
+                    run: echo verify
+            """
+        )
+        result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
+        self.assertEqual(
+            result,
+            textwrap.dedent(
+                """\
+                jobs:
+                  lint:
+                    steps:
+                      - run: echo lint
+                  "build_push":
+                    env:
+                      FOO: bar
+                    steps:
+                      - if: env.FOO == 'true'
+                        run: echo build
+                  'verify': # quoted, with a comment
+                    env:
+                      FOO: bar
+                      OTHER: 1
+                    steps:
+                      - if: env.FOO == 'true'
+                        run: echo verify
+                """
+            ),
+        )
+        self.assertEqual(ensure_workflow_job_env_entries(result, [("FOO", "bar")]), result)
+
+    def test_workflow_job_ranges_names_quoted_jobs_without_their_quotes(self) -> None:
+        lines = ["jobs:", '  "build_push":', "    steps: []", "  'verify':", "    steps: []", "  plain:", "    steps: []"]
+        self.assertEqual(
+            workflow_job_ranges(lines),
+            [("build_push", 1, 3), ("verify", 3, 5), ("plain", 5, 7)],
+        )
+
+    def test_ensure_workflow_job_env_entries_fails_closed_when_a_reader_is_outside_every_known_job(self) -> None:
+        # Jobs nested at four spaces are valid YAML the walk does not parse.
+        # The reference is still there, so returning the text unchanged is the
+        # silent-unsigned outcome again; the update must stop and say so.
+        workflow_text = textwrap.dedent(
+            """\
+            jobs:
+                build:
+                    steps:
+                      - if: env.FOO == 'true'
+                        run: echo build
+            """
+        )
+        with self.assertRaisesRegex(CommandError, r"env\.FOO on line 4, outside every job.*Add 'FOO: bar'"):
+            ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
 
     def test_validate_config_rejects_unsupported_base_image(self) -> None:
         app = self.make_app()
@@ -11264,7 +11612,62 @@ class BuilderTests(unittest.TestCase):
         app.gum = stub
         app.add_copr()
         self.assertEqual(app.config.copr_repos, [])
-        self.assertIn(("error", "Enter the COPR repo as owner/project."), app.gum.messages)
+        self.assertIn(("error", "Enter the COPR repo as owner/project or @group/project."), app.gum.messages)
+
+    def test_add_copr_accepts_group_owner_and_project_directory(self) -> None:
+        # `man dnf5-copr`: OWNER is a username or a @groupname, and PROJECT may
+        # be a project directory such as project:custom:123. The wizard used to
+        # reject both with the "owner/project" error, telling a user who typed
+        # @caddy/caddy that they had the format wrong (#348).
+        for repo in ("@caddy/caddy", "@fedora-llvm-team/llvm-snapshots", "user/project:custom:123"):
+            with self.subTest(repo=repo):
+                app = self.make_app()
+                stub = GumStub()
+                stub.input = lambda *, prompt, repo=repo, **_kwargs: repo if prompt == "COPR repo: " else ""
+                app.gum = stub
+                app.add_copr()
+                self.assertEqual(app.config.copr_repos, [repo])
+                self.assertEqual([m for m in app.gum.messages if m[0] == "error"], [])
+
+    def test_add_copr_still_rejects_misplaced_at_and_colon(self) -> None:
+        # The loosening is exactly what dnf5 accepts: "@" only leads the owner
+        # and colons only appear in the project, so the values that reach
+        # build.sh and recipe.yml stay repo specs rather than anything else.
+        for repo in ("owner@group/project", "@/project", "@group/", "own:er/project", "@group/project/extra", "@@group/project"):
+            with self.subTest(repo=repo):
+                app = self.make_app()
+                stub = GumStub()
+                stub.input = lambda *, prompt, repo=repo, **_kwargs: repo if prompt == "COPR repo: " else ""
+                app.gum = stub
+                app.add_copr()
+                self.assertEqual(app.config.copr_repos, [])
+                self.assertIn(("error", "Enter the COPR repo as owner/project or @group/project."), app.gum.messages)
+
+    def test_validate_config_accepts_group_copr_from_loaded_state(self) -> None:
+        # validate_config shares COPR_REPO_RE with add_copr, so a state file
+        # carrying a group COPR must pass the pre-write gate too, not just the
+        # wizard prompt.
+        app = self.make_app()
+        app.config.copr_repos = ["@caddy/caddy", "user/project:custom:123"]
+        app.validate_config()
+        app.config.copr_repos = ["@caddy/caddy", "bad;rm/project"]
+        with self.assertRaisesRegex(CommandError, "Invalid COPR repository value"):
+            app.validate_config()
+
+    def test_group_copr_reaches_build_sh_and_recipe_unchanged(self) -> None:
+        app = self.make_app()
+        app.config.copr_repos = ["@caddy/caddy", "user/project:custom:123"]
+        build_sh = app.generate_build_sh()
+        # shlex.quote leaves "@" and ":" bare, so dnf5 sees exactly what the
+        # user typed; pin that rather than the quoting helper's behaviour.
+        self.assertIn("dnf5 -y copr enable @caddy/caddy", build_sh)
+        self.assertIn("dnf5 -y copr disable @caddy/caddy", build_sh)
+        self.assertIn("dnf5 -y copr enable user/project:custom:123", build_sh)
+        bluebuild = self.make_bluebuild_app()
+        bluebuild.config.copr_repos = ["@caddy/caddy", "user/project:custom:123"]
+        recipe = bluebuild.generate_recipe()
+        self.assertIn('        - "@caddy/caddy"', recipe)
+        self.assertIn('        - "user/project:custom:123"', recipe)
 
     def test_add_copr_returns_without_adding_repo_when_packages_fail_validation(self) -> None:
         app = self.make_app()

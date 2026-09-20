@@ -183,7 +183,13 @@ BLUEBUILD_RECIPE_SCHEMA = "https://schema.blue-build.org/recipe-v1.json"
 # service is real, but they do stop obviously unsafe values from becoming shell
 # script content later.
 PACKAGE_TOKEN_RE = re.compile(r"^[A-Za-z0-9._+:-]+$")
-COPR_REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+# What `dnf5 copr enable` takes: the owner is a username or a @groupname
+# (@caddy/caddy), and the project may be a project directory with colons
+# (owner/project:custom:123). The "@" is allowed only as the first character
+# and the colons only after the slash, so this stays a repo spec and not a
+# shell or YAML surprise -- shell_quote and yaml_scalar quote it downstream
+# regardless.
+COPR_REPO_RE = re.compile(r"^@?[A-Za-z0-9._-]+/[A-Za-z0-9._:-]+$")
 SERVICE_TOKEN_RE = re.compile(r"^[A-Za-z0-9@._:+-]+$")
 # The repo name becomes the image name in ghcr.io/<owner>/<repo>, so it has to
 # satisfy the container-reference grammar as well as GitHub's naming rules.
@@ -1256,12 +1262,73 @@ def extend_flow_sequence_line(line: str, item: str) -> str | None:
     return f"{prefix}[{items}, {item}]{suffix}" if items else f"{prefix}[{item}]{suffix}"
 
 
+# The oldest Cosign release the generated signing step works with. Workflows
+# pinned below it are raised to it; anything at or above it is the owner's
+# choice and stays. The bundled snapshot pins this same version.
+COSIGN_COMPATIBILITY_FLOOR = "v3.1.2"
+# A whole line that is the `cosign-release:` input: the key at the start of
+# the line, a quoted value, and nothing after it but an optional comment.
+# Anchoring both ends is what keeps a shell line that merely mentions the
+# input -- `run: echo "cosign-release: '2.6.3'"` -- from being rewritten.
+COSIGN_RELEASE_LINE_RE = re.compile(r"^(\s*cosign-release:\s*)(['\"])([^'\"]*)\2(\s*(?:#.*)?)$")
+
+
+def cosign_release_tuple(release: str) -> tuple[int, int, int] | None:
+    """Parse a `cosign-release:` value like `v3.1.2` into (3, 1, 2).
+
+    Returns None for anything that is not a plain version, so the caller can
+    leave it alone rather than guess.
+    """
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", release.strip())
+    if match is None:
+        return None
+    major, minor, patch = (int(part) for part in match.groups())
+    return major, minor, patch
+
+
+def raise_cosign_release_floor(step_lines: Sequence[str]) -> list[str]:
+    """Raise a below-floor `cosign-release:` input of a cosign-installer step.
+
+    Only the installer step's own `with:` block is looked at. The workflow is
+    patched in place, so the same text anywhere else -- in an owner's `run:`
+    script, a comment, another action that happens to take an input of that
+    name -- is theirs and stays as written.
+    """
+    if not any("uses:" in line and "sigstore/cosign-installer@" in line for line in step_lines):
+        return list(step_lines)
+    floor = cosign_release_tuple(COSIGN_COMPATIBILITY_FLOOR)
+    patched: list[str] = []
+    with_indent: int | None = None
+    for line in step_lines:
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if with_indent is not None and stripped and not stripped.startswith("#") and indent <= with_indent:
+            with_indent = None
+        if with_indent is None:
+            if workflow_block_key(stripped.removeprefix("- ").lstrip()) == "with":
+                with_indent = indent
+            patched.append(line)
+            continue
+        match = COSIGN_RELEASE_LINE_RE.match(line)
+        if match is not None:
+            current = cosign_release_tuple(match.group(3))
+            if current is not None and current < floor:
+                prefix, quote, _, suffix = match.groups()
+                line = f"{prefix}{quote}{COSIGN_COMPATIBILITY_FLOOR}{quote}{suffix}"
+        patched.append(line)
+    return patched
+
+
 def patch_cosign_compatibility(workflow_text: str) -> str:
-    """Keep existing managed workflows compatible with Cosign 3.x."""
-    lines = workflow_text.splitlines()
-    for index, line in enumerate(lines):
-        if "cosign-release:" in line:
-            lines[index] = re.sub(r"(cosign-release:\s*['\"])v[^'\"]+(['\"])", r"\1v3.1.2\2", line)
+    """Keep existing managed workflows compatible with Cosign 3.x.
+
+    Only versions below COSIGN_COMPATIBILITY_FLOOR are raised, and only on the
+    cosign-installer step's own `cosign-release:` input. An unconditional
+    rewrite meant every update reverted an owner's deliberate bump to a newer
+    3.x or a 4.x release, so a security patch they applied was undone the next
+    time they ran the tool.
+    """
+    lines = patch_workflow_steps(workflow_text, raise_cosign_release_floor)
 
     # `cosign sign` is routinely written across shell line continuations, so the
     # guard has to consider the whole logical command. Testing each physical
@@ -1308,38 +1375,131 @@ def patch_cosign_compatibility(workflow_text: str) -> str:
     return "\n".join(lines)
 
 
-def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[str, str]]) -> str:
-    lines = workflow_text.splitlines()
-    missing_lines: list[str] = []
-    # Job-level env is at 6 spaces (4 for job indent + 2 for key).  We must
-    # check at this exact indentation, otherwise a step-level env entry with
-    # the same key fools the check into thinking the job-level one exists.
-    job_env_prefix = "      "  # 6 spaces
-    for name, value in entries:
-        wanted = f"{name}: {value}"
-        if not any(line == f"{job_env_prefix}{wanted}" for line in lines):
-            missing_lines.append(f"{job_env_prefix}{wanted}")
-    if not missing_lines:
-        return workflow_text
+# A job ID under `jobs:`, bare or quoted, opening a block (no inline value):
+#   build_push:
+#   "build_push":   # quoting is legal YAML and some owners' editors emit it
+#   'build_push': # with a comment
+WORKFLOW_JOB_KEY_RE = re.compile(
+    r"""^(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_.-]*)):\s*(?:#.*)?$"""
+)
 
-    insertion = "".join(f"{line}\n" for line in missing_lines)
-    if re.search(r"^    env:\n", workflow_text, flags=re.MULTILINE):
-        return re.sub(
-            r"^    env:\n",
-            "    env:\n" + insertion,
-            workflow_text,
-            count=1,
-            flags=re.MULTILINE,
-        )
-    if re.search(r"^    steps:\n", workflow_text, flags=re.MULTILINE):
-        return re.sub(
-            r"^    steps:\n",
-            "    env:\n" + insertion + "    steps:\n",
-            workflow_text,
-            count=1,
-            flags=re.MULTILINE,
-        )
-    return workflow_text
+
+def workflow_job_key(stripped_line: str) -> str | None:
+    """Return the job ID a stripped line under `jobs:` declares, if any.
+
+    workflow_key() only knows bare keys. A quoted job ID such as
+    `"build_push":` is equally valid, and a parser that does not see it
+    drops the whole job from workflow_job_ranges(): its guards still get
+    rewritten to test env.SIGNING_ENABLED, no job is found to define the
+    variable in, and the image ships unsigned on a green run.
+    """
+    match = WORKFLOW_JOB_KEY_RE.match(stripped_line)
+    if match is None:
+        return None
+    return next(group for group in match.groups() if group is not None)
+
+
+def workflow_job_ranges(lines: Sequence[str]) -> list[tuple[str, int, int]]:
+    """Return (name, start, end) for every job in a workflow, as line indexes.
+
+    A job is a key, bare or quoted, at two-space indentation inside the
+    top-level `jobs:` block. Its range runs from that key up to the next job
+    key, or to the first line that leaves the block. Blank lines and
+    comments end nothing, so a job keeps the trailing blank line that
+    separates it from the next.
+    """
+    ranges: list[tuple[str, int, int]] = []
+    in_jobs = False
+    name: str | None = None
+    start = 0
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent == 0:
+            if name is not None:
+                ranges.append((name, start, index))
+                name = None
+            in_jobs = workflow_block_key(stripped) == "jobs"
+            continue
+        if in_jobs and indent == 2:
+            key = workflow_job_key(stripped)
+            if key is None:
+                continue
+            if name is not None:
+                ranges.append((name, start, index))
+            name, start = key, index
+    if name is not None:
+        ranges.append((name, start, len(lines)))
+    return ranges
+
+
+def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[str, str]]) -> str:
+    """Define each variable, at job level, in every job that reads it.
+
+    A job reads a variable when one of its lines refers to `env.<NAME>` --
+    the shape of the signing guard's step condition. Defining the variable
+    anywhere else does nothing: job env does not reach across jobs, so a
+    guard in `build_push` testing a variable defined in a `lint` job the
+    owner added ahead of it is false forever, both cosign steps are skipped,
+    and the image is published unsigned while the run stays green. That is
+    what searching the whole file for the first `env:` did (#344).
+
+    A job that reads the variable but has neither an `env:` nor a `steps:`
+    key at the expected indentation cannot be patched, and the only outcome
+    of leaving it is the silent-unsigned one above. So that case fails
+    closed with a message saying what to add by hand. So does a reference
+    that sits outside every job this parser recognizes -- a job nested at
+    an indentation it does not expect, say -- because a reader the walk
+    cannot see is a reader that never gets its definition. A workflow in
+    which no job reads the variable needs nothing and is returned untouched.
+    """
+    lines = workflow_text.splitlines()
+    changed = False
+    for name, value in entries:
+        # Job-level env is at 6 spaces (4 for job indent + 2 for key).  We must
+        # check at this exact indentation, otherwise a step-level env entry with
+        # the same key fools the check into thinking the job-level one exists.
+        wanted = f"      {name}: {value}"
+        reads = re.compile(rf"\benv\.{re.escape(name)}\b")
+        ranges = workflow_job_ranges(lines)
+        covered = {index for _, start, end in ranges for index in range(start, end)}
+        for index, line in enumerate(lines):
+            if index in covered or line.lstrip().startswith("#") or not reads.search(line):
+                continue
+            raise CommandError(
+                f"This workflow refers to env.{name} on line {index + 1}, outside every job this "
+                f"tool recognizes under 'jobs:', so it cannot tell which job to define the variable "
+                f"in. Left undefined, every condition that tests it is false and the steps it guards "
+                f"are skipped. Add '{name}: {value}' under that job's 'env:' by hand, then run this "
+                f"update again."
+            )
+        # Walk the jobs back to front so an insertion never shifts a range
+        # that is still to be visited.
+        for job_name, start, end in reversed(ranges):
+            job = lines[start:end]
+            if not any(reads.search(line) for line in job if not line.lstrip().startswith("#")):
+                continue
+            if wanted in job:
+                continue
+            if "    env:" in job:
+                lines.insert(start + job.index("    env:") + 1, wanted)
+            elif "    steps:" in job:
+                steps_at = start + job.index("    steps:")
+                lines[steps_at:steps_at] = ["    env:", wanted]
+            else:
+                raise CommandError(
+                    f"This workflow's '{job_name}' job reads env.{name}, but the job has no 'env:' "
+                    f"or 'steps:' key where this tool expects one, so it cannot define the variable "
+                    f"there. Left undefined, every condition that tests it is false and the steps "
+                    f"it guards are skipped. Add '{name}: {value}' under that job's 'env:' by hand, "
+                    f"then run this update again."
+                )
+            changed = True
+    if not changed:
+        return workflow_text
+    return "\n".join(lines) + ("\n" if workflow_text.endswith("\n") else "")
 
 
 class CommandError(RuntimeError):
@@ -2719,7 +2879,8 @@ class App:
             "When To Use COPR",
             "COPR is an extra community package source outside the normal Fedora and image-provider repos.",
             "Most users can skip this. Only use it if you know a package you need comes from that COPR.",
-            "Example: kwizart/fedy. Leave the repo field empty if you want to go back.",
+            "Example: kwizart/fedy. A group-owned COPR starts with @, like @caddy/caddy.",
+            "Leave the repo field empty if you want to go back.",
         )
         print()
         repo = self.gum.input(
@@ -2731,7 +2892,7 @@ class App:
         if not repo:
             return
         if not COPR_REPO_RE.fullmatch(repo):
-            self.gum.error("Enter the COPR repo as owner/project.")
+            self.gum.error("Enter the COPR repo as owner/project or @group/project.")
             return
         proposed_copr_repos = unique([*self.config.copr_repos, repo])
         print()
