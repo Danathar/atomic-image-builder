@@ -564,15 +564,21 @@ class MaintenanceAuditTests(unittest.TestCase):
 
     def test_run_audit_returns_action_updates_as_advisories_not_failures(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
-        with patch(
-            "maintenance_audit.audit_action_update_availability", return_value=["stale pin"]
-        ):
+        # The same gate also runs the trust-root downloads and the two image
+        # pin lookups. Stub them: they read the live registry, and this test
+        # went red the day ghcr.io/ublue-os/brew:latest moved past its pin.
+        with patch("maintenance_audit.audit_container_trust_roots", return_value=[]), patch(
+            "maintenance_audit.audit_brew_image_pin", return_value=[]
+        ), patch("maintenance_audit.audit_disk_builder_image_pin", return_value=[]):
             with patch(
-                "maintenance_audit.audit_action_pin_freshness", return_value=["moved pin"]
+                "maintenance_audit.audit_action_update_availability", return_value=["stale pin"]
             ):
-                findings, advisories = run_audit(
-                    repo_root, skip_upstream=True, check_action_updates=True
-                )
+                with patch(
+                    "maintenance_audit.audit_action_pin_freshness", return_value=["moved pin"]
+                ):
+                    findings, advisories = run_audit(
+                        repo_root, skip_upstream=True, check_action_updates=True
+                    )
         # Pin drift must not fail the run -- a branch pin drifts constantly.
         self.assertEqual(findings, [])
         self.assertEqual(advisories, ["stale pin", "moved pin"])
