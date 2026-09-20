@@ -334,6 +334,10 @@ class BaseImage:
     name: str
     description: str
     image_uri: str
+    # Other repositories the same desktop is published at, without a tag.
+    # match_base_image() treats a host booted from one of these as this
+    # curated image; image_uri stays the one the tool recommends and writes.
+    aliases: tuple[str, ...] = ()
 
 
 def read_os_release_fields(path: Path = Path("/etc/os-release")) -> dict[str, str]:
@@ -385,13 +389,21 @@ def universal_blue_image(key: str, name: str, description: str, image_uri: str) 
     return BaseImage(key=key, provider="Universal Blue", name=name, description=description, image_uri=image_uri)
 
 
-def fedora_atomic_image(key: str, name: str, description: str, variant: str) -> BaseImage:
+def fedora_atomic_image(key: str, name: str, description: str, variant: str, *, official_alias: bool = True) -> BaseImage:
+    # Fedora publishes each desktop twice: the long-standing
+    # quay.io/fedora-ostree-desktops/<variant>, and the newer official bootc
+    # location quay.io/fedora/fedora-<variant>. Both carry the same release
+    # tags, and which one a host was rebased to is not the user's choice of
+    # base -- it is the same Silverblue either way. Without the alias a host
+    # on the official location was refused as a custom image (#354).
+    aliases = (f"quay.io/fedora/fedora-{variant}",) if official_alias else ()
     return BaseImage(
         key=key,
         provider="Fedora Atomic",
         name=name,
         description=description,
         image_uri=f"quay.io/fedora-ostree-desktops/{variant}:{FEDORA_ATOMIC_DEFAULT_TAG}",
+        aliases=aliases,
     )
 
 
@@ -408,7 +420,10 @@ BASE_IMAGES: tuple[BaseImage, ...] = (
     fedora_atomic_image("kinoite", "Fedora Kinoite", "KDE Plasma desktop built from the official Fedora Atomic desktop image", "kinoite"),
     fedora_atomic_image("sway-atomic", "Fedora Sway Atomic", "Sway desktop built from the official Fedora Atomic desktop image", "sway-atomic"),
     fedora_atomic_image("budgie-atomic", "Fedora Budgie Atomic", "Budgie desktop built from the official Fedora Atomic desktop image", "budgie-atomic"),
-    fedora_atomic_image("cosmic-atomic", "Fedora COSMIC Atomic", "COSMIC desktop built from the official Fedora Atomic desktop image", "cosmic-atomic"),
+    # quay.io/fedora/fedora-cosmic-atomic does not exist (checked against the
+    # registry API on 2026-09-20; the other four variants do), so claiming
+    # the alias here would match a reference no host can be booted from.
+    fedora_atomic_image("cosmic-atomic", "Fedora COSMIC Atomic", "COSMIC desktop built from the official Fedora Atomic desktop image", "cosmic-atomic", official_alias=False),
 )
 
 
@@ -3555,9 +3570,11 @@ class App:
 
     def match_base_image(self, value: str) -> BaseImage | None:
         for image in BASE_IMAGES:
-            image_repo = image.image_uri.rsplit(":", 1)[0]
-            if value == image.image_uri or value == image_repo or value.startswith(f"{image_repo}:") or value.startswith(f"{image_repo}@"):
+            if value == image.image_uri:
                 return image
+            for image_repo in (image.image_uri.rsplit(":", 1)[0], *image.aliases):
+                if value == image_repo or value.startswith(f"{image_repo}:") or value.startswith(f"{image_repo}@"):
+                    return image
         return None
 
     def carried_scan_customizations(self) -> bool:

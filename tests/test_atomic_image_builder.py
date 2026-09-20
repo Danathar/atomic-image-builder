@@ -2543,6 +2543,47 @@ class BuilderTests(unittest.TestCase):
         self.assertIsNotNone(matched)
         self.assertEqual(matched.name, "Fedora Kinoite")
 
+    def test_match_base_image_accepts_fedora_official_bootc_locations(self) -> None:
+        # Fedora publishes the same desktops at quay.io/fedora/fedora-<variant>
+        # as well as quay.io/fedora-ostree-desktops/<variant>. A host rebased to
+        # the official location is running the curated image, not a custom one
+        # (#354). Every reference shape the scan can produce has to match.
+        app = self.make_app()
+        for variant, name in (
+            ("silverblue", "Fedora Silverblue"),
+            ("kinoite", "Fedora Kinoite"),
+            ("sway-atomic", "Fedora Sway Atomic"),
+            ("budgie-atomic", "Fedora Budgie Atomic"),
+        ):
+            for ref in (
+                f"quay.io/fedora/fedora-{variant}",
+                f"quay.io/fedora/fedora-{variant}:44",
+                f"quay.io/fedora/fedora-{variant}:43",
+                f"quay.io/fedora/fedora-{variant}@sha256:{'a' * 64}",
+            ):
+                with self.subTest(ref=ref):
+                    matched = app.match_base_image(ref)
+                    self.assertIsNotNone(matched)
+                    self.assertEqual(matched.name, name)
+                    # The alias identifies the desktop; the recommended URI is
+                    # still the curated one, so nothing downstream changes.
+                    self.assertTrue(matched.image_uri.startswith(f"quay.io/fedora-ostree-desktops/{variant}:"))
+
+    def test_match_base_image_does_not_invent_an_official_location_for_cosmic(self) -> None:
+        # quay.io/fedora/fedora-cosmic-atomic is not published, so the alias
+        # must not be claimed for it: a match here would be a reference no
+        # host can actually be booted from.
+        app = self.make_app()
+        self.assertIsNone(app.match_base_image("quay.io/fedora/fedora-cosmic-atomic:44"))
+        self.assertIsNotNone(app.match_base_image("quay.io/fedora-ostree-desktops/cosmic-atomic:44"))
+
+    def test_match_base_image_alias_requires_a_repository_boundary(self) -> None:
+        # A longer repository name that merely starts with the alias is a
+        # different image, the same way "kinoite-nightly" is not "kinoite".
+        app = self.make_app()
+        self.assertIsNone(app.match_base_image("quay.io/fedora/fedora-silverblue-nightly:44"))
+        self.assertIsNone(app.match_base_image("quay.io/fedora/fedora-silverbluex"))
+
     def test_ensure_signing_ready_requires_cosign(self) -> None:
         app = self.make_app()
         with patch.object(app, "repo_secret_exists", return_value=False):
@@ -6448,6 +6489,63 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(result, SCAN_OK)
         self.assertEqual(app.config.base_image_uri, "quay.io/fedora-ostree-desktops/kinoite:44")
         self.assertEqual(app.config.base_image_name, "Fedora Kinoite")
+
+    def scan_fedora_official_location(self, tag: str) -> App:
+        # A host rebased to Fedora's official bootc desktop image at
+        # quay.io/fedora/fedora-silverblue rather than the
+        # fedora-ostree-desktops location the curated entry names.
+        class ChoosingStub(GumStub):
+            def choose(self, items, **_kwargs):
+                return list(items)
+
+        app = self.make_app()
+        app.github_user = "example"
+        status_payload = json.dumps(
+            {
+                "deployments": [
+                    {
+                        "booted": True,
+                        "container-image-reference": f"ostree-unverified-registry:quay.io/fedora/fedora-silverblue:{tag}",
+                        "requested-packages": ["htop"],
+                        "requested-base-removals": ["firefox"],
+                    }
+                ]
+            }
+        )
+        app.gum = ChoosingStub()
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["rpm-ostree", "status", "--json", "--booted"], 0, status_payload, ""),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(app.scan_os(), SCAN_OK)
+        return app
+
+    def test_scan_os_recognises_fedora_official_location_as_the_curated_desktop(self) -> None:
+        # Reported in #354: this host was told it runs a custom, unsupported
+        # image. It runs Fedora Silverblue, and the scan has to say so and
+        # carry its customizations. On the current tag there is nothing to
+        # recommend, so the host's own reference is kept.
+        app = self.scan_fedora_official_location(FEDORA_ATOMIC_DEFAULT_TAG)
+
+        self.assertEqual(app.config.base_image_name, "Fedora Silverblue")
+        self.assertEqual(app.config.base_image_uri, f"quay.io/fedora/fedora-silverblue:{FEDORA_ATOMIC_DEFAULT_TAG}")
+        self.assertEqual(app.config.scanned_packages, ["htop"])
+        self.assertEqual(app.config.scanned_removed, ["firefox"])
+        warnings = [m for level, m in app.gum.messages if level == "warn"]
+        self.assertEqual(warnings, [])
+
+    def test_scan_os_offers_the_curated_tag_to_a_fedora_official_location_host(self) -> None:
+        # The tag comparison is against the curated entry the alias resolved
+        # to, so a host behind the recommended release is offered it exactly
+        # as one on fedora-ostree-desktops would be.
+        app = self.scan_fedora_official_location(str(int(FEDORA_ATOMIC_DEFAULT_TAG) - 1))
+
+        self.assertEqual(app.config.base_image_name, "Fedora Silverblue")
+        self.assertEqual(app.config.base_image_uri, f"quay.io/fedora-ostree-desktops/silverblue:{FEDORA_ATOMIC_DEFAULT_TAG}")
+        warnings = " ".join(m for level, m in app.gum.messages if level == "warn")
+        self.assertIn(f"recommends :{FEDORA_ATOMIC_DEFAULT_TAG} for Fedora Silverblue", warnings)
 
     def test_scan_os_refuses_an_image_that_is_not_a_supported_base(self) -> None:
         # choose_base_image already refuses an image that is not curated. The
