@@ -2380,7 +2380,9 @@ class App:
         self.github_available = False
         self.github_user = ""
         self.generated_cosign_pub: str | None = None
-        self.package_lookup_cache: dict[str, bool | None] = {}
+        # Keyed by (spec, resolve_provides): "vim" is installable, through
+        # Provides, and not removable, so the two screens' answers differ.
+        self.package_lookup_cache: dict[tuple[str, bool], bool | None] = {}
         self.package_search_cache: dict[str, list[tuple[str, str]]] = {}
         self.package_lookup_warning_shown = False
         self.last_manual_package_check_had_missing = False
@@ -4350,7 +4352,11 @@ class App:
         missing: list[str] = []
         missing_but_copr_may_provide: list[str] = []
         unchecked: list[str] = []
-        lookup_results = self.lookup_host_packages(packages)
+        # A removal is gated by `rpm -q --quiet "$pkg"` in the generated
+        # build.sh, and rpm -q does not resolve Provides: with vim-enhanced
+        # installed, `rpm -q vim` fails and the removal is skipped. So a
+        # virtual name that install would accept is a typo here.
+        lookup_results = self.lookup_host_packages(packages, resolve_provides=mode == "available")
         for package in packages:
             available = lookup_results[package]
             if available is True:
@@ -4445,10 +4451,18 @@ class App:
         self.gum.success("Package metadata refreshed.")
         return True
 
-    def lookup_host_packages(self, packages: Sequence[str], *, allow_metadata_refresh: bool = True) -> dict[str, bool | None]:
+    def lookup_host_packages(
+        self, packages: Sequence[str], *, resolve_provides: bool = True, allow_metadata_refresh: bool = True
+    ) -> dict[str, bool | None]:
         # Host-side dnf5 checks are a lightweight "spellcheck" for manual RPM
         # names. They are not a perfect model of the final image build, but they
         # catch obvious mistakes like typos before we create a repo.
+        #
+        # resolve_provides says which build step the answer has to match.
+        # `dnf5 install` resolves a Provides such as vim to vim-enhanced; the
+        # removal loop's `rpm -q --quiet` gate does not, so for a removal a
+        # virtual name is "not found". NEVRA forms (vim-enhanced.x86_64,
+        # htop-3.4.1) are accepted by both and checked either way.
         #
         # This checks every requested package in a single dnf5 invocation
         # rather than one invocation per package. dnf5's first repoquery call
@@ -4468,15 +4482,15 @@ class App:
         results: dict[str, bool | None] = {}
         to_check: list[str] = []
         for package in packages:
-            if package in self.package_lookup_cache:
-                results[package] = self.package_lookup_cache[package]
+            if (package, resolve_provides) in self.package_lookup_cache:
+                results[package] = self.package_lookup_cache[package, resolve_provides]
             elif package not in to_check:
                 to_check.append(package)
         if not to_check:
             return results
         if not command_exists("dnf5"):
             for package in to_check:
-                self.package_lookup_cache[package] = None
+                self.package_lookup_cache[package, resolve_provides] = None
                 results[package] = None
             return results
         state_dir = self.dnf5_state_dir()
@@ -4485,6 +4499,52 @@ class App:
             if len(to_check) == 1
             else f"Checking package names: {', '.join(to_check)}"
         )
+        names, uncheckable, no_cache = self._dnf5_repoquery_names(title, state_dir, to_check)
+        if no_cache:
+            # Offer the fix, then check again. The retry has the offer
+            # disabled so a refresh that reports success without producing
+            # usable metadata cannot loop. Nothing is cached on this path:
+            # a declined download is not a verdict on the names, and a later
+            # accepted refresh (here or from search) must be able to check
+            # them for real.
+            if allow_metadata_refresh and self.refresh_package_metadata():
+                results.update(
+                    self.lookup_host_packages(to_check, resolve_provides=resolve_provides, allow_metadata_refresh=False)
+                )
+                return results
+            for package in to_check:
+                results[package] = None
+            return results
+        unresolved: list[str] = []
+        for package in to_check:
+            if package in names:
+                outcome: bool | None = True
+            elif uncheckable:
+                outcome = None
+            else:
+                # Not a package name -- which is not the same as not
+                # installable. Decided per spec below, once the batch has
+                # settled everything it can.
+                unresolved.append(package)
+                continue
+            self.package_lookup_cache[package, resolve_provides] = outcome
+            results[package] = outcome
+        for package in unresolved:
+            outcome = self._resolve_package_spec(package, state_dir, resolve_provides=resolve_provides)
+            self.package_lookup_cache[package, resolve_provides] = outcome
+            results[package] = outcome
+        return results
+
+    def _dnf5_repoquery_names(self, title: str, state_dir: Path, args: Sequence[str]) -> tuple[set[str], bool, bool]:
+        # One `dnf5 repoquery` run, reduced to the package names it printed,
+        # whether that answer can be trusted, and whether the reason it
+        # cannot is dnf5 having no metadata cache to answer from. A nonzero
+        # exit that is not one of dnf5's own "nothing matched" messages means
+        # dnf5 itself failed (no metadata, broken config), so an empty result
+        # then says nothing about the names; callers report None rather than
+        # a typo. The no-cache case is singled out because the batch caller
+        # can offer to fix it (#369); the per-spec follow-ups run on the cache
+        # the batch just used, so for them it is just another failed query.
         proc = self.gum.spinner_result(
             title,
             [
@@ -4498,7 +4558,7 @@ class App:
                 "%{name}\n",
                 "--latest-limit",
                 "1",
-                *to_check,
+                *args,
             ],
         )
         # %{name}\n means one result per line even when multiple packages are
@@ -4506,32 +4566,50 @@ class App:
         # multiple results print back to back with no separator at all.
         names = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
         detail = "\n".join(part for part in [proc.stdout, proc.stderr] if part).lower()
-        if proc.returncode != 0 and DNF5_NO_CACHE_MARKER in detail:
-            # Offer the fix, then check again. The retry has the offer
-            # disabled so a refresh that reports success without producing
-            # usable metadata cannot loop. Nothing is cached on this path:
-            # a declined download is not a verdict on the names, and a later
-            # accepted refresh (here or from search) must be able to check
-            # them for real.
-            if allow_metadata_refresh and self.refresh_package_metadata():
-                results.update(self.lookup_host_packages(to_check, allow_metadata_refresh=False))
-                return results
-            for package in to_check:
-                results[package] = None
-            return results
+        no_cache = proc.returncode != 0 and DNF5_NO_CACHE_MARKER in detail
         has_missing_marker = any(marker in detail for marker in DNF5_MISSING_MARKERS)
-        for package in to_check:
-            if package in names:
-                outcome: bool | None = True
-            elif has_missing_marker:
-                outcome = False
-            elif proc.returncode == 0:
-                outcome = False
-            else:
-                outcome = None
-            self.package_lookup_cache[package] = outcome
-            results[package] = outcome
-        return results
+        uncheckable = proc.returncode != 0 and not has_missing_marker
+        return names, uncheckable, no_cache
+
+    def _resolve_package_spec(self, spec: str, state_dir: Path, *, resolve_provides: bool) -> bool | None:
+        # The batch answers "is this exactly a package name?", and the
+        # generated build.sh's `dnf5 install -y` accepts more than that: a
+        # NEVRA form such as vim-enhanced.x86_64, or a Provides such as vim,
+        # which dnf5 resolves to vim-enhanced. Rejecting those as typos
+        # contradicted what `dnf install` does on the user's own machine
+        # (#370). The batch cannot say which of its arguments printed which
+        # line, so the leftovers are resolved one spec at a time, on the
+        # metadata cache the batch just warmed -- these calls are the fast
+        # kind.
+        title = f"Checking package name: {spec}"
+        if resolve_provides:
+            # --whatprovides first. It is case-sensitive, like install's own
+            # resolution, and every package provides its own name, so this
+            # covers a plain name and a virtual one alike.
+            names, uncheckable, _no_cache = self._dnf5_repoquery_names(title, state_dir, ["--whatprovides", spec])
+            if names:
+                return True
+            if uncheckable:
+                return None
+        # A spec with no NEVRA separator can only be a name. For install the
+        # Provides query already gave the case-exact answer; for a removal
+        # the batch did, since rpm -q wants the name itself. (The batch is
+        # positional and so matched ignoring case, but it printed the real
+        # name, which is what the spec was compared against.) Swapping a
+        # Provides for its provider instead would guess: `webserver` has
+        # three (caddy, httpd, lighttpd), and the state file would then hold
+        # a name the user never typed.
+        if not any(separator in spec for separator in ".-:"):
+            return False
+        # NEVRA forms. dnf5 prints the bare %{name} for vim-enhanced.x86_64,
+        # and matches positional specs ignoring case where install does not
+        # (5.4.2.1: Vim-Enhanced prints vim-enhanced here but is "No match
+        # for argument" to install). So the printed name must open the spec
+        # verbatim; the rest is the arch or version dnf5 matched it against.
+        names, uncheckable, _no_cache = self._dnf5_repoquery_names(title, state_dir, [spec])
+        if any(spec.startswith(name) for name in names):
+            return True
+        return None if uncheckable else False
 
     def lookup_host_package(self, package: str) -> bool | None:
         return self.lookup_host_packages([package])[package]
