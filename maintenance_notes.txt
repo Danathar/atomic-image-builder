@@ -550,6 +550,22 @@ correctly elsewhere in this file; lookup_host_package() was the one call
 site that had been missing it, invisibly, because a single-package query
 never has more than one result to separate.
 
+The lookup query is cache-only (dnf5 -C), like the search query. Before #369
+it was not, and dnf5 quietly fetched the full repository metadata -- about
+160 MB on Fedora -- behind the "Checking package name" spinner whenever the
+cache was missing or expired (48 h for fedora, 6 h for updates), while the
+search screen on the same empty cache stopped and asked first. Both paths now
+treat dnf5's "cache-only enabled but no cache" failure the same way: offer
+refresh_package_metadata() once, retry with the offer disabled so a refresh
+that produces no usable cache cannot loop, and otherwise carry on. For the
+lookup, "carry on" means every name in the batch comes back None -- kept, with
+the usual "could not fully check" warning -- rather than blocking entry, and
+that None is deliberately not written to package_lookup_cache: declining a
+download says nothing about the names, and a refresh accepted later (from
+either screen) must be able to check them properly. The batching story above
+is unchanged; what the first call used to spend downloading is now the
+explicit, consented refresh.
+
 The batch is an exact-name check, and `dnf5 install` accepts more than exact
 names (#370). Two specs the generated build.sh installs were rejected as
 typos: `vim`, which repoquery prints nothing for because a positional
