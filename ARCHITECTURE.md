@@ -10,19 +10,19 @@ below is greppable.
 
 ## Repository map
 
-| Path                        | What it is                                                                                                                                                                    |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `atomic_image_builder.py`   | The whole tool. One module, standard library only.                                                                                                                            |
-| `template_snapshots/`       | Pinned copies of `ublue-os/image-template` and `blue-build/template`. Inputs, not examples — each carries a `.template-source` recording its upstream revision.               |
-| `maintenance_audit.py`      | Weekly consistency check: snapshot drift, action pin coverage and freshness. It does not touch the Homebrew formula — `maintenance-audit.yml` checks that in a separate step. |
-| `snapshot_drift_issue.py`   | Keeps the audit's sub-threshold drift tracking issue in sync.                                                                                                                 |
-| `homebrew_formula.py`       | Points `Formula/atomic-image-builder.rb` at a release, and verifies that pin under `--check` — which is what the weekly audit workflow runs.                                  |
-| `coverage_badge.py`         | Writes the coverage badge endpoint and trend CSV.                                                                                                                             |
-| `format_markdown_tables.py` | Aligns the tables in every tracked Markdown file, including this one. A test fails when one drifts; `template_snapshots/` is skipped as vendored.                             |
-| `contrib/aib`               | Host-side wrapper that runs the published container image.                                                                                                                    |
-| `container/entrypoint.sh`   | Entrypoint baked into that image.                                                                                                                                             |
-| `tests/`                    | `unittest` suites; the shell entrypoints have their own `.sh` harnesses.                                                                                                      |
-| `maintenance_notes.txt`     | Operational knowledge that outlives any one change — read it before touching the patchers or base-image detection.                                                            |
+| Path                        | What it is                                                                                                                                                                                                                          |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `atomic_image_builder.py`   | The whole tool. One module, standard library only.                                                                                                                                                                                  |
+| `template_snapshots/`       | Pinned copies of `ublue-os/image-template` and `blue-build/template`. Inputs, not examples — each carries a `.template-source` recording its upstream revision.                                                                     |
+| `maintenance_audit.py`      | Weekly consistency check: snapshot drift, action pin coverage and freshness, and that the latest release's `aib` is `contrib/aib`. It does not touch the Homebrew formula — `maintenance-audit.yml` checks that in a separate step. |
+| `snapshot_drift_issue.py`   | Keeps the audit's sub-threshold drift tracking issue in sync.                                                                                                                                                                       |
+| `homebrew_formula.py`       | Points `Formula/atomic-image-builder.rb` at a release, and verifies that pin under `--check` — which is what the weekly audit workflow runs.                                                                                        |
+| `coverage_badge.py`         | Writes the coverage badge endpoint and trend CSV.                                                                                                                                                                                   |
+| `format_markdown_tables.py` | Aligns the tables in every tracked Markdown file, including this one. A test fails when one drifts; `template_snapshots/` is skipped as vendored.                                                                                   |
+| `contrib/aib`               | Host-side wrapper that runs the published container image.                                                                                                                                                                          |
+| `container/entrypoint.sh`   | Entrypoint baked into that image.                                                                                                                                                                                                   |
+| `tests/`                    | `unittest` suites; the shell entrypoints have their own `.sh` harnesses.                                                                                                                                                            |
+| `maintenance_notes.txt`     | Operational knowledge that outlives any one change — read it before touching the patchers or base-image detection.                                                                                                                  |
 
 ## Why one file
 
