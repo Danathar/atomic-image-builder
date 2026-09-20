@@ -8634,6 +8634,58 @@ class BuilderTests(unittest.TestCase):
             stdin.isatty.return_value = True
             with patch("atomic_image_builder.os.open", side_effect=AssertionError("not needed")):
                 self.assertTrue(gum.terminal_available())
+                self.assertTrue(gum.terminal_available(stdin_inherited=True))
+
+    def test_terminal_available_ignores_stdin_for_a_widget_fed_through_a_pipe(self) -> None:
+        # choose and filter get their options on a stdin pipe, so gum never
+        # sees this process's stdin and goes straight to /dev/tty. Under
+        # `setsid tool` stdin is still a terminal while /dev/tty is not, and
+        # asking about stdin made gum's "could not open a new TTY" exit 1
+        # look like Esc for exactly those two widgets.
+        gum = Gum()
+        with patch("atomic_image_builder.sys.stdin") as stdin:
+            stdin.isatty.return_value = True
+            with patch("atomic_image_builder.os.open", side_effect=OSError(6, "No such device or address")):
+                self.assertFalse(gum.terminal_available(stdin_inherited=False))
+            stdin.isatty.assert_not_called()
+            with patch("atomic_image_builder.os.open", return_value=7):
+                with patch("atomic_image_builder.os.close"):
+                    self.assertTrue(gum.terminal_available(stdin_inherited=False))
+
+    def test_require_interactive_success_tells_terminal_available_how_the_widget_got_stdin(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "choose"], 1, "", "")
+        for stdin_inherited in (True, False):
+            with self.subTest(stdin_inherited=stdin_inherited):
+                with patch.object(Gum, "terminal_available", return_value=True) as probe:
+                    with self.assertRaises(ScreenBack):
+                        gum.require_interactive_success(completed, stdin_inherited=stdin_inherited)
+                probe.assert_called_once_with(stdin_inherited=stdin_inherited)
+
+    def test_piped_widgets_say_so_and_inherited_widgets_do_not(self) -> None:
+        # Each widget is run twice: once succeeding, to show which of the
+        # two stdin arrangements it actually uses; once exiting 1, to show
+        # that the terminal probe is asked about that same arrangement.
+        gum = Gum()
+        widgets = {
+            "choose": (lambda: gum.choose(["alpha", "beta"]), False),
+            "filter": (lambda: gum.filter(["alpha", "beta"]), False),
+            "input": (lambda: gum.input(prompt="> "), True),
+            "write": (lambda: gum.write(placeholder="", height=3, width=40), True),
+            "enter_to_continue": (lambda: gum.enter_to_continue(), True),
+        }
+        for name, (call, inherited) in widgets.items():
+            with self.subTest(widget=name), patch.object(Gum, "instruction"):
+                ok = subprocess.CompletedProcess(["gum", name], 0, "alpha\n", "")
+                with patch.object(Gum, "interactive_stdout", return_value=ok) as run_mock:
+                    call()
+                self.assertEqual(run_mock.call_args.kwargs.get("stdin") is None, inherited)
+                esc = subprocess.CompletedProcess(["gum", name], 1, "", "")
+                with patch.object(Gum, "interactive_stdout", return_value=esc):
+                    with patch.object(Gum, "terminal_available", return_value=True) as probe:
+                        with self.assertRaises(ScreenBack):
+                            call()
+                probe.assert_called_once_with(stdin_inherited=inherited)
 
     def test_terminal_available_falls_back_to_dev_tty(self) -> None:
         # bubbletea opens /dev/tty when stdin is not a terminal, which is how
@@ -8649,6 +8701,73 @@ class BuilderTests(unittest.TestCase):
             close_mock.assert_called_once_with(7)
             with patch("atomic_image_builder.os.open", side_effect=OSError(6, "No such device or address")):
                 self.assertFalse(gum.terminal_available())
+
+    SETSID_CHILD = textwrap.dedent(
+        """
+        import json, sys
+        sys.path.insert(0, sys.argv[1])
+        from atomic_image_builder import CommandError, Gum, ScreenBack
+        gum = Gum()
+        report = {
+            "stdin_isatty": sys.stdin.isatty(),
+            "inherited": gum.terminal_available(),
+            "piped": gum.terminal_available(stdin_inherited=False),
+        }
+        try:
+            gum.choose(["alpha", "beta"])
+            report["choose"] = "returned"
+        except CommandError as exc:
+            report["choose"] = f"CommandError: {exc}"
+        except ScreenBack:
+            report["choose"] = "ScreenBack"
+        print(json.dumps(report))
+        """
+    )
+
+    def test_choose_under_setsid_is_a_failure_not_esc_with_real_gum(self) -> None:
+        # `setsid tool` from a shell: stdin is still the terminal, but the
+        # new session has no controlling terminal, so /dev/tty fails with
+        # ENXIO. gum input would read keys from that stdin; gum choose gets
+        # its options on a pipe, opens /dev/tty instead, and exits 1 with
+        # "could not open a new TTY". Probing the parent's stdin called that
+        # Esc, and main() turned it into exit 0. The child below is that
+        # process: a pty as stdin, a new session, and no TIOCSCTTY.
+        if shutil.which("gum") is None:
+            self.skipTest("gum is not installed")
+        master, slave = pty.openpty()
+        proc = subprocess.Popen(
+            [sys.executable, "-c", self.SETSID_CHILD, str(Path(atomic_image_builder.__file__).parent)],
+            stdin=slave,
+            stdout=subprocess.PIPE,
+            stderr=slave,
+            env={**os.environ, "TERM": "xterm-256color"},
+            start_new_session=True,
+        )
+        os.close(slave)
+        assert proc.stdout is not None
+        deadline = time.monotonic() + 15.0
+        while proc.poll() is None:
+            if time.monotonic() > deadline:
+                proc.kill()
+                raise AssertionError("the child did not exit within 15s")
+            ready, _, _ = select.select([master], [], [], 0.1)
+            if ready:
+                try:
+                    os.read(master, 65536)
+                except OSError:
+                    continue
+        os.close(master)
+        report = json.loads(proc.stdout.read().decode())
+        proc.stdout.close()
+        self.assertEqual(
+            report,
+            {
+                "stdin_isatty": True,
+                "inherited": True,
+                "piped": False,
+                "choose": "CommandError: gum choose needs a terminal to read from, and this session has none",
+            },
+        )
 
     def test_gum_input_raises_keyboard_interrupt_on_ctrl_c(self) -> None:
         gum = Gum()

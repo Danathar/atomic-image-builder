@@ -1878,12 +1878,21 @@ class Gum:
         right = max(min_right, self.content_width(max_width=max_width, reserve=0) - left - 4)
         return f"{left},{right}"
 
-    def terminal_available(self) -> bool:
-        # Mirrors how gum (bubbletea) finds its keyboard: stdin when that is a
-        # terminal, otherwise /dev/tty. A process with no controlling terminal
-        # -- a wrapper started it with setsid, a cron job, a CI step -- has
-        # neither, and every widget then fails before it draws anything.
-        if sys.stdin.isatty():
+    def terminal_available(self, *, stdin_inherited: bool = True) -> bool:
+        # Mirrors how gum (bubbletea) finds its keyboard: the widget's own
+        # stdin when that is a terminal, otherwise /dev/tty. Which of the two
+        # a widget gets to try depends on how it was started. input, write and
+        # the Enter prompt inherit this process's stdin; choose and filter get
+        # their options through a pipe, so for them only /dev/tty counts.
+        #
+        # The two answers can differ. Under `setsid tool` with no redirect,
+        # stdin is still the terminal the shell handed over, but the process
+        # has no controlling terminal and /dev/tty fails with ENXIO: gum input
+        # reads keys fine while gum choose exits 1 with "could not open a new
+        # TTY". Asking about the parent's stdin for every widget read that
+        # exit as Esc. A cron job or CI step has neither, and every widget
+        # then fails before it draws anything.
+        if stdin_inherited and sys.stdin.isatty():
             return True
         try:
             fd = os.open("/dev/tty", os.O_RDWR)
@@ -1892,7 +1901,9 @@ class Gum:
         os.close(fd)
         return True
 
-    def require_interactive_success(self, proc: subprocess.CompletedProcess[str]) -> subprocess.CompletedProcess[str]:
+    def require_interactive_success(
+        self, proc: subprocess.CompletedProcess[str], *, stdin_inherited: bool = True
+    ) -> subprocess.CompletedProcess[str]:
         # gum v0.17.0 exits 130 for Ctrl+C and 1 for Esc ("nothing selected",
         # "not submitted"). Converting those to Python exceptions lets the rest
         # of the app reason about navigation instead of raw exit codes.
@@ -1904,14 +1915,17 @@ class Gum:
         # #362) and 1 -- the same code as Esc -- when it has no terminal to
         # read from ("could not open a new TTY"). The exit code alone cannot
         # tell the second case from Esc, so ask the question gum asked: is
-        # there a terminal? If not, nobody pressed anything.
+        # there a terminal? If not, nobody pressed anything. stdin_inherited
+        # says whether the widget was given this process's stdin or a pipe
+        # (see terminal_available()); the caller knows because it passed the
+        # pipe's contents to interactive_stdout().
         if proc.returncode == 130:
             raise KeyboardInterrupt()
         if proc.returncode == 0:
             return proc
         command = [str(part) for part in proc.args]
         if proc.returncode == 1:
-            if self.terminal_available():
+            if self.terminal_available(stdin_inherited=stdin_inherited):
                 raise ScreenBack()
             raise CommandError(f"{' '.join(command[:2])} needs a terminal to read from, and this session has none")
         raise CommandError(f"command failed with exit status {proc.returncode}: {' '.join(command)}")
@@ -2130,7 +2144,9 @@ class Gum:
             args.extend(["--selected-prefix", selected_prefix])
         if unselected_prefix is not None:
             args.extend(["--unselected-prefix", unselected_prefix])
-        proc = self.require_interactive_success(self.interactive_stdout(args, stdin="\n".join(options) + "\n"))
+        proc = self.require_interactive_success(
+            self.interactive_stdout(args, stdin="\n".join(options) + "\n"), stdin_inherited=False
+        )
         output = proc.stdout.strip("\n")
         return [line for line in output.splitlines() if line]
 
@@ -2157,7 +2173,8 @@ class Gum:
                     str(MUTED_COLOR),
                 ],
                 stdin="\n".join(options) + "\n",
-            )
+            ),
+            stdin_inherited=False,
         )
         return proc.stdout.strip()
 
