@@ -443,7 +443,9 @@ SCAN_UNSUPPORTED_BASE = "unsupported-base"
 # generated image reproduces them. They were read as absent rather than as
 # unsupported, so a scan reported success and recommended `rpm-ostree reset`
 # while the new image silently omitted them. See the rpm-ostree administrator
-# handbook's "rpm-ostree status --json" section for the field list.
+# handbook's "rpm-ostree status --json" section for the field list. The first
+# three are string arrays; the remote one is a list of (from, packages) pairs
+# and needs remote_replacement_list() rather than string_list().
 UNSUPPORTED_SCAN_FIELDS: tuple[tuple[str, str], ...] = (
     ("requested-local-packages", "Locally installed RPMs"),
     ("requested-local-fileoverride-packages", "Local file overrides"),
@@ -520,6 +522,39 @@ def string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, str)]
+
+
+def remote_replacement_list(value: object) -> list[str]:
+    # requested-base-remote-replacements is the one scan field that is not a
+    # flat list of names. rpm-ostree records each `override replace --from
+    # repo=...` as a (from, packages) pair -- Vec<(String, Vec<String>)> in
+    # rust/src/daemon.rs -- so the JSON is [["repo=<id>", ["pkg", ...]], ...].
+    # string_list() kept only str items, which dropped every pair and read the
+    # override as absent: no "Cannot Be Carried Over" row, no confirm, and a
+    # README recommending the reset that removes it (#353). Flatten to one
+    # entry per package with its source attached, package name first so a long
+    # COPR id is what the preview truncates. Same coercion contract as
+    # string_list() otherwise: null, a bare string, or an entry of another
+    # shape is dropped rather than raised on.
+    if not isinstance(value, list):
+        return []
+    found: list[str] = []
+    for entry in value:
+        if isinstance(entry, str):
+            found.append(entry)
+            continue
+        if not isinstance(entry, list) or len(entry) != 2:
+            continue
+        source, packages = entry
+        source = source.strip() if isinstance(source, str) else ""
+        names = string_list(packages)
+        if names:
+            found.extend(f"{name} (from {source})" if source else name for name in names)
+        elif source:
+            # A source with no readable package list is still an override the
+            # image will not reproduce; naming the repository beats silence.
+            found.append(source)
+    return found
 
 
 def sanitize_slug(value: str, default: str = DEFAULT_REPO_NAME) -> str:
@@ -3457,7 +3492,9 @@ class App:
         # "one local RPM" is not enough to decide with.
         found: list[tuple[str, list[str]]] = []
         for status_key, label in UNSUPPORTED_SCAN_FIELDS + INITRAMFS_SCAN_FIELDS:
-            values = unique(string_list(booted.get(status_key)))
+            # Every field but one is a list of names; see remote_replacement_list.
+            reader = remote_replacement_list if status_key == "requested-base-remote-replacements" else string_list
+            values = unique(reader(booted.get(status_key)))
             if values:
                 found.append((label, values))
         if booted.get("regenerate-initramfs"):
