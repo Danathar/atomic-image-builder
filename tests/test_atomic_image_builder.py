@@ -67,6 +67,7 @@ from atomic_image_builder import (
     ensure_workflow_job_env_entries,
     extend_flow_sequence_line,
     format_daily_rebuild_note,
+    image_reference_tag_and_digest,
     is_valid_repo_name,
     managed_path,
     normalize_container_image_reference,
@@ -405,6 +406,17 @@ class BuilderTests(unittest.TestCase):
             normalize_container_image_reference("  ghcr.io/ublue-os/bazzite:stable  "),
             "ghcr.io/ublue-os/bazzite:stable",
         )
+
+    def test_image_reference_tag_and_digest_splits_every_reference_shape(self) -> None:
+        digest = "sha256:" + "a" * 64
+        self.assertEqual(image_reference_tag_and_digest("ghcr.io/ublue-os/bazzite:stable"), ("stable", ""))
+        self.assertEqual(image_reference_tag_and_digest("ghcr.io/ublue-os/bazzite"), ("", ""))
+        # The digest's own colon must not be read as a tag separator.
+        self.assertEqual(image_reference_tag_and_digest(f"ghcr.io/ublue-os/bazzite@{digest}"), ("", digest))
+        self.assertEqual(image_reference_tag_and_digest(f"ghcr.io/ublue-os/bazzite:stable@{digest}"), ("stable", digest))
+        # A registry port is a colon before the last path component, not a tag.
+        self.assertEqual(image_reference_tag_and_digest("localhost:5000/bazzite"), ("", ""))
+        self.assertEqual(image_reference_tag_and_digest("localhost:5000/bazzite:testing"), ("testing", ""))
 
     def test_load_repo_config_rejects_repo_without_state_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6194,6 +6206,84 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.config.base_image_name, "Bazzite (KDE)")
         # Verify the warning was shown
         self.assertTrue(any("testing" in msg and "stable" in msg for _, msg in gum.messages))
+
+    def scan_ref(self, container_ref: str, gum: GumStub) -> App:
+        # Runs scan_os against a one-deployment host booted on container_ref,
+        # with no layered packages so nothing past the base-image check asks.
+        app = self.make_app()
+        app.github_user = "example"
+        status_payload = json.dumps(
+            {
+                "deployments": [
+                    {
+                        "booted": True,
+                        "container-image-reference": container_ref,
+                        "requested-packages": [],
+                        "requested-base-removals": [],
+                    }
+                ]
+            }
+        )
+        app.gum = gum
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+            with patch(
+                "atomic_image_builder.run",
+                return_value=subprocess.CompletedProcess(["rpm-ostree", "status", "--json", "--booted"], 0, status_payload, ""),
+            ):
+                result = app.scan_os()
+        self.assertEqual(result, SCAN_OK)
+        return app
+
+    def test_scan_os_words_a_digest_pin_as_a_pin_and_not_as_a_tag(self) -> None:
+        # A digest-pinned host has no tag. Splitting the ref on its last colon
+        # used to present the 64 hex characters after "sha256:" as the tag the
+        # system was "running", which reads as a bug rather than a suggestion.
+        digest = "sha256:" + "9" * 64
+        gum = GumStub()
+        prompts: list[str] = []
+        gum.confirm = lambda prompt, default=False: prompts.append(prompt) or default
+
+        app = self.scan_ref(f"docker://ghcr.io/ublue-os/bluefin-dx@{digest}", gum)
+
+        warnings = [msg for kind, msg in gum.messages if kind == "warn" and "recommends" in msg]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("pinned to a digest", warnings[0])
+        self.assertIn(":stable for Bluefin DX", warnings[0])
+        self.assertNotIn("9" * 64, warnings[0])
+        self.assertNotIn("running :", warnings[0])
+        # The offer that follows is still the right action, and accepting it
+        # (the default) replaces the pin with the curated tag.
+        self.assertEqual([p for p in prompts if "recommended" in p], ["Use the recommended :stable tag instead?"])
+        self.assertEqual(app.config.base_image_uri, "ghcr.io/ublue-os/bluefin-dx:stable")
+
+    def test_scan_os_does_not_warn_about_a_digest_pinned_curated_tag(self) -> None:
+        digest = "sha256:" + "0" * 64
+        gum = GumStub()
+        prompts: list[str] = []
+        gum.confirm = lambda prompt, default=False: prompts.append(prompt) or default
+
+        app = self.scan_ref(f"docker://ghcr.io/ublue-os/bazzite:stable@{digest}", gum)
+
+        # The tag is the curated one, so there is nothing to recommend: no
+        # warning, no prompt, and the pinned ref the host booted stays put.
+        self.assertEqual([msg for kind, msg in gum.messages if kind == "warn" and "recommends" in msg], [])
+        self.assertEqual([p for p in prompts if "recommended" in p], [])
+        self.assertEqual(app.config.base_image_uri, f"ghcr.io/ublue-os/bazzite:stable@{digest}")
+        self.assertEqual(app.config.base_image_name, "Bazzite (KDE)")
+
+    def test_scan_os_names_the_tag_of_a_digest_pinned_non_curated_tag(self) -> None:
+        digest = "sha256:" + "f" * 64
+        gum = GumStub()
+        gum.confirm = lambda prompt, default=False: False if "recommended" in prompt else default
+
+        app = self.scan_ref(f"docker://ghcr.io/ublue-os/bazzite:testing@{digest}", gum)
+
+        warnings = [msg for kind, msg in gum.messages if kind == "warn" and "recommends" in msg]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("running :testing", warnings[0])
+        self.assertIn(":stable for Bazzite (KDE)", warnings[0])
+        self.assertNotIn("f" * 64, warnings[0])
+        self.assertEqual(app.config.base_image_uri, f"ghcr.io/ublue-os/bazzite:testing@{digest}")
 
     def test_scan_os_returns_false_when_rpm_ostree_is_missing(self) -> None:
         app = self.make_app()
