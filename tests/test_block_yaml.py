@@ -157,6 +157,22 @@ class BlockYamlTests(unittest.TestCase):
         with self.assertRaises(BlockYamlError):
             parse_block_yaml('a: ["x", "\\udc00"]\n')
 
+    def test_rejects_a_raw_character_yaml_does_not_allow_in_a_stream(self) -> None:
+        # YAML's c-printable production leaves out DEL, the C1 controls and
+        # the U+FFFE/U+FFFF noncharacters; libyaml refuses the entire stream
+        # on the first one ("unacceptable character #x0080: control
+        # characters are not allowed"). json.dumps(ensure_ascii=False) writes
+        # them raw, so yaml_scalar() has to put them back as \u escapes and
+        # the oracle has to notice when it does not. Their escaped spellings
+        # are ordinary double-quoted content.
+        for raw in ("\x7f", "\x80", "\x9f", "￾", "￿", "\x01"):
+            with self.subTest(raw=f"U+{ord(raw):04X}"), self.assertRaises(BlockYamlError):
+                parse_block_yaml(f'a: "x{raw}y"\n')
+        self.assertEqual(
+            parse_block_yaml('a: "x\\u007f\\u0080\\u009f\\ufffe\\uffffy"\n'),
+            {"a": "x\x7f\x80\x9f￾￿y"},
+        )
+
     def test_rejects_an_escape_the_generators_never_write(self) -> None:
         for raw in ('"\\x41"', '"\\U0001F680"', '"\\q"', '"a\\"'):
             with self.subTest(raw=raw), self.assertRaises(BlockYamlError):

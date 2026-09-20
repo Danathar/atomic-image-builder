@@ -87,6 +87,7 @@ from atomic_image_builder import (
     remote_replacement_list,
     string_list,
     workflow_job_ranges,
+    yaml_scalar,
 )
 
 # CI installs no PyYAML, so tests/_block_yaml.py is the oracle every generated
@@ -406,6 +407,24 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(is_valid_repo_name("test__image"))
         self.assertTrue(is_valid_repo_name("test--image"))
         self.assertTrue(is_valid_repo_name("test---image"))
+
+    def test_yaml_scalar_writes_printable_text_raw_and_escapes_the_rest(self) -> None:
+        # Since #360 non-ASCII is written as itself so an emoji is one scalar
+        # value rather than a surrogate pair. That must not extend to what
+        # YAML refuses raw anywhere in a stream: DEL, the C1 controls and the
+        # U+FFFE/U+FFFF noncharacters. json.dumps(ensure_ascii=False) passes
+        # those through, and libyaml then rejects the whole recipe with
+        # "unacceptable character #x0080". U+0085 is a YAML 1.1 line break
+        # that PyYAML folds to a space, so it rides with its neighbours. The
+        # C0 controls, quotes and backslashes are json.dumps's own escapes.
+        self.assertEqual(yaml_scalar("My 🚀 Ünïcødé 图像"), '"My 🚀 Ünïcødé 图像"')
+        self.assertEqual(yaml_scalar('say "hi"\\\t\x01'), '"say \\"hi\\"\\\\\\t\\u0001"')
+        self.assertEqual(
+            yaml_scalar("a\x7fb\x80c\x85d\x9fe￾f￿g"),
+            '"a\\u007fb\\u0080c\\u0085d\\u009fe\\ufffef\\uffffg"',
+        )
+        # The neighbours on either side of each escaped range stay raw.
+        self.assertEqual(yaml_scalar("~\xa0�\U0010ffff"), '"~\xa0�\U0010ffff"')
 
     def test_repository_status_omits_description_separator_when_unset(self) -> None:
         app = self.make_app()
@@ -11643,6 +11662,23 @@ class BuilderTests(unittest.TestCase):
         if libyaml_document is not None:
             self.assertEqual(libyaml_document["description"], "My 🚀 Ünïcødé 图像")
 
+    def test_generate_recipe_escapes_a_control_character_in_the_description(self) -> None:
+        # The other side of the #360 fix: writing non-ASCII raw must stop at
+        # what YAML forbids in a stream. A C1 control such as U+0080 -- a
+        # stray byte from a pasted description, say -- emitted as itself makes
+        # libyaml refuse the whole recipe ("unacceptable character #x0080"),
+        # where the pre-#360 \u escape parsed fine. The description is not
+        # validated before it gets here, so the escape has to come back.
+        app = self.make_bluebuild_app()
+        app.config.image_desc = "My \x80 image"
+        recipe = app.generate_recipe()
+        self.assertIn('description: "My \\u0080 image"', recipe)
+        self.assertNotIn("\x80", recipe)
+        self.assertEqual(self.recipe_document(app)["description"], "My \x80 image")
+        libyaml_document = parse_with_libyaml(recipe)
+        if libyaml_document is not None:
+            self.assertEqual(libyaml_document["description"], "My \x80 image")
+
     def test_generate_recipe_nests_packages_under_install_and_removals_under_remove(self) -> None:
         # Substring assertions cannot tell "install:" from "remove:": emitting
         # the install list under remove keeps every assertIn passing while the
@@ -15925,6 +15961,20 @@ class BuilderTests(unittest.TestCase):
         libyaml_document = parse_with_libyaml(workflow)
         if libyaml_document is not None:
             self.assertEqual(libyaml_document["env"]["IMAGE_DESC"], "My 🚀 image")
+
+    def test_generated_workflow_escapes_a_control_character_in_the_image_description(self) -> None:
+        # And the limit of writing non-ASCII raw, in the workflow: a C1
+        # control emitted as itself is a stream libyaml (and go-yaml, which
+        # Actions uses) refuses outright, so it has to stay a \u escape.
+        app = self.make_app()
+        app.config.image_desc = "My \x80 image"
+        workflow = app.generate_container_workflow()
+        self.assertIn('  IMAGE_DESC: "My \\u0080 image"', workflow)
+        self.assertNotIn("\x80", workflow)
+        self.assertEqual(parse_block_yaml(workflow)["env"]["IMAGE_DESC"], "My \x80 image")
+        libyaml_document = parse_with_libyaml(workflow)
+        if libyaml_document is not None:
+            self.assertEqual(libyaml_document["env"]["IMAGE_DESC"], "My \x80 image")
 
     def test_generated_workflow_signing_step_signs_the_pushed_digest(self) -> None:
         # The digest, not a tag. `latest` is rewritten by the daily rebuild, so

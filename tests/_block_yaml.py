@@ -62,12 +62,26 @@ _PLAIN_FLOAT_RE = re.compile(
 )
 
 
+# The complement of YAML 1.2's c-printable production, minus the three C0
+# characters a document may carry raw (tab, LF, CR). libyaml's reader refuses
+# the whole stream on the first one of these -- "unacceptable character
+# #x0080: control characters are not allowed" -- before any scalar is even
+# tokenised, and so do the go-yaml and serde-yaml readers BlueBuild and
+# Actions use. yaml_scalar() writes non-ASCII as itself since #360, so a
+# description carrying a C1 control has to reach the file as a \u escape, and
+# the oracle has to be able to see when it does not.
+_UNPRINTABLE_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f\ud800-\udfff￾￿]")
+
+
 class BlockYamlError(ValueError):
     """Raised when the document is outside the supported subset or malformed."""
 
 
 def parse(text: str) -> object:
     """Parse ``text`` into dicts, lists and strings."""
+    unprintable = _UNPRINTABLE_RE.search(text)
+    if unprintable is not None:
+        raise BlockYamlError(f"unacceptable character #x{ord(unprintable.group()):04x}: not printable in a YAML stream")
     lines = _relevant_lines(text)
     if not lines:
         return None

@@ -605,6 +605,15 @@ def is_valid_repo_name(value: str) -> bool:
     return True
 
 
+# What json.dumps(ensure_ascii=False) leaves raw but YAML forbids in a
+# document: DEL and the C1 controls (U+007F-U+009F) and the two noncharacters
+# U+FFFE/U+FFFF. YAML 1.2's c-printable production stops there -- C0 controls
+# are already escaped by json.dumps, and everything else up to U+10FFFF is
+# printable. U+0085 (NEL) is technically printable but a 1.1 line break, which
+# PyYAML folds to a space, so it is escaped along with its neighbours.
+_YAML_UNPRINTABLE_RE = re.compile("[\x7f-\x9f￾￿]")
+
+
 def yaml_scalar(value: str) -> str:
     # JSON string quoting is valid YAML 1.2 and saves us from bringing in a
     # YAML library just to safely escape a single scalar value. Only with
@@ -614,9 +623,12 @@ def yaml_scalar(value: str) -> str:
     # and YamlDotNet all refuse the pair (see #360), so a description like
     # "My 🚀 image" would produce a recipe BlueBuild cannot read and a
     # workflow Actions cannot load. The characters that need escaping (quotes,
-    # backslashes, control characters) are still escaped; the rest is written
-    # as the UTF-8 the file is saved in anyway.
-    return json.dumps(value, ensure_ascii=False)
+    # backslashes, C0 controls) are still escaped; the rest is written as the
+    # UTF-8 the file is saved in anyway -- except the few code points YAML
+    # refuses to see raw anywhere in a document, which ensure_ascii=False
+    # would now pass through and libyaml would reject the whole file over.
+    # Those go back to the \u escape, which every parser reads as itself.
+    return _YAML_UNPRINTABLE_RE.sub(lambda m: f"\\u{ord(m.group()):04x}", json.dumps(value, ensure_ascii=False))
 
 
 def ensure_trailing_newline(text: str) -> str:
