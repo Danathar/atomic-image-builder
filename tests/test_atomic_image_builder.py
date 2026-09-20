@@ -4031,25 +4031,29 @@ class BuilderTests(unittest.TestCase):
         # cache warm-up) while every package after it flashed by in a
         # fraction of a second -- because each one was its own dnf5 call.
         # This asserts the fix directly: one dnf5 invocation covers every
-        # requested package.
+        # requested package. Only a name the batch did not find gets a
+        # follow-up of its own (#370), and by then the cache is warm.
         app = self.make_app()
         stub = GumStub()
         calls: list[list[str]] = []
 
         def fake_spinner_result(_title, command, *, cwd=None):
             calls.append(list(command))
-            return subprocess.CompletedProcess(list(command), 0, "tmux\nhtop\n", "")
+            output = "tmux\nhtop\n" if len(calls) == 1 else ""
+            return subprocess.CompletedProcess(list(command), 0, output, "")
 
         stub.spinner_result = fake_spinner_result
         app.gum = stub
         with patch("atomic_image_builder.command_exists", return_value=True):
             results = app.lookup_host_packages(["tmux", "htop", "nethock"])
 
-        self.assertEqual(len(calls), 1)
         self.assertIn("tmux", calls[0])
         self.assertIn("htop", calls[0])
         self.assertIn("nethock", calls[0])
         self.assertIn("%{name}\n", calls[0])
+        for command in calls[1:]:
+            self.assertNotIn("tmux", command)
+            self.assertNotIn("htop", command)
         self.assertEqual(results, {"tmux": True, "htop": True, "nethock": False})
 
     def test_lookup_host_packages_asks_about_each_name_once(self) -> None:
@@ -4062,15 +4066,16 @@ class BuilderTests(unittest.TestCase):
 
         def fake_spinner_result(_title, command, *, cwd=None):
             calls.append(list(command))
-            return subprocess.CompletedProcess(list(command), 0, "tmux\n", "")
+            output = "tmux\n" if len(calls) == 1 else ""
+            return subprocess.CompletedProcess(list(command), 0, output, "")
 
         stub.spinner_result = fake_spinner_result
         app.gum = stub
         with patch("atomic_image_builder.command_exists", return_value=True):
             results = app.lookup_host_packages(["tmux", "tmux", "htop"])
 
-        self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].count("tmux"), 1)
+        self.assertTrue(all("tmux" not in command for command in calls[1:]))
         self.assertEqual(results, {"tmux": True, "htop": False})
 
     def test_lookup_host_packages_skips_already_cached_packages(self) -> None:
@@ -4148,6 +4153,140 @@ class BuilderTests(unittest.TestCase):
         with patch("atomic_image_builder.command_exists", return_value=True):
             results = app.lookup_host_packages(["tmux"])
         self.assertEqual(results, {"tmux": None})
+
+    def _lookup_with_dnf5_stub(self, app, packages: list[str], answers: dict[str, str]) -> tuple[dict, list[list[str]]]:
+        # `answers` maps the tail of a repoquery command (what follows
+        # --latest-limit 1) to the stdout dnf5 would print for it. The batch
+        # is keyed by its joined names; a follow-up by "--whatprovides <spec>"
+        # or "<spec>". Anything unlisted prints nothing with exit 0, which is
+        # what dnf5 5.4.2.1 does for a spec that matches no package.
+        stub = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            calls.append(list(command))
+            tail = " ".join(command[command.index("1") + 1 :])
+            return subprocess.CompletedProcess(list(command), 0, answers.get(tail, ""), "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            return app.lookup_host_packages(packages), calls
+
+    def test_lookup_host_packages_accepts_a_name_that_resolves_through_provides(self) -> None:
+        # The issue's reproduction: `dnf5 install vim` installs vim-enhanced
+        # via `Provides: vim`, but a plain repoquery argument does not resolve
+        # Provides, so the batch prints nothing for it. The follow-up asks
+        # --whatprovides, which is what makes the answer match the build.
+        app = self.make_app()
+        results, calls = self._lookup_with_dnf5_stub(
+            app,
+            ["htop", "vim"],
+            {"htop vim": "htop\n", "--whatprovides vim": "vim-enhanced\n"},
+        )
+        self.assertEqual(results, {"htop": True, "vim": True})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][-2:], ["--whatprovides", "vim"])
+        self.assertEqual(app.package_lookup_cache["vim"], True)
+
+    def test_lookup_host_packages_accepts_a_name_dot_arch_spec(self) -> None:
+        # repoquery resolves vim-enhanced.x86_64 but prints the bare name,
+        # which is not string-equal to the spec. The printed name opening
+        # the spec is the accept condition.
+        app = self.make_app()
+        results, calls = self._lookup_with_dnf5_stub(
+            app,
+            ["vim-enhanced.x86_64"],
+            {"vim-enhanced.x86_64": "vim-enhanced\n"},
+        )
+        self.assertEqual(results, {"vim-enhanced.x86_64": True})
+        # Batch, then --whatprovides (a name.arch is not a Provides), then
+        # the NEVRA query that answers it.
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[1][-2:], ["--whatprovides", "vim-enhanced.x86_64"])
+        self.assertEqual(calls[2][-1], "vim-enhanced.x86_64")
+        self.assertNotIn("--whatprovides", calls[2])
+
+    def test_lookup_host_packages_still_rejects_a_wrong_case_name(self) -> None:
+        # repoquery matches positional specs ignoring case, install does not:
+        # `dnf5 install Vim-Enhanced` is "No match for argument". Printed
+        # name vim-enhanced does not open the spec Vim-Enhanced, so the
+        # lookup must keep saying no, exactly as the issue expects.
+        app = self.make_app()
+        results, _calls = self._lookup_with_dnf5_stub(
+            app,
+            ["Vim-Enhanced"],
+            {"Vim-Enhanced": "vim-enhanced\n"},
+        )
+        self.assertEqual(results, {"Vim-Enhanced": False})
+
+    def test_lookup_host_packages_typo_without_separator_skips_the_nevra_query(self) -> None:
+        # "nethock" has no ".", "-" or ":" so it cannot be a name.arch or
+        # name-version form; once --whatprovides says nothing provides it,
+        # there is nothing left for a positional query to add.
+        app = self.make_app()
+        results, calls = self._lookup_with_dnf5_stub(app, ["nethock"], {})
+        self.assertEqual(results, {"nethock": False})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][-2:], ["--whatprovides", "nethock"])
+
+    def test_lookup_host_packages_typo_with_separator_is_rejected_after_both_follow_ups(self) -> None:
+        app = self.make_app()
+        results, calls = self._lookup_with_dnf5_stub(app, ["python3-foo-typo"], {})
+        self.assertEqual(results, {"python3-foo-typo": False})
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(app.package_lookup_cache["python3-foo-typo"], False)
+
+    def test_lookup_host_packages_follow_up_failure_is_unchecked_not_missing(self) -> None:
+        # A dnf5 failure during the follow-up must not turn into "not found":
+        # None keeps the name with the "could not fully check" warning, the
+        # same as a failure in the batch.
+        app = self.make_app()
+        stub = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            calls.append(list(command))
+            if "--whatprovides" in command:
+                return subprocess.CompletedProcess(list(command), 1, "", "some unrelated dnf5 error")
+            return subprocess.CompletedProcess(list(command), 0, "", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            results = app.lookup_host_packages(["vim"])
+        self.assertEqual(results, {"vim": None})
+        self.assertEqual(len(calls), 2)
+
+    def test_lookup_host_packages_nevra_follow_up_failure_is_unchecked_not_missing(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            if command[-1] == "vim-enhanced.x86_64" and "--whatprovides" not in command:
+                return subprocess.CompletedProcess(list(command), 1, "", "some unrelated dnf5 error")
+            return subprocess.CompletedProcess(list(command), 0, "", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            results = app.lookup_host_packages(["vim-enhanced.x86_64"])
+        self.assertEqual(results, {"vim-enhanced.x86_64": None})
+
+    def test_manual_entry_keeps_a_provides_name_without_a_not_found_error(self) -> None:
+        # The user-visible half of #370: typing "vim" on the exact-name
+        # screen used to print "These package names were not found: vim".
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.CompletedProcess(
+            list(command), 0, "vim-enhanced\n" if "--whatprovides" in command else "", ""
+        )
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            kept = app.filter_available_manual_packages(["vim"])
+        self.assertEqual(kept, ["vim"])
+        self.assertFalse(app.last_manual_package_check_had_missing)
+        self.assertFalse(any(level == "error" for level, _message in stub.messages))
 
     def test_lookup_host_packages_uses_singular_title_for_one_package(self) -> None:
         app = self.make_app()

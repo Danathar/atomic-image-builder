@@ -550,6 +550,27 @@ correctly elsewhere in this file; lookup_host_package() was the one call
 site that had been missing it, invisibly, because a single-package query
 never has more than one result to separate.
 
+The batch is an exact-name check, and `dnf5 install` accepts more than exact
+names (#370). Two specs the generated build.sh installs were rejected as
+typos: `vim`, which repoquery prints nothing for because a positional
+repoquery argument does not resolve Provides (install resolves it to
+vim-enhanced), and `vim-enhanced.x86_64`, for which repoquery prints the bare
+name `vim-enhanced`, not string-equal to the spec. The batch cannot say which
+argument printed which line, so _resolve_package_spec() re-asks per leftover
+spec, on the cache the batch just warmed: `--whatprovides <spec>` first (it is
+case-sensitive and every package provides its own name), then a positional
+`<spec>` query for NEVRA forms, accepted only when a printed name opens the
+spec verbatim. That last condition is what keeps `Vim-Enhanced` rejected:
+positional repoquery matches ignoring case (5.4.2.1 prints vim-enhanced for
+it), install does not ("No match for argument"). A spec with no ".", "-" or
+":" skips the positional query, since it can only be a plain name and
+--whatprovides already answered that. Confirmed live against dnf5 5.4.2.1:
+vim, vim-enhanced.x86_64, htop-3.4.1 and the virtual `webserver` resolve;
+Vim-Enhanced, HTOP, nethock and python3-foo-typo do not. Binaries by bare name
+(`dnf5 install <name>` also matches /usr/bin/<name>) are not resolved here; a
+user who types one keeps the "not found" message and can enter the package
+name instead.
+
 Chunkah Config and Output Cleanup: trap, not trailing rm commands
 ---------------------------------------------------------------
 The current recipe registers `trap 'rm -f "${CHUNKAH_CONFIG_FILE}"; rm -rf

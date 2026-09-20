@@ -4339,6 +4339,33 @@ class App:
             if len(to_check) == 1
             else f"Checking package names: {', '.join(to_check)}"
         )
+        names, uncheckable = self._dnf5_repoquery_names(title, state_dir, to_check)
+        unresolved: list[str] = []
+        for package in to_check:
+            if package in names:
+                outcome: bool | None = True
+            elif uncheckable:
+                outcome = None
+            else:
+                # Not a package name -- which is not the same as not
+                # installable. Decided per spec below, once the batch has
+                # settled everything it can.
+                unresolved.append(package)
+                continue
+            self.package_lookup_cache[package] = outcome
+            results[package] = outcome
+        for package in unresolved:
+            outcome = self._resolve_package_spec(package, state_dir)
+            self.package_lookup_cache[package] = outcome
+            results[package] = outcome
+        return results
+
+    def _dnf5_repoquery_names(self, title: str, state_dir: Path, args: Sequence[str]) -> tuple[set[str], bool]:
+        # One `dnf5 repoquery` run, reduced to the package names it printed
+        # plus whether that answer can be trusted. A nonzero exit that is not
+        # one of dnf5's own "nothing matched" messages means dnf5 itself
+        # failed (no metadata, broken config), so an empty result then says
+        # nothing about the names; callers report None rather than a typo.
         proc = self.gum.spinner_result(
             title,
             [
@@ -4351,7 +4378,7 @@ class App:
                 "%{name}\n",
                 "--latest-limit",
                 "1",
-                *to_check,
+                *args,
             ],
         )
         # %{name}\n means one result per line even when multiple packages are
@@ -4360,18 +4387,41 @@ class App:
         names = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
         detail = "\n".join(part for part in [proc.stdout, proc.stderr] if part).lower()
         has_missing_marker = any(marker in detail for marker in DNF5_MISSING_MARKERS)
-        for package in to_check:
-            if package in names:
-                outcome: bool | None = True
-            elif has_missing_marker:
-                outcome = False
-            elif proc.returncode == 0:
-                outcome = False
-            else:
-                outcome = None
-            self.package_lookup_cache[package] = outcome
-            results[package] = outcome
-        return results
+        uncheckable = proc.returncode != 0 and not has_missing_marker
+        return names, uncheckable
+
+    def _resolve_package_spec(self, spec: str, state_dir: Path) -> bool | None:
+        # The batch answers "is this exactly a package name?", and the
+        # generated build.sh's `dnf5 install -y` accepts more than that: a
+        # NEVRA form such as vim-enhanced.x86_64, or a Provides such as vim,
+        # which dnf5 resolves to vim-enhanced. Rejecting those as typos
+        # contradicted what `dnf install` does on the user's own machine
+        # (#370). The batch cannot say which of its arguments printed which
+        # line, so the leftovers are resolved one spec at a time, on the
+        # metadata cache the batch just warmed -- these calls are the fast
+        # kind.
+        title = f"Checking package name: {spec}"
+        # --whatprovides first. It is case-sensitive, like install's own
+        # resolution, and every package provides its own name, so this covers
+        # a plain name and a virtual one alike.
+        names, uncheckable = self._dnf5_repoquery_names(title, state_dir, ["--whatprovides", spec])
+        if names:
+            return True
+        if uncheckable:
+            return None
+        # A spec with no NEVRA separator can only be a name, and the Provides
+        # query already gave the case-exact answer for that.
+        if not any(separator in spec for separator in ".-:"):
+            return False
+        # NEVRA forms. dnf5 prints the bare %{name} for vim-enhanced.x86_64,
+        # and matches positional specs ignoring case where install does not
+        # (5.4.2.1: Vim-Enhanced prints vim-enhanced here but is "No match
+        # for argument" to install). So the printed name must open the spec
+        # verbatim; the rest is the arch or version dnf5 matched it against.
+        names, uncheckable = self._dnf5_repoquery_names(title, state_dir, [spec])
+        if any(spec.startswith(name) for name in names):
+            return True
+        return None if uncheckable else False
 
     def lookup_host_package(self, package: str) -> bool | None:
         return self.lookup_host_packages([package])[package]
