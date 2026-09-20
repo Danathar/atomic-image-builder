@@ -601,16 +601,29 @@ CONTAINER_ORIGIN_PREFIXES: tuple[str, ...] = ("ostree-", "docker://", "registry:
 # already spell the curated key.
 CLASSIC_FEDORA_REF_ALIASES: dict[str, str] = {"sericea": "sway-atomic", "onyx": "budgie-atomic"}
 
+# The remote Fedora's installer configures for its own ostree repo. Remote
+# names are local configuration, so the ref alone says nothing about where a
+# deployment came from: `corp:fedora/44/x86_64/silverblue` is whatever the
+# corp remote serves under that name. Only this remote is Fedora's.
+FEDORA_OSTREE_REMOTE = "fedora"
 
-def classic_ostree_origin_ref(origin: str) -> str | None:
-    # A deployment that was installed from Fedora's ostree repo and never
-    # rebased has no container-image-reference; its `origin` is a plain
+# The image workflow this tool generates builds and publishes one native
+# x86_64 image and nothing else (see patch_disk_workflow_platform and #236).
+# A host on another architecture can be scanned, but the image it would be
+# guided into building could never be switched onto it.
+PUBLISHED_ARCHITECTURE = "x86_64"
+
+
+def classic_ostree_origin(origin: str) -> tuple[str, str] | None:
+    # A deployment that was installed from an ostree repo and never rebased
+    # has no container-image-reference; its `origin` is a plain
     # `<remote>:<ref>` such as "fedora:fedora/44/x86_64/silverblue". Return
-    # that ref, or None when the value names a container image so the caller
-    # can send it through normalize_container_image_reference() instead. The
-    # shape check matters: an unprefixed image reference has a colon too, but
-    # what precedes it is a registry path -- slashes, and a host with a dot in
-    # it -- where a classic origin has a bare remote name or a ref segment.
+    # (remote, ref) -- the remote is "" for a bare ref deployed without one --
+    # or None when the value names a container image so the caller can send
+    # it through normalize_container_image_reference() instead. The shape
+    # check matters: an unprefixed image reference has a colon too, but what
+    # precedes it is a registry path -- slashes, and a host with a dot in it
+    # -- where a classic origin has a bare remote name or a ref segment.
     value = origin.strip()
     if not value or value.startswith(CONTAINER_ORIGIN_PREFIXES):
         return None
@@ -621,21 +634,43 @@ def classic_ostree_origin_ref(origin: str) -> str | None:
         return None
     if not re.fullmatch(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*", ref):
         return None
-    return ref
+    return remote, ref
 
 
-def fedora_atomic_image_for_classic_ref(ref: str) -> str | None:
-    # fedora/<release>/<arch>/<variant> -> the quay.io image of the same
-    # variant and release, which is the curated Fedora Atomic entry's
+def parse_classic_fedora_ref(ref: str) -> tuple[str, str, str] | None:
+    # fedora/<release>/<arch>/<variant> -> (release, arch, variant), or None
+    # for any ref that is not spelled the way Fedora's desktop refs are.
+    parts = ref.split("/")
+    if len(parts) != 4 or parts[0] != "fedora" or not all(parts):
+        return None
+    _fedora, release, arch, variant = parts
+    return release, arch, variant
+
+
+def fedora_atomic_image_for_classic_origin(remote: str, ref: str) -> str | None:
+    # fedora:fedora/<release>/<arch>/<variant> -> the quay.io image of the
+    # same variant and release, which is the curated Fedora Atomic entry's
     # repository with the host's own release as the tag. Handing back a
     # tagged URI rather than the BaseImage lets scan_os treat it exactly like
     # a scanned image: match_base_image() finds the curated entry, and the
     # existing tag check offers the recommended tag when the host is on an
-    # older release. Anything that is not a Fedora desktop ref is None.
-    parts = ref.split("/")
-    if len(parts) != 4 or parts[0] != "fedora" or not all(parts):
+    # older release.
+    #
+    # None for everything else, and that is deliberately strict. The remote
+    # has to be Fedora's own: the ref is only evidence of provenance when it
+    # was pulled from Fedora's repo, and substituting the official image for
+    # a same-named ref served by some other remote would quietly build on a
+    # different base than the one running. And the architecture has to be
+    # the one the generated workflow publishes: an aarch64 host offered the
+    # x86_64 image would be walked through creating an image it cannot use.
+    if remote != FEDORA_OSTREE_REMOTE:
         return None
-    _fedora, release, _arch, variant = parts
+    parsed = parse_classic_fedora_ref(ref)
+    if parsed is None:
+        return None
+    release, arch, variant = parsed
+    if arch != PUBLISHED_ARCHITECTURE:
+        return None
     key = CLASSIC_FEDORA_REF_ALIASES.get(variant, variant)
     for image in BASE_IMAGES:
         if image.provider == "Fedora Atomic" and image.key == key:
@@ -3357,8 +3392,8 @@ class App:
                 "This deployment has no container image reference; scanning only supports bootc / image-based deployments."
             )
             return SCAN_UNAVAILABLE
-        classic_ref = classic_ostree_origin_ref(container_ref)
-        if classic_ref is None:
+        classic = classic_ostree_origin(container_ref)
+        if classic is None:
             base = normalize_container_image_reference(container_ref)
         else:
             # A stock Fedora Atomic install has no container-image-reference,
@@ -3368,14 +3403,23 @@ class App:
             # of the images this tool supports" and defaulted to stopping.
             # The ref names the same variant and release the quay.io image
             # does, so map it there and carry the layered packages as usual.
-            # A classic ref this tool has no image for is the case the error
-            # above describes -- there is no image to build on -- and takes
-            # the same path, where create_image offers to choose a base.
-            mapped = fedora_atomic_image_for_classic_ref(classic_ref)
+            # A classic origin this tool has no image for is the case the
+            # error above describes -- there is no image to build on -- and
+            # takes the same path, where create_image offers to choose a base.
+            remote, classic_ref = classic
+            mapped = fedora_atomic_image_for_classic_origin(remote, classic_ref)
             if mapped is None:
                 self.gum.error(
-                    f"This system was installed from the ostree ref {classic_ref}, which is not one of the images this tool supports."
+                    f"This system was installed from the ostree origin {container_ref.strip()}, which is not one of the images this tool supports."
                 )
+                parsed = parse_classic_fedora_ref(classic_ref)
+                if remote == FEDORA_OSTREE_REMOTE and parsed is not None and parsed[1] != PUBLISHED_ARCHITECTURE:
+                    # The variant may well be supported; the architecture is
+                    # not. Say so, or the "Supported" list below reads as a
+                    # contradiction to someone running Kinoite on aarch64.
+                    self.gum.hint(
+                        f"This tool only publishes {PUBLISHED_ARCHITECTURE} images, so a {parsed[1]} system cannot switch to an image it builds."
+                    )
                 self.gum.hint(f"Supported: {supported_base_image_names()}")
                 return SCAN_UNAVAILABLE
             base = mapped
