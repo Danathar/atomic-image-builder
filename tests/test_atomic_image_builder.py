@@ -4553,7 +4553,16 @@ class BuilderTests(unittest.TestCase):
             list(command), 0, "vim-enhanced\n" if "--whatprovides" in command else "", ""
         )
         app.gum = stub
-        with patch("atomic_image_builder.command_exists", return_value=True):
+        # The gum stub answers the repo query, but the installed-package
+        # lookup ahead of it goes to `rpm` through run(), not through gum.
+        # Left unpatched that reaches the real binary: absent, the test
+        # errors; present, the answer is whatever this machine happens to
+        # have installed, and a host with vim would take a different branch.
+        rpm = subprocess.CompletedProcess(["rpm"], 1, "package vim is not installed\n", "")
+        with (
+            patch("atomic_image_builder.command_exists", return_value=True),
+            patch("atomic_image_builder.run", return_value=rpm),
+        ):
             kept = app.filter_available_manual_removed_packages(["vim"])
         self.assertEqual(kept, [])
         self.assertTrue(app.last_manual_removed_package_check_had_missing)
