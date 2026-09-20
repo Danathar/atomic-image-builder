@@ -1228,12 +1228,73 @@ def workflow_block_key(stripped_line: str) -> str | None:
     return match.group(1) if match else None
 
 
+# The oldest Cosign release the generated signing step works with. Workflows
+# pinned below it are raised to it; anything at or above it is the owner's
+# choice and stays. The bundled snapshot pins this same version.
+COSIGN_COMPATIBILITY_FLOOR = "v3.1.2"
+# A whole line that is the `cosign-release:` input: the key at the start of
+# the line, a quoted value, and nothing after it but an optional comment.
+# Anchoring both ends is what keeps a shell line that merely mentions the
+# input -- `run: echo "cosign-release: '2.6.3'"` -- from being rewritten.
+COSIGN_RELEASE_LINE_RE = re.compile(r"^(\s*cosign-release:\s*)(['\"])([^'\"]*)\2(\s*(?:#.*)?)$")
+
+
+def cosign_release_tuple(release: str) -> tuple[int, int, int] | None:
+    """Parse a `cosign-release:` value like `v3.1.2` into (3, 1, 2).
+
+    Returns None for anything that is not a plain version, so the caller can
+    leave it alone rather than guess.
+    """
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", release.strip())
+    if match is None:
+        return None
+    major, minor, patch = (int(part) for part in match.groups())
+    return major, minor, patch
+
+
+def raise_cosign_release_floor(step_lines: Sequence[str]) -> list[str]:
+    """Raise a below-floor `cosign-release:` input of a cosign-installer step.
+
+    Only the installer step's own `with:` block is looked at. The workflow is
+    patched in place, so the same text anywhere else -- in an owner's `run:`
+    script, a comment, another action that happens to take an input of that
+    name -- is theirs and stays as written.
+    """
+    if not any("uses:" in line and "sigstore/cosign-installer@" in line for line in step_lines):
+        return list(step_lines)
+    floor = cosign_release_tuple(COSIGN_COMPATIBILITY_FLOOR)
+    patched: list[str] = []
+    with_indent: int | None = None
+    for line in step_lines:
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if with_indent is not None and stripped and not stripped.startswith("#") and indent <= with_indent:
+            with_indent = None
+        if with_indent is None:
+            if workflow_block_key(stripped.removeprefix("- ").lstrip()) == "with":
+                with_indent = indent
+            patched.append(line)
+            continue
+        match = COSIGN_RELEASE_LINE_RE.match(line)
+        if match is not None:
+            current = cosign_release_tuple(match.group(3))
+            if current is not None and current < floor:
+                prefix, quote, _, suffix = match.groups()
+                line = f"{prefix}{quote}{COSIGN_COMPATIBILITY_FLOOR}{quote}{suffix}"
+        patched.append(line)
+    return patched
+
+
 def patch_cosign_compatibility(workflow_text: str) -> str:
-    """Keep existing managed workflows compatible with Cosign 3.x."""
-    lines = workflow_text.splitlines()
-    for index, line in enumerate(lines):
-        if "cosign-release:" in line:
-            lines[index] = re.sub(r"(cosign-release:\s*['\"])v[^'\"]+(['\"])", r"\1v3.1.2\2", line)
+    """Keep existing managed workflows compatible with Cosign 3.x.
+
+    Only versions below COSIGN_COMPATIBILITY_FLOOR are raised, and only on the
+    cosign-installer step's own `cosign-release:` input. An unconditional
+    rewrite meant every update reverted an owner's deliberate bump to a newer
+    3.x or a 4.x release, so a security patch they applied was undone the next
+    time they ran the tool.
+    """
+    lines = patch_workflow_steps(workflow_text, raise_cosign_release_floor)
 
     # `cosign sign` is routinely written across shell line continuations, so the
     # guard has to consider the whole logical command. Testing each physical

@@ -681,6 +681,7 @@ class BuilderTests(unittest.TestCase):
               build:
                 steps:
                   - name: Install Cosign
+                    uses: sigstore/cosign-installer@v3
                     with:
                       cosign-release: 'v2.6.3'
                   - name: Sign
@@ -707,6 +708,108 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("--use-signing-config=false", patched)
         self.assertEqual(patch_cosign_compatibility(patched), patched, "not idempotent")
         return patched
+
+    @staticmethod
+    def cosign_installer_step(release_line: str) -> str:
+        """The installer step as the snapshot writes it, around one input line."""
+        return (
+            "    steps:\n"
+            "      - name: Install Cosign\n"
+            "        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2\n"
+            "        with:\n"
+            "          # be careful when upgrading major versions\n"
+            f"{release_line}"
+        )
+
+    def test_patch_cosign_compatibility_raises_only_releases_below_the_floor(self) -> None:
+        # The rewrite is a migration for repos generated against Cosign 2.x.
+        # Before it checked the version it rewrote every value to the floor,
+        # so an owner who bumped past it lost the bump on the next update.
+        for release in ("v2.6.3", "v3.0.0", "v3.1.1", "3.1.0"):
+            with self.subTest(release=release):
+                text = self.cosign_installer_step(f"          cosign-release: '{release}'")
+                self.assertEqual(
+                    patch_cosign_compatibility(text),
+                    self.cosign_installer_step("          cosign-release: 'v3.1.2'"),
+                )
+
+    def test_patch_cosign_compatibility_leaves_newer_releases_alone(self) -> None:
+        for release in ("v3.1.2", "v3.2.0", "v3.10.1", "v4.0.0"):
+            with self.subTest(release=release):
+                text = self.cosign_installer_step(f"          cosign-release: '{release}'")
+                self.assertEqual(patch_cosign_compatibility(text), text)
+
+    def test_patch_cosign_compatibility_leaves_non_version_pins_alone(self) -> None:
+        # A branch name or a partial version is not something the floor can be
+        # compared against; guessing would overwrite a deliberate choice.
+        for release in ("main", "v3", "v3.2"):
+            with self.subTest(release=release):
+                text = self.cosign_installer_step(f'          cosign-release: "{release}"')
+                self.assertEqual(patch_cosign_compatibility(text), text)
+
+    def test_patch_cosign_compatibility_keeps_quotes_and_trailing_comment(self) -> None:
+        text = self.cosign_installer_step('          cosign-release: "v2.6.3"  # bumped by hand')
+        self.assertEqual(
+            patch_cosign_compatibility(text),
+            self.cosign_installer_step('          cosign-release: "v3.1.2"  # bumped by hand'),
+        )
+
+    def test_patch_cosign_compatibility_leaves_the_input_name_alone_outside_the_installer_step(self) -> None:
+        # The workflow is patched in place. Text that merely mentions the
+        # input -- an owner's shell command, a comment, another action that
+        # takes an input of that name -- is not the installer's pin, and
+        # rewriting it edits what the owner wrote. Only the installer step's
+        # own `with:` block is fair game; the below-floor pin there still moves.
+        workflow_text = textwrap.dedent(
+            """\
+            jobs:
+              build:
+                steps:
+                  - name: Say so
+                    run: echo "cosign-release: '2.6.3'"
+                  - name: Other tool
+                    uses: example/other-installer@v1
+                    with:
+                      cosign-release: '2.6.3'
+                  - name: Install Cosign
+                    uses: sigstore/cosign-installer@v3
+                    # cosign-release: '2.6.3' was the old pin
+                    with:
+                      cosign-release: '2.6.3'
+                    env:
+                      NOTE: "cosign-release: '2.6.3'"
+            """
+        )
+        patched = patch_cosign_compatibility(workflow_text)
+        expected = workflow_text.replace(
+            "        with:\n          cosign-release: '2.6.3'\n        env:",
+            "        with:\n          cosign-release: 'v3.1.2'\n        env:",
+        )
+        self.assertNotEqual(expected, workflow_text, "the fixture must carry the installer's pin")
+        self.assertEqual(patched, expected.rstrip("\n"))
+        self.assertEqual(patched.count("cosign-release: '2.6.3'"), 4)
+
+    def test_patch_container_workflow_keeps_newer_cosign_release(self) -> None:
+        # Through the real generated-repo path: the signing flags still land,
+        # and the owner's newer pin survives the update.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build:
+                steps:
+                  - name: Install Cosign
+                    uses: sigstore/cosign-installer@v3
+                    with:
+                      cosign-release: 'v4.0.0'
+                  - name: Sign
+                    run: cosign sign -y --key env://COSIGN_PRIVATE_KEY image:latest
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn("cosign-release: 'v4.0.0'", patched)
+        self.assertNotIn("v3.1.2", patched)
+        self.assertIn("--new-bundle-format=false", patched)
 
     def test_patch_cosign_compatibility_bundled_snapshot_shape(self) -> None:
         snapshot = (
@@ -759,6 +862,7 @@ class BuilderTests(unittest.TestCase):
               build:
                 steps:
                   - name: Install Cosign
+                    uses: sigstore/cosign-installer@v3
                     with:
                       cosign-release: 'v2.6.3'
                   - name: Sign
