@@ -65,6 +65,7 @@ from atomic_image_builder import (
     determine_fedora_atomic_default_tag,
     ensure_trailing_newline,
     ensure_workflow_job_env_entries,
+    extend_flow_sequence_line,
     format_daily_rebuild_note,
     is_valid_repo_name,
     managed_path,
@@ -75,6 +76,7 @@ from atomic_image_builder import (
     pinned_action,
     read_os_release_fields,
     string_list,
+    workflow_job_ranges,
 )
 
 
@@ -511,16 +513,16 @@ class BuilderTests(unittest.TestCase):
                     uses: actions/checkout@v4
                   - name: Install Cosign
                     uses: sigstore/cosign-installer@v3
-                    if: github.event_name != 'pull_request' && env.COSIGN_PRIVATE_KEY != ''
+                    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.COSIGN_PRIVATE_KEY != ''
                   - name: Sign container image
-                    if: github.event_name != 'pull_request' && env.COSIGN_PRIVATE_KEY != ''
+                    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.COSIGN_PRIVATE_KEY != ''
                     run: cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/example/test:latest
                     env:
                       COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
             """
         )
         patched = app.patch_container_workflow(workflow)
-        # The job-level env block must now contain COSIGN_PRIVATE_KEY
+        # The job-level env block must now contain SIGNING_ENABLED
         job_env_lines = []
         in_job_env = False
         for line in patched.splitlines():
@@ -555,6 +557,108 @@ class BuilderTests(unittest.TestCase):
         )
         patched = app.patch_container_workflow(workflow)
         self.assertIn("paths-ignore: ['**/README.md', '.atomic-image-builder.json']", patched)
+        self.assertNotIn(f"- '{STATE_FILE}'", patched)
+        push = parse_block_yaml(patched)["on"]["push"]
+        self.assertEqual(push["paths-ignore"], ["**/README.md", STATE_FILE])
+        self.assertEqual(app.patch_container_workflow(patched), patched)
+
+    def test_patch_container_workflow_keeps_comment_after_inline_paths_ignore(self) -> None:
+        # Same handling as the BlueBuild patcher, through the shared helper:
+        # a trailing comment stays after the closing bracket rather than
+        # ending the match and dropping the patcher into the block-form
+        # insert, which would corrupt the file. Text assertion only, as the
+        # suite's YAML parser does not read comments after a flow sequence.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Build container image
+            on:
+              push:
+                paths-ignore: ['**/README.md']  # docs only
+            jobs:
+              build_push:
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v4
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn(f"    paths-ignore: ['**/README.md', '{STATE_FILE}']  # docs only\n", patched)
+        self.assertNotIn(f"- '{STATE_FILE}'", patched)
+        self.assertEqual(app.patch_container_workflow(patched), patched)
+
+    def test_extend_flow_sequence_line_leaves_block_form_alone(self) -> None:
+        # None is the signal to fall through to the block-form insert. The
+        # bundled BlueBuild snapshot's key carries a comment, and a comment
+        # may itself contain brackets; neither is a flow sequence.
+        for line in (
+            "    paths-ignore:",
+            "    paths-ignore: # don't rebuild if only documentation has changed",
+            "    paths-ignore: # see [docs]",
+            "      - '**/README.md'",
+        ):
+            with self.subTest(line=line):
+                self.assertIsNone(extend_flow_sequence_line(line, f"'{STATE_FILE}'"))
+
+    def test_extend_flow_sequence_line_keeps_brackets_in_comment_out_of_the_list(self) -> None:
+        self.assertEqual(
+            extend_flow_sequence_line("    paths-ignore: ['**.md'] # see [docs]", "'x'"),
+            "    paths-ignore: ['**.md', 'x'] # see [docs]",
+        )
+        self.assertEqual(extend_flow_sequence_line("paths-ignore: [ ]", "'x'"), "paths-ignore: ['x']")
+
+    def test_extend_flow_sequence_line_writes_one_separator_before_the_new_item(self) -> None:
+        # YAML allows a trailing comma in a flow sequence, "['**.md',]", and
+        # padding inside the brackets. Appending ", item" after an existing
+        # comma wrote "['**.md',, item]", which no parser accepts, so the
+        # workflow stopped running. Every shape here has to come out as the
+        # same one-separator line, and a comma inside a quoted item is part
+        # of the item, not a separator.
+        expected = "paths-ignore: ['**.md', 'x']"
+        for line in (
+            "paths-ignore: ['**.md',]",
+            "paths-ignore: ['**.md', ]",
+            "paths-ignore: ['**.md' ,]",
+            "paths-ignore: [ '**.md' , ]",
+            "paths-ignore: ['**.md' ]",
+            "paths-ignore: [ '**.md']",
+        ):
+            with self.subTest(line=line):
+                extended = extend_flow_sequence_line(line, "'x'")
+                self.assertEqual(extended, expected)
+                self.assertEqual(parse_block_yaml(extended), {"paths-ignore": ["**.md", "x"]})
+        self.assertEqual(extend_flow_sequence_line("paths-ignore: [,]", "'x'"), "paths-ignore: ['x']")
+        self.assertEqual(
+            extend_flow_sequence_line("paths-ignore: ['a,b', 'c,']", "'x'"),
+            "paths-ignore: ['a,b', 'c,', 'x']",
+        )
+        self.assertEqual(
+            extend_flow_sequence_line("    paths-ignore: [\"**.md\",] # docs", "'x'"),
+            "    paths-ignore: [\"**.md\", 'x'] # docs",
+        )
+
+    def test_patch_container_workflow_handles_trailing_comma_in_inline_paths_ignore(self) -> None:
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Build container image
+            on:
+              push:
+                paths-ignore: ['**/README.md',]
+            jobs:
+              build_push:
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v4
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn(f"    paths-ignore: ['**/README.md', '{STATE_FILE}']\n", patched)
+        self.assertNotIn(",,", patched)
+        self.assertNotIn(f"- '{STATE_FILE}'", patched)
+        push = parse_block_yaml(patched)["on"]["push"]
+        self.assertEqual(push["paths-ignore"], ["**/README.md", STATE_FILE])
+        self.assertEqual(app.patch_container_workflow(patched), patched)
 
     def test_patch_container_workflow_handles_empty_inline_paths_ignore(self) -> None:
         # An empty inline list must not produce "[, '<state file>']".
@@ -680,6 +784,7 @@ class BuilderTests(unittest.TestCase):
               build:
                 steps:
                   - name: Install Cosign
+                    uses: sigstore/cosign-installer@v3
                     with:
                       cosign-release: 'v2.6.3'
                   - name: Sign
@@ -706,6 +811,108 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("--use-signing-config=false", patched)
         self.assertEqual(patch_cosign_compatibility(patched), patched, "not idempotent")
         return patched
+
+    @staticmethod
+    def cosign_installer_step(release_line: str) -> str:
+        """The installer step as the snapshot writes it, around one input line."""
+        return (
+            "    steps:\n"
+            "      - name: Install Cosign\n"
+            "        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2\n"
+            "        with:\n"
+            "          # be careful when upgrading major versions\n"
+            f"{release_line}"
+        )
+
+    def test_patch_cosign_compatibility_raises_only_releases_below_the_floor(self) -> None:
+        # The rewrite is a migration for repos generated against Cosign 2.x.
+        # Before it checked the version it rewrote every value to the floor,
+        # so an owner who bumped past it lost the bump on the next update.
+        for release in ("v2.6.3", "v3.0.0", "v3.1.1", "3.1.0"):
+            with self.subTest(release=release):
+                text = self.cosign_installer_step(f"          cosign-release: '{release}'")
+                self.assertEqual(
+                    patch_cosign_compatibility(text),
+                    self.cosign_installer_step("          cosign-release: 'v3.1.2'"),
+                )
+
+    def test_patch_cosign_compatibility_leaves_newer_releases_alone(self) -> None:
+        for release in ("v3.1.2", "v3.2.0", "v3.10.1", "v4.0.0"):
+            with self.subTest(release=release):
+                text = self.cosign_installer_step(f"          cosign-release: '{release}'")
+                self.assertEqual(patch_cosign_compatibility(text), text)
+
+    def test_patch_cosign_compatibility_leaves_non_version_pins_alone(self) -> None:
+        # A branch name or a partial version is not something the floor can be
+        # compared against; guessing would overwrite a deliberate choice.
+        for release in ("main", "v3", "v3.2"):
+            with self.subTest(release=release):
+                text = self.cosign_installer_step(f'          cosign-release: "{release}"')
+                self.assertEqual(patch_cosign_compatibility(text), text)
+
+    def test_patch_cosign_compatibility_keeps_quotes_and_trailing_comment(self) -> None:
+        text = self.cosign_installer_step('          cosign-release: "v2.6.3"  # bumped by hand')
+        self.assertEqual(
+            patch_cosign_compatibility(text),
+            self.cosign_installer_step('          cosign-release: "v3.1.2"  # bumped by hand'),
+        )
+
+    def test_patch_cosign_compatibility_leaves_the_input_name_alone_outside_the_installer_step(self) -> None:
+        # The workflow is patched in place. Text that merely mentions the
+        # input -- an owner's shell command, a comment, another action that
+        # takes an input of that name -- is not the installer's pin, and
+        # rewriting it edits what the owner wrote. Only the installer step's
+        # own `with:` block is fair game; the below-floor pin there still moves.
+        workflow_text = textwrap.dedent(
+            """\
+            jobs:
+              build:
+                steps:
+                  - name: Say so
+                    run: echo "cosign-release: '2.6.3'"
+                  - name: Other tool
+                    uses: example/other-installer@v1
+                    with:
+                      cosign-release: '2.6.3'
+                  - name: Install Cosign
+                    uses: sigstore/cosign-installer@v3
+                    # cosign-release: '2.6.3' was the old pin
+                    with:
+                      cosign-release: '2.6.3'
+                    env:
+                      NOTE: "cosign-release: '2.6.3'"
+            """
+        )
+        patched = patch_cosign_compatibility(workflow_text)
+        expected = workflow_text.replace(
+            "        with:\n          cosign-release: '2.6.3'\n        env:",
+            "        with:\n          cosign-release: 'v3.1.2'\n        env:",
+        )
+        self.assertNotEqual(expected, workflow_text, "the fixture must carry the installer's pin")
+        self.assertEqual(patched, expected.rstrip("\n"))
+        self.assertEqual(patched.count("cosign-release: '2.6.3'"), 4)
+
+    def test_patch_container_workflow_keeps_newer_cosign_release(self) -> None:
+        # Through the real generated-repo path: the signing flags still land,
+        # and the owner's newer pin survives the update.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build:
+                steps:
+                  - name: Install Cosign
+                    uses: sigstore/cosign-installer@v3
+                    with:
+                      cosign-release: 'v4.0.0'
+                  - name: Sign
+                    run: cosign sign -y --key env://COSIGN_PRIVATE_KEY image:latest
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn("cosign-release: 'v4.0.0'", patched)
+        self.assertNotIn("v3.1.2", patched)
+        self.assertIn("--new-bundle-format=false", patched)
 
     def test_patch_cosign_compatibility_bundled_snapshot_shape(self) -> None:
         snapshot = (
@@ -749,6 +956,78 @@ class BuilderTests(unittest.TestCase):
         with self.assertRaisesRegex(CommandError, "split across line continuations"):
             patch_cosign_compatibility(text)
 
+    # `cosign sign-blob` is how an owner signs a second artifact - an SBOM, an
+    # ISO checksum - with the same key. It shares the `--key env://` spelling
+    # the guard keys on, and a hyphen is a word boundary, so `\bcosign\s+sign\b`
+    # matched the `sign` inside it and spliced the flags into the middle of the
+    # subcommand name. The result was not a command, and the step failed on the
+    # owner's next push. Only the bare `sign` verb takes the flags.
+    SIGN_BLOB_LINE = (
+        "          cosign sign-blob -y --key env://COSIGN_PRIVATE_KEY --output-signature sbom.sig sbom.json"
+    )
+
+    def test_patch_cosign_compatibility_leaves_sign_blob_alone(self) -> None:
+        self.assertEqual(patch_cosign_compatibility(self.SIGN_BLOB_LINE), self.SIGN_BLOB_LINE)
+
+    def test_patch_cosign_compatibility_leaves_sign_blob_alone_across_continuations(self) -> None:
+        # Neither continuation shape is a `cosign sign` command, so neither is
+        # rewritten - and the split-verb one must not trip the fail-closed
+        # error either, since there is nothing here that needs the flags.
+        for text in (
+            (
+                "          cosign sign-blob -y \\\n"
+                "            --key env://COSIGN_PRIVATE_KEY \\\n"
+                "            --output-signature sbom.sig sbom.json"
+            ),
+            (
+                "          cosign \\\n"
+                "            sign-blob -y --key env://COSIGN_PRIVATE_KEY sbom.json"
+            ),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(patch_cosign_compatibility(text), text)
+
+    def test_patch_cosign_compatibility_patches_sign_but_not_sign_blob_beside_it(self) -> None:
+        # The realistic shape: an image-signing step followed by an SBOM step
+        # that reuses the key. The first still gets the flags; the second is
+        # untouched.
+        text = (
+            "          cosign sign -y --key env://COSIGN_PRIVATE_KEY ${IMAGE}\n"
+            f"{self.SIGN_BLOB_LINE}\n"
+        )
+        patched = self.assert_cosign_patched(text)
+        self.assertEqual(
+            patched.splitlines(),
+            [
+                "          cosign sign --new-bundle-format=false --use-signing-config=false"
+                " -y --key env://COSIGN_PRIVATE_KEY ${IMAGE}",
+                self.SIGN_BLOB_LINE,
+            ],
+        )
+
+    def test_patch_container_workflow_leaves_sign_blob_step_alone_end_to_end(self) -> None:
+        # The bundled snapshot with a "Sign SBOM" step added, through the real
+        # generated-repo path: the added step's command survives byte-for-byte.
+        app = self.make_app()
+        snapshot = (
+            CONTAINERFILE_TEMPLATE_DIR / ".github" / "workflows" / "build.yml"
+        ).read_text()
+        sbom_step = textwrap.indent(
+            textwrap.dedent(
+                """\
+                - name: Sign SBOM
+                  env:
+                    COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+                  run: |
+                    cosign sign-blob -y --key env://COSIGN_PRIVATE_KEY --output-signature sbom.sig sbom.json
+                """
+            ),
+            "      ",
+        )
+        patched = app.patch_container_workflow(snapshot.rstrip("\n") + "\n\n" + sbom_step)
+        self.assertIn("cosign sign-blob -y --key env://COSIGN_PRIVATE_KEY --output-signature sbom.sig sbom.json", patched)
+        self.assertNotIn("=false-blob", patched)
+
     def test_patch_container_workflow_patches_continuation_signing_end_to_end(self) -> None:
         # Exercise it through the real generated-repo path, not just the helper.
         app = self.make_app()
@@ -758,6 +1037,7 @@ class BuilderTests(unittest.TestCase):
               build:
                 steps:
                   - name: Install Cosign
+                    uses: sigstore/cosign-installer@v3
                     with:
                       cosign-release: 'v2.6.3'
                   - name: Sign
@@ -899,6 +1179,79 @@ class BuilderTests(unittest.TestCase):
             migrated.splitlines(),
         )
         self.assertEqual(app.patch_container_workflow(migrated), migrated)
+
+    @staticmethod
+    def job_env_entries_by_job(workflow: str) -> dict[str, list[str]]:
+        """Job-level env entries keyed by job name, compared by whole line.
+
+        job_env_entries() reads the first `env:` block in the file, which is
+        the right question for a one-job workflow and the wrong one here: the
+        bug under test is precisely that the entry lands in the first job.
+        """
+        entries: dict[str, list[str]] = {}
+        job: str | None = None
+        inside = False
+        for line in workflow.splitlines():
+            if line.startswith("  ") and not line.startswith("   ") and line.rstrip().endswith(":"):
+                job = line.strip()[:-1]
+                entries[job] = []
+                inside = False
+                continue
+            if job is None:
+                continue
+            if line == "    env:":
+                inside = True
+                continue
+            if inside and line.startswith("      ") and ":" in line:
+                entries[job].append(line.strip())
+            elif inside:
+                inside = False
+        return entries
+
+    def test_signing_guard_is_defined_in_the_job_that_reads_it_not_the_first_job(self) -> None:
+        # An owner adding a job ahead of build_push -- a lint job is the
+        # everyday case -- is the shape that published unsigned images (#344).
+        # Job env does not reach across jobs, so a SIGNING_ENABLED defined in
+        # `lint` leaves both guards in build_push false: cosign never runs,
+        # the run stays green, and the presence check then finds the misplaced
+        # line and reports nothing to do on every later update.
+        app = self.make_app()
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        lint_with_env = textwrap.dedent(
+            """\
+              lint:
+                runs-on: ubuntu-latest
+                env:
+                  LINT_LEVEL: strict
+                steps:
+                  - run: echo lint
+
+            """
+        )
+        lint_without_env = textwrap.dedent(
+            """\
+              lint:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: echo lint
+
+            """
+        )
+        for label, lint in (("env: present", lint_with_env), ("env: absent", lint_without_env)):
+            with self.subTest(preceding_job=label):
+                workflow = snapshot.replace("jobs:\n", "jobs:\n" + textwrap.indent(lint, "  "), 1)
+                patched = app.patch_container_workflow(workflow)
+                by_job = self.job_env_entries_by_job(patched)
+                self.assertEqual(
+                    by_job["build_push"],
+                    ["SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}"],
+                    by_job,
+                )
+                self.assertNotIn("SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}", by_job["lint"])
+                self.assertEqual(patched.count("env.SIGNING_ENABLED == 'true'"), 2)
+                # The lint job is the owner's, and the update must not touch it.
+                self.assertIn(textwrap.indent(lint, "  "), patched)
+                self.assertEqual(app.patch_container_workflow(patched), patched)
 
     def test_strip_job_env_entries_leaves_step_level_entries_alone(self) -> None:
         # Six spaces is the job level and eight or more is a step's. Matching
@@ -1641,26 +1994,33 @@ class BuilderTests(unittest.TestCase):
         line = "        reuses: actions/checkout@v4"
         self.assertEqual(pin_action_uses_line(line), line)
 
-    def test_ensure_workflow_job_env_entries_returns_unchanged_without_env_or_steps_anchor(self) -> None:
-        workflow_text = "name: Build\njobs:\n  build:\n    name: build\n"
+    def test_ensure_workflow_job_env_entries_returns_unchanged_when_no_job_reads_the_variable(self) -> None:
+        # Nothing tests env.FOO, so there is nothing an undefined FOO can break
+        # and nothing to add. This is also the shape of a workflow whose owner
+        # removed the signing steps: an update must keep working there.
+        workflow_text = "name: Build\njobs:\n  build:\n    name: build\n    steps:\n      - run: echo hi\n"
         result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
         self.assertEqual(result, workflow_text)
+
+    # ensure_workflow_job_env_entries() only defines a variable in a job that
+    # reads it (#344), so the fixtures below each end in a step that does.
+    READER = "      - if: env.FOO == 'true'\n        run: true\n"
 
     def test_ensure_workflow_job_env_entries_counts_a_key_with_a_different_value_as_defined(self) -> None:
         # The owner renamed the secret the value reads. The key is defined;
         # writing ours next to it is a duplicate mapping key, which GitHub
         # rejects and the repository stops building (#345). Their value stays.
-        workflow_text = "jobs:\n  build:\n    env:\n      FOO: theirs\n    steps:\n"
+        workflow_text = "jobs:\n  build:\n    env:\n      FOO: theirs\n    steps:\n" + self.READER
         self.assertEqual(ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")]), workflow_text)
 
     def test_ensure_workflow_job_env_entries_counts_a_commented_key_as_defined(self) -> None:
-        workflow_text = "jobs:\n  build:\n    env:\n      FOO: ours # why\n    steps:\n"
+        workflow_text = "jobs:\n  build:\n    env:\n      FOO: ours # why\n    steps:\n" + self.READER
         self.assertEqual(ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")]), workflow_text)
 
     def test_ensure_workflow_job_env_entries_does_not_take_a_prefixed_key_for_the_wanted_one(self) -> None:
         # `FOO_BAR:` is not `FOO:`, and `FOO:bar` is a scalar, not a key --
         # the name match has to end at the colon-and-space.
-        workflow_text = "jobs:\n  build:\n    env:\n      FOO_BAR: x\n      FOO:bar\n    steps:\n"
+        workflow_text = "jobs:\n  build:\n    env:\n      FOO_BAR: x\n      FOO:bar\n    steps:\n" + self.READER
         result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")])
         self.assertEqual(result.splitlines()[3], "      FOO: ours")
 
@@ -1679,7 +2039,8 @@ class BuilderTests(unittest.TestCase):
                 env:
                   BAR: baz
                 steps:
-                  - run: true
+                  - if: env.FOO == 'true'
+                    run: true
             """
         )
         result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")])
@@ -1694,7 +2055,8 @@ class BuilderTests(unittest.TestCase):
                 "      FOO: ours",
                 "      BAR: baz",
                 "    steps:",
-                "      - run: true",
+                "      - if: env.FOO == 'true'",
+                "        run: true",
             ],
         )
         self.assertEqual(ensure_workflow_job_env_entries(result, [("FOO", "ours")]), result)
@@ -1703,11 +2065,11 @@ class BuilderTests(unittest.TestCase):
         # No `env:` at all, and the six-space `FOO:` is an output. Before the
         # check was scoped, that output read as "already defined" and no
         # block was opened; the guard then tested an undefined variable.
-        workflow_text = "jobs:\n  build:\n    outputs:\n      FOO: x\n    steps:\n      - run: true\n"
+        workflow_text = "jobs:\n  build:\n    outputs:\n      FOO: x\n    steps:\n" + self.READER
         result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")])
         self.assertEqual(
             result.splitlines(),
-            ["jobs:", "  build:", "    outputs:", "      FOO: x", "    env:", "      FOO: ours", "    steps:", "      - run: true"],
+            ["jobs:", "  build:", "    outputs:", "      FOO: x", "    env:", "      FOO: ours", "    steps:", *self.READER.splitlines()],
         )
 
     def test_ensure_workflow_job_env_entries_scans_the_whole_env_block_past_comments_and_blanks(self) -> None:
@@ -1725,7 +2087,8 @@ class BuilderTests(unittest.TestCase):
                 outputs:
                   QUX: 1
                 steps:
-                  - run: true
+                  - if: env.FOO == 'true' && env.QUX == '1'
+                    run: true
             """
         )
         self.assertEqual(ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")]), workflow_text)
@@ -1738,38 +2101,38 @@ class BuilderTests(unittest.TestCase):
         # `steps:`, in the same job (#345).
         for shape in ("    env: # build settings", "    env: "):
             with self.subTest(shape=shape):
-                workflow_text = f"jobs:\n  build:\n{shape}\n      BAR: baz\n    steps:\n"
+                workflow_text = f"jobs:\n  build:\n{shape}\n      BAR: baz\n    steps:\n" + self.READER
                 result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")])
                 self.assertEqual(
                     result.splitlines(),
-                    ["jobs:", "  build:", shape, "      FOO: ours", "      BAR: baz", "    steps:"],
+                    ["jobs:", "  build:", shape, "      FOO: ours", "      BAR: baz", "    steps:", *self.READER.splitlines()],
                 )
 
     def test_ensure_workflow_job_env_entries_unwraps_an_empty_flow_mapping(self) -> None:
         # `env: {}` is what a mapping emptied by hand (or by
         # strip_permission_entries, for permissions) looks like. Nothing is
         # inside it, so it becomes a block; an inline comment survives.
-        workflow_text = "jobs:\n  build:\n    env: {} # nothing yet\n    steps:\n"
+        workflow_text = "jobs:\n  build:\n    env: {} # nothing yet\n    steps:\n" + self.READER
         result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")])
         self.assertEqual(
             result.splitlines(),
-            ["jobs:", "  build:", "    env: # nothing yet", "      FOO: ours", "    steps:"],
+            ["jobs:", "  build:", "    env: # nothing yet", "      FOO: ours", "    steps:", *self.READER.splitlines()],
         )
 
     def test_ensure_workflow_job_env_entries_refuses_an_env_with_an_inline_value(self) -> None:
         # Nested entries under `env: { BAR: baz }` are a parse error, and a
         # second `env:` key in the job is one too. Neither can be published,
         # so the update stops and says what to rewrite.
-        workflow_text = "jobs:\n  build:\n    env: { BAR: baz }\n    steps:\n"
+        workflow_text = "jobs:\n  build:\n    env: { BAR: baz }\n    steps:\n" + self.READER
         with self.assertRaisesRegex(CommandError, r"inline value.*'FOO'.*block mapping"):
             ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")])
 
     def test_ensure_workflow_job_env_entries_opens_a_block_above_a_commented_steps_key(self) -> None:
-        workflow_text = "jobs:\n  build:\n    steps: # the work\n      - run: true\n"
+        workflow_text = "jobs:\n  build:\n    steps: # the work\n" + self.READER
         result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")])
         self.assertEqual(
             result.splitlines(),
-            ["jobs:", "  build:", "    env:", "      FOO: ours", "    steps: # the work", "      - run: true"],
+            ["jobs:", "  build:", "    env:", "      FOO: ours", "    steps: # the work", *self.READER.splitlines()],
         )
 
     def test_patch_container_workflow_leaves_a_renamed_signing_secret_with_one_key(self) -> None:
@@ -1794,18 +2157,19 @@ class BuilderTests(unittest.TestCase):
     def test_patch_container_workflow_extends_a_commented_env_block_in_a_legacy_repo(self) -> None:
         """A legacy repo with `env: # comment` gains the guard under that key.
 
-        Modelled on a repo generated before the guard existed: no
-        `SIGNING_ENABLED` line, and the owner has annotated the job's `env:`.
-        The old anchor missed the comment and wrote a second `env:` block
-        into the same job, which the workflow parser rejects (#345).
+        Modelled on a repo generated before the guard existed: the bundled
+        upstream snapshot, whose signing steps still test the secret directly
+        and which has no `SIGNING_ENABLED` line, plus an `env:` the owner has
+        annotated. The old anchor missed the comment and wrote a second
+        `env:` block into the same job, which the workflow parser rejects
+        (#345).
         """
         app = self.make_app()
-        generated = app.generate_container_workflow()
-        legacy = "\n".join(
-            line for line in generated.splitlines() if not line.startswith("      SIGNING_ENABLED:")
-        ) + "\n"
-        self.assertIn("    env:\n", legacy)
-        legacy = legacy.replace("    env:\n", "    env: # build settings\n", 1)
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        self.assertNotIn("SIGNING_ENABLED", snapshot)
+        self.assertNotIn("\n    env:", snapshot)
+        legacy = snapshot.replace("    steps:\n", "    env: # build settings\n    steps:\n", 1)
+        self.assertNotEqual(legacy, snapshot)
         patched = app.patch_container_workflow(legacy)
         job_env_keys = [line for line in patched.splitlines() if line.startswith("    env:")]
         self.assertEqual(job_env_keys, ["    env: # build settings"])
@@ -1815,6 +2179,172 @@ class BuilderTests(unittest.TestCase):
         )
         self.assertEqual(patched.count("SIGNING_ENABLED:"), 1)
         self.assertEqual(app.patch_container_workflow(patched), patched)
+    def test_ensure_workflow_job_env_entries_defines_the_variable_in_each_job_that_reads_it(self) -> None:
+        # Two jobs ahead of the reader: one with an env: block, one without.
+        # Neither may receive the entry, and the reader gets it whichever
+        # anchor it has. The second reader shares the variable and gets its
+        # own copy, because job env is per job.
+        workflow_text = textwrap.dedent(
+            """\
+            name: Build
+            jobs:
+              lint:
+                env:
+                  LINT_LEVEL: strict
+                steps:
+                  - run: echo lint
+              plain:
+                steps:
+                  - run: echo plain
+              build:
+                steps:
+                  - if: env.FOO == 'true'
+                    run: echo build
+              verify:
+                env:
+                  OTHER: 1
+                steps:
+                  - if: env.FOO == 'true'
+                    run: echo verify
+            """
+        )
+        result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
+        self.assertEqual(
+            result,
+            textwrap.dedent(
+                """\
+                name: Build
+                jobs:
+                  lint:
+                    env:
+                      LINT_LEVEL: strict
+                    steps:
+                      - run: echo lint
+                  plain:
+                    steps:
+                      - run: echo plain
+                  build:
+                    env:
+                      FOO: bar
+                    steps:
+                      - if: env.FOO == 'true'
+                        run: echo build
+                  verify:
+                    env:
+                      FOO: bar
+                      OTHER: 1
+                    steps:
+                      - if: env.FOO == 'true'
+                        run: echo verify
+                """
+            ),
+        )
+        self.assertEqual(ensure_workflow_job_env_entries(result, [("FOO", "bar")]), result)
+
+    def test_ensure_workflow_job_env_entries_ignores_a_copy_in_the_wrong_job(self) -> None:
+        # The shape an earlier update left behind: the entry in the first job,
+        # the guard in a later one. The presence check used to find this copy
+        # and report nothing to do, forever. The reader must still get its own.
+        workflow_text = textwrap.dedent(
+            """\
+            jobs:
+              lint:
+                env:
+                  FOO: bar
+                steps:
+                  - run: echo lint
+              build:
+                steps:
+                  - if: env.FOO == 'true'
+                    run: echo build
+            """
+        )
+        result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
+        self.assertIn("  build:\n    env:\n      FOO: bar\n    steps:\n", result)
+
+    def test_ensure_workflow_job_env_entries_fails_closed_when_the_reading_job_has_no_anchor(self) -> None:
+        # A job that reads the variable but offers nowhere to define it is the
+        # silent-unsigned outcome waiting to happen: the guard is false, the
+        # steps are skipped, the run is green. Returning the text unchanged
+        # here is what maintenance_notes.txt warns is hard to notice, so the
+        # update stops and says what to add by hand instead.
+        workflow_text = "jobs:\n  build:\n      steps:\n        - if: env.FOO == 'true'\n          run: echo build\n"
+        with self.assertRaisesRegex(CommandError, r"'build' job reads env\.FOO.*Add 'FOO: bar'"):
+            ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
+
+    def test_ensure_workflow_job_env_entries_recognizes_quoted_job_ids(self) -> None:
+        # `"build_push":` is as valid a job key as the bare form, and a walk
+        # that only knows bare keys drops the job: its guard is rewritten to
+        # test env.FOO, no job is found to define FOO in, and the workflow
+        # publishes unsigned while staying green. Both quote styles must be
+        # seen, and the bare-key sibling must still be left alone.
+        workflow_text = textwrap.dedent(
+            """\
+            jobs:
+              lint:
+                steps:
+                  - run: echo lint
+              "build_push":
+                steps:
+                  - if: env.FOO == 'true'
+                    run: echo build
+              'verify': # quoted, with a comment
+                env:
+                  OTHER: 1
+                steps:
+                  - if: env.FOO == 'true'
+                    run: echo verify
+            """
+        )
+        result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
+        self.assertEqual(
+            result,
+            textwrap.dedent(
+                """\
+                jobs:
+                  lint:
+                    steps:
+                      - run: echo lint
+                  "build_push":
+                    env:
+                      FOO: bar
+                    steps:
+                      - if: env.FOO == 'true'
+                        run: echo build
+                  'verify': # quoted, with a comment
+                    env:
+                      FOO: bar
+                      OTHER: 1
+                    steps:
+                      - if: env.FOO == 'true'
+                        run: echo verify
+                """
+            ),
+        )
+        self.assertEqual(ensure_workflow_job_env_entries(result, [("FOO", "bar")]), result)
+
+    def test_workflow_job_ranges_names_quoted_jobs_without_their_quotes(self) -> None:
+        lines = ["jobs:", '  "build_push":', "    steps: []", "  'verify':", "    steps: []", "  plain:", "    steps: []"]
+        self.assertEqual(
+            workflow_job_ranges(lines),
+            [("build_push", 1, 3), ("verify", 3, 5), ("plain", 5, 7)],
+        )
+
+    def test_ensure_workflow_job_env_entries_fails_closed_when_a_reader_is_outside_every_known_job(self) -> None:
+        # Jobs nested at four spaces are valid YAML the walk does not parse.
+        # The reference is still there, so returning the text unchanged is the
+        # silent-unsigned outcome again; the update must stop and say so.
+        workflow_text = textwrap.dedent(
+            """\
+            jobs:
+                build:
+                    steps:
+                      - if: env.FOO == 'true'
+                        run: echo build
+            """
+        )
+        with self.assertRaisesRegex(CommandError, r"env\.FOO on line 4, outside every job.*Add 'FOO: bar'"):
+            ensure_workflow_job_env_entries(workflow_text, [("FOO", "bar")])
 
     def test_validate_config_rejects_unsupported_base_image(self) -> None:
         app = self.make_app()
@@ -10189,6 +10719,83 @@ class BuilderTests(unittest.TestCase):
         patched = app.patch_bluebuild_workflow(template)
         self.assertEqual(patched.count(STATE_FILE), 1)
 
+    def bluebuild_snapshot_with_inline_paths_ignore(self, replacement: str) -> str:
+        # The bundled snapshot with its paths-ignore block collapsed to one
+        # line, the way a repository owner might write it. Asserting the
+        # rewrite took keeps this honest against a snapshot refresh.
+        snapshot = (BLUEBUILD_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        block = "    paths-ignore: # don't rebuild if only documentation has changed\n      - \"**.md\"\n"
+        self.assertIn(block, snapshot)
+        return snapshot.replace(block, replacement)
+
+    def test_patch_bluebuild_workflow_extends_inline_paths_ignore(self) -> None:
+        # An inline flow sequence is the same filter as the block form. The
+        # state-file entry has to join it in place: a block "- entry" written
+        # beneath it is a parse error, and GitHub then runs nothing from the
+        # workflow until the owner repairs it by hand. See #358.
+        app = self.make_bluebuild_app()
+        template = self.bluebuild_snapshot_with_inline_paths_ignore('    paths-ignore: ["**.md"]\n')
+        patched = app.patch_bluebuild_workflow(template)
+        self.assertIn(f"    paths-ignore: [\"**.md\", '{STATE_FILE}']\n", patched)
+        self.assertNotIn(f"- '{STATE_FILE}'", patched)
+        self.assertEqual(patched.count(STATE_FILE), 1)
+        push = parse_block_yaml(patched)["on"]["push"]
+        self.assertEqual(push["paths-ignore"], ["**.md", STATE_FILE])
+        self.assertEqual(app.patch_bluebuild_workflow(patched), patched)
+
+    def test_patch_bluebuild_workflow_extends_empty_inline_paths_ignore(self) -> None:
+        # An empty inline list must not produce "[, '<state file>']".
+        app = self.make_bluebuild_app()
+        template = self.bluebuild_snapshot_with_inline_paths_ignore("    paths-ignore: []\n")
+        patched = app.patch_bluebuild_workflow(template)
+        self.assertIn(f"    paths-ignore: ['{STATE_FILE}']\n", patched)
+        self.assertNotIn("paths-ignore: []", patched)
+        self.assertEqual(parse_block_yaml(patched)["on"]["push"]["paths-ignore"], [STATE_FILE])
+        self.assertEqual(app.patch_bluebuild_workflow(patched), patched)
+
+    def test_patch_bluebuild_workflow_handles_trailing_comma_in_inline_paths_ignore(self) -> None:
+        # "paths-ignore: [\"**.md\",]" is valid YAML, and the first version of
+        # the inline handling appended a second comma after the existing
+        # one: "[\"**.md\",, '<state file>']", which no parser accepts. The
+        # patched line must carry exactly one separator and parse to the
+        # two-entry list. (The suite's parser is stricter than YAML and
+        # rejects the trailing comma in the input, so only the output is
+        # parsed here; the input shape was checked against PyYAML.)
+        app = self.make_bluebuild_app()
+        for replacement in (
+            '    paths-ignore: ["**.md",]\n',
+            '    paths-ignore: ["**.md", ]\n',
+            '    paths-ignore: [ "**.md" ,]\n',
+        ):
+            with self.subTest(replacement=replacement):
+                template = self.bluebuild_snapshot_with_inline_paths_ignore(replacement)
+                patched = app.patch_bluebuild_workflow(template)
+                self.assertIn(f"    paths-ignore: [\"**.md\", '{STATE_FILE}']\n", patched)
+                self.assertNotIn(",,", patched)
+                self.assertNotIn(f"- '{STATE_FILE}'", patched)
+                self.assertEqual(patched.count(STATE_FILE), 1)
+                push = parse_block_yaml(patched)["on"]["push"]
+                self.assertEqual(push["paths-ignore"], ["**.md", STATE_FILE])
+                self.assertEqual(app.patch_bluebuild_workflow(patched), patched)
+
+    def test_patch_bluebuild_workflow_keeps_comment_after_inline_paths_ignore(self) -> None:
+        # The bundled snapshot comments this very key, so an owner who
+        # collapses the list is likely to keep the comment. It belongs after
+        # the closing bracket, where a real parser ignores it. (The test-suite
+        # YAML parser does not read comments after a flow sequence, so this
+        # asserts the text; the shape was checked against PyYAML.)
+        app = self.make_bluebuild_app()
+        template = self.bluebuild_snapshot_with_inline_paths_ignore(
+            '    paths-ignore: ["**.md"] # don\'t rebuild if only documentation has changed\n'
+        )
+        patched = app.patch_bluebuild_workflow(template)
+        self.assertIn(
+            f"    paths-ignore: [\"**.md\", '{STATE_FILE}'] # don't rebuild if only documentation has changed\n",
+            patched,
+        )
+        self.assertNotIn(f"- '{STATE_FILE}'", patched)
+        self.assertEqual(app.patch_bluebuild_workflow(patched), patched)
+
     def test_patch_bluebuild_workflow_adds_branch_filters_and_validation_only_inputs(self) -> None:
         app = self.make_bluebuild_app()
         template = textwrap.dedent(
@@ -11254,7 +11861,62 @@ class BuilderTests(unittest.TestCase):
         app.gum = stub
         app.add_copr()
         self.assertEqual(app.config.copr_repos, [])
-        self.assertIn(("error", "Enter the COPR repo as owner/project."), app.gum.messages)
+        self.assertIn(("error", "Enter the COPR repo as owner/project or @group/project."), app.gum.messages)
+
+    def test_add_copr_accepts_group_owner_and_project_directory(self) -> None:
+        # `man dnf5-copr`: OWNER is a username or a @groupname, and PROJECT may
+        # be a project directory such as project:custom:123. The wizard used to
+        # reject both with the "owner/project" error, telling a user who typed
+        # @caddy/caddy that they had the format wrong (#348).
+        for repo in ("@caddy/caddy", "@fedora-llvm-team/llvm-snapshots", "user/project:custom:123"):
+            with self.subTest(repo=repo):
+                app = self.make_app()
+                stub = GumStub()
+                stub.input = lambda *, prompt, repo=repo, **_kwargs: repo if prompt == "COPR repo: " else ""
+                app.gum = stub
+                app.add_copr()
+                self.assertEqual(app.config.copr_repos, [repo])
+                self.assertEqual([m for m in app.gum.messages if m[0] == "error"], [])
+
+    def test_add_copr_still_rejects_misplaced_at_and_colon(self) -> None:
+        # The loosening is exactly what dnf5 accepts: "@" only leads the owner
+        # and colons only appear in the project, so the values that reach
+        # build.sh and recipe.yml stay repo specs rather than anything else.
+        for repo in ("owner@group/project", "@/project", "@group/", "own:er/project", "@group/project/extra", "@@group/project"):
+            with self.subTest(repo=repo):
+                app = self.make_app()
+                stub = GumStub()
+                stub.input = lambda *, prompt, repo=repo, **_kwargs: repo if prompt == "COPR repo: " else ""
+                app.gum = stub
+                app.add_copr()
+                self.assertEqual(app.config.copr_repos, [])
+                self.assertIn(("error", "Enter the COPR repo as owner/project or @group/project."), app.gum.messages)
+
+    def test_validate_config_accepts_group_copr_from_loaded_state(self) -> None:
+        # validate_config shares COPR_REPO_RE with add_copr, so a state file
+        # carrying a group COPR must pass the pre-write gate too, not just the
+        # wizard prompt.
+        app = self.make_app()
+        app.config.copr_repos = ["@caddy/caddy", "user/project:custom:123"]
+        app.validate_config()
+        app.config.copr_repos = ["@caddy/caddy", "bad;rm/project"]
+        with self.assertRaisesRegex(CommandError, "Invalid COPR repository value"):
+            app.validate_config()
+
+    def test_group_copr_reaches_build_sh_and_recipe_unchanged(self) -> None:
+        app = self.make_app()
+        app.config.copr_repos = ["@caddy/caddy", "user/project:custom:123"]
+        build_sh = app.generate_build_sh()
+        # shlex.quote leaves "@" and ":" bare, so dnf5 sees exactly what the
+        # user typed; pin that rather than the quoting helper's behaviour.
+        self.assertIn("dnf5 -y copr enable @caddy/caddy", build_sh)
+        self.assertIn("dnf5 -y copr disable @caddy/caddy", build_sh)
+        self.assertIn("dnf5 -y copr enable user/project:custom:123", build_sh)
+        bluebuild = self.make_bluebuild_app()
+        bluebuild.config.copr_repos = ["@caddy/caddy", "user/project:custom:123"]
+        recipe = bluebuild.generate_recipe()
+        self.assertIn('        - "@caddy/caddy"', recipe)
+        self.assertIn('        - "user/project:custom:123"', recipe)
 
     def test_add_copr_returns_without_adding_repo_when_packages_fail_validation(self) -> None:
         app = self.make_app()

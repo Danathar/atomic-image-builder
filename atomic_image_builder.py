@@ -183,7 +183,13 @@ BLUEBUILD_RECIPE_SCHEMA = "https://schema.blue-build.org/recipe-v1.json"
 # service is real, but they do stop obviously unsafe values from becoming shell
 # script content later.
 PACKAGE_TOKEN_RE = re.compile(r"^[A-Za-z0-9._+:-]+$")
-COPR_REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+# What `dnf5 copr enable` takes: the owner is a username or a @groupname
+# (@caddy/caddy), and the project may be a project directory with colons
+# (owner/project:custom:123). The "@" is allowed only as the first character
+# and the colons only after the slash, so this stays a repo spec and not a
+# shell or YAML surprise -- shell_quote and yaml_scalar quote it downstream
+# regardless.
+COPR_REPO_RE = re.compile(r"^@?[A-Za-z0-9._-]+/[A-Za-z0-9._:-]+$")
 SERVICE_TOKEN_RE = re.compile(r"^[A-Za-z0-9@._:+-]+$")
 # The repo name becomes the image name in ghcr.io/<owner>/<repo>, so it has to
 # satisfy the container-reference grammar as well as GitHub's naming rules.
@@ -1222,12 +1228,107 @@ def workflow_block_key(stripped_line: str) -> str | None:
     return match.group(1) if match else None
 
 
+# A key whose value is an inline flow sequence, "paths-ignore: ['**.md']",
+# with an optional trailing comment. The items group is non-greedy so the
+# comment's own brackets, if any, stay in the suffix.
+WORKFLOW_FLOW_SEQUENCE_LINE_RE = re.compile(r"^(\s*[^\s#][^:]*:\s*)\[(.*?)\](\s*(?:#.*)?)$")
+
+
+def extend_flow_sequence_line(line: str, item: str) -> str | None:
+    """Return ``line`` with ``item`` appended to its inline flow sequence.
+
+    "paths-ignore: ['**.md']" is the same trigger filter as the block form
+    the bundled snapshots use, and a repository owner may well collapse it to
+    one line. Writing a block "- item" beneath it is not a list entry, it is
+    a parse error, and GitHub then runs nothing from the file at all - a
+    worse outcome than the no-op the other patchers fall back to. So the
+    sequence is extended in place instead. Returns None when the line is not
+    a flow sequence, so the caller can go on to the block-form insert. An
+    empty list becomes "[item]" rather than "[, item]", and a list that
+    already ends in a comma - "['**.md',]" is valid YAML - is not given a
+    second one. ``item`` is written verbatim, so pass it already quoted. A
+    trailing comment is kept: the bundled BlueBuild snapshot carries one on
+    this very key.
+    """
+    match = WORKFLOW_FLOW_SEQUENCE_LINE_RE.match(line)
+    if not match:
+        return None
+    prefix, items, suffix = match.groups()
+    # Drop surrounding whitespace and any trailing comma so the separator
+    # written below is the only one before the new item: "['**.md',, 'x']"
+    # is a parse error, and a quoted item ending in a comma keeps its
+    # closing quote, so only a bare separator is removed here.
+    items = items.strip().rstrip(",").rstrip()
+    return f"{prefix}[{items}, {item}]{suffix}" if items else f"{prefix}[{item}]{suffix}"
+
+
+# The oldest Cosign release the generated signing step works with. Workflows
+# pinned below it are raised to it; anything at or above it is the owner's
+# choice and stays. The bundled snapshot pins this same version.
+COSIGN_COMPATIBILITY_FLOOR = "v3.1.2"
+# A whole line that is the `cosign-release:` input: the key at the start of
+# the line, a quoted value, and nothing after it but an optional comment.
+# Anchoring both ends is what keeps a shell line that merely mentions the
+# input -- `run: echo "cosign-release: '2.6.3'"` -- from being rewritten.
+COSIGN_RELEASE_LINE_RE = re.compile(r"^(\s*cosign-release:\s*)(['\"])([^'\"]*)\2(\s*(?:#.*)?)$")
+
+
+def cosign_release_tuple(release: str) -> tuple[int, int, int] | None:
+    """Parse a `cosign-release:` value like `v3.1.2` into (3, 1, 2).
+
+    Returns None for anything that is not a plain version, so the caller can
+    leave it alone rather than guess.
+    """
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", release.strip())
+    if match is None:
+        return None
+    major, minor, patch = (int(part) for part in match.groups())
+    return major, minor, patch
+
+
+def raise_cosign_release_floor(step_lines: Sequence[str]) -> list[str]:
+    """Raise a below-floor `cosign-release:` input of a cosign-installer step.
+
+    Only the installer step's own `with:` block is looked at. The workflow is
+    patched in place, so the same text anywhere else -- in an owner's `run:`
+    script, a comment, another action that happens to take an input of that
+    name -- is theirs and stays as written.
+    """
+    if not any("uses:" in line and "sigstore/cosign-installer@" in line for line in step_lines):
+        return list(step_lines)
+    floor = cosign_release_tuple(COSIGN_COMPATIBILITY_FLOOR)
+    patched: list[str] = []
+    with_indent: int | None = None
+    for line in step_lines:
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if with_indent is not None and stripped and not stripped.startswith("#") and indent <= with_indent:
+            with_indent = None
+        if with_indent is None:
+            if workflow_block_key(stripped.removeprefix("- ").lstrip()) == "with":
+                with_indent = indent
+            patched.append(line)
+            continue
+        match = COSIGN_RELEASE_LINE_RE.match(line)
+        if match is not None:
+            current = cosign_release_tuple(match.group(3))
+            if current is not None and current < floor:
+                prefix, quote, _, suffix = match.groups()
+                line = f"{prefix}{quote}{COSIGN_COMPATIBILITY_FLOOR}{quote}{suffix}"
+        patched.append(line)
+    return patched
+
+
 def patch_cosign_compatibility(workflow_text: str) -> str:
-    """Keep existing managed workflows compatible with Cosign 3.x."""
-    lines = workflow_text.splitlines()
-    for index, line in enumerate(lines):
-        if "cosign-release:" in line:
-            lines[index] = re.sub(r"(cosign-release:\s*['\"])v[^'\"]+(['\"])", r"\1v3.1.2\2", line)
+    """Keep existing managed workflows compatible with Cosign 3.x.
+
+    Only versions below COSIGN_COMPATIBILITY_FLOOR are raised, and only on the
+    cosign-installer step's own `cosign-release:` input. An unconditional
+    rewrite meant every update reverted an owner's deliberate bump to a newer
+    3.x or a 4.x release, so a security patch they applied was undone the next
+    time they ran the tool.
+    """
+    lines = patch_workflow_steps(workflow_text, raise_cosign_release_floor)
 
     # `cosign sign` is routinely written across shell line continuations, so the
     # guard has to consider the whole logical command. Testing each physical
@@ -1235,6 +1336,14 @@ def patch_cosign_compatibility(workflow_text: str) -> str:
     # has no `--key env://` and the key line has no `cosign sign` - and the
     # workflow was published still carrying the exact Cosign 3.x incompatibility
     # this function exists to remove.
+    #
+    # The verb has to be followed by whitespace or the end of the line, not a
+    # mere word boundary: a hyphen is one, so `\bcosign\s+sign\b` also matched
+    # the `sign` inside `cosign sign-blob`, and the flags were spliced into the
+    # middle of that subcommand's name. `cosign sign --new-bundle-format=false
+    # --use-signing-config=false-blob` is not a command, and an owner who signs
+    # an SBOM or ISO checksum with the same key found out on their next push.
+    verb_re = r"\bcosign(\s+)sign(?=\s|$)"
     index = 0
     while index < len(lines):
         start = index
@@ -1242,7 +1351,7 @@ def patch_cosign_compatibility(workflow_text: str) -> str:
             index += 1
         logical = " ".join(part.rstrip().rstrip("\\") for part in lines[start:index + 1])
         index += 1
-        if not re.search(r"\bcosign\s+sign\b", logical):
+        if not re.search(verb_re, logical):
             continue
         if "--key env://" not in logical or "--new-bundle-format=" in logical:
             continue
@@ -1253,7 +1362,7 @@ def patch_cosign_compatibility(workflow_text: str) -> str:
         # the guard above reported the line as needing a fix.
         for offset in range(start, index):
             patched, count = re.subn(
-                r"\bcosign(\s+)sign\b",
+                verb_re,
                 r"cosign\1sign --new-bundle-format=false --use-signing-config=false",
                 lines[offset],
                 count=1,
@@ -1280,80 +1389,197 @@ def patch_cosign_compatibility(workflow_text: str) -> str:
 WORKFLOW_EMPTY_ENV_RE = re.compile(r"^env:\s*\{\s*\}\s*(#.*)?$")
 
 
+# A job ID under `jobs:`, bare or quoted, opening a block (no inline value):
+#   build_push:
+#   "build_push":   # quoting is legal YAML and some owners' editors emit it
+#   'build_push': # with a comment
+WORKFLOW_JOB_KEY_RE = re.compile(
+    r"""^(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_.-]*)):\s*(?:#.*)?$"""
+)
+
+
+def workflow_job_key(stripped_line: str) -> str | None:
+    """Return the job ID a stripped line under `jobs:` declares, if any.
+
+    workflow_key() only knows bare keys. A quoted job ID such as
+    `"build_push":` is equally valid, and a parser that does not see it
+    drops the whole job from workflow_job_ranges(): its guards still get
+    rewritten to test env.SIGNING_ENABLED, no job is found to define the
+    variable in, and the image ships unsigned on a green run.
+    """
+    match = WORKFLOW_JOB_KEY_RE.match(stripped_line)
+    if match is None:
+        return None
+    return next(group for group in match.groups() if group is not None)
+
+
+def workflow_job_ranges(lines: Sequence[str]) -> list[tuple[str, int, int]]:
+    """Return (name, start, end) for every job in a workflow, as line indexes.
+
+    A job is a key, bare or quoted, at two-space indentation inside the
+    top-level `jobs:` block. Its range runs from that key up to the next job
+    key, or to the first line that leaves the block. Blank lines and
+    comments end nothing, so a job keeps the trailing blank line that
+    separates it from the next.
+    """
+    ranges: list[tuple[str, int, int]] = []
+    in_jobs = False
+    name: str | None = None
+    start = 0
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent == 0:
+            if name is not None:
+                ranges.append((name, start, index))
+                name = None
+            in_jobs = workflow_block_key(stripped) == "jobs"
+            continue
+        if in_jobs and indent == 2:
+            key = workflow_job_key(stripped)
+            if key is None:
+                continue
+            if name is not None:
+                ranges.append((name, start, index))
+            name, start = key, index
+    if name is not None:
+        ranges.append((name, start, len(lines)))
+    return ranges
+
+
+def workflow_job_level_key_index(job: Sequence[str], key: str) -> int | None:
+    """Return the index within `job` of the first job-level line declaring `key`.
+
+    Job-level keys sit at exactly four spaces. The match goes through
+    workflow_key() rather than a literal `    env:` so a key carrying a
+    comment or trailing whitespace (`env: # build settings`, `env: `) is
+    found and extended instead of missed and duplicated (#345).
+    """
+    for index, line in enumerate(job):
+        if line.startswith("    ") and not line.startswith("     ") and workflow_key(line.strip()) == key:
+            return index
+    return None
+
+
+def workflow_job_env_keys(job: Sequence[str], env_at: int) -> set[str]:
+    """Return the names of the keys directly under the job-level `env:` at `env_at`.
+
+    The block runs until the first non-blank, non-comment line at the job's
+    own indentation or shallower; only its direct children count. Other keys
+    sit at six spaces too -- the job's `outputs:` entries, a step-level
+    `env:` -- and taking one of those for the job env entry leaves the real
+    block without it while every guard that tests the variable goes on
+    reading it undefined.
+    """
+    defined: set[str] = set()
+    for line in job[env_at + 1 :]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if len(line) - len(line.lstrip()) <= 4:
+            break
+        if line.startswith("      ") and not line.startswith("       "):
+            key = workflow_key(stripped)
+            if key is not None:
+                defined.add(key)
+    return defined
+
+
 def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[str, str]]) -> str:
-    """Define each entry at job level unless a key of that name is already there.
+    """Define each variable, at job level, in every job that reads it.
 
-    Presence is decided by key name, not by comparing the whole line to the
-    value this tool would write. An owner who renamed the secret the value
-    reads (`secrets.COSIGN_KEY`), or hung a comment on the line, has still
-    defined the key -- and GitHub rejects a workflow with a duplicate mapping
-    key (`'SIGNING_ENABLED' is already defined`), so writing our line next to
-    theirs stops the repository building until they hand-edit it (#345). The
-    differing value is theirs and is left as it is; the update preview then
-    shows nothing to change for that key, which is the truth.
+    A job reads a variable when one of its lines refers to `env.<NAME>` --
+    the shape of the signing guard's step condition. Defining the variable
+    anywhere else does nothing: job env does not reach across jobs, so a
+    guard in `build_push` testing a variable defined in a `lint` job the
+    owner added ahead of it is false forever, both cosign steps are skipped,
+    and the image is published unsigned while the run stays green. That is
+    what searching the whole file for the first `env:` did (#344).
 
-    Job-level env is at 6 spaces (4 for the job, 2 for the key), and only a
-    key nested under the job-level `env:` block this tool extends counts as
-    defined. Other keys sit at that indentation too -- the job's `outputs:`
-    entries, a step-level `env:` -- and taking one of those for the job env
-    entry leaves the real block without it while every guard that tests the
-    variable goes on reading it undefined.
+    Within a job, presence is decided by key name, not by comparing the
+    whole line to the value this tool would write. An owner who renamed the
+    secret the value reads (`secrets.COSIGN_KEY`), or hung a comment on the
+    line, has still defined the key -- and GitHub rejects a workflow with a
+    duplicate mapping key (`'SIGNING_ENABLED' is already defined`), so
+    writing our line next to theirs stops the repository building until
+    they hand-edit it (#345). The differing value is theirs and is left as
+    it is; the update preview then shows nothing to change for that key,
+    which is the truth. Only a key nested under the job-level `env:` block
+    this tool extends counts as defined -- see workflow_job_env_keys().
 
     An existing job-level `env:` is extended whatever follows the colon -- a
     comment, trailing whitespace, or an empty `{}` that is unwrapped into a
     block. The one shape that cannot take nested entries is an `env:` with
     an inline value, and the alternative to stopping there is a second
-    `env:` key in the same job, which the parser rejects. Without any `env:`
-    the block is opened above `steps:`.
+    `env:` key in the same job, which the parser rejects, so that shape
+    fails closed. Without any `env:` the block is opened above `steps:`.
+
+    A job that reads the variable but has neither an `env:` nor a `steps:`
+    key at the expected indentation cannot be patched, and the only outcome
+    of leaving it is the silent-unsigned one above. So that case fails
+    closed with a message saying what to add by hand. So does a reference
+    that sits outside every job this parser recognizes -- a job nested at
+    an indentation it does not expect, say -- because a reader the walk
+    cannot see is a reader that never gets its definition. A workflow in
+    which no job reads the variable needs nothing and is returned untouched.
     """
     lines = workflow_text.splitlines()
-
-    def first_job_level(key: str) -> int | None:
+    changed = False
+    for name, value in entries:
+        # Job-level env is at 6 spaces (4 for job indent + 2 for key).
+        wanted = f"      {name}: {value}"
+        reads = re.compile(rf"\benv\.{re.escape(name)}\b")
+        ranges = workflow_job_ranges(lines)
+        covered = {index for _, start, end in ranges for index in range(start, end)}
         for index, line in enumerate(lines):
-            if line.startswith("    ") and not line.startswith("     ") and workflow_key(line.strip()) == key:
-                return index
-        return None
-
-    env_at = first_job_level("env")
-    defined: set[str] = set()
-    if env_at is not None:
-        # The block runs until the first non-blank, non-comment line at the
-        # job's own indentation or shallower; only its direct children count.
-        for line in lines[env_at + 1 :]:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
+            if index in covered or line.lstrip().startswith("#") or not reads.search(line):
                 continue
-            if len(line) - len(line.lstrip()) <= 4:
-                break
-            if line.startswith("      ") and not line.startswith("       "):
-                key = workflow_key(stripped)
-                if key is not None:
-                    defined.add(key)
-    missing = [(name, value) for name, value in entries if name not in defined]
-    if not missing:
-        return workflow_text
-    missing_lines = [f"      {name}: {value}" for name, value in missing]
-
-    if env_at is not None:
-        stripped = lines[env_at].strip()
-        empty = WORKFLOW_EMPTY_ENV_RE.match(stripped)
-        if empty:
-            comment = empty.group(1)
-            lines[env_at] = "    env:" + (f" {comment}" if comment else "")
-        elif workflow_block_key(stripped) != "env":
-            names = ", ".join(f"'{name}'" for name, _ in missing)
             raise CommandError(
-                f"This workflow's job-level 'env:' carries an inline value ({stripped!r}), so this "
-                f"tool cannot add {names} beneath it, and writing a second 'env:' key would stop "
-                f"the workflow parsing. Rewrite that 'env:' as a block mapping with one entry per "
-                f"line, then run this update again."
+                f"This workflow refers to env.{name} on line {index + 1}, outside every job this "
+                f"tool recognizes under 'jobs:', so it cannot tell which job to define the variable "
+                f"in. Left undefined, every condition that tests it is false and the steps it guards "
+                f"are skipped. Add '{name}: {value}' under that job's 'env:' by hand, then run this "
+                f"update again."
             )
-        lines[env_at + 1:env_at + 1] = missing_lines
-    else:
-        steps_at = first_job_level("steps")
-        if steps_at is None:
-            return workflow_text
-        lines[steps_at:steps_at] = ["    env:", *missing_lines]
+        # Walk the jobs back to front so an insertion never shifts a range
+        # that is still to be visited.
+        for job_name, start, end in reversed(ranges):
+            job = lines[start:end]
+            if not any(reads.search(line) for line in job if not line.lstrip().startswith("#")):
+                continue
+            env_at = workflow_job_level_key_index(job, "env")
+            if env_at is not None:
+                if name in workflow_job_env_keys(job, env_at):
+                    continue
+                stripped = job[env_at].strip()
+                empty = WORKFLOW_EMPTY_ENV_RE.match(stripped)
+                if empty:
+                    comment = empty.group(1)
+                    lines[start + env_at] = "    env:" + (f" {comment}" if comment else "")
+                elif workflow_block_key(stripped) != "env":
+                    raise CommandError(
+                        f"This workflow's '{job_name}' job-level 'env:' carries an inline value "
+                        f"({stripped!r}), so this tool cannot add '{name}' beneath it, and writing a "
+                        f"second 'env:' key would stop the workflow parsing. Rewrite that 'env:' as a "
+                        f"block mapping with one entry per line, then run this update again."
+                    )
+                lines.insert(start + env_at + 1, wanted)
+            else:
+                steps_at = workflow_job_level_key_index(job, "steps")
+                if steps_at is None:
+                    raise CommandError(
+                        f"This workflow's '{job_name}' job reads env.{name}, but the job has no 'env:' "
+                        f"or 'steps:' key where this tool expects one, so it cannot define the variable "
+                        f"there. Left undefined, every condition that tests it is false and the steps "
+                        f"it guards are skipped. Add '{name}: {value}' under that job's 'env:' by hand, "
+                        f"then run this update again."
+                    )
+                lines[start + steps_at:start + steps_at] = ["    env:", wanted]
+            changed = True
+    if not changed:
+        return workflow_text
     return "\n".join(lines) + ("\n" if workflow_text.endswith("\n") else "")
 
 
@@ -2734,7 +2960,8 @@ class App:
             "When To Use COPR",
             "COPR is an extra community package source outside the normal Fedora and image-provider repos.",
             "Most users can skip this. Only use it if you know a package you need comes from that COPR.",
-            "Example: kwizart/fedy. Leave the repo field empty if you want to go back.",
+            "Example: kwizart/fedy. A group-owned COPR starts with @, like @caddy/caddy.",
+            "Leave the repo field empty if you want to go back.",
         )
         print()
         repo = self.gum.input(
@@ -2746,7 +2973,7 @@ class App:
         if not repo:
             return
         if not COPR_REPO_RE.fullmatch(repo):
-            self.gum.error("Enter the COPR repo as owner/project.")
+            self.gum.error("Enter the COPR repo as owner/project or @group/project.")
             return
         proposed_copr_repos = unique([*self.config.copr_repos, repo])
         print()
@@ -5041,17 +5268,12 @@ class App:
                 output.append(f"{indent}- cron: '{DEFAULT_GITHUB_BUILD_CRON}'")
                 continue
             if stripped.startswith("paths-ignore:") and not state_ignore_present and not paths_ignore_inserted:
-                output.append(line)
-                inline_match = re.match(r"^(\s*paths-ignore:\s*)\[(.*)\](\s*)$", line)
-                if inline_match:
-                    prefix, items, suffix = inline_match.groups()
-                    items = items.strip()
-                    if items:
-                        output[-1] = f"{prefix}[{items}, '{STATE_FILE}']{suffix}"
-                    else:
-                        output[-1] = f"{prefix}['{STATE_FILE}']{suffix}"
+                extended = extend_flow_sequence_line(line, f"'{STATE_FILE}'")
+                if extended is not None:
+                    output.append(extended)
                     paths_ignore_inserted = True
                     continue
+                output.append(line)
                 paths_ignore_indent = line[: len(line) - len(line.lstrip())] + "  "
                 output.append(f"{paths_ignore_indent}- '{STATE_FILE}'")
                 paths_ignore_inserted = True
@@ -5505,6 +5727,11 @@ class App:
                 output.append(f"{indent}- cron: '{DEFAULT_GITHUB_BUILD_CRON}'")
                 continue
             if stripped.startswith("paths-ignore:") and not state_ignore_present and not paths_ignore_inserted:
+                extended = extend_flow_sequence_line(line, f"'{STATE_FILE}'")
+                if extended is not None:
+                    output.append(extended)
+                    paths_ignore_inserted = True
+                    continue
                 output.append(line)
                 paths_ignore_indent = line[: len(line) - len(line.lstrip())] + "  "
                 output.append(f"{paths_ignore_indent}- '{STATE_FILE}'")
