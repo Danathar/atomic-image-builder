@@ -38,6 +38,15 @@ because that no-op is exactly the failure this section warns about.  When no
 job reads the variable it does nothing, which is the shape of a workflow whose
 owner removed the signing steps.
 
+The paths-ignore state-file entry is the exception to "no match, no change":
+it is inserted as a new sequence item, so a shape mismatch corrupts the file
+rather than leaving it alone.  A managed repository may write the list inline
+("paths-ignore: ['**.md']"), where a block "- item" beneath it is a parse
+error and GitHub runs nothing from the workflow.  Both patchers therefore go
+through extend_flow_sequence_line first, which extends an inline list in place
+(keeping a trailing comment, and not doubling a trailing comma) and returns
+None for the block form — see #358.
+
 maintenance_audit.py currently validates action pin coverage but does not run
 the patchers against the snapshots.  When refreshing a template snapshot, run
 the test suite — the golden-file patcher tests in

@@ -65,6 +65,7 @@ from atomic_image_builder import (
     determine_fedora_atomic_default_tag,
     ensure_trailing_newline,
     ensure_workflow_job_env_entries,
+    extend_flow_sequence_line,
     format_daily_rebuild_note,
     is_valid_repo_name,
     managed_path,
@@ -556,6 +557,108 @@ class BuilderTests(unittest.TestCase):
         )
         patched = app.patch_container_workflow(workflow)
         self.assertIn("paths-ignore: ['**/README.md', '.atomic-image-builder.json']", patched)
+        self.assertNotIn(f"- '{STATE_FILE}'", patched)
+        push = parse_block_yaml(patched)["on"]["push"]
+        self.assertEqual(push["paths-ignore"], ["**/README.md", STATE_FILE])
+        self.assertEqual(app.patch_container_workflow(patched), patched)
+
+    def test_patch_container_workflow_keeps_comment_after_inline_paths_ignore(self) -> None:
+        # Same handling as the BlueBuild patcher, through the shared helper:
+        # a trailing comment stays after the closing bracket rather than
+        # ending the match and dropping the patcher into the block-form
+        # insert, which would corrupt the file. Text assertion only, as the
+        # suite's YAML parser does not read comments after a flow sequence.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Build container image
+            on:
+              push:
+                paths-ignore: ['**/README.md']  # docs only
+            jobs:
+              build_push:
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v4
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn(f"    paths-ignore: ['**/README.md', '{STATE_FILE}']  # docs only\n", patched)
+        self.assertNotIn(f"- '{STATE_FILE}'", patched)
+        self.assertEqual(app.patch_container_workflow(patched), patched)
+
+    def test_extend_flow_sequence_line_leaves_block_form_alone(self) -> None:
+        # None is the signal to fall through to the block-form insert. The
+        # bundled BlueBuild snapshot's key carries a comment, and a comment
+        # may itself contain brackets; neither is a flow sequence.
+        for line in (
+            "    paths-ignore:",
+            "    paths-ignore: # don't rebuild if only documentation has changed",
+            "    paths-ignore: # see [docs]",
+            "      - '**/README.md'",
+        ):
+            with self.subTest(line=line):
+                self.assertIsNone(extend_flow_sequence_line(line, f"'{STATE_FILE}'"))
+
+    def test_extend_flow_sequence_line_keeps_brackets_in_comment_out_of_the_list(self) -> None:
+        self.assertEqual(
+            extend_flow_sequence_line("    paths-ignore: ['**.md'] # see [docs]", "'x'"),
+            "    paths-ignore: ['**.md', 'x'] # see [docs]",
+        )
+        self.assertEqual(extend_flow_sequence_line("paths-ignore: [ ]", "'x'"), "paths-ignore: ['x']")
+
+    def test_extend_flow_sequence_line_writes_one_separator_before_the_new_item(self) -> None:
+        # YAML allows a trailing comma in a flow sequence, "['**.md',]", and
+        # padding inside the brackets. Appending ", item" after an existing
+        # comma wrote "['**.md',, item]", which no parser accepts, so the
+        # workflow stopped running. Every shape here has to come out as the
+        # same one-separator line, and a comma inside a quoted item is part
+        # of the item, not a separator.
+        expected = "paths-ignore: ['**.md', 'x']"
+        for line in (
+            "paths-ignore: ['**.md',]",
+            "paths-ignore: ['**.md', ]",
+            "paths-ignore: ['**.md' ,]",
+            "paths-ignore: [ '**.md' , ]",
+            "paths-ignore: ['**.md' ]",
+            "paths-ignore: [ '**.md']",
+        ):
+            with self.subTest(line=line):
+                extended = extend_flow_sequence_line(line, "'x'")
+                self.assertEqual(extended, expected)
+                self.assertEqual(parse_block_yaml(extended), {"paths-ignore": ["**.md", "x"]})
+        self.assertEqual(extend_flow_sequence_line("paths-ignore: [,]", "'x'"), "paths-ignore: ['x']")
+        self.assertEqual(
+            extend_flow_sequence_line("paths-ignore: ['a,b', 'c,']", "'x'"),
+            "paths-ignore: ['a,b', 'c,', 'x']",
+        )
+        self.assertEqual(
+            extend_flow_sequence_line("    paths-ignore: [\"**.md\",] # docs", "'x'"),
+            "    paths-ignore: [\"**.md\", 'x'] # docs",
+        )
+
+    def test_patch_container_workflow_handles_trailing_comma_in_inline_paths_ignore(self) -> None:
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            name: Build container image
+            on:
+              push:
+                paths-ignore: ['**/README.md',]
+            jobs:
+              build_push:
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v4
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn(f"    paths-ignore: ['**/README.md', '{STATE_FILE}']\n", patched)
+        self.assertNotIn(",,", patched)
+        self.assertNotIn(f"- '{STATE_FILE}'", patched)
+        push = parse_block_yaml(patched)["on"]["push"]
+        self.assertEqual(push["paths-ignore"], ["**/README.md", STATE_FILE])
+        self.assertEqual(app.patch_container_workflow(patched), patched)
 
     def test_patch_container_workflow_handles_empty_inline_paths_ignore(self) -> None:
         # An empty inline list must not produce "[, '<state file>']".
@@ -10438,6 +10541,83 @@ class BuilderTests(unittest.TestCase):
         template = '    paths-ignore:\n      - "**.md"\n'
         patched = app.patch_bluebuild_workflow(template)
         self.assertEqual(patched.count(STATE_FILE), 1)
+
+    def bluebuild_snapshot_with_inline_paths_ignore(self, replacement: str) -> str:
+        # The bundled snapshot with its paths-ignore block collapsed to one
+        # line, the way a repository owner might write it. Asserting the
+        # rewrite took keeps this honest against a snapshot refresh.
+        snapshot = (BLUEBUILD_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        block = "    paths-ignore: # don't rebuild if only documentation has changed\n      - \"**.md\"\n"
+        self.assertIn(block, snapshot)
+        return snapshot.replace(block, replacement)
+
+    def test_patch_bluebuild_workflow_extends_inline_paths_ignore(self) -> None:
+        # An inline flow sequence is the same filter as the block form. The
+        # state-file entry has to join it in place: a block "- entry" written
+        # beneath it is a parse error, and GitHub then runs nothing from the
+        # workflow until the owner repairs it by hand. See #358.
+        app = self.make_bluebuild_app()
+        template = self.bluebuild_snapshot_with_inline_paths_ignore('    paths-ignore: ["**.md"]\n')
+        patched = app.patch_bluebuild_workflow(template)
+        self.assertIn(f"    paths-ignore: [\"**.md\", '{STATE_FILE}']\n", patched)
+        self.assertNotIn(f"- '{STATE_FILE}'", patched)
+        self.assertEqual(patched.count(STATE_FILE), 1)
+        push = parse_block_yaml(patched)["on"]["push"]
+        self.assertEqual(push["paths-ignore"], ["**.md", STATE_FILE])
+        self.assertEqual(app.patch_bluebuild_workflow(patched), patched)
+
+    def test_patch_bluebuild_workflow_extends_empty_inline_paths_ignore(self) -> None:
+        # An empty inline list must not produce "[, '<state file>']".
+        app = self.make_bluebuild_app()
+        template = self.bluebuild_snapshot_with_inline_paths_ignore("    paths-ignore: []\n")
+        patched = app.patch_bluebuild_workflow(template)
+        self.assertIn(f"    paths-ignore: ['{STATE_FILE}']\n", patched)
+        self.assertNotIn("paths-ignore: []", patched)
+        self.assertEqual(parse_block_yaml(patched)["on"]["push"]["paths-ignore"], [STATE_FILE])
+        self.assertEqual(app.patch_bluebuild_workflow(patched), patched)
+
+    def test_patch_bluebuild_workflow_handles_trailing_comma_in_inline_paths_ignore(self) -> None:
+        # "paths-ignore: [\"**.md\",]" is valid YAML, and the first version of
+        # the inline handling appended a second comma after the existing
+        # one: "[\"**.md\",, '<state file>']", which no parser accepts. The
+        # patched line must carry exactly one separator and parse to the
+        # two-entry list. (The suite's parser is stricter than YAML and
+        # rejects the trailing comma in the input, so only the output is
+        # parsed here; the input shape was checked against PyYAML.)
+        app = self.make_bluebuild_app()
+        for replacement in (
+            '    paths-ignore: ["**.md",]\n',
+            '    paths-ignore: ["**.md", ]\n',
+            '    paths-ignore: [ "**.md" ,]\n',
+        ):
+            with self.subTest(replacement=replacement):
+                template = self.bluebuild_snapshot_with_inline_paths_ignore(replacement)
+                patched = app.patch_bluebuild_workflow(template)
+                self.assertIn(f"    paths-ignore: [\"**.md\", '{STATE_FILE}']\n", patched)
+                self.assertNotIn(",,", patched)
+                self.assertNotIn(f"- '{STATE_FILE}'", patched)
+                self.assertEqual(patched.count(STATE_FILE), 1)
+                push = parse_block_yaml(patched)["on"]["push"]
+                self.assertEqual(push["paths-ignore"], ["**.md", STATE_FILE])
+                self.assertEqual(app.patch_bluebuild_workflow(patched), patched)
+
+    def test_patch_bluebuild_workflow_keeps_comment_after_inline_paths_ignore(self) -> None:
+        # The bundled snapshot comments this very key, so an owner who
+        # collapses the list is likely to keep the comment. It belongs after
+        # the closing bracket, where a real parser ignores it. (The test-suite
+        # YAML parser does not read comments after a flow sequence, so this
+        # asserts the text; the shape was checked against PyYAML.)
+        app = self.make_bluebuild_app()
+        template = self.bluebuild_snapshot_with_inline_paths_ignore(
+            '    paths-ignore: ["**.md"] # don\'t rebuild if only documentation has changed\n'
+        )
+        patched = app.patch_bluebuild_workflow(template)
+        self.assertIn(
+            f"    paths-ignore: [\"**.md\", '{STATE_FILE}'] # don't rebuild if only documentation has changed\n",
+            patched,
+        )
+        self.assertNotIn(f"- '{STATE_FILE}'", patched)
+        self.assertEqual(app.patch_bluebuild_workflow(patched), patched)
 
     def test_patch_bluebuild_workflow_adds_branch_filters_and_validation_only_inputs(self) -> None:
         app = self.make_bluebuild_app()
