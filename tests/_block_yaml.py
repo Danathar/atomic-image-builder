@@ -62,12 +62,26 @@ _PLAIN_FLOAT_RE = re.compile(
 )
 
 
+# The complement of YAML 1.2's c-printable production, minus the three C0
+# characters a document may carry raw (tab, LF, CR). libyaml's reader refuses
+# the whole stream on the first one of these -- "unacceptable character
+# #x0080: control characters are not allowed" -- before any scalar is even
+# tokenised, and so do the go-yaml and serde-yaml readers BlueBuild and
+# Actions use. yaml_scalar() writes non-ASCII as itself since #360, so a
+# description carrying a C1 control has to reach the file as a \u escape, and
+# the oracle has to be able to see when it does not.
+_UNPRINTABLE_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f\ud800-\udfff￾￿]")
+
+
 class BlockYamlError(ValueError):
     """Raised when the document is outside the supported subset or malformed."""
 
 
 def parse(text: str) -> object:
     """Parse ``text`` into dicts, lists and strings."""
+    unprintable = _UNPRINTABLE_RE.search(text)
+    if unprintable is not None:
+        raise BlockYamlError(f"unacceptable character #x{ord(unprintable.group()):04x}: not printable in a YAML stream")
     lines = _relevant_lines(text)
     if not lines:
         return None
@@ -252,10 +266,10 @@ def _scalar(raw: str) -> object:
         if len(raw) < 2 or raw[-1] != '"':
             raise BlockYamlError(f"unbalanced quoting: {raw!r}")
         inner = raw[1:-1]
-        if '"' in inner.replace('\\"', ""):
+        if '"' in re.sub(r"\\.", "", inner):
             raise BlockYamlError(f"unbalanced quoting: {raw!r}")
         # Quoted, so it is a string whatever it spells.
-        return inner.replace('\\"', '"')
+        return _unescape_double_quoted(inner)
     if raw[:1] == "'":
         if len(raw) < 2 or raw[-1] != "'":
             raise BlockYamlError(f"unbalanced quoting: {raw!r}")
@@ -271,6 +285,34 @@ def _scalar(raw: str) -> object:
     if raw.endswith(":"):
         raise BlockYamlError(f"scalar needs quoting: {raw!r}")
     return _resolve_plain(raw)
+
+
+# The escapes a double-quoted scalar can carry here are the ones json.dumps
+# writes, since yaml_scalar() is json.dumps: YAML 1.2 defines them all with
+# the same meaning. \x, \U and the rest of YAML's set are not emitted, so an
+# unknown escape is a failure like any other unsupported construct.
+_DOUBLE_QUOTED_ESCAPE_RE = re.compile(r'\\(?:(?P<simple>["\\/bfnrt])|u(?P<hex>[0-9a-fA-F]{4})|(?P<bad>.?))', re.DOTALL)
+_SIMPLE_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+
+
+def _unescape_double_quoted(inner: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        if match.group("simple") is not None:
+            return _SIMPLE_ESCAPES[match.group("simple")]
+        if match.group("hex") is not None:
+            code_point = int(match.group("hex"), 16)
+            # A \u escape names one Unicode scalar value, and a surrogate is
+            # not one. json.dumps with its default ensure_ascii=True spells
+            # every character outside the BMP as a pair of them, which
+            # pure-Python PyYAML tolerates but libyaml, go-yaml, serde-yaml
+            # and YamlDotNet all reject -- and BlueBuild and Actions read
+            # the generated files with those, not with PyYAML.
+            if 0xD800 <= code_point <= 0xDFFF:
+                raise BlockYamlError(f"invalid Unicode character escape code: {match.group(0)!r}")
+            return chr(code_point)
+        raise BlockYamlError(f"unsupported escape in double-quoted scalar: {match.group(0)!r}")
+
+    return _DOUBLE_QUOTED_ESCAPE_RE.sub(replace, inner)
 
 
 def _flow_sequence(raw: str) -> list[object]:
