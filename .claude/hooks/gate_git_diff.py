@@ -35,6 +35,7 @@ naming a denied file.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import sys
 
@@ -94,6 +95,11 @@ OPERATORS = frozenset({"&&", "||", ";", "|", "&", "(", ")", "{", "}", "\n"})
 
 VERB_PREFIXES = ("$(", "(", "`", "<(", ">(")
 
+# The shape of every brace expansion bash performs: a `{`, then a `,` or a
+# `..` somewhere after it, then a `}` somewhere after that. See
+# brace_would_expand().
+EXPANDING_BRACE = re.compile(r"\{.*(?:,|\.\.).*\}", re.DOTALL)
+
 
 def refused_long(token: str) -> bool:
     """Is this token a long option that reaches outside the index?
@@ -143,30 +149,27 @@ def brace_would_expand(token: str) -> bool:
     what git's own `@{...}` revision syntax relies on: `HEAD@{1}`,
     `main@{upstream}`, `@{-1}`, `@{2.days.ago}`. Those reach git as typed and
     touch none of the arguments this hook refuses, so refusing them blocked the
-    ordinary diff against the previous commit for nothing.
+    ordinary diff against the previous commit for nothing. A `{` that never
+    closes is a literal to bash as well, and passes.
 
-    This expands nothing; it asks whether bash would, and errs toward yes. The
-    comma or `..` is looked for at any depth, since `{{a,b}}` is `{a} {b}` to
-    bash; a `{` that never closes counts; and `${VAR}` counts, as a runtime-
-    built argument this hook cannot inspect. Each of those over-counts is a
-    refusal. What it never does is call a word literal that bash would
-    rewrite: every expansion bash performs has a comma or `..` between a `{`
-    and a `}`. A `..` *between* two literal braces (`HEAD@{2}..HEAD@{1}`) is
-    not inside one and is left alone.
+    The test is deliberately cruder than bash's: a `{`, then a `,` or a `..`
+    anywhere after it, then a `}` anywhere after that. No nesting or matching
+    is tracked. A depth counter that closed a brace at the first `}` missed
+    the comma in `{--src-prefix=x},--no-index}`, which bash expands to
+    `--src-prefix=x}` and `--no-index` because it pairs the `{` with the
+    *last* `}` it can; every refinement toward bash's real rule is a chance
+    to disagree with it in some other direction. Over-refusing is the safe
+    direction: `HEAD@{2}..HEAD@{1}` is refused too, though bash would leave
+    it alone, and the refusal says to write `HEAD~2..HEAD~1`. `${VAR}` is
+    refused as a runtime-built argument this hook cannot inspect.
+
+    The token is bash's word with the quote marks removed, which is what
+    shlex hands back. Removing quotes never removes a brace, a comma or a
+    dot, so a quoted comma (`{a",",b}`) or a quoted operator (`{a';',b}`) --
+    both of which bash still expands -- cannot hide the shape; a fully
+    quoted `"{a,b}"`, which bash leaves alone, is refused as the price.
     """
-    depth = 0
-    for index, char in enumerate(token):
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth = max(depth - 1, 0)
-        elif char == "," and depth > 0:
-            return True
-        elif char == "." and depth > 0 and token[index + 1 : index + 2] == ".":
-            return True
-        elif char == "$" and token[index + 1 : index + 2] == "{":
-            return True
-    return depth > 0
+    return "${" in token or EXPANDING_BRACE.search(token) is not None
 
 
 def unsafe_operand(token: str) -> bool:
@@ -274,8 +277,10 @@ def refusal(command: str) -> str | None:
                     f"{token} carries a brace that bash expands before git runs, and "
                     "the expansion can spell --output, --no-index, -O or a path outside "
                     "the checkout that none of the other tests see in the word as typed; "
-                    "a brace with no comma and no .. range inside it, such as HEAD@{1}, "
-                    "is a literal to bash and is not refused"
+                    "a brace with no comma and no .. after it before a }, such as "
+                    "HEAD@{1}, is a literal to bash and is not refused, while a .. "
+                    "between two reflog entries (HEAD@{2}..HEAD@{1}) is refused with "
+                    "the rest, so write HEAD~2..HEAD~1 instead"
                 )
         for name in names:
             if name in REFUSED_ENVIRONMENT:
