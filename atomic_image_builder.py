@@ -1238,15 +1238,21 @@ def extend_flow_sequence_line(line: str, item: str) -> str | None:
     worse outcome than the no-op the other patchers fall back to. So the
     sequence is extended in place instead. Returns None when the line is not
     a flow sequence, so the caller can go on to the block-form insert. An
-    empty list becomes "[item]" rather than "[, item]". ``item`` is written
-    verbatim, so pass it already quoted. A trailing comment is kept: the
-    bundled BlueBuild snapshot carries one on this very key.
+    empty list becomes "[item]" rather than "[, item]", and a list that
+    already ends in a comma - "['**.md',]" is valid YAML - is not given a
+    second one. ``item`` is written verbatim, so pass it already quoted. A
+    trailing comment is kept: the bundled BlueBuild snapshot carries one on
+    this very key.
     """
     match = WORKFLOW_FLOW_SEQUENCE_LINE_RE.match(line)
     if not match:
         return None
     prefix, items, suffix = match.groups()
-    items = items.strip()
+    # Drop surrounding whitespace and any trailing comma so the separator
+    # written below is the only one before the new item: "['**.md',, 'x']"
+    # is a parse error, and a quoted item ending in a comma keeps its
+    # closing quote, so only a bare separator is removed here.
+    items = items.strip().rstrip(",").rstrip()
     return f"{prefix}[{items}, {item}]{suffix}" if items else f"{prefix}[{item}]{suffix}"
 
 

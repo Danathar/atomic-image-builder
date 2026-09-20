@@ -37,7 +37,8 @@ rather than leaving it alone.  A managed repository may write the list inline
 ("paths-ignore: ['**.md']"), where a block "- item" beneath it is a parse
 error and GitHub runs nothing from the workflow.  Both patchers therefore go
 through extend_flow_sequence_line first, which extends an inline list in place
-(trailing comment included) and returns None for the block form — see #358.
+(keeping a trailing comment, and not doubling a trailing comma) and returns
+None for the block form — see #358.
 
 maintenance_audit.py currently validates action pin coverage but does not run
 the patchers against the snapshots.  When refreshing a template snapshot, run
