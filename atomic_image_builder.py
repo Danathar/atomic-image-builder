@@ -1292,9 +1292,12 @@ def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[
     differing value is theirs and is left as it is; the update preview then
     shows nothing to change for that key, which is the truth.
 
-    Job-level env is at 6 spaces (4 for the job, 2 for the key). The check is
-    pinned to that exact indentation, otherwise a step-level entry with the
-    same key fools it into thinking the job-level one exists.
+    Job-level env is at 6 spaces (4 for the job, 2 for the key), and only a
+    key nested under the job-level `env:` block this tool extends counts as
+    defined. Other keys sit at that indentation too -- the job's `outputs:`
+    entries, a step-level `env:` -- and taking one of those for the job env
+    entry leaves the real block without it while every guard that tests the
+    variable goes on reading it undefined.
 
     An existing job-level `env:` is extended whatever follows the colon -- a
     comment, trailing whitespace, or an empty `{}` that is unwrapped into a
@@ -1304,14 +1307,6 @@ def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[
     the block is opened above `steps:`.
     """
     lines = workflow_text.splitlines()
-    missing: list[tuple[str, str]] = []
-    for name, value in entries:
-        defined = re.compile(rf"^ {{6}}{re.escape(name)}:(?:\s|$)")
-        if not any(defined.match(line) for line in lines):
-            missing.append((name, value))
-    if not missing:
-        return workflow_text
-    missing_lines = [f"      {name}: {value}" for name, value in missing]
 
     def first_job_level(key: str) -> int | None:
         for index, line in enumerate(lines):
@@ -1320,6 +1315,25 @@ def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[
         return None
 
     env_at = first_job_level("env")
+    defined: set[str] = set()
+    if env_at is not None:
+        # The block runs until the first non-blank, non-comment line at the
+        # job's own indentation or shallower; only its direct children count.
+        for line in lines[env_at + 1 :]:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if len(line) - len(line.lstrip()) <= 4:
+                break
+            if line.startswith("      ") and not line.startswith("       "):
+                key = workflow_key(stripped)
+                if key is not None:
+                    defined.add(key)
+    missing = [(name, value) for name, value in entries if name not in defined]
+    if not missing:
+        return workflow_text
+    missing_lines = [f"      {name}: {value}" for name, value in missing]
+
     if env_at is not None:
         stripped = lines[env_at].strip()
         empty = WORKFLOW_EMPTY_ENV_RE.match(stripped)

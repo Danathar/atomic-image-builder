@@ -1664,6 +1664,74 @@ class BuilderTests(unittest.TestCase):
         result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")])
         self.assertEqual(result.splitlines()[3], "      FOO: ours")
 
+    def test_ensure_workflow_job_env_entries_does_not_take_a_key_outside_the_env_block_for_defined(self) -> None:
+        # A same-named key under the job's `outputs:` sits at the same six
+        # spaces as job env, but it is not job env: the guards still read
+        # env.FOO undefined and the signing steps are skipped on a green run.
+        # Only a key nested under the `env:` block counts; the block must
+        # still receive its own entry, and the output is left alone.
+        workflow_text = textwrap.dedent(
+            """\
+            jobs:
+              build:
+                outputs:
+                  FOO: ${{ steps.x.outputs.foo }}
+                env:
+                  BAR: baz
+                steps:
+                  - run: true
+            """
+        )
+        result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")])
+        self.assertEqual(
+            result.splitlines(),
+            [
+                "jobs:",
+                "  build:",
+                "    outputs:",
+                "      FOO: ${{ steps.x.outputs.foo }}",
+                "    env:",
+                "      FOO: ours",
+                "      BAR: baz",
+                "    steps:",
+                "      - run: true",
+            ],
+        )
+        self.assertEqual(ensure_workflow_job_env_entries(result, [("FOO", "ours")]), result)
+
+    def test_ensure_workflow_job_env_entries_opens_a_block_when_the_only_same_named_key_is_an_output(self) -> None:
+        # No `env:` at all, and the six-space `FOO:` is an output. Before the
+        # check was scoped, that output read as "already defined" and no
+        # block was opened; the guard then tested an undefined variable.
+        workflow_text = "jobs:\n  build:\n    outputs:\n      FOO: x\n    steps:\n      - run: true\n"
+        result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")])
+        self.assertEqual(
+            result.splitlines(),
+            ["jobs:", "  build:", "    outputs:", "      FOO: x", "    env:", "      FOO: ours", "    steps:", "      - run: true"],
+        )
+
+    def test_ensure_workflow_job_env_entries_scans_the_whole_env_block_past_comments_and_blanks(self) -> None:
+        # A key further down the block, after a comment and a blank line, is
+        # still defined; a same-named key in the next job-level block is not.
+        workflow_text = textwrap.dedent(
+            """\
+            jobs:
+              build:
+                env:
+                  BAR: baz
+                  # the guard
+
+                  FOO: theirs
+                outputs:
+                  QUX: 1
+                steps:
+                  - run: true
+            """
+        )
+        self.assertEqual(ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")]), workflow_text)
+        result = ensure_workflow_job_env_entries(workflow_text, [("QUX", "ours")])
+        self.assertEqual(result.splitlines()[3], "      QUX: ours")
+
     def test_ensure_workflow_job_env_entries_extends_a_commented_env_block(self) -> None:
         # The old anchor was the literal "    env:\n"; a comment after the
         # colon missed it and the fallback wrote a second `env:` above
