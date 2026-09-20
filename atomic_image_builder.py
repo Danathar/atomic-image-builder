@@ -1990,6 +1990,13 @@ class Gum:
         print(f"{label} {' | '.join(parts)}")
         print()
 
+    def write_controls(self) -> None:
+        # Every widget runs with --no-show-help, so this is the only place a
+        # user learns that `gum write` submits on Enter and needs Ctrl+J for a
+        # newline. Without it, "one per line" on screen plus Enter after the
+        # first name submitted a single entry with no explanation (#368).
+        self.controls("Ctrl+J new line", "Enter submit", "Esc back", "Ctrl+C quit")
+
     def confirm(self, prompt: str, *, default: bool = True) -> bool:
         args = ["gum", "confirm", "--no-show-help"]
         args.append("--default=true" if default else "--default=false")
@@ -3055,7 +3062,7 @@ class App:
         # package names they want, and the tool does a lightweight local check
         # for obvious mistakes before the GitHub build does the final check.
         self.gum.header("Add Packages")
-        print()
+        self.gum.write_controls()
         self.menu_section(
             "What To Enter",
             "Enter exact RPM package names separated by spaces or newlines.",
@@ -3069,7 +3076,11 @@ class App:
             "Leave this empty if you want to go back without adding anything.",
         )
         print()
-        raw = self.gum.write(placeholder="Enter package names...", height=6, width=self.gum.form_width(max_width=110))
+        raw = self.gum.write(
+            placeholder="Enter package names separated by spaces...",
+            height=6,
+            width=self.gum.form_width(max_width=110),
+        )
         packages = raw.replace(",", " ").split()
         if not packages:
             return
@@ -3268,18 +3279,21 @@ class App:
 
     def add_services_manually(self) -> None:
         self.gum.header("Add Services Manually")
-        print()
+        self.gum.write_controls()
         self.menu_section(
             "What To Enter",
-            "Type systemd service names like sshd.service or tailscaled.service.",
+            "Type systemd service names like sshd.service or tailscaled.service, separated by spaces or newlines.",
             "Leave this empty if you want to go back without adding anything.",
         )
         raw = self.gum.write(
-            placeholder="Enter service names, one per line...",
+            placeholder="Enter service names separated by spaces...",
             height=5,
             width=self.gum.form_width(max_width=80),
         )
-        services = unique(line.strip() for line in raw.splitlines())
+        # Same tokenising as package entry. Splitting on newlines alone meant a
+        # user who typed two names with a space -- the natural thing once Enter
+        # submits -- got one invalid "a b" token rejected instead of two services.
+        services = unique(raw.replace(",", " ").split())
         if not services:
             return
         try:
@@ -5076,13 +5090,14 @@ class App:
             return
         selected = choice[0] if choice else "Back"
         if selected == "Add package names to remove":
+            self.gum.write_controls()
             self.menu_section(
                 "What To Enter",
                 "Enter exact RPM package names separated by spaces or newlines.",
                 "Leave this empty if you want to go back.",
             )
             raw = self.gum.write(
-                placeholder="Enter package names, one per line...",
+                placeholder="Enter package names separated by spaces...",
                 height=6,
                 width=self.gum.form_width(max_width=90),
             )
