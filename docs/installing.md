@@ -88,7 +88,7 @@ running it. See [Verifying the image](#verifying-the-image).
 ```bash
 curl -fsSLO https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib &&
 curl -fsSL  https://github.com/Danathar/atomic-image-builder/releases/latest/download/aib.sha256 | sha256sum -c - &&
-install -m 755 aib ~/.local/bin/aib && rm aib
+install -D -m 755 aib ~/.local/bin/aib && rm aib
 aib
 ```
 
@@ -96,6 +96,14 @@ aib
 [`publish-wrapper.yml`](../.github/workflows/publish-wrapper.yml), both generated
 from the same checkout of the tag, so the pair always agrees. `sha256sum -c -`
 exits non-zero and prints `FAILED` if it does not.
+
+`install -D` creates `~/.local/bin` if it is not there yet. A fresh account on
+Fedora Atomic or Bluefin does not have it — `/etc/skel` ships only
+`.local/share` — and without `-D` the install fails with
+`install: invalid target ... No such file or directory`, which reads like a
+broken download rather than a missing directory. Fedora's stock `.bashrc` puts
+the directory on `PATH` whether or not it exists, so creating it is all that is
+needed.
 
 The `&&` at the end of the first two lines is doing the same work it does in the
 `cosign verify` command further down: it makes the check a gate rather than a
@@ -118,6 +126,7 @@ thing doing the verifying from being the unverified part.
 #### The `main` version
 
 ```bash
+mkdir -p ~/.local/bin
 curl -fsSL https://raw.githubusercontent.com/Danathar/atomic-image-builder/main/contrib/aib -o ~/.local/bin/aib
 chmod +x ~/.local/bin/aib
 ```
