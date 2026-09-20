@@ -463,7 +463,12 @@ advise when that branch moves, the same way the osbuild/bootc-image-builder
 "main"-labelled pins already behave. The older ACTION_REF_PINS entries that
 label the same SHA "v8" are deliberate history (upstream once moved the v8 tag
 backwards; see the comment in maintenance_audit.py's describe_pin_drift) and
-must not be "corrected" to match.
+must not be "corrected" to match. They exist for the audit, not for the
+comment: pin_action_uses_line() writes ACTION_PINS' label whenever the SHA it
+lands on is ACTION_PINS' SHA, so a workflow line at 695eb75b reads "# master"
+however it arrived there. Before that rule (#349) the ref table's "v8" won,
+and every repository generated from scratch had the generator's "# master"
+rewritten to "# v8" on its first update, with no upstream change behind it.
 
 Rechunk Recipe ARG_MAX Fix (CHUNKAH_CONFIG_STR)
 ------------------------------------------------

@@ -957,6 +957,17 @@ def pin_action_uses_line(line: str) -> str:
     if not pin:
         return line
     sha, label = pin
+    # ACTION_REF_PINS may name the SHA ACTION_PINS already holds under an
+    # older label -- remove-unwanted-software's "v8" entries do, and stay as
+    # they are so the freshness audit keeps watching that tag (see
+    # maintenance_notes.txt). The label written into a workflow is the
+    # generator's, though: pinned_action() writes ACTION_PINS' label for this
+    # SHA, and if the ref table's won here, a repository generated from
+    # scratch would have its comment rewritten on its first update with no
+    # upstream change behind it. Same SHA, one label.
+    current = ACTION_PINS.get(action)
+    if current is not None and current[0] == sha:
+        label = current[1]
     suffix = re.sub(r"\s+#.*$", "", suffix)
     comment = f" # {label}"
     return f"{prefix}{action}@{sha}{comment}"
