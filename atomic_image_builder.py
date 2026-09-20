@@ -586,6 +586,63 @@ def normalize_container_image_reference(container_ref: str) -> str:
     return base
 
 
+# Every way rpm-ostree spells a container origin starts with one of these:
+# the ostree-* prefixes normalize_container_image_reference() strips, and the
+# bare transports a status override file may carry. What is left after ruling
+# them out is a classic ostree origin -- `<remote>:<ref>` -- which is what
+# every stock Fedora Silverblue or Kinoite install has until its first rebase.
+CONTAINER_ORIGIN_PREFIXES: tuple[str, ...] = ("ostree-", "docker://", "registry:")
+
+# The classic ref keeps a variant's original codename: Fedora renamed Sericea
+# to Sway Atomic and Onyx to Budgie Atomic, and the container images on
+# quay.io took the new names, but the ostree refs Fedora signs are
+# still fedora/<release>/<arch>/sericea and .../onyx (see the ostree_refs
+# table in fedora-infra/ansible's robosignatory role). The other three refs
+# already spell the curated key.
+CLASSIC_FEDORA_REF_ALIASES: dict[str, str] = {"sericea": "sway-atomic", "onyx": "budgie-atomic"}
+
+
+def classic_ostree_origin_ref(origin: str) -> str | None:
+    # A deployment that was installed from Fedora's ostree repo and never
+    # rebased has no container-image-reference; its `origin` is a plain
+    # `<remote>:<ref>` such as "fedora:fedora/44/x86_64/silverblue". Return
+    # that ref, or None when the value names a container image so the caller
+    # can send it through normalize_container_image_reference() instead. The
+    # shape check matters: an unprefixed image reference has a colon too, but
+    # what precedes it is a registry path -- slashes, and a host with a dot in
+    # it -- where a classic origin has a bare remote name or a ref segment.
+    value = origin.strip()
+    if not value or value.startswith(CONTAINER_ORIGIN_PREFIXES):
+        return None
+    remote, sep, ref = value.partition(":")
+    if not sep:
+        remote, ref = "", value
+    if "/" in remote or "." in (remote or ref.split("/", 1)[0]):
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*", ref):
+        return None
+    return ref
+
+
+def fedora_atomic_image_for_classic_ref(ref: str) -> str | None:
+    # fedora/<release>/<arch>/<variant> -> the quay.io image of the same
+    # variant and release, which is the curated Fedora Atomic entry's
+    # repository with the host's own release as the tag. Handing back a
+    # tagged URI rather than the BaseImage lets scan_os treat it exactly like
+    # a scanned image: match_base_image() finds the curated entry, and the
+    # existing tag check offers the recommended tag when the host is on an
+    # older release. Anything that is not a Fedora desktop ref is None.
+    parts = ref.split("/")
+    if len(parts) != 4 or parts[0] != "fedora" or not all(parts):
+        return None
+    _fedora, release, _arch, variant = parts
+    key = CLASSIC_FEDORA_REF_ALIASES.get(variant, variant)
+    for image in BASE_IMAGES:
+        if image.provider == "Fedora Atomic" and image.key == key:
+            return f"{image.image_uri.rsplit(':', 1)[0]}:{release}"
+    return None
+
+
 def format_daily_rebuild_note(
     cron: str,
     *,
@@ -3300,7 +3357,28 @@ class App:
                 "This deployment has no container image reference; scanning only supports bootc / image-based deployments."
             )
             return SCAN_UNAVAILABLE
-        base = normalize_container_image_reference(container_ref)
+        classic_ref = classic_ostree_origin_ref(container_ref)
+        if classic_ref is None:
+            base = normalize_container_image_reference(container_ref)
+        else:
+            # A stock Fedora Atomic install has no container-image-reference,
+            # only a classic `remote:ref` origin. Treating that string as an
+            # image sent the primary Fedora install down the custom-image
+            # refusal below, which told the user their Silverblue was "not one
+            # of the images this tool supports" and defaulted to stopping.
+            # The ref names the same variant and release the quay.io image
+            # does, so map it there and carry the layered packages as usual.
+            # A classic ref this tool has no image for is the case the error
+            # above describes -- there is no image to build on -- and takes
+            # the same path, where create_image offers to choose a base.
+            mapped = fedora_atomic_image_for_classic_ref(classic_ref)
+            if mapped is None:
+                self.gum.error(
+                    f"This system was installed from the ostree ref {classic_ref}, which is not one of the images this tool supports."
+                )
+                self.gum.hint(f"Supported: {supported_base_image_names()}")
+                return SCAN_UNAVAILABLE
+            base = mapped
         self.config.scanned_packages = unique(string_list(booted.get("requested-packages")))
         self.config.scanned_removed = unique(string_list(booted.get("requested-base-removals")))
         self.config.removed_packages = list(self.config.scanned_removed)
