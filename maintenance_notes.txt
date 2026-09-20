@@ -550,6 +550,57 @@ correctly elsewhere in this file; lookup_host_package() was the one call
 site that had been missing it, invisibly, because a single-package query
 never has more than one result to separate.
 
+The lookup query is cache-only (dnf5 -C), like the search query. Before #369
+it was not, and dnf5 quietly fetched the full repository metadata -- about
+160 MB on Fedora -- behind the "Checking package name" spinner whenever the
+cache was missing or expired (48 h for fedora, 6 h for updates), while the
+search screen on the same empty cache stopped and asked first. Both paths now
+treat dnf5's "cache-only enabled but no cache" failure the same way: offer
+refresh_package_metadata() once, retry with the offer disabled so a refresh
+that produces no usable cache cannot loop, and otherwise carry on. For the
+lookup, "carry on" means every name in the batch comes back None -- kept, with
+the usual "could not fully check" warning -- rather than blocking entry, and
+that None is deliberately not written to package_lookup_cache: declining a
+download says nothing about the names, and a refresh accepted later (from
+either screen) must be able to check them properly. The batching story above
+is unchanged; what the first call used to spend downloading is now the
+explicit, consented refresh.
+
+The batch is an exact-name check, and `dnf5 install` accepts more than exact
+names (#370). Two specs the generated build.sh installs were rejected as
+typos: `vim`, which repoquery prints nothing for because a positional
+repoquery argument does not resolve Provides (install resolves it to
+vim-enhanced), and `vim-enhanced.x86_64`, for which repoquery prints the bare
+name `vim-enhanced`, not string-equal to the spec. The batch cannot say which
+argument printed which line, so _resolve_package_spec() re-asks per leftover
+spec, on the cache the batch just warmed: `--whatprovides <spec>` first (it is
+case-sensitive and every package provides its own name), then a positional
+`<spec>` query for NEVRA forms, accepted only when a printed name opens the
+spec verbatim. That last condition is what keeps `Vim-Enhanced` rejected:
+positional repoquery matches ignoring case (5.4.2.1 prints vim-enhanced for
+it), install does not ("No match for argument"). A spec with no ".", "-" or
+":" skips the positional query, since it can only be a plain name and
+--whatprovides already answered that. Confirmed live against dnf5 5.4.2.1:
+vim, vim-enhanced.x86_64, htop-3.4.1 and the virtual `webserver` resolve;
+Vim-Enhanced, HTOP, nethock and python3-foo-typo do not. Binaries by bare name
+(`dnf5 install <name>` also matches /usr/bin/<name>) are not resolved here; a
+user who types one keeps the "not found" message and can enter the package
+name instead.
+
+The same lookup checks the Removed Base Packages screen, and there Provides
+must stay rejected. The generated build.sh only removes a package after
+`rpm -q --quiet "$pkg"` succeeds, and rpm -q matches names and NEVRA forms
+only: on a host with vim-enhanced (Provides: vim) installed, `rpm -q --quiet
+vim` exits 1 while vim-enhanced.x86_64 and htop-3.4.1 exit 0. Accepting `vim`
+as a removal would save it and then skip it at build time with "not
+installed in the base image". So lookup_host_packages() takes
+resolve_provides: the removal filter passes False, which skips the
+--whatprovides step and keeps the positional NEVRA follow-up, and the cache
+is keyed by (spec, resolve_provides) so `vim` accepted on the install screen
+does not leak into the removal screen. Swapping a Provides for its provider
+was not taken: `webserver` has three providers, and the state file would
+hold a name the user never typed.
+
 Removal Entry Asks the rpmdb Before the Repos (lookup_removable_host_packages)
 ------------------------------------------------------------------------------
 The removed-package screen used the same `dnf5 repoquery --available` lookup
@@ -560,8 +611,8 @@ neither fedora nor updates, so on a Bluefin host `uupd` was reported as a
 typo and dropped, even though the generated build.sh would have removed it
 fine (#371). lookup_removable_host_packages() now asks
 lookup_installed_host_packages() first -- one `rpm -q` over the batch -- and
-sends only the names rpm did not confirm on to the repo query. Installed is
-final; not-installed and could-not-check both fall through, because the
+sends only the names rpm did not confirm on to the repo query, with
+resolve_provides=False for the reason given above. Installed is final; not-installed and could-not-check both fall through, because the
 host may have overridden the package away already, or be running a
 different base than the one being built, and the repo answer for those is
 the one the screen always gave. Nothing that was accepted before is rejected

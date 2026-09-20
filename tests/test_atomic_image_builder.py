@@ -87,7 +87,26 @@ from atomic_image_builder import (
     remote_replacement_list,
     string_list,
     workflow_job_ranges,
+    yaml_scalar,
 )
+
+# CI installs no PyYAML, so tests/_block_yaml.py is the oracle every generated
+# document is parsed with. When a libyaml-backed PyYAML happens to be on the
+# machine, the tests that exist because of a libyaml-only rejection (#360)
+# also run the real thing: pure-Python PyYAML accepts a surrogate \u escape,
+# libyaml -- like BlueBuild's serde-yaml and actionlint's go-yaml -- does not.
+try:
+    from yaml import CSafeLoader as _LIBYAML_LOADER
+    from yaml import load as _yaml_load
+except ImportError:  # no PyYAML, or one built without libyaml
+    _LIBYAML_LOADER = None
+
+
+def parse_with_libyaml(text: str) -> object | None:
+    """``text`` as libyaml reads it, or None when libyaml is not available."""
+    if _LIBYAML_LOADER is None:
+        return None
+    return _yaml_load(text, Loader=_LIBYAML_LOADER)
 
 
 class GumStub:
@@ -112,6 +131,9 @@ class GumStub:
 
     def controls(self, *_parts: str) -> None:
         pass
+
+    def write_controls(self) -> None:
+        self.messages.append(("controls", "write"))
 
     def success(self, message: str) -> None:
         self.messages.append(("success", message))
@@ -388,6 +410,24 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(is_valid_repo_name("test__image"))
         self.assertTrue(is_valid_repo_name("test--image"))
         self.assertTrue(is_valid_repo_name("test---image"))
+
+    def test_yaml_scalar_writes_printable_text_raw_and_escapes_the_rest(self) -> None:
+        # Since #360 non-ASCII is written as itself so an emoji is one scalar
+        # value rather than a surrogate pair. That must not extend to what
+        # YAML refuses raw anywhere in a stream: DEL, the C1 controls and the
+        # U+FFFE/U+FFFF noncharacters. json.dumps(ensure_ascii=False) passes
+        # those through, and libyaml then rejects the whole recipe with
+        # "unacceptable character #x0080". U+0085 is a YAML 1.1 line break
+        # that PyYAML folds to a space, so it rides with its neighbours. The
+        # C0 controls, quotes and backslashes are json.dumps's own escapes.
+        self.assertEqual(yaml_scalar("My 🚀 Ünïcødé 图像"), '"My 🚀 Ünïcødé 图像"')
+        self.assertEqual(yaml_scalar('say "hi"\\\t\x01'), '"say \\"hi\\"\\\\\\t\\u0001"')
+        self.assertEqual(
+            yaml_scalar("a\x7fb\x80c\x85d\x9fe￾f￿g"),
+            '"a\\u007fb\\u0080c\\u0085d\\u009fe\\ufffef\\uffffg"',
+        )
+        # The neighbours on either side of each escaped range stay raw.
+        self.assertEqual(yaml_scalar("~\xa0�\U0010ffff"), '"~\xa0�\U0010ffff"')
 
     def test_repository_status_omits_description_separator_when_unset(self) -> None:
         app = self.make_app()
@@ -925,6 +965,30 @@ class BuilderTests(unittest.TestCase):
         # quoted, escaped scalar or the workflow stops parsing.
         self.assertIn('  IMAGE_DESC: "Doug: my \\"daily\\" image"', patched)
         self.assertEqual(app.patch_container_workflow(patched), patched)
+
+    def test_patch_container_workflow_writes_an_emoji_description_as_itself(self) -> None:
+        # The third place yaml_scalar() reaches a file, alongside the recipe
+        # and the from-scratch workflow (#360): the bundled template's env
+        # key. A description outside the BMP has to land as the character,
+        # not as the surrogate pair json.dumps writes by default.
+        app = self.make_app()
+        app.config.image_desc = "My 🚀 image"
+        workflow = textwrap.dedent(
+            """\
+            name: Build container image
+            env:
+              IMAGE_DESC: My Customized Bootc Image
+            jobs:
+              build_push:
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v4
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn('  IMAGE_DESC: "My 🚀 image"', patched)
+        self.assertNotIn("\\u", patched)
+        self.assertEqual(parse_block_yaml(patched)["env"]["IMAGE_DESC"], "My 🚀 image")
 
     def test_patch_container_workflow_adds_state_ignore_only_once(self) -> None:
         # Both the key branch and the README anchor can match the same
@@ -3844,6 +3908,37 @@ class BuilderTests(unittest.TestCase):
                 self.assertIn(atomic_image_builder.usage_text(), buffer.getvalue())
                 app_cls.assert_not_called()
 
+    def test_main_rejects_unknown_arguments_instead_of_starting_the_wizard(self) -> None:
+        # #366: main() used to look only at argv[1] and fall through to the
+        # wizard for anything it did not recognise, so a typo in a script or a
+        # `podman run` cleared the screen and sat at "Press Enter". Every shape
+        # below has to fail closed: usage on stderr, exit 2, App never built.
+        cases = {
+            "unknown long flag": ["--bogus"],
+            "lowercase -v is not -V": ["-v"],
+            "combined short flags": ["-hV"],
+            "help typo": ["--hlep"],
+            "positional word": ["build"],
+            "known flag with trailing extra": ["--version", "--bogus"],
+            "known flag after an unknown one": ["--bogus", "--help"],
+            "same known flag twice": ["--help", "--help"],
+        }
+        for label, arguments in cases.items():
+            with self.subTest(label):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with patch("sys.argv", ["atomic-image-builder", *arguments]):
+                    with patch.object(atomic_image_builder, "App") as app_cls:
+                        with redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                            with self.assertRaises(SystemExit) as raised:
+                                atomic_image_builder.main()
+                self.assertEqual(raised.exception.code, 2)
+                app_cls.assert_not_called()
+                # `--version --bogus` used to print the version to stdout and
+                # exit 0, which is exactly what a script would then trust.
+                self.assertEqual(stdout.getvalue(), "", "a rejected invocation must not print to stdout")
+                self.assertIn(f"{atomic_image_builder.TOOL_COMMAND}: unrecognized arguments: {' '.join(arguments)}", stderr.getvalue())
+                self.assertIn(atomic_image_builder.usage_text(), stderr.getvalue())
+
     def test_main_runs_app_and_exits_zero_on_success(self) -> None:
         with patch("sys.argv", ["atomic-image-builder"]):
             with patch.object(atomic_image_builder, "App") as app_cls:
@@ -3880,7 +3975,7 @@ class BuilderTests(unittest.TestCase):
     def test_add_packages_to_config_accepts_valid_tokens(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: True for p in pkgs}):
             added = app.add_packages_to_config(["tmux", "ripgrep"], source_label="manual entry")
         self.assertTrue(added)
         self.assertEqual(app.config.packages, ["tmux", "ripgrep"])
@@ -3910,7 +4005,7 @@ class BuilderTests(unittest.TestCase):
     def test_add_packages_to_config_rejects_missing_manual_packages(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: False for p in pkgs}):
             added = app.add_packages_to_config(["nethock"], source_label="manual entry")
         self.assertFalse(added)
         self.assertEqual(app.config.packages, [])
@@ -3928,7 +4023,7 @@ class BuilderTests(unittest.TestCase):
     def test_add_packages_to_config_warns_when_manual_check_is_unavailable(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: None for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: None for p in pkgs}):
             added = app.add_packages_to_config(["tmux"], source_label="manual entry")
         self.assertTrue(added)
         self.assertEqual(app.config.packages, ["tmux"])
@@ -3938,7 +4033,7 @@ class BuilderTests(unittest.TestCase):
         app = self.make_app()
         app.config.copr_repos = ["foo/bar"]
         app.gum = GumStub()
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: False for p in pkgs}):
             added = app.add_packages_to_config(["nethock"], source_label="manual entry")
         self.assertTrue(added)
         self.assertEqual(app.config.packages, ["nethock"])
@@ -3948,7 +4043,7 @@ class BuilderTests(unittest.TestCase):
         app = self.make_app()
         app.gum = GumStub()
         with patch.object(app, "lookup_installed_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
-            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: True for p in pkgs}):
                 added = app.add_removed_packages_to_config(["vim-enhanced", "nano"], source_label="manual entry")
         self.assertTrue(added)
         self.assertEqual(app.config.removed_packages, ["vim-enhanced", "nano"])
@@ -3976,7 +4071,7 @@ class BuilderTests(unittest.TestCase):
         app = self.make_app()
         app.gum = GumStub()
         with patch.object(app, "lookup_installed_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
-            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
+            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: False for p in pkgs}):
                 added = app.add_removed_packages_to_config(["nethock"], source_label="manual entry")
         self.assertFalse(added)
         hints = [message for level, message in app.gum.messages if level == "hint"]
@@ -3989,7 +4084,7 @@ class BuilderTests(unittest.TestCase):
         app = self.make_app()
         app.gum = GumStub()
         with patch.object(app, "lookup_installed_host_packages") as installed_mock:
-            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: True for p in pkgs}):
                 added = app.add_packages_to_config(["tmux"], source_label="manual entry")
         installed_mock.assert_not_called()
         self.assertTrue(added)
@@ -4029,7 +4124,7 @@ class BuilderTests(unittest.TestCase):
         app = self.make_app()
         app.gum = GumStub()
         with patch.object(app, "lookup_installed_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
-            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
+            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: False for p in pkgs}):
                 added = app.add_removed_packages_to_config(["nethock"], source_label="manual entry")
         self.assertFalse(added)
         self.assertEqual(app.config.removed_packages, [])
@@ -4044,10 +4139,33 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.config.services, ["sshd.service", "tailscaled.service"])
         self.assertTrue(any(level == "success" for level, _message in stub.messages))
 
+    def test_add_services_manually_accepts_space_and_comma_separated_entry(self) -> None:
+        # gum write submits on Enter, so "one per line" was never what a
+        # user could type without knowing Ctrl+J. Names separated the way
+        # package entry already accepts them must each become a service,
+        # instead of one invalid "a b" token that rejects the whole entry (#368).
+        app = self.make_app()
+        stub = GumStub()
+        stub.write = lambda **_kwargs: "sshd.service tailscaled.service, cups.service\nsshd.service\n"
+        app.gum = stub
+        app.add_services_manually()
+        self.assertEqual(app.config.services, ["sshd.service", "tailscaled.service", "cups.service"])
+        self.assertTrue(any(level == "success" for level, _message in stub.messages))
+
+    def test_add_services_manually_shows_the_write_widget_keys(self) -> None:
+        # The controls line is the only place the Enter-submits / Ctrl+J
+        # newline behaviour is explained, since the widget's own help is hidden.
+        app = self.make_app()
+        stub = GumStub()
+        stub.write = lambda **_kwargs: ""
+        app.gum = stub
+        app.add_services_manually()
+        self.assertIn(("controls", "write"), stub.messages)
+
     def test_add_services_manually_rejects_unsafe_tokens_immediately(self) -> None:
         app = self.make_app()
         stub = GumStub()
-        stub.write = lambda **_kwargs: "sshd.service\nfoo bar.service\n"
+        stub.write = lambda **_kwargs: "sshd.service\nfoo;bar.service\n"
         app.gum = stub
         app.add_services_manually()
         self.assertEqual(app.config.services, [])
@@ -4073,25 +4191,29 @@ class BuilderTests(unittest.TestCase):
         # cache warm-up) while every package after it flashed by in a
         # fraction of a second -- because each one was its own dnf5 call.
         # This asserts the fix directly: one dnf5 invocation covers every
-        # requested package.
+        # requested package. Only a name the batch did not find gets a
+        # follow-up of its own (#370), and by then the cache is warm.
         app = self.make_app()
         stub = GumStub()
         calls: list[list[str]] = []
 
         def fake_spinner_result(_title, command, *, cwd=None):
             calls.append(list(command))
-            return subprocess.CompletedProcess(list(command), 0, "tmux\nhtop\n", "")
+            output = "tmux\nhtop\n" if len(calls) == 1 else ""
+            return subprocess.CompletedProcess(list(command), 0, output, "")
 
         stub.spinner_result = fake_spinner_result
         app.gum = stub
         with patch("atomic_image_builder.command_exists", return_value=True):
             results = app.lookup_host_packages(["tmux", "htop", "nethock"])
 
-        self.assertEqual(len(calls), 1)
         self.assertIn("tmux", calls[0])
         self.assertIn("htop", calls[0])
         self.assertIn("nethock", calls[0])
         self.assertIn("%{name}\n", calls[0])
+        for command in calls[1:]:
+            self.assertNotIn("tmux", command)
+            self.assertNotIn("htop", command)
         self.assertEqual(results, {"tmux": True, "htop": True, "nethock": False})
 
     def test_lookup_host_packages_asks_about_each_name_once(self) -> None:
@@ -4104,20 +4226,21 @@ class BuilderTests(unittest.TestCase):
 
         def fake_spinner_result(_title, command, *, cwd=None):
             calls.append(list(command))
-            return subprocess.CompletedProcess(list(command), 0, "tmux\n", "")
+            output = "tmux\n" if len(calls) == 1 else ""
+            return subprocess.CompletedProcess(list(command), 0, output, "")
 
         stub.spinner_result = fake_spinner_result
         app.gum = stub
         with patch("atomic_image_builder.command_exists", return_value=True):
             results = app.lookup_host_packages(["tmux", "tmux", "htop"])
 
-        self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].count("tmux"), 1)
+        self.assertTrue(all("tmux" not in command for command in calls[1:]))
         self.assertEqual(results, {"tmux": True, "htop": False})
 
     def test_lookup_host_packages_skips_already_cached_packages(self) -> None:
         app = self.make_app()
-        app.package_lookup_cache["tmux"] = True
+        app.package_lookup_cache["tmux", True] = True
         stub = GumStub()
         calls: list[list[str]] = []
 
@@ -4137,8 +4260,8 @@ class BuilderTests(unittest.TestCase):
 
     def test_lookup_host_packages_does_not_call_dnf5_when_everything_is_cached(self) -> None:
         app = self.make_app()
-        app.package_lookup_cache["tmux"] = True
-        app.package_lookup_cache["htop"] = False
+        app.package_lookup_cache["tmux", True] = True
+        app.package_lookup_cache["htop", True] = False
         stub = GumStub()
         stub.spinner_result = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not run dnf5"))
         app.gum = stub
@@ -4153,7 +4276,7 @@ class BuilderTests(unittest.TestCase):
         with patch("atomic_image_builder.command_exists", return_value=False):
             results = app.lookup_host_packages(["tmux", "htop"])
         self.assertEqual(results, {"tmux": None, "htop": None})
-        self.assertEqual(app.package_lookup_cache["tmux"], None)
+        self.assertEqual(app.package_lookup_cache["tmux", True], None)
 
     def test_lookup_host_packages_treats_returncode_zero_absence_as_missing(self) -> None:
         app = self.make_app()
@@ -4191,6 +4314,263 @@ class BuilderTests(unittest.TestCase):
             results = app.lookup_host_packages(["tmux"])
         self.assertEqual(results, {"tmux": None})
 
+    def _lookup_with_dnf5_stub(
+        self, app, packages: list[str], answers: dict[str, str], *, resolve_provides: bool = True
+    ) -> tuple[dict, list[list[str]]]:
+        # `answers` maps the tail of a repoquery command (what follows
+        # --latest-limit 1) to the stdout dnf5 would print for it. The batch
+        # is keyed by its joined names; a follow-up by "--whatprovides <spec>"
+        # or "<spec>". Anything unlisted prints nothing with exit 0, which is
+        # what dnf5 5.4.2.1 does for a spec that matches no package.
+        stub = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            calls.append(list(command))
+            tail = " ".join(command[command.index("1") + 1 :])
+            return subprocess.CompletedProcess(list(command), 0, answers.get(tail, ""), "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            return app.lookup_host_packages(packages, resolve_provides=resolve_provides), calls
+
+    def test_lookup_host_packages_accepts_a_name_that_resolves_through_provides(self) -> None:
+        # The issue's reproduction: `dnf5 install vim` installs vim-enhanced
+        # via `Provides: vim`, but a plain repoquery argument does not resolve
+        # Provides, so the batch prints nothing for it. The follow-up asks
+        # --whatprovides, which is what makes the answer match the build.
+        app = self.make_app()
+        results, calls = self._lookup_with_dnf5_stub(
+            app,
+            ["htop", "vim"],
+            {"htop vim": "htop\n", "--whatprovides vim": "vim-enhanced\n"},
+        )
+        self.assertEqual(results, {"htop": True, "vim": True})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][-2:], ["--whatprovides", "vim"])
+        self.assertEqual(app.package_lookup_cache["vim", True], True)
+
+    def test_lookup_host_packages_accepts_a_name_dot_arch_spec(self) -> None:
+        # repoquery resolves vim-enhanced.x86_64 but prints the bare name,
+        # which is not string-equal to the spec. The printed name opening
+        # the spec is the accept condition.
+        app = self.make_app()
+        results, calls = self._lookup_with_dnf5_stub(
+            app,
+            ["vim-enhanced.x86_64"],
+            {"vim-enhanced.x86_64": "vim-enhanced\n"},
+        )
+        self.assertEqual(results, {"vim-enhanced.x86_64": True})
+        # Batch, then --whatprovides (a name.arch is not a Provides), then
+        # the NEVRA query that answers it.
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[1][-2:], ["--whatprovides", "vim-enhanced.x86_64"])
+        self.assertEqual(calls[2][-1], "vim-enhanced.x86_64")
+        self.assertNotIn("--whatprovides", calls[2])
+
+    def test_lookup_host_packages_still_rejects_a_wrong_case_name(self) -> None:
+        # repoquery matches positional specs ignoring case, install does not:
+        # `dnf5 install Vim-Enhanced` is "No match for argument". Printed
+        # name vim-enhanced does not open the spec Vim-Enhanced, so the
+        # lookup must keep saying no, exactly as the issue expects.
+        app = self.make_app()
+        results, _calls = self._lookup_with_dnf5_stub(
+            app,
+            ["Vim-Enhanced"],
+            {"Vim-Enhanced": "vim-enhanced\n"},
+        )
+        self.assertEqual(results, {"Vim-Enhanced": False})
+
+    def test_lookup_host_packages_typo_without_separator_skips_the_nevra_query(self) -> None:
+        # "nethock" has no ".", "-" or ":" so it cannot be a name.arch or
+        # name-version form; once --whatprovides says nothing provides it,
+        # there is nothing left for a positional query to add.
+        app = self.make_app()
+        results, calls = self._lookup_with_dnf5_stub(app, ["nethock"], {})
+        self.assertEqual(results, {"nethock": False})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][-2:], ["--whatprovides", "nethock"])
+
+    def test_lookup_host_packages_typo_with_separator_is_rejected_after_both_follow_ups(self) -> None:
+        app = self.make_app()
+        results, calls = self._lookup_with_dnf5_stub(app, ["python3-foo-typo"], {})
+        self.assertEqual(results, {"python3-foo-typo": False})
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(app.package_lookup_cache["python3-foo-typo", True], False)
+
+    def test_lookup_host_packages_follow_up_failure_is_unchecked_not_missing(self) -> None:
+        # A dnf5 failure during the follow-up must not turn into "not found":
+        # None keeps the name with the "could not fully check" warning, the
+        # same as a failure in the batch.
+        app = self.make_app()
+        stub = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            calls.append(list(command))
+            if "--whatprovides" in command:
+                return subprocess.CompletedProcess(list(command), 1, "", "some unrelated dnf5 error")
+            return subprocess.CompletedProcess(list(command), 0, "", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            results = app.lookup_host_packages(["vim"])
+        self.assertEqual(results, {"vim": None})
+        self.assertEqual(len(calls), 2)
+
+    def test_lookup_host_packages_nevra_follow_up_failure_is_unchecked_not_missing(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            if command[-1] == "vim-enhanced.x86_64" and "--whatprovides" not in command:
+                return subprocess.CompletedProcess(list(command), 1, "", "some unrelated dnf5 error")
+            return subprocess.CompletedProcess(list(command), 0, "", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            results = app.lookup_host_packages(["vim-enhanced.x86_64"])
+        self.assertEqual(results, {"vim-enhanced.x86_64": None})
+
+    def test_manual_entry_keeps_a_provides_name_without_a_not_found_error(self) -> None:
+        # The user-visible half of #370: typing "vim" on the exact-name
+        # screen used to print "These package names were not found: vim".
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.CompletedProcess(
+            list(command), 0, "vim-enhanced\n" if "--whatprovides" in command else "", ""
+        )
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            kept = app.filter_available_manual_packages(["vim"])
+        self.assertEqual(kept, ["vim"])
+        self.assertFalse(app.last_manual_package_check_had_missing)
+        self.assertFalse(any(level == "error" for level, _message in stub.messages))
+
+    # ── removals: the rpm -q gate does not resolve Provides ─────────────
+    # The generated build.sh only removes a package after `rpm -q --quiet
+    # "$pkg"` succeeds, and rpm -q matches names and NEVRA forms, not
+    # Provides. Measured on a host with vim-enhanced (Provides: vim)
+    # installed: `rpm -q --quiet vim` exits 1, vim-enhanced.x86_64 and
+    # htop-3.4.1 exit 0. So a Provides that install accepts is, for a
+    # removal, a name the build would silently skip.
+
+    def test_removal_lookup_rejects_a_provides_name_without_asking_whatprovides(self) -> None:
+        app = self.make_app()
+        results, calls = self._lookup_with_dnf5_stub(
+            app,
+            ["htop", "vim"],
+            {"htop vim": "htop\n", "--whatprovides vim": "vim-enhanced\n"},
+            resolve_provides=False,
+        )
+        self.assertEqual(results, {"htop": True, "vim": False})
+        # The batch alone: "vim" has no NEVRA separator, so with Provides
+        # out of the picture there is nothing left to ask dnf5.
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(app.package_lookup_cache["vim", False], False)
+
+    def test_removal_lookup_still_accepts_a_nevra_form(self) -> None:
+        # rpm -q accepts name.arch and name-version, so the positional
+        # follow-up still runs for a removal; only --whatprovides is skipped.
+        app = self.make_app()
+        results, calls = self._lookup_with_dnf5_stub(
+            app,
+            ["vim-enhanced.x86_64", "htop-3.4.1"],
+            {"vim-enhanced.x86_64": "vim-enhanced\n", "htop-3.4.1": "htop\n"},
+            resolve_provides=False,
+        )
+        self.assertEqual(results, {"vim-enhanced.x86_64": True, "htop-3.4.1": True})
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all("--whatprovides" not in command for command in calls))
+        self.assertEqual(calls[1][-1], "vim-enhanced.x86_64")
+        self.assertEqual(calls[2][-1], "htop-3.4.1")
+
+    def test_removal_lookup_keeps_the_wrong_case_and_typo_answers(self) -> None:
+        app = self.make_app()
+        results, calls = self._lookup_with_dnf5_stub(
+            app,
+            ["Vim-Enhanced", "HTOP", "python3-foo-typo"],
+            {"Vim-Enhanced": "vim-enhanced\n"},
+            resolve_provides=False,
+        )
+        self.assertEqual(results, {"Vim-Enhanced": False, "HTOP": False, "python3-foo-typo": False})
+        # Batch, then one positional query for each spec with a separator;
+        # HTOP has none and needs no follow-up.
+        self.assertEqual(len(calls), 3)
+
+    def test_removal_lookup_nevra_follow_up_failure_is_unchecked_not_missing(self) -> None:
+        # For a single spec the batch and the positional follow-up are the
+        # same argv, so the stub answers by call order: the batch finds
+        # nothing, the follow-up is where dnf5 falls over.
+        app = self.make_app()
+        stub = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            calls.append(list(command))
+            if len(calls) == 2:
+                return subprocess.CompletedProcess(list(command), 1, "", "some unrelated dnf5 error")
+            return subprocess.CompletedProcess(list(command), 0, "", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            results = app.lookup_host_packages(["vim-enhanced.x86_64"], resolve_provides=False)
+        self.assertEqual(results, {"vim-enhanced.x86_64": None})
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("--whatprovides", calls[1])
+
+    def test_lookup_cache_keeps_the_install_and_removal_answers_apart(self) -> None:
+        # "vim" typed on the install screen is accepted through Provides. The
+        # same name typed on the removal screen afterwards must not inherit
+        # that answer from the cache: for a removal it is "not found".
+        app = self.make_app()
+        answers = {"vim": "", "--whatprovides vim": "vim-enhanced\n"}
+        install, install_calls = self._lookup_with_dnf5_stub(app, ["vim"], answers)
+        self.assertEqual(install, {"vim": True})
+        removal, removal_calls = self._lookup_with_dnf5_stub(app, ["vim"], answers, resolve_provides=False)
+        self.assertEqual(removal, {"vim": False})
+        self.assertEqual(len(removal_calls), 1)
+        self.assertEqual(app.package_lookup_cache, {("vim", True): True, ("vim", False): False})
+        # And the other way round: a removal's "not found" is not install's.
+        app = self.make_app()
+        removal, _calls = self._lookup_with_dnf5_stub(app, ["vim"], answers, resolve_provides=False)
+        install, install_calls = self._lookup_with_dnf5_stub(app, ["vim"], answers)
+        self.assertEqual((removal, install), ({"vim": False}, {"vim": True}))
+        self.assertEqual(install_calls[-1][-2:], ["--whatprovides", "vim"])
+
+    def test_manual_removal_entry_reports_a_provides_name_as_not_found(self) -> None:
+        # The user-visible half: on the Removed Base Packages screen, "vim"
+        # is refused with the same message as any other name the build
+        # would not find, instead of being saved and then skipped at build
+        # time with "not installed in the base image".
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.CompletedProcess(
+            list(command), 0, "vim-enhanced\n" if "--whatprovides" in command else "", ""
+        )
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            kept = app.filter_available_manual_removed_packages(["vim"])
+        self.assertEqual(kept, [])
+        self.assertTrue(app.last_manual_removed_package_check_had_missing)
+        self.assertTrue(any(level == "error" and "not found: vim" in message for level, message in stub.messages))
+
+    def test_filter_modes_ask_the_lookup_for_their_own_build_step(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        with patch.object(app, "lookup_installed_host_packages", return_value={"vim": False}):
+            with patch.object(app, "lookup_host_packages", return_value={"vim": True}) as lookup:
+                app.filter_available_manual_packages(["vim"])
+                app.filter_available_manual_removed_packages(["vim"])
+        self.assertEqual(
+            [call.kwargs for call in lookup.call_args_list],
+            [{"resolve_provides": True}, {"resolve_provides": False}],
+        )
+
     def test_lookup_host_packages_uses_singular_title_for_one_package(self) -> None:
         app = self.make_app()
         stub = GumStub()
@@ -4227,6 +4607,193 @@ class BuilderTests(unittest.TestCase):
             result = app.lookup_host_package("tmux")
         mock.assert_called_once_with(["tmux"])
         self.assertTrue(result)
+
+    def test_lookup_host_packages_queries_cache_only(self) -> None:
+        # Without -C, dnf5 fetches missing or expired repository metadata on
+        # its own -- about 160 MB on Fedora -- behind a spinner that only says
+        # "Checking package name", while the search screen on the same empty
+        # cache stops and asks first (#369). The flag is what makes the empty
+        # cache a reported failure this code can answer with an offer.
+        app = self.make_app()
+        stub = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            calls.append(list(command))
+            return subprocess.CompletedProcess(list(command), 0, "tmux\n", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            app.lookup_host_packages(["tmux"])
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn("-C", calls[0])
+        self.assertLess(calls[0].index("-C"), calls[0].index("repoquery"))
+
+    def test_lookup_host_packages_keeps_names_unchecked_when_refresh_is_declined(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        commands: list[list[str]] = []
+        prompts: list[str] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                list(command),
+                1,
+                "",
+                'Cache-only enabled but no cache for repository "fedora"',
+            )
+
+        def fake_confirm(prompt, **_kwargs):
+            prompts.append(prompt)
+            return False
+
+        stub.spinner_result = fake_spinner_result
+        stub.confirm = fake_confirm
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with redirect_stdout(io.StringIO()):
+                results = app.lookup_host_packages(["tmux", "htop"])
+
+        self.assertEqual(prompts, ["Refresh package metadata now?"])
+        # Unchecked, not missing: the names are kept and the GitHub build
+        # gets the final say, the same as when dnf5 is not installed.
+        self.assertEqual(results, {"tmux": None, "htop": None})
+        # Declining must not download anything.
+        self.assertTrue(all("makecache" not in command for command in commands))
+        self.assertEqual(len(commands), 1)
+        # A declined download is not a verdict on the names. Cache nothing, so
+        # a refresh accepted later can check them for real.
+        self.assertEqual(app.package_lookup_cache, {})
+
+    def test_lookup_host_packages_refreshes_metadata_then_checks_again(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        commands: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            commands.append(list(command))
+            if "makecache" in command:
+                return subprocess.CompletedProcess(list(command), 0, "Metadata cache created.", "")
+            if len([c for c in commands if "repoquery" in c]) == 1:
+                return subprocess.CompletedProcess(
+                    list(command),
+                    1,
+                    "",
+                    'Cache-only enabled but no cache for repository "fedora"',
+                )
+            # The batch retry prints the one real name; the per-spec
+            # follow-ups for nethock (#370) print nothing, as dnf5 does for
+            # a spec that matches no package.
+            output = "tmux\n" if command[-2:] == ["tmux", "nethock"] else ""
+            return subprocess.CompletedProcess(list(command), 0, output, "")
+
+        stub.spinner_result = fake_spinner_result
+        stub.confirm = lambda _prompt, **_kwargs: True
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with redirect_stdout(io.StringIO()):
+                results = app.lookup_host_packages(["tmux", "nethock"])
+
+        self.assertEqual(results, {"tmux": True, "nethock": False})
+        # The failed query, the refresh, then the query again -- and only
+        # then the follow-up for the name the batch did not print.
+        self.assertEqual(commands[0][-2:], ["tmux", "nethock"])
+        self.assertEqual(commands[1][-1], "makecache")
+        self.assertIn("-C", commands[2])
+        self.assertEqual(commands[2][-2:], ["tmux", "nethock"])
+        self.assertEqual(commands[3][-2:], ["--whatprovides", "nethock"])
+        self.assertEqual(len(commands), 4)
+        self.assertEqual(app.package_lookup_cache, {("tmux", True): True, ("nethock", True): False})
+
+    def test_lookup_host_packages_retry_after_refresh_keeps_the_removal_mode(self) -> None:
+        # The retry after a refresh must ask the same question the caller
+        # asked: a removal check for vim must stay a removal check (no
+        # --whatprovides), and its answer must land under the removal key.
+        app = self.make_app()
+        stub = GumStub()
+        commands: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            commands.append(list(command))
+            if "makecache" in command:
+                return subprocess.CompletedProcess(list(command), 0, "Metadata cache created.", "")
+            if len([c for c in commands if "repoquery" in c]) == 1:
+                return subprocess.CompletedProcess(list(command), 1, "", "Cache-only enabled but no cache")
+            return subprocess.CompletedProcess(list(command), 0, "", "")
+
+        stub.spinner_result = fake_spinner_result
+        stub.confirm = lambda _prompt, **_kwargs: True
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with redirect_stdout(io.StringIO()):
+                results = app.lookup_host_packages(["vim"], resolve_provides=False)
+
+        self.assertEqual(results, {"vim": False})
+        self.assertEqual(len(commands), 3)
+        self.assertTrue(all("--whatprovides" not in command for command in commands))
+        self.assertEqual(app.package_lookup_cache, {("vim", False): False})
+
+    def test_lookup_host_packages_does_not_loop_when_refresh_leaves_cache_empty(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        commands: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            commands.append(list(command))
+            if "makecache" in command:
+                return subprocess.CompletedProcess(list(command), 0, "", "")
+            return subprocess.CompletedProcess(
+                list(command),
+                1,
+                "",
+                'Cache-only enabled but no cache for repository "fedora"',
+            )
+
+        stub.spinner_result = fake_spinner_result
+        stub.confirm = lambda _prompt, **_kwargs: True
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with redirect_stdout(io.StringIO()):
+                results = app.lookup_host_packages(["tmux"])
+
+        self.assertEqual(results, {"tmux": None})
+        # Query, refresh, query -- and then it stops rather than offering again.
+        self.assertEqual(len(commands), 3)
+        self.assertEqual(len([c for c in commands if "makecache" in c]), 1)
+
+    def test_manual_entry_keeps_names_and_warns_when_metadata_refresh_is_declined(self) -> None:
+        # The whole path from the exact-name screen: dnf5 has no cache, the
+        # user declines the download, and the names go in unchecked with the
+        # existing "could not fully check" warning instead of being dropped.
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.CompletedProcess(
+            list(command), 1, "", 'Cache-only enabled but no cache for repository "fedora"'
+        )
+        stub.confirm = lambda _prompt, **_kwargs: False
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with redirect_stdout(io.StringIO()):
+                accepted = app.filter_available_manual_packages(["tmux", "htop"])
+
+        self.assertEqual(accepted, ["tmux", "htop"])
+        self.assertFalse(app.last_manual_package_check_had_missing)
+        self.assertTrue(
+            any(level == "warn" and "Could not fully check" in message for level, message in stub.messages)
+        )
+        self.assertTrue(any(level == "hint" and "tmux, htop" in message for level, message in stub.messages))
+
+    def test_package_search_needs_metadata_message_no_longer_points_at_a_silent_download(self) -> None:
+        # The old wording sent people to exact-name entry as the way around
+        # the download. Now that both paths ask first, the message has to say
+        # what exact-name entry actually gives them without metadata.
+        message = atomic_image_builder.PACKAGE_SEARCH_NEEDS_METADATA
+        self.assertNotIn("instead", message)
+        self.assertIn("Exact-name entry", message)
+        self.assertIn("GitHub build", message)
 
     def test_lookup_installed_host_packages_reads_misses_off_rpm_output_in_one_call(self) -> None:
         # Real `rpm -q` shape (rpm 6.0.2): hits print their %{name}, misses
@@ -4328,7 +4895,7 @@ class BuilderTests(unittest.TestCase):
         with patch.object(app, "lookup_installed_host_packages", return_value={"uupd": True, "nethock": False}):
             with patch.object(app, "lookup_host_packages", return_value={"nethock": False}) as repo_mock:
                 results = app.lookup_removable_host_packages(["uupd", "nethock"])
-        repo_mock.assert_called_once_with(["nethock"])
+        repo_mock.assert_called_once_with(["nethock"], resolve_provides=False)
         self.assertEqual(results, {"uupd": True, "nethock": False})
 
     def test_lookup_removable_host_packages_falls_back_to_repos_for_names_not_installed_here(self) -> None:
@@ -4348,7 +4915,7 @@ class BuilderTests(unittest.TestCase):
         with patch.object(app, "lookup_installed_host_packages", return_value={"tmux": None, "htop": None}):
             with patch.object(app, "lookup_host_packages", return_value={"tmux": True, "htop": None}) as repo_mock:
                 results = app.lookup_removable_host_packages(["tmux", "htop"])
-        repo_mock.assert_called_once_with(["tmux", "htop"])
+        repo_mock.assert_called_once_with(["tmux", "htop"], resolve_provides=False)
         self.assertEqual(results, {"tmux": True, "htop": None})
 
     def test_lookup_removable_host_packages_skips_the_repo_query_when_everything_is_installed(self) -> None:
@@ -4719,6 +5286,17 @@ class BuilderTests(unittest.TestCase):
             with self.assertRaises(CommandError):
                 gum.spinner_capture("Working...", ["true"])
 
+    @staticmethod
+    def run_spinner_without_gum(args, *, cwd=None, **_kwargs) -> subprocess.CompletedProcess[str]:
+        # Stands in for run() under the spinner helpers: drops the `gum spin
+        # ... --` prefix and runs the wrapped `bash -c` for real, so the
+        # redirects and the status file are exercised the way they are on a
+        # user's machine while CI, which has no gum, still runs the test.
+        # gum spin exits with its child's code, so this returns bash's.
+        child = list(args[args.index("--") + 1 :])
+        proc = subprocess.run(child, cwd=str(cwd) if cwd else None, text=True, capture_output=True, check=False)
+        return subprocess.CompletedProcess(list(args), proc.returncode, proc.stdout, proc.stderr)
+
     def test_gum_spinner_capture_returns_captured_output_on_success(self) -> None:
         gum = Gum()
         original_named_temporary_file = tempfile.NamedTemporaryFile
@@ -4729,16 +5307,122 @@ class BuilderTests(unittest.TestCase):
             created_paths.append(tmp.name)
             return tmp
 
-        def fake_run(_args, **_kwargs):
-            Path(created_paths[-1]).write_text("captured output\n")
-            return subprocess.CompletedProcess(["gum", "spin"], 0, "", "")
-
         with patch("atomic_image_builder.tempfile.NamedTemporaryFile", side_effect=fake_named_temporary_file):
-            with patch("atomic_image_builder.run", side_effect=fake_run):
-                output = gum.spinner_capture("Working...", ["true"])
+            with patch("atomic_image_builder.run", side_effect=self.run_spinner_without_gum):
+                output = gum.spinner_capture("Working...", ["bash", "-c", "echo captured output; echo noise >&2"])
 
         self.assertEqual(output, "captured output\n")
-        self.assertFalse(Path(created_paths[-1]).exists())
+        self.assertTrue(created_paths)
+        for path in created_paths:
+            self.assertFalse(Path(path).exists())
+
+    def test_gum_spinner_capture_error_carries_wrapped_command_stderr(self) -> None:
+        # #363: a `gh` 404 under the spinner used to surface as "command
+        # failed: gum spin --spinner dot --title ... -- bash -c ..." with gh's
+        # own message discarded. The user-facing error must carry what the
+        # wrapped command wrote and name that command, not the gum line.
+        gum = Gum()
+        with patch("atomic_image_builder.run", side_effect=self.run_spinner_without_gum):
+            with self.assertRaises(CommandError) as raised:
+                gum.spinner_capture("Loading repository...", ["bash", "-c", "echo 'gh: Not Found (HTTP 404)' >&2; exit 1"])
+
+        message = str(raised.exception)
+        self.assertIn("gh: Not Found (HTTP 404)", message)
+        self.assertIn("(command: bash -c ", message)
+        self.assertNotIn("gum spin", message)
+
+    def test_gum_spinner_error_carries_wrapped_command_stderr(self) -> None:
+        # Same as above for the no-output spinner, which `gh repo clone` and
+        # `gh repo create` run under.
+        gum = Gum()
+        with patch("atomic_image_builder.run", side_effect=self.run_spinner_without_gum):
+            with self.assertRaises(CommandError) as raised:
+                gum.spinner("Cloning owner/nope...", ["bash", "-c", "echo 'GraphQL: Could not resolve to a Repository' >&2; exit 1"])
+
+        message = str(raised.exception)
+        self.assertIn("Could not resolve to a Repository", message)
+        self.assertNotIn("gum spin", message)
+
+    def test_gum_spinner_error_falls_back_to_stdout_then_command_line(self) -> None:
+        # A command that fails silently on stderr still gets a useful message:
+        # its stdout if it wrote any, else the bare "command failed" line with
+        # the wrapped command, never the gum invocation.
+        gum = Gum()
+        with patch("atomic_image_builder.run", side_effect=self.run_spinner_without_gum):
+            with self.assertRaisesRegex(CommandError, r"^only on stdout \(command: bash -c "):
+                gum.spinner("Working...", ["bash", "-c", "echo only on stdout; exit 3"])
+            with self.assertRaisesRegex(CommandError, r"^command failed: false$"):
+                gum.spinner("Working...", ["false"])
+
+    def test_gum_spinner_error_reports_missing_wrapped_command(self) -> None:
+        # bash itself writes the reason when the command does not exist, and
+        # that reason is what the user should read.
+        gum = Gum()
+        with patch("atomic_image_builder.run", side_effect=self.run_spinner_without_gum):
+            with self.assertRaises(CommandError) as raised:
+                gum.spinner_capture("Working...", ["definitely-not-a-command-8675309"])
+        self.assertIn("command not found", str(raised.exception))
+
+    def test_gum_spinner_succeeds_when_wrapped_command_writes_stderr_and_exits_zero(self) -> None:
+        # `gh repo clone` narrates progress on stderr and exits 0. Noise on
+        # stderr is not failure; only the exit status decides.
+        gum = Gum()
+        with patch("atomic_image_builder.run", side_effect=self.run_spinner_without_gum):
+            gum.spinner("Cloning...", ["bash", "-c", "echo 'Cloning into ...' >&2"])
+
+    def test_gum_spinner_helpers_keep_the_wrapped_commands_ctrl_c_an_interrupt(self) -> None:
+        # Before #363 the command went straight to gum spin, which exits with
+        # its child's code, so `gh` taking the Ctrl+C (exit 130) reached
+        # require_spinner_success() as gum's 130 and became KeyboardInterrupt
+        # -- exit 130 from main(). The bash wrapper now ends in the status
+        # printf, so bash and gum exit 0 and the 130 sits in the status file:
+        # it must still come out as an interrupt, not as a CommandError that
+        # reports an interrupted clone as a failed one and exits 1.
+        gum = Gum()
+        with patch("atomic_image_builder.run", side_effect=self.run_spinner_without_gum):
+            with self.assertRaises(KeyboardInterrupt):
+                gum.spinner("Cloning...", ["bash", "-c", "exit 130"])
+            with self.assertRaises(KeyboardInterrupt):
+                gum.spinner_capture("Loading...", ["bash", "-c", "echo partial; exit 130"])
+            # spinner_result() hands the status back for the caller to judge,
+            # as it always has; 130 is just a status there.
+            proc = gum.spinner_result("Checking...", ["bash", "-c", "exit 130"])
+        self.assertEqual(proc.returncode, 130)
+
+    def test_gum_spinner_helpers_share_one_bash_wrapper(self) -> None:
+        # require_spinner_success() may read a nonzero gum exit as "gum itself
+        # failed" only while every spinner ends its `bash -c` in the status
+        # printf, so bash exits 0 whatever the wrapped command did. Pin that
+        # for all three helpers so a future shortcut past spinner_result()
+        # cannot quietly bring #363 back.
+        gum = Gum()
+        seen: list[list[str]] = []
+
+        def record(args, **kwargs):
+            seen.append(list(args))
+            return self.run_spinner_without_gum(args, **kwargs)
+
+        with patch("atomic_image_builder.run", side_effect=record):
+            gum.spinner("a", ["true"])
+            gum.spinner_capture("b", ["true"])
+            gum.spinner_result("c", ["true"])
+        self.assertEqual(len(seen), 3)
+        for args in seen:
+            with self.subTest(args=args):
+                self.assertEqual(args[:2], ["gum", "spin"])
+                self.assertEqual(args[args.index("--") + 1 : -1], ["bash", "-c"])
+                self.assertRegex(args[-1], r"; printf '%s' \$\? > \S+$")
+
+    def test_gum_spinner_capture_error_carries_stderr_with_real_gum(self) -> None:
+        # Integration check against the actual binary, skipped when absent,
+        # for the exact reproduction in #363.
+        if shutil.which("gum") is None:
+            self.skipTest("gum is not installed")
+        with self.assertRaises(CommandError) as raised:
+            Gum().spinner_capture("t", ["bash", "-c", "echo ERR >&2; exit 7"])
+        message = str(raised.exception)
+        self.assertTrue(message.startswith("ERR (command: bash -c "), message)
+        self.assertNotIn("gum spin", message)
 
     def test_gum_spinner_result_raises_keyboard_interrupt_when_gum_itself_is_interrupted(self) -> None:
         gum = Gum()
@@ -4803,7 +5487,7 @@ class BuilderTests(unittest.TestCase):
         stub = GumStub()
         stub.write = lambda **_kwargs: "tmux"
         app.gum = stub
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: True for p in pkgs}):
             app.manual_packages()
         self.assertEqual(app.config.packages, ["tmux"])
         self.assertEqual(app.gum.prompts, ["Added 1 package(s). Press Enter to return to the package menu..."])
@@ -4813,7 +5497,7 @@ class BuilderTests(unittest.TestCase):
         stub = GumStub()
         stub.write = lambda **_kwargs: "nethock"
         app.gum = stub
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: False for p in pkgs}):
             app.manual_packages()
         self.assertEqual(app.config.packages, [])
         self.assertEqual(app.gum.prompts, ["No packages were added. Press Enter to return to the package menu..."])
@@ -4823,7 +5507,7 @@ class BuilderTests(unittest.TestCase):
         stub = GumStub()
         stub.write = lambda **_kwargs: "tmux,htop, vim"
         app.gum = stub
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: True for p in pkgs}):
             app.manual_packages()
         self.assertEqual(app.config.packages, ["tmux", "htop", "vim"])
 
@@ -4836,12 +5520,22 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.config.packages, [])
         self.assertEqual(app.gum.prompts, [])
 
+    def test_manual_packages_shows_the_write_widget_keys(self) -> None:
+        # See test_add_services_manually_shows_the_write_widget_keys: every
+        # screen that opens gum write has to say Enter submits (#368).
+        app = self.make_app()
+        stub = GumStub()
+        stub.write = lambda **_kwargs: ""
+        app.gum = stub
+        app.manual_packages()
+        self.assertIn(("controls", "write"), stub.messages)
+
     def test_manual_packages_pauses_with_missing_hint_when_some_packages_are_missing(self) -> None:
         app = self.make_app()
         stub = GumStub()
         stub.write = lambda **_kwargs: "tmux nethock"
         app.gum = stub
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {"tmux": True, "nethock": False}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {"tmux": True, "nethock": False}):
             app.manual_packages()
         self.assertEqual(app.config.packages, ["tmux"])
         self.assertEqual(
@@ -7934,6 +8628,36 @@ class BuilderTests(unittest.TestCase):
 
         self.assertTrue(any(level == "warn" and "podman" in message.lower() for level, message in stub.messages))
         run_mock.assert_not_called()
+        # Both callers redraw their menu with header() as soon as this returns,
+        # which clears the screen. Without a pause the warning is never read.
+        self.assertIn("Press Enter to return to the menu...", stub.prompts)
+
+    def test_every_test_build_locally_early_exit_pauses_before_the_menu_redraws(self) -> None:
+        # The three early exits drifted apart: the AIB_DISABLE_LOCAL_BUILD one
+        # paused, the other two did not, so "podman is required" flashed and
+        # vanished under the caller's next header(). They are only correct
+        # together, so assert them together (same defect as #64, other site).
+        cases = {
+            "disabled by env": ({"AIB_DISABLE_LOCAL_BUILD": "1"}, "containerfile", True),
+            "not containerfile": ({}, "bluebuild", True),
+            "podman missing": ({}, "containerfile", False),
+        }
+        for label, (env, method, podman_present) in cases.items():
+            with self.subTest(case=label):
+                app = self.make_app()
+                app.config.method = method
+                stub = GumStub()
+                app.gum = stub
+                with patch.dict("os.environ", env):
+                    if not env:
+                        # patch.dict restores this on exit; the two later exits
+                        # must not be short-circuited by a host that sets it.
+                        os.environ.pop("AIB_DISABLE_LOCAL_BUILD", None)
+                    with patch("atomic_image_builder.command_exists", return_value=podman_present):
+                        with patch.object(app, "seed_project_template") as seed_mock:
+                            app.test_build_locally()
+                seed_mock.assert_not_called()
+                self.assertEqual(stub.prompts, ["Press Enter to return to the menu..."])
 
     def test_test_build_locally_degrades_cleanly_when_disabled_by_env(self) -> None:
         app = self.make_app()
@@ -7987,6 +8711,7 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(
             any(level == "hint" and "Containerfile-only" in message for level, message in stub.messages)
         )
+        self.assertIn("Press Enter to return to the menu...", stub.prompts)
 
     def test_test_build_locally_reports_failure_with_stderr_tail(self) -> None:
         # A non-zero podman exit must be reported as a failure, with only the
@@ -8748,9 +9473,199 @@ class BuilderTests(unittest.TestCase):
     def test_gum_input_raises_screen_back_when_interactive_command_aborts(self) -> None:
         gum = Gum()
         completed = subprocess.CompletedProcess(["gum", "input"], 1, "", "")
-        with patch.object(Gum, "interactive_stdout", return_value=completed):
+        with patch.object(Gum, "terminal_available", return_value=True):
+            with patch.object(Gum, "interactive_stdout", return_value=completed):
+                with self.assertRaises(ScreenBack):
+                    gum.input(prompt="Repository name: ")
+
+    # ── require_interactive_success: navigation vs gum failing ──────────
+    # Measured against gum v0.17.0: Esc exits 1 ("nothing selected", "not
+    # submitted"), Ctrl+C exits 130, a flag value it cannot parse exits 80,
+    # and "could not open a new TTY" exits 1 -- the same code as Esc. The
+    # last two used to become ScreenBack, which main() turns into exit 0, so
+    # a run with no terminal reported success to whatever started it (#367).
+
+    def test_require_interactive_success_exit_one_with_a_terminal_is_esc(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "choose", "--no-show-help"], 1, "", "")
+        with patch.object(Gum, "terminal_available", return_value=True):
             with self.assertRaises(ScreenBack):
-                gum.input(prompt="Repository name: ")
+                gum.require_interactive_success(completed)
+
+    def test_require_interactive_success_exit_one_without_a_terminal_is_a_failure(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "input", "--no-show-help"], 1, "", "")
+        with patch.object(Gum, "terminal_available", return_value=False):
+            with self.assertRaises(CommandError) as raised:
+                gum.require_interactive_success(completed)
+        # gum has already printed "could not open a new TTY" above this line,
+        # so the widget's name is enough; its flags would only add noise.
+        self.assertEqual(str(raised.exception), "gum input needs a terminal to read from, and this session has none")
+
+    def test_require_interactive_success_other_statuses_are_failures_whatever_the_terminal(self) -> None:
+        # 80 is gum's usage error (#362); 2 stands in for anything else it
+        # might exit with. Neither is a key the user pressed, so the terminal
+        # question is not even asked.
+        gum = Gum()
+        for status in (80, 2):
+            with self.subTest(status=status):
+                completed = subprocess.CompletedProcess(["gum", "input", "--placeholder=x"], status, "", "")
+                with patch.object(Gum, "terminal_available", side_effect=AssertionError("not consulted")):
+                    with self.assertRaises(CommandError) as raised:
+                        gum.require_interactive_success(completed)
+                self.assertEqual(
+                    str(raised.exception),
+                    f"command failed with exit status {status}: gum input --placeholder=x",
+                )
+
+    def test_require_interactive_success_keeps_ctrl_c_and_success_as_they_were(self) -> None:
+        gum = Gum()
+        with patch.object(Gum, "terminal_available", side_effect=AssertionError("not consulted")):
+            with self.assertRaises(KeyboardInterrupt):
+                gum.require_interactive_success(subprocess.CompletedProcess(["gum", "input"], 130, "", ""))
+            ok = subprocess.CompletedProcess(["gum", "input"], 0, "value\n", "")
+            self.assertIs(gum.require_interactive_success(ok), ok)
+
+    def test_terminal_available_prefers_a_terminal_on_stdin(self) -> None:
+        gum = Gum()
+        with patch("atomic_image_builder.sys.stdin") as stdin:
+            stdin.isatty.return_value = True
+            with patch("atomic_image_builder.os.open", side_effect=AssertionError("not needed")):
+                self.assertTrue(gum.terminal_available())
+                self.assertTrue(gum.terminal_available(stdin_inherited=True))
+
+    def test_terminal_available_ignores_stdin_for_a_widget_fed_through_a_pipe(self) -> None:
+        # choose and filter get their options on a stdin pipe, so gum never
+        # sees this process's stdin and goes straight to /dev/tty. Under
+        # `setsid tool` stdin is still a terminal while /dev/tty is not, and
+        # asking about stdin made gum's "could not open a new TTY" exit 1
+        # look like Esc for exactly those two widgets.
+        gum = Gum()
+        with patch("atomic_image_builder.sys.stdin") as stdin:
+            stdin.isatty.return_value = True
+            with patch("atomic_image_builder.os.open", side_effect=OSError(6, "No such device or address")):
+                self.assertFalse(gum.terminal_available(stdin_inherited=False))
+            stdin.isatty.assert_not_called()
+            with patch("atomic_image_builder.os.open", return_value=7):
+                with patch("atomic_image_builder.os.close"):
+                    self.assertTrue(gum.terminal_available(stdin_inherited=False))
+
+    def test_require_interactive_success_tells_terminal_available_how_the_widget_got_stdin(self) -> None:
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "choose"], 1, "", "")
+        for stdin_inherited in (True, False):
+            with self.subTest(stdin_inherited=stdin_inherited):
+                with patch.object(Gum, "terminal_available", return_value=True) as probe:
+                    with self.assertRaises(ScreenBack):
+                        gum.require_interactive_success(completed, stdin_inherited=stdin_inherited)
+                probe.assert_called_once_with(stdin_inherited=stdin_inherited)
+
+    def test_piped_widgets_say_so_and_inherited_widgets_do_not(self) -> None:
+        # Each widget is run twice: once succeeding, to show which of the
+        # two stdin arrangements it actually uses; once exiting 1, to show
+        # that the terminal probe is asked about that same arrangement.
+        gum = Gum()
+        widgets = {
+            "choose": (lambda: gum.choose(["alpha", "beta"]), False),
+            "filter": (lambda: gum.filter(["alpha", "beta"]), False),
+            "input": (lambda: gum.input(prompt="> "), True),
+            "write": (lambda: gum.write(placeholder="", height=3, width=40), True),
+            "enter_to_continue": (lambda: gum.enter_to_continue(), True),
+        }
+        for name, (call, inherited) in widgets.items():
+            with self.subTest(widget=name), patch.object(Gum, "instruction"):
+                ok = subprocess.CompletedProcess(["gum", name], 0, "alpha\n", "")
+                with patch.object(Gum, "interactive_stdout", return_value=ok) as run_mock:
+                    call()
+                self.assertEqual(run_mock.call_args.kwargs.get("stdin") is None, inherited)
+                esc = subprocess.CompletedProcess(["gum", name], 1, "", "")
+                with patch.object(Gum, "interactive_stdout", return_value=esc):
+                    with patch.object(Gum, "terminal_available", return_value=True) as probe:
+                        with self.assertRaises(ScreenBack):
+                            call()
+                probe.assert_called_once_with(stdin_inherited=inherited)
+
+    def test_terminal_available_falls_back_to_dev_tty(self) -> None:
+        # bubbletea opens /dev/tty when stdin is not a terminal, which is how
+        # `tool </dev/null` still works from a shell. That open fails with
+        # ENXIO when the process has no controlling terminal at all.
+        gum = Gum()
+        with patch("atomic_image_builder.sys.stdin") as stdin:
+            stdin.isatty.return_value = False
+            with patch("atomic_image_builder.os.open", return_value=7) as open_mock:
+                with patch("atomic_image_builder.os.close") as close_mock:
+                    self.assertTrue(gum.terminal_available())
+            open_mock.assert_called_once_with("/dev/tty", os.O_RDWR)
+            close_mock.assert_called_once_with(7)
+            with patch("atomic_image_builder.os.open", side_effect=OSError(6, "No such device or address")):
+                self.assertFalse(gum.terminal_available())
+
+    SETSID_CHILD = textwrap.dedent(
+        """
+        import json, sys
+        sys.path.insert(0, sys.argv[1])
+        from atomic_image_builder import CommandError, Gum, ScreenBack
+        gum = Gum()
+        report = {
+            "stdin_isatty": sys.stdin.isatty(),
+            "inherited": gum.terminal_available(),
+            "piped": gum.terminal_available(stdin_inherited=False),
+        }
+        try:
+            gum.choose(["alpha", "beta"])
+            report["choose"] = "returned"
+        except CommandError as exc:
+            report["choose"] = f"CommandError: {exc}"
+        except ScreenBack:
+            report["choose"] = "ScreenBack"
+        print(json.dumps(report))
+        """
+    )
+
+    def test_choose_under_setsid_is_a_failure_not_esc_with_real_gum(self) -> None:
+        # `setsid tool` from a shell: stdin is still the terminal, but the
+        # new session has no controlling terminal, so /dev/tty fails with
+        # ENXIO. gum input would read keys from that stdin; gum choose gets
+        # its options on a pipe, opens /dev/tty instead, and exits 1 with
+        # "could not open a new TTY". Probing the parent's stdin called that
+        # Esc, and main() turned it into exit 0. The child below is that
+        # process: a pty as stdin, a new session, and no TIOCSCTTY.
+        if shutil.which("gum") is None:
+            self.skipTest("gum is not installed")
+        master, slave = pty.openpty()
+        proc = subprocess.Popen(
+            [sys.executable, "-c", self.SETSID_CHILD, str(Path(atomic_image_builder.__file__).parent)],
+            stdin=slave,
+            stdout=subprocess.PIPE,
+            stderr=slave,
+            env={**os.environ, "TERM": "xterm-256color"},
+            start_new_session=True,
+        )
+        os.close(slave)
+        assert proc.stdout is not None
+        deadline = time.monotonic() + 15.0
+        while proc.poll() is None:
+            if time.monotonic() > deadline:
+                proc.kill()
+                raise AssertionError("the child did not exit within 15s")
+            ready, _, _ = select.select([master], [], [], 0.1)
+            if ready:
+                try:
+                    os.read(master, 65536)
+                except OSError:
+                    continue
+        os.close(master)
+        report = json.loads(proc.stdout.read().decode())
+        proc.stdout.close()
+        self.assertEqual(
+            report,
+            {
+                "stdin_isatty": True,
+                "inherited": True,
+                "piped": False,
+                "choose": "CommandError: gum choose needs a terminal to read from, and this session has none",
+            },
+        )
 
     def test_gum_input_raises_keyboard_interrupt_on_ctrl_c(self) -> None:
         gum = Gum()
@@ -8779,8 +9694,8 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(call_args[:4], ["gum", "choose", "--no-show-help", "--height"])
         self.assertIn("10", call_args)
         self.assertNotIn("--no-limit", call_args)
-        self.assertNotIn("--selected", call_args)
-        self.assertNotIn("--header", call_args)
+        self.assertFalse([arg for arg in call_args if arg.startswith("--selected=")])
+        self.assertFalse([arg for arg in call_args if arg.startswith("--header=")])
         self.assertEqual(kwargs["stdin"], "alpha\nbeta\ngamma\n")
 
     def test_gum_choose_includes_optional_flags_when_provided(self) -> None:
@@ -8800,18 +9715,27 @@ class BuilderTests(unittest.TestCase):
             )
         call_args = stdout_mock.call_args[0][0]
         self.assertIn("--no-limit", call_args)
-        self.assertIn("--selected", call_args)
-        self.assertIn("alpha", call_args[call_args.index("--selected") + 1])
-        self.assertIn("--header", call_args)
-        self.assertIn("Pick one", call_args)
-        self.assertIn("--label-delimiter", call_args)
-        self.assertIn("|", call_args)
-        self.assertIn("--cursor-prefix", call_args)
-        self.assertIn(">", call_args)
-        self.assertIn("--selected-prefix", call_args)
-        self.assertIn("[x]", call_args)
-        self.assertIn("--unselected-prefix", call_args)
-        self.assertIn("[ ]", call_args)
+        self.assertIn("--selected=alpha", call_args)
+        self.assertIn("--header=Pick one", call_args)
+        self.assertIn("--label-delimiter=|", call_args)
+        self.assertIn("--cursor-prefix=>", call_args)
+        self.assertIn("--selected-prefix=[x]", call_args)
+        self.assertIn("--unselected-prefix=[ ]", call_args)
+
+    def test_gum_choose_passes_text_flags_as_single_tokens_so_a_leading_dash_is_not_a_flag(self) -> None:
+        # A pre-selected entry or header that starts with "-" is, as a separate
+        # argv token, the next flag to gum's parser: it exits 80 with a usage
+        # error, and require_interactive_success() reports that as Esc. Joined
+        # with "=" the value is unambiguous however it starts. See #362.
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "choose"], 0, "", "")
+        with patch.object(Gum, "interactive_stdout", return_value=completed) as stdout_mock:
+            gum.choose(["- alpha", "beta"], selected=["- alpha"], header="- pick one")
+        call_args = stdout_mock.call_args[0][0]
+        self.assertIn("--selected=- alpha", call_args)
+        self.assertIn("--header=- pick one", call_args)
+        self.assertNotIn("- alpha", call_args)
+        self.assertNotIn("- pick one", call_args)
 
     def test_gum_choose_escapes_commas_inside_selected_entries(self) -> None:
         # gum splits --selected on commas. A label built from a package summary
@@ -8827,10 +9751,7 @@ class BuilderTests(unittest.TestCase):
                 label_delimiter="\t",
             )
         call_args = stdout_mock.call_args[0][0]
-        self.assertEqual(
-            call_args[call_args.index("--selected") + 1],
-            "editor\\, with extras,path\\to,plain",
-        )
+        self.assertIn("--selected=editor\\, with extras,path\\to,plain", call_args)
 
     def test_gum_choose_drops_blank_lines_from_output(self) -> None:
         gum = Gum()
@@ -8842,9 +9763,10 @@ class BuilderTests(unittest.TestCase):
     def test_gum_choose_raises_screen_back_when_cancelled(self) -> None:
         gum = Gum()
         completed = subprocess.CompletedProcess(["gum", "choose"], 1, "", "")
-        with patch.object(Gum, "interactive_stdout", return_value=completed):
-            with self.assertRaises(ScreenBack):
-                gum.choose(["alpha", "beta"])
+        with patch.object(Gum, "terminal_available", return_value=True):
+            with patch.object(Gum, "interactive_stdout", return_value=completed):
+                with self.assertRaises(ScreenBack):
+                    gum.choose(["alpha", "beta"])
 
     def test_gum_choose_raises_keyboard_interrupt_on_ctrl_c(self) -> None:
         gum = Gum()
@@ -8863,16 +9785,16 @@ class BuilderTests(unittest.TestCase):
         call_args = args[0]
         self.assertEqual(call_args[:3], ["gum", "filter", "--no-show-help"])
         self.assertIn("15", call_args)
-        self.assertIn("--placeholder", call_args)
-        self.assertIn("Type to search", call_args)
+        self.assertIn("--placeholder=Type to search", call_args)
         self.assertEqual(kwargs["stdin"], "alpha\nbeta\n")
 
     def test_gum_filter_raises_screen_back_when_cancelled(self) -> None:
         gum = Gum()
         completed = subprocess.CompletedProcess(["gum", "filter"], 1, "", "")
-        with patch.object(Gum, "interactive_stdout", return_value=completed):
-            with self.assertRaises(ScreenBack):
-                gum.filter(["alpha", "beta"])
+        with patch.object(Gum, "terminal_available", return_value=True):
+            with patch.object(Gum, "interactive_stdout", return_value=completed):
+                with self.assertRaises(ScreenBack):
+                    gum.filter(["alpha", "beta"])
 
     def test_gum_table_builds_args_and_stdin_from_rows(self) -> None:
         gum = Gum()
@@ -9231,6 +10153,53 @@ class BuilderTests(unittest.TestCase):
             diff = app.repo_full_diff(repo_dir)
 
         self.assertEqual(diff, "")
+
+    def test_repo_full_diff_survives_a_non_utf8_byte_in_a_managed_file(self) -> None:
+        # A README.md hand-edited with a cp1252 editor carries a 0x92 curly
+        # quote, and `git diff` prints it back verbatim. Strict decoding of that
+        # output raised UnicodeDecodeError out of the "View full diff?" step,
+        # which main() does not catch, so the whole session died (#372). The
+        # diff has to come back readable instead, with the byte marked rather
+        # than the update abandoned.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+            readme = repo_dir / "README.md"
+            readme.write_text("# Image\n\nA plain line.\n")
+            subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo_dir, check=True)
+            readme.write_bytes(b"# Image\n\nIt\x92s a curly quote.\n")
+            (repo_dir / "notes.txt").write_bytes(b"untracked \x92 too\n")
+
+            summary = app.repo_diff_summary(repo_dir)
+            diff = app.repo_full_diff(repo_dir)
+
+        self.assertIn("README.md", summary)
+        self.assertIn("?? notes.txt", summary)
+        self.assertIn("-A plain line.", diff)
+        self.assertIn("+It�s a curly quote.", diff)
+        self.assertIn("+untracked � too", diff)
+
+    def test_run_replaces_undecodable_output_instead_of_raising(self) -> None:
+        # The helper is shared by every git and gh call in the file, so the
+        # guarantee belongs to it rather than to one caller: a subprocess may
+        # print any bytes it likes and run() still returns a str.
+        emit = "import sys; sys.stdout.buffer.write(b'ok \\x92 done'); sys.stderr.buffer.write(b'warn \\xff')"
+        proc = atomic_image_builder.run([sys.executable, "-c", emit])
+
+        self.assertEqual(proc.stdout, "ok � done")
+        self.assertEqual(proc.stderr, "warn �")
+
+    def test_run_reports_a_failing_command_whose_stderr_is_not_utf8(self) -> None:
+        # The failure path reads stderr to build the CommandError text. It has
+        # to survive the same bytes, or a git error message would turn into a
+        # traceback at exactly the moment the user needs to read it.
+        emit = "import sys; sys.stderr.buffer.write(b'fatal: bad \\x92 path\\n'); sys.exit(1)"
+        with self.assertRaisesRegex(CommandError, "fatal: bad � path"):
+            atomic_image_builder.run([sys.executable, "-c", emit])
 
     def test_contrib_wrapper_does_not_put_github_token_in_podman_argv(self) -> None:
         wrapper = (Path(__file__).resolve().parents[1] / "contrib/aib").read_text()
@@ -10335,19 +11304,59 @@ class BuilderTests(unittest.TestCase):
         )
         self.assertNotIn("COSIGN_PASSWORD", workflow)
 
-    def test_installer_profile_maps_kde_and_gnome_base_images_correctly(self) -> None:
+    def test_installer_profile_follows_first_boot_setup_not_desktop(self) -> None:
+        # iso-gnome.toml disables Anaconda's Users module because a first-boot
+        # wizard creates the account; a base without one installs a system
+        # nobody can log in to (#361). So the profile is decided by
+        # BaseImage.first_boot_setup, and this asserts that property rather
+        # than a list of keys, so a new entry cannot be mis-profiled by
+        # falling through a hard-coded set.
         app = self.make_app()
-        kde_bases = {"bazzite", "bazzite-dx", "aurora", "aurora-dx", "kinoite"}
-        gnome_bases = {"bazzite-gnome", "bazzite-dx-gnome", "bluefin", "bluefin-dx", "silverblue", "sway-atomic", "budgie-atomic", "cosmic-atomic"}
         for bi in BASE_IMAGES:
             app.config.base_image_uri = bi.image_uri
-            profile = app.installer_profile()
-            if bi.key in kde_bases:
-                self.assertEqual(profile, "kde", f"{bi.key} should map to kde")
-            elif bi.key in gnome_bases:
-                self.assertEqual(profile, "gnome", f"{bi.key} should map to gnome")
-            else:
-                self.fail(f"Base image {bi.key} is not covered by this test")
+            expected = "gnome" if bi.first_boot_setup else "kde"
+            self.assertEqual(app.installer_profile(), expected, f"{bi.key} should map to {expected}")
+
+    def test_base_image_catalog_first_boot_setup_matches_what_each_base_ships(self) -> None:
+        # The catalog's claim about each base, checked against the images on
+        # 2026-09-20: GNOME bases carry gnome-initial-setup, Budgie and COSMIC
+        # carry Fedora's initial-setup, and the KDE bases and Sway Atomic
+        # carry nothing -- Sway boots straight to sddm. Pinning the answers
+        # here is what turns a wrong flag on a new entry into a failing test
+        # instead of an ISO nobody can log in to.
+        without_wizard = {"bazzite", "bazzite-dx", "aurora", "aurora-dx", "kinoite", "sway-atomic"}
+        with_wizard = {"bazzite-gnome", "bazzite-dx-gnome", "bluefin", "bluefin-dx", "silverblue", "budgie-atomic", "cosmic-atomic"}
+        self.assertEqual({bi.key for bi in BASE_IMAGES}, without_wizard | with_wizard)
+        self.assertEqual({bi.key for bi in BASE_IMAGES if not bi.first_boot_setup}, without_wizard)
+        self.assertEqual({bi.key for bi in BASE_IMAGES if bi.first_boot_setup}, with_wizard)
+
+    def test_installer_profile_keeps_users_module_for_sway_atomic_iso(self) -> None:
+        # End to end for the reported case: the iso.toml a Sway Atomic repo
+        # gets must be the one that leaves Anaconda's Users module enabled.
+        app = self.make_app()
+        app.config.base_image_uri = next(bi.image_uri for bi in BASE_IMAGES if bi.key == "sway-atomic")
+        self.assertEqual(app.installer_config_name(), "iso-kde.toml")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            app.write_project_files(repo_dir, include_workflow=True)
+            iso_toml = (repo_dir / "disk_config/iso.toml").read_text()
+        self.assertNotIn("org.fedoraproject.Anaconda.Modules.Users", self.disabled_installer_modules(iso_toml))
+
+    def test_installer_profile_keeps_gnome_config_for_unknown_base(self) -> None:
+        # A base the catalog does not know has no first_boot_setup to read,
+        # so it keeps the config it always got rather than switching profiles.
+        app = self.make_app()
+        app.config.base_image_uri = "ghcr.io/example/custom-desktop:latest"
+        self.assertEqual(app.installer_profile(), "gnome")
+
+    @staticmethod
+    def disabled_installer_modules(iso_toml: str) -> list[str]:
+        # CI runs on 3.10, which has no tomllib; the block is a flat string
+        # array, so a regex over it is exact enough.
+        block = re.search(r"^disable = \[(.*?)^\]", iso_toml, re.DOTALL | re.MULTILINE)
+        assert block is not None, iso_toml
+        return re.findall(r'"([^"]+)"', block.group(1))
 
     def test_write_project_files_updates_readme_when_config_changes(self) -> None:
         app = self.make_app()
@@ -11756,6 +12765,41 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(document["image-version"], "stable")
         self.assertEqual([module["type"] for module in document["modules"]], ["files", "signing"])
 
+    def test_generate_recipe_keeps_an_emoji_in_the_description_a_single_scalar(self) -> None:
+        # "My 🚀 image" is ordinary input to the wizard's description prompt.
+        # json.dumps with its default ensure_ascii=True wrote the emoji as a
+        # pair of UTF-16 surrogate \u escapes, and a YAML \u escape has to
+        # name one scalar value: pure-Python PyYAML let it through, BlueBuild
+        # did not, so the repo was created and pushed and then every build
+        # failed to deserialize its recipe (#360). Characters inside the BMP
+        # never had the problem, so one of those rides along as the control.
+        app = self.make_bluebuild_app()
+        app.config.image_desc = "My 🚀 Ünïcødé 图像"
+        recipe = app.generate_recipe()
+        self.assertIn('description: "My 🚀 Ünïcødé 图像"', recipe)
+        self.assertNotIn("\\u", recipe)
+        self.assertEqual(self.recipe_document(app)["description"], "My 🚀 Ünïcødé 图像")
+        libyaml_document = parse_with_libyaml(recipe)
+        if libyaml_document is not None:
+            self.assertEqual(libyaml_document["description"], "My 🚀 Ünïcødé 图像")
+
+    def test_generate_recipe_escapes_a_control_character_in_the_description(self) -> None:
+        # The other side of the #360 fix: writing non-ASCII raw must stop at
+        # what YAML forbids in a stream. A C1 control such as U+0080 -- a
+        # stray byte from a pasted description, say -- emitted as itself makes
+        # libyaml refuse the whole recipe ("unacceptable character #x0080"),
+        # where the pre-#360 \u escape parsed fine. The description is not
+        # validated before it gets here, so the escape has to come back.
+        app = self.make_bluebuild_app()
+        app.config.image_desc = "My \x80 image"
+        recipe = app.generate_recipe()
+        self.assertIn('description: "My \\u0080 image"', recipe)
+        self.assertNotIn("\x80", recipe)
+        self.assertEqual(self.recipe_document(app)["description"], "My \x80 image")
+        libyaml_document = parse_with_libyaml(recipe)
+        if libyaml_document is not None:
+            self.assertEqual(libyaml_document["description"], "My \x80 image")
+
     def test_generate_recipe_nests_packages_under_install_and_removals_under_remove(self) -> None:
         # Substring assertions cannot tell "install:" from "remove:": emitting
         # the install list under remove keeps every assertIn passing while the
@@ -12520,7 +13564,7 @@ class BuilderTests(unittest.TestCase):
         stub.write = lambda **_kwargs: "vim-enhanced"
         app.gum = stub
         with patch.object(app, "lookup_installed_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
-            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: True for p in pkgs}):
                 app.manage_removed_packages()
         self.assertIn("vim-enhanced", app.config.removed_packages)
 
@@ -12531,9 +13575,21 @@ class BuilderTests(unittest.TestCase):
         stub.write = lambda **_kwargs: "vim-enhanced,nano"
         app.gum = stub
         with patch.object(app, "lookup_installed_host_packages", side_effect=lambda pkgs: {p: False for p in pkgs}):
-            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+            with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: True for p in pkgs}):
                 app.manage_removed_packages()
         self.assertEqual(app.config.removed_packages, ["vim-enhanced", "nano"])
+
+    def test_manage_removed_packages_add_flow_shows_the_write_widget_keys(self) -> None:
+        # See test_add_services_manually_shows_the_write_widget_keys (#368).
+        # The keys line belongs to the Add branch only: the menu before it is
+        # a chooser, where Ctrl+J and "Enter submit" would be wrong.
+        app = self.make_app()
+        stub = GumStub()
+        stub.choose = lambda _options, **_kwargs: ["Add package names to remove"]
+        stub.write = lambda **_kwargs: ""
+        app.gum = stub
+        app.manage_removed_packages()
+        self.assertEqual(stub.messages.count(("controls", "write")), 1)
 
     def test_manage_removed_packages_remove_flow(self) -> None:
         """Choosing 'Stop removing listed packages' lets the user deselect
@@ -12993,6 +14049,51 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("Missing host tools:", output)
         self.assertNotIn("rpm-ostree", output)
 
+    def test_preflight_failure_still_exits_one_when_esc_ends_the_exit_prompt(self) -> None:
+        # Esc at "Press Enter to exit to the terminal..." raised ScreenBack out
+        # of render_preflight_failure(), so preflight() never reached its
+        # SystemExit(1) and main() exited 0: a missing tool reported success
+        # to the wrapper that ran it (#367). Esc and Enter mean the same
+        # thing here -- leave -- and the exit status is the point.
+        app = self.make_app()
+        stub = GumStub()
+        stub.ensure_available = lambda: None
+
+        def esc(placeholder: str = "Press Enter to continue...") -> None:
+            stub.prompts.append(placeholder)
+            raise ScreenBack()
+
+        stub.enter_to_continue = esc
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name != "cosign"):
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gh"], 0, "", "")):
+                with patch.object(app, "github_login_name", return_value="octocat"):
+                    with redirect_stdout(io.StringIO()):
+                        with self.assertRaises(SystemExit) as raised:
+                            app.preflight()
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(stub.prompts, ["Press Enter to exit to the terminal..."])
+
+    def test_preflight_failure_lets_a_prompt_failure_and_ctrl_c_through(self) -> None:
+        # Only Esc is absorbed. gum failing to draw the prompt at all (no
+        # terminal) stays a CommandError so main() reports it and exits 1,
+        # and Ctrl+C stays the interrupt main() turns into 130.
+        for outcome in (CommandError("gum input needs a terminal"), KeyboardInterrupt()):
+            with self.subTest(outcome=type(outcome).__name__):
+                app = self.make_app()
+                stub = GumStub()
+                stub.ensure_available = lambda: None
+
+                def fail(placeholder: str = "Press Enter to continue...", _exc: BaseException = outcome) -> None:
+                    raise _exc
+
+                stub.enter_to_continue = fail
+                app.gum = stub
+                with patch("atomic_image_builder.command_exists", return_value=True):
+                    with redirect_stdout(io.StringIO()):
+                        with self.assertRaises(type(outcome)):
+                            app.render_preflight_failure(missing_tools=["cosign"])
+
     def test_manage_services_remove_calls_choose_to_remove(self) -> None:
         app = self.make_app()
         app.config.services = ["sshd.service", "tailscaled.service"]
@@ -13026,7 +14127,7 @@ class BuilderTests(unittest.TestCase):
 
         stub.input = fake_input
         app.gum = stub
-        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs: {p: True for p in pkgs}):
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: True for p in pkgs}):
             app.add_copr()
         self.assertEqual(app.config.copr_repos, ["kwizart/fedy"])
         self.assertEqual(app.config.packages, ["tmux", "htop"])
@@ -15237,6 +16338,46 @@ class BuilderTests(unittest.TestCase):
         style_mock.assert_called_once_with("Keys:", foreground=CONTROLS_COLOR, bold=True)
         self.assertEqual(out.getvalue(), "Keys: enter: select | esc: back\n\n")
 
+    def test_write_controls_names_the_newline_and_submit_keys(self) -> None:
+        # gum write runs with --no-show-help, so this line is the only hint
+        # that Enter submits and Ctrl+J starts a new line (#368). The real-gum
+        # tests below prove those two keys do what the line says.
+        gum = Gum()
+        with patch.object(Gum, "style", return_value="Keys:"):
+            with redirect_stdout(io.StringIO()) as out:
+                gum.write_controls()
+        self.assertEqual(out.getvalue(), "Keys: Ctrl+J new line | Enter submit | Esc back | Ctrl+C quit\n\n")
+
+    def write_with_real_gum(self, keys: list[bytes]) -> str:
+        if shutil.which("gum") is None:
+            self.skipTest("gum is not installed")
+        gum = Gum()
+        gum.interactive_stdout = lambda args, *, stdin=None: drive_real_gum(args, stdin=stdin, keys=keys)
+        # drive_real_gum() gives gum a controlling pty of its own, so the
+        # widget did have a terminal; the probe in require_interactive_
+        # success() asks about this test process's stdin and /dev/tty
+        # instead, which under a CI runner is neither, and would read the
+        # Esc exit 1 as "no terminal" (#367). Answer for the pty gum used.
+        with patch.object(Gum, "terminal_available", return_value=True):
+            return gum.write(placeholder="Enter service names separated by spaces...", height=5, width=60)
+
+    def test_write_enter_submits_after_the_first_line_with_real_gum(self) -> None:
+        # The reproduction from #368: a user following "one per line" pressed
+        # Enter after the first name and the widget returned only that name.
+        self.assertEqual(self.write_with_real_gum([b"sshd.service", b"\r", b"tailscaled.service", b"\r"]), "sshd.service")
+
+    def test_write_ctrl_j_inserts_a_newline_with_real_gum(self) -> None:
+        # Ctrl+J is the byte 0x0a; it must yield two lines, or the keys line
+        # in write_controls() is advertising a key that does not work.
+        self.assertEqual(
+            self.write_with_real_gum([b"sshd.service", b"\n", b"tailscaled.service", b"\r"]),
+            "sshd.service\ntailscaled.service",
+        )
+
+    def test_write_esc_raises_screen_back_with_real_gum(self) -> None:
+        with self.assertRaises(ScreenBack):
+            self.write_with_real_gum([b"sshd.service", b"\x1b"])
+
     def test_input_passes_value_placeholder_and_width_flags_through(self) -> None:
         gum = Gum()
         completed = subprocess.CompletedProcess(["gum", "input"], 0, "typed\n", "")
@@ -15244,13 +16385,29 @@ class BuilderTests(unittest.TestCase):
             result = gum.input(prompt="Name: ", value="preset", placeholder="e.g. my-image", width=50)
         self.assertEqual(result, "typed")
         args = interactive_mock.call_args[0][0]
-        self.assertIn("--value", args)
-        self.assertEqual(args[args.index("--value") + 1], "preset")
-        self.assertIn("--placeholder", args)
-        self.assertEqual(args[args.index("--placeholder") + 1], "e.g. my-image")
+        self.assertIn("--prompt=Name: ", args)
+        self.assertIn("--value=preset", args)
+        self.assertIn("--placeholder=e.g. my-image", args)
         self.assertIn("--placeholder.foreground", args)
         self.assertIn("--width", args)
         self.assertEqual(args[args.index("--width") + 1], "50")
+
+    def test_input_passes_text_flags_as_single_tokens_so_a_leading_dash_is_not_a_flag(self) -> None:
+        # The description prompt shows the current description as its
+        # placeholder. As a separate argv token, "- Doug's daily driver" is the
+        # next flag to gum's parser, which exits 80 before drawing anything;
+        # require_interactive_success() reports that as Esc, so a description
+        # that starts with "-" could be entered once and never edited. See #362.
+        gum = Gum()
+        completed = subprocess.CompletedProcess(["gum", "input"], 0, "typed\n", "")
+        with patch.object(Gum, "interactive_stdout", return_value=completed) as interactive_mock:
+            gum.input(prompt="- Description: ", value="--current", placeholder="- Doug's daily driver")
+        args = interactive_mock.call_args[0][0]
+        self.assertIn("--prompt=- Description: ", args)
+        self.assertIn("--value=--current", args)
+        self.assertIn("--placeholder=- Doug's daily driver", args)
+        for token in ("- Description: ", "--current", "- Doug's daily driver"):
+            self.assertNotIn(token, args)
 
     def test_write_passes_placeholder_height_and_width_and_strips_trailing_newline(self) -> None:
         gum = Gum()
@@ -15259,8 +16416,7 @@ class BuilderTests(unittest.TestCase):
             result = gum.write(placeholder="Describe your image", height=6, width=60)
         self.assertEqual(result, "typed text")
         args = interactive_mock.call_args[0][0]
-        self.assertIn("--placeholder", args)
-        self.assertEqual(args[args.index("--placeholder") + 1], "Describe your image")
+        self.assertIn("--placeholder=Describe your image", args)
         self.assertIn("--height", args)
         self.assertEqual(args[args.index("--height") + 1], "6")
         self.assertIn("--width", args)
@@ -16025,6 +17181,35 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(document["env"]["IMAGE_DESC"], 'A "quoted" description: with punctuation')
         self.assertEqual(document["env"]["DEFAULT_TAG"], "latest")
         self.assertEqual(document["concurrency"]["cancel-in-progress"], True)
+
+    def test_generated_workflow_keeps_an_emoji_in_the_image_description_a_single_scalar(self) -> None:
+        # The recipe's problem (#360) in the other generated document: a
+        # from-scratch build.yml whose IMAGE_DESC carried a surrogate pair was
+        # a workflow file GitHub could not load -- actionlint reports "found
+        # invalid Unicode character escape code" on the env line.
+        app = self.make_app()
+        app.config.image_desc = "My 🚀 image"
+        workflow = app.generate_container_workflow()
+        self.assertIn('  IMAGE_DESC: "My 🚀 image"', workflow)
+        self.assertNotIn("\\u", workflow)
+        self.assertEqual(parse_block_yaml(workflow)["env"]["IMAGE_DESC"], "My 🚀 image")
+        libyaml_document = parse_with_libyaml(workflow)
+        if libyaml_document is not None:
+            self.assertEqual(libyaml_document["env"]["IMAGE_DESC"], "My 🚀 image")
+
+    def test_generated_workflow_escapes_a_control_character_in_the_image_description(self) -> None:
+        # And the limit of writing non-ASCII raw, in the workflow: a C1
+        # control emitted as itself is a stream libyaml (and go-yaml, which
+        # Actions uses) refuses outright, so it has to stay a \u escape.
+        app = self.make_app()
+        app.config.image_desc = "My \x80 image"
+        workflow = app.generate_container_workflow()
+        self.assertIn('  IMAGE_DESC: "My \\u0080 image"', workflow)
+        self.assertNotIn("\x80", workflow)
+        self.assertEqual(parse_block_yaml(workflow)["env"]["IMAGE_DESC"], "My \x80 image")
+        libyaml_document = parse_with_libyaml(workflow)
+        if libyaml_document is not None:
+            self.assertEqual(libyaml_document["env"]["IMAGE_DESC"], "My \x80 image")
 
     def test_generated_workflow_signing_step_signs_the_pushed_digest(self) -> None:
         # The digest, not a tag. `latest` is rewritten by the daily rebuild, so
