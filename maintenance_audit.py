@@ -35,6 +35,15 @@ WORKFLOW_DIRS: tuple[Path, ...] = (
     Path("template_snapshots/bluebuild/.github/workflows"),
 )
 CONTAINERFILE = Path("Containerfile")
+# The recommended wrapper install (README.md, docs/installing.md) fetches this
+# asset from `releases/latest`, so the release, not `main`, decides which
+# wrapper a new user runs as root with their GitHub login forwarded into it.
+# Spelled out rather than imported from the formula script, which records the
+# same slug: snapshot_drift_issue.py imports this module, and its step harness
+# copies exactly the chain it needs. A test ties the slug to the docs' URL.
+WRAPPER_RELEASE_REPO = "Danathar/atomic-image-builder"
+WRAPPER_SOURCE = Path("contrib/aib")
+WRAPPER_ASSET = "aib"
 # `curl … -o <dest> <url>`, after backslash continuations are folded, and the
 # `"<digest>  <dest>"` line that pins what that download must contain. Both
 # forms the Containerfile uses -- `echo "…" >` and `printf '%s\n' "…" …` --
@@ -503,6 +512,12 @@ def run_audit(
     upstream having moved this week; it is nobody having looked in months,
     while every generated repo ships the stale template. Red then means what
     red should mean, and it cannot recur weekly the way a flat comparison did.
+
+    One network check reports a failure outright: the `aib` attached to the
+    latest release not being the contrib/aib on this checkout. That is not
+    upstream moving, it is this repository's own release trailing its own
+    `main` while the docs describe the newer wrapper, and only a release
+    cut here clears it -- see audit_wrapper_release().
     """
     findings = audit_local_snapshot(repo_root)
     advisories: list[str] = []
@@ -538,6 +553,11 @@ def run_audit(
         # reads rather than downloads but age the same way.
         advisories.extend(audit_brew_image_pin())
         advisories.extend(audit_disk_builder_image_pin())
+        # Same gate, different bucket: the release asset trailing contrib/aib
+        # is the repo contradicting itself, so it fails rather than advises.
+        wrapper_findings, wrapper_advisories = audit_wrapper_release(repo_root)
+        findings.extend(wrapper_findings)
+        advisories.extend(wrapper_advisories)
     return findings, advisories
 
 
@@ -767,6 +787,90 @@ def audit_disk_builder_image_pin() -> list[str]:
     )
 
 
+def query_latest_release(repo: str) -> tuple[str, dict[str, str]]:
+    """Return (tag, {asset name: download URL}) for a repository's latest release.
+
+    The API's `latest` is the release `releases/latest/download/<asset>` --
+    the URL in the install docs -- redirects to: the newest published release
+    that is neither a draft nor a prerelease. Asking the API rather than
+    following that redirect is what puts the tag in the finding, so it can be
+    acted on without a browser.
+    """
+    payload = github_api_json(f"https://api.github.com/repos/{repo}/releases/latest")
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Unexpected release payload for {repo}")
+    tag = payload.get("tag_name")
+    assets = payload.get("assets")
+    if not isinstance(tag, str) or not tag or not isinstance(assets, list):
+        raise RuntimeError(f"Unexpected release payload for {repo}")
+    urls: dict[str, str] = {}
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        name = asset.get("name")
+        url = asset.get("browser_download_url")
+        if isinstance(name, str) and isinstance(url, str):
+            urls[name] = url
+    return tag, urls
+
+
+def audit_wrapper_release(repo_root: Path) -> tuple[list[str], list[str]]:
+    """Return (failures, advisories) for the wrapper the latest release serves.
+
+    The recommended install downloads `aib` from the latest release and checks
+    it against the `aib.sha256` published beside it. That check proves the
+    download is the file the release carries; nothing proved the release
+    carries the file `main` describes. It did not (#356): the install path
+    moved to the release URL without a release being cut, so for weeks the
+    docs described a wrapper that verifies the image and withholds the token
+    from an unverified one, while every user following them installed the
+    v0.9.5 wrapper, which does neither.
+
+    A failure, not an advisory, when the digests differ. The other network
+    checks advise because something outside this repository moved and nothing
+    is wrong at the moment they fire. Here nothing outside moved: this is the
+    repository's own release trailing its own `main`, every new install is
+    affected for as long as it lasts, and the one thing that clears it -- a
+    release -- is cut here. It cannot recur weekly on its own either, only
+    after a change to contrib/aib that nobody released, which is the neglect
+    a red audit exists to report. Being unable to check stays an advisory,
+    as everywhere else: blocking on a rate limit is how a rate limit becomes
+    a red audit.
+
+    A release with no `aib` asset at all is also a failure. The install docs
+    fetch it by name, so the recommended install fails outright, and the fix
+    is a workflow dispatch rather than a release.
+    """
+    source = repo_root / WRAPPER_SOURCE
+    try:
+        expected = hashlib.sha256(source.read_bytes()).hexdigest()
+    except OSError as exc:
+        return [], [f"Unable to read {WRAPPER_SOURCE}: {exc}"]
+    try:
+        tag, assets = query_latest_release(WRAPPER_RELEASE_REPO)
+    except RuntimeError as exc:
+        return [], [f"Unable to query the latest release of {WRAPPER_RELEASE_REPO}: {exc}"]
+    url = assets.get(WRAPPER_ASSET)
+    if url is None:
+        return [
+            f"Release {tag} of {WRAPPER_RELEASE_REPO} carries no `{WRAPPER_ASSET}` asset, so the "
+            "recommended wrapper install in README.md fails. Attach it with "
+            f"`gh workflow run publish-wrapper.yml -f tag={tag}`."
+        ], []
+    try:
+        published = fetch_sha256(url)
+    except RuntimeError as exc:
+        return [], [f"Unable to download {url}: {exc}"]
+    if published == expected:
+        return [], []
+    return [
+        f"The `{WRAPPER_ASSET}` attached to release {tag} is not the {WRAPPER_SOURCE} on this "
+        f"checkout: release sha256 {published}, checkout {expected}. The recommended install "
+        "serves the release, so new users are running a wrapper the docs no longer describe. "
+        'Cut a release -- maintainer_docs/MAINTAINER.md, "Cutting a release".'
+    ], []
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Audit bundled template snapshot drift and workflow action pin coverage.")
     parser.add_argument(
@@ -785,7 +889,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "Also query upstream and report action pins that trail newer semver tags or no "
-            "longer match the tag or branch they name. Reported as advisories, not failures."
+            "longer match the tag or branch they name. Reported as advisories, not failures. "
+            "Also fails if the `aib` attached to the latest release is not contrib/aib."
         ),
     )
     args = parser.parse_args(argv)
