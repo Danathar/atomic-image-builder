@@ -24,6 +24,13 @@ and the two SSH key patterns. Those two statements are only consistent while
   command -- and shlex hands that `>` back as the first token of the
   segment, where a scan that took the first token for the command name saw
   no `git` at all and checked nothing else in the segment either.
+* `git diff $(echo /dev/null) ./cosign.key` is `--no-index` once more: bash
+  rebuilds the word before git runs, and the gate reads words as typed. A
+  `$VAR`, a `${VAR}`, a `$(...)` or `` `...` `` substitution and a `$'...'`
+  escape (`--outpu$'\x74'=cosign.pub` is `--output=cosign.pub`) each spell
+  an argument this hook cannot see, so a word carrying an unquoted `$` or
+  backtick is refused; a single-quoted one (`--format='%h $x'`) is a literal
+  to bash and passes.
 
 A `Read(...)` rule gates the Read tool and never sees a path that arrives as
 an argument to Bash, and every form above matches the allowed prefix, so none
@@ -117,6 +124,17 @@ VERB_PREFIXES = ("$(", "(", "`", "<(", ">(")
 # any git invocation; the segment it lands in is the one being checked.
 PROCESS_SUBSTITUTION = ("<(", ">(")
 
+# The characters that make bash rebuild a word before git runs: `$` opens a
+# parameter (`$VAR`, `${VAR}`), a command substitution (`$(...)`) or an
+# ANSI-C escape (`$'\x74'`), and a backtick opens the older substitution.
+# The gate reads words as typed and cannot see what any of them becomes, and
+# each can spell a refused argument out of pieces that are not refused --
+# `$(echo /dev/null)`, `--outpu$'\x74'=`. A word carrying either is refused
+# where bash would read it: unquoted, or inside double quotes, which quote
+# neither. Single quotes and a backslash do, so `--format='%h $x'` passes.
+# See expands_at_runtime().
+EXPANSION = frozenset("$`")
+
 # The shape of every brace expansion bash performs: a `{`, then a `,` or a
 # `..` somewhere after it, then a `}` somewhere after that. See
 # brace_would_expand().
@@ -135,6 +153,18 @@ REDIRECTION = re.compile(r"^[<>&|]*[<>][<>&|]*$")
 # of `{fd}>file`, which allocates a descriptor into a variable. shlex splits
 # either off as a token of its own.
 DESCRIPTOR = re.compile(r"^(?:[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\})$")
+
+# A run of shell punctuation as shlex hands it back, and the pieces bash
+# reads it as. `punctuation_chars` glues every adjacent `();<>|&` into one
+# token, so `echo x;(git diff)` arrives with `;(` as a word and `x=$(git
+# diff);echo` with `);`. Neither is a separator to is_operator() nor a `(`
+# or `)` to segments(), so the first hid its git from the scan altogether
+# and the second ran the outer command into the inner one. Each paren is
+# a token of its own to bash, except the `<(` and `>(` of a process
+# substitution, which stay whole so the prefix test above still sees them;
+# what is left between parens (`;`, `&&`, `>`) is the operator it was.
+# See punctuation_pieces().
+PUNCTUATION = frozenset("();<>|&")
 
 
 def refused_long(token: str) -> bool:
@@ -197,7 +227,9 @@ def brace_would_expand(token: str) -> bool:
     to disagree with it in some other direction. Over-refusing is the safe
     direction: `HEAD@{2}..HEAD@{1}` is refused too, though bash would leave
     it alone, and the refusal says to write `HEAD~2..HEAD~1`. `${VAR}` is
-    refused as a runtime-built argument this hook cannot inspect.
+    refused as a runtime-built argument this hook cannot inspect; the `$`
+    in it is refused by expands_at_runtime() as well, the same answer by
+    another route.
 
     The token is bash's word with the quote marks removed, which is what
     shlex hands back. Removing quotes never removes a brace, a comma or a
@@ -227,6 +259,24 @@ def redirection_writes_a_path(operator: str, target: str) -> bool:
     return True
 
 
+def expands_at_runtime(twin: str) -> bool:
+    """Does bash rebuild this word before git sees it?
+
+    `twin` is the word's masked copy from mask_quotes(): every character
+    bash takes literally is a `Q`, and a `$` or a backtick survives only
+    where bash would act on it. So `$G`, `$(...)`, `` `...` `` and the `$`
+    of `$'\\x74'` are all found, while `'%h $x'`, `\\$x` and `"\\$x"` are
+    not. The token itself is no use here: shlex hands back the same `$x`
+    for `'$x'` and `$x`.
+
+    A `$` that bash leaves alone -- one that ends the word, or sits before
+    a character that opens nothing -- is refused with the rest; the gate
+    reads words as typed, and the price of that is naming the literal
+    through single quotes.
+    """
+    return any(char in twin for char in EXPANSION)
+
+
 def unsafe_operand(token: str) -> bool:
     """A path that leaves the checkout, spelled without needing `--no-index`.
 
@@ -253,6 +303,14 @@ def mask_quotes(command: str) -> str:
     length and free of shell syntax, so splitting it with the same lexer
     gives one token per real token, and a token that is a separator in
     the masked copy is one bash would honour; a quoted one is not.
+
+    Double quotes are the exception for two characters: bash still opens a
+    substitution at a `$` or a backtick inside them, so those two are kept
+    where a double quote encloses them and expands_at_runtime() can read
+    the twin for what bash would rebuild. Neither is a separator or a
+    quote to the lexer, so the token count is unchanged; a `(` after the
+    `$` is still masked, so `"$(x)"` opens no nested segment. An escaped
+    `\\$` is a literal inside double quotes as out of them, and is masked.
     """
     masked: list[str] = []
     quote = ""
@@ -264,9 +322,14 @@ def mask_quotes(command: str) -> str:
         elif quote:
             if char == quote:
                 quote = ""
+                masked.append("Q")
             elif quote == '"' and char == "\\":
                 escaped = True
-            masked.append("Q")
+                masked.append("Q")
+            elif quote == '"' and char in EXPANSION:
+                masked.append(char)
+            else:
+                masked.append("Q")
         elif char == "\\":
             escaped = True
             masked.append("Q")
@@ -291,18 +354,50 @@ def tokenize(command: str) -> list[str]:
     reads `/etc/passwd`), while a lexer with the default comment character sees
     only `git diff HEAD^` and lets the command through. The gate has to read the
     same words bash runs, so the comment character is turned off.
+
+    A run of punctuation is split back into the pieces bash reads, so a
+    `(` or `)` glued to a separator (`;(`, `);`, `&&(`) is the paren and the
+    separator rather than a word of its own. See punctuation_pieces().
     """
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     lexer.commenters = ""
-    return list(lexer)
+    tokens: list[str] = []
+    for token in lexer:
+        if len(token) > 1 and set(token) <= PUNCTUATION:
+            tokens.extend(punctuation_pieces(token))
+        else:
+            tokens.append(token)
+    return tokens
+
+
+def punctuation_pieces(run: str) -> list[str]:
+    """A glued run of shell punctuation as the tokens bash reads it as.
+
+    Each paren is a token of its own, except that a `<` or `>` right before
+    a `(` is the opening of a process substitution and stays with it, so
+    `;<(` is `;` and `<(`. Whatever lies between parens is kept whole: it is
+    the separator or redirection it was, and is_operator() and REDIRECTION
+    read it as before.
+    """
+    pieces: list[str] = []
+    for piece in re.split(r"([()])", run):
+        if not piece:
+            continue
+        if piece == "(" and pieces and pieces[-1][-1] in "<>":
+            piece = pieces[-1][-1] + piece
+            pieces[-1] = pieces[-1][:-1]
+            if not pieces[-1]:
+                pieces.pop()
+        pieces.append(piece)
+    return pieces
 
 
 def is_operator(token: str) -> bool:
     return token in OPERATORS or bool(token) and set(token) <= {"&", "|", ";"}
 
 
-def segments(tokens: list[str], masked: list[str]) -> list[list[str]]:
+def segments(tokens: list[str], masked: list[str]) -> list[tuple[list[str], list[str]]]:
     """The token list split into commands on the shell operators bash honours.
 
     `masked` is the same list lexed from mask_quotes(); a token is a
@@ -313,22 +408,28 @@ def segments(tokens: list[str], masked: list[str]) -> list[list[str]]:
     is one command whose redirection names a target built at runtime, and
     a split that ended the command at the `(` had put that redirection in a
     segment with no git in it (review on #414).
+
+    Each segment is returned as (words, twins): the tokens of the command
+    and their masked copies in the same order, so a check that needs to
+    know what bash would quote -- expands_at_runtime() -- can read the twin
+    of the word it is judging.
     """
-    found: list[list[str]] = [[]]
-    outer: list[list[str]] = []
+    found: list[tuple[list[str], list[str]]] = [([], [])]
+    outer: list[tuple[list[str], list[str]]] = []
     for token, twin in zip(tokens, masked, strict=True):
-        if twin == "(" and found[-1] and found[-1][-1].endswith("$"):
+        if twin == "(" and found[-1][0] and found[-1][0][-1].endswith("$"):
             outer.append(found.pop())
-            found.append([])
+            found.append(([], []))
             continue
         if twin == ")" and outer:
             found.append(outer.pop())
             continue
         if is_operator(twin):
-            found.append([])
+            found.append(([], []))
             continue
-        found[-1].append(token)
-    return [segment for segment in found if segment]
+        found[-1][0].append(token)
+        found[-1][1].append(twin)
+    return [segment for segment in found if segment[0]]
 
 
 def bare(token: str) -> str:
@@ -420,7 +521,7 @@ def refusal(command: str) -> str | None:
         # The masked copy split differently, so which tokens are separators
         # cannot be told; refused rather than guessed at.
         return "the command's quoting cannot be matched to its words, so its git arguments cannot be checked"
-    for segment in segments(tokens, masked):
+    for segment, twins in segments(tokens, masked):
         names, command_name, arguments = split_segment(segment)
         if command_name != "git":
             continue
@@ -460,6 +561,18 @@ def refusal(command: str) -> str | None:
                     "git diff and git log print to stdout, so read that instead (2>&1, "
                     ">&2, an input redirection, and a redirection on another command of "
                     "the same string are not refused)"
+                )
+        for token, twin in zip(segment, twins, strict=True):
+            if expands_at_runtime(twin):
+                return (
+                    f"{token} carries a $ or a backtick that bash acts on, so the word "
+                    "git runs is built at runtime -- from a variable, a $(...) or "
+                    "backtick substitution, or a $'...' escape -- and the gate reads "
+                    "words as typed; bash would rebuild them, and the rebuilt word can "
+                    "spell --output, --no-index, -O or a path outside the checkout that "
+                    "no test here sees; write the argument out literally (a "
+                    "single-quoted literal such as --format='%h $x' is not refused, and "
+                    "neither is a $ on another command of the same string)"
                 )
         for name in names:
             if name in REFUSED_ENVIRONMENT:

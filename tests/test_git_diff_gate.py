@@ -102,6 +102,16 @@ REFUSED_COMMANDS = (
     ("git diff ~/.bashrc ~/.aws/credentials", "names two home files through a tilde without --"),
     ("git log -p -- ~/.ssh/config", "names a home file through a tilde in git log"),
     ("git diff -- ~root/.bashrc ./LICENSE", "names another user's home file through a tilde"),
+    ("git diff $(echo /dev/null) ./cosign.key", "builds a --no-index operand from a substitution"),
+    ("git diff `echo /dev/null` ./cosign.key", "builds a --no-index operand from a backtick"),
+    ("git diff `printf -- --no-index` ./LICENSE ./cosign.key", "builds --no-index from a backtick"),
+    ("git log --outpu$'\\x74'=cosign.pub -1", "builds --output from an ANSI-C escape"),
+    ("G=/dev/null; git diff $G ./cosign.key", "builds a --no-index operand from a variable"),
+    ('git diff "$G" ./cosign.key', "builds an operand from a variable double quotes do not quote"),
+    ('git diff "$(echo /dev/null)" ./cosign.key', "builds an operand from a quoted substitution"),
+    ("git diff ${G} ./cosign.key", "builds an operand from a braced variable"),
+    ("echo x;(git diff --no-index /dev/null ./cosign.key)", "hid git behind a ;( shlex glued"),
+    ("true&&(git diff --no-index /dev/null ./cosign.key)", "hid git behind an &&( shlex glued"),
     ("git status && git diff --no-index a b", "hides behind an earlier command"),
     ("echo x | git diff --no-index a b", "hides in a pipeline"),
     ("x=$(git diff --no-index a b)", "hides in a command substitution"),
@@ -159,6 +169,15 @@ ALLOWED_COMMANDS = (
     "2>&1 git diff HEAD",
     ">&2 git diff HEAD",
     "git diff HEAD@{1}",
+    "git log --format='%h $x'",
+    'git log --format="%h \\$x"',
+    "git log -G'\\$x' --oneline",
+    "git diff HEAD -- \\$x",
+    "echo $HOME; git diff HEAD",
+    'echo "$(date)"; git diff HEAD',
+    "x=$(git log -1); git diff HEAD",
+    "for f in $(git diff --name-only HEAD); do echo $f; done",
+    "x=$(git log -1);(git diff HEAD)",
     "git diff -- 'lit~eral'",
     "git diff HEAD -- x~",
     "git show HEAD:~/x",
@@ -344,6 +363,72 @@ class ReachTests(unittest.TestCase):
         )
 
 
+    def test_git_runs_the_word_bash_rebuilds_not_the_one_typed(self) -> None:
+        # bash rebuilds a word from a substitution, a variable or an ANSI-C
+        # escape before git runs, so `git diff $(echo /dev/null) ./cosign.key`
+        # is `git diff /dev/null ./cosign.key` -- --no-index implied, the
+        # key printed whole -- with no absolute path or refused option
+        # anywhere in the words as typed, and `--outpu$'\\x74'=` is
+        # `--output=`. The key and the target are stand-ins in a throwaway
+        # repository; `echo x;(...)` is the glued-punctuation form beside
+        # them.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            (repo / "cosign.key").write_text("STAND-IN-NOT-A-SECRET\n")
+            for command in (
+                "git diff $(echo /dev/null) ./cosign.key",
+                "git diff `echo /dev/null` ./cosign.key",
+                "G=/dev/null; git diff $G ./cosign.key",
+                "echo x;(git diff --no-index /dev/null ./cosign.key)",
+            ):
+                with self.subTest(command=command):
+                    result = subprocess.run(
+                        ["bash", "--norc", "--noprofile", "-c", command],
+                        cwd=repo,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertIn(
+                        "STAND-IN-NOT-A-SECRET",
+                        result.stdout,
+                        f"bash no longer rebuilds the word in {command!r}, or git no "
+                        "longer diffs the result; re-derive why expands_at_runtime() and "
+                        "punctuation_pieces() exist",
+                    )
+                    self.assertIsNotNone(
+                        gate.refusal(command),
+                        "the command just shown to print the key is not refused",
+                    )
+            target = repo / "cosign.pub"
+            target.write_text("ORIGINAL-CONTENT\n")
+            subprocess.run(["git", "-C", str(repo), "add", "cosign.key"], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-qm", "x"],
+                check=True,
+            )
+            command = "git log --outpu$'\\x74'=cosign.pub -1"
+            subprocess.run(
+                ["bash", "--norc", "--noprofile", "-c", command],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            written = target.read_text()
+        self.assertNotIn(
+            "ORIGINAL-CONTENT",
+            written,
+            "bash no longer reads $'\\x74' as the letter t, or git log no longer "
+            "writes through --output; re-derive why expands_at_runtime() exists",
+        )
+        self.assertIsNotNone(
+            gate.refusal(command),
+            "the command just shown to overwrite a file is not refused",
+        )
+
+
 class RefusalTests(unittest.TestCase):
     def test_each_reaching_command_is_refused(self) -> None:
         for command, reach in REFUSED_COMMANDS:
@@ -366,12 +451,13 @@ class RefusalTests(unittest.TestCase):
                 # value assigned to it, so both spellings count as naming it.
                 # A process substitution reaches the hook as its opening `<(`
                 # or `>(` alone, since shlex breaks the word there, so that
-                # opening is how the refusal names it.
+                # opening is how the refusal names it. A quoted word is
+                # named by its text, without the quote marks.
                 words = [
                     part
                     for word in command.split()
                     if word not in {"git", "&&", "|"}
-                    for part in (word, word.split("=", 1)[0], word[:2])
+                    for part in (word, word.split("=", 1)[0], word[:2], word.strip("'\""))
                 ]
                 self.assertTrue(
                     any(word in reason for word in words),
@@ -454,8 +540,53 @@ class RefusalTests(unittest.TestCase):
                 tokens = gate.tokenize(command)
                 masked = gate.tokenize(gate.mask_quotes(command))
                 self.assertEqual(len(tokens), len(masked))
-                self.assertEqual(gate.segments(tokens, masked), expected)
+                found = gate.segments(tokens, masked)
+                self.assertEqual([words for words, _ in found], expected)
+                for words, twins in found:
+                    self.assertEqual(len(words), len(twins))
         self.assertEqual(gate.mask_quotes(r"""a 'b c' \; "d\"e" f"""), "a QQQQQ QQ QQQQQQ f")
+
+    def test_a_paren_glued_to_a_separator_is_read_as_both(self) -> None:
+        # shlex glues adjacent punctuation into one token, so `echo x;(git
+        # diff)` arrived with `;(` as a word: not a separator, not a `(`, and
+        # the git after it was a word of echo's command that nothing checked.
+        # `);` ran the outer command into the inner one the same way. Each
+        # paren is a token of its own to bash, and `<(`/`>(` stay whole.
+        for run, pieces in (
+            (";(", [";", "("]),
+            ("&&(", ["&&", "("]),
+            ("|(", ["|", "("]),
+            (");", [")", ";"]),
+            (")&&(", [")", "&&", "("]),
+            (")>", [")", ">"]),
+            ("((", ["(", "("]),
+            ("))", [")", ")"]),
+            (";<(", [";", "<("]),
+            (">(", [">("]),
+            ("<(", ["<("]),
+            (";;", [";;"]),
+            (">&", [">&"]),
+        ):
+            with self.subTest(run=run):
+                self.assertEqual(gate.punctuation_pieces(run), pieces)
+        self.assertEqual(
+            gate.tokenize("echo x;(git diff);<(true)"),
+            ["echo", "x", ";", "(", "git", "diff", ")", ";", "<(", "true", ")"],
+        )
+        for command, expected in (
+            ("echo x;(git diff HEAD)", [["echo", "x"], ["git", "diff", "HEAD"]]),
+            ("x=$(git log -1);echo", [["git", "log", "-1"], ["x=$"], ["echo"]]),
+            (
+                "for f in $(git diff --name-only); do echo $f; done",
+                [["git", "diff", "--name-only"], ["for", "f", "in", "$"], ["do", "echo", "$f"], ["done"]],
+            ),
+        ):
+            with self.subTest(command=command):
+                tokens = gate.tokenize(command)
+                masked = gate.tokenize(gate.mask_quotes(command))
+                self.assertEqual([words for words, _ in gate.segments(tokens, masked)], expected)
+        self.assertIsNotNone(gate.refusal("echo x;(git diff --no-index /dev/null ./cosign.key)"))
+        self.assertIsNotNone(gate.refusal("true&&(git diff --no-index /dev/null ./cosign.key)"))
 
     def test_a_revision_range_is_not_a_parent_directory(self) -> None:
         # `..` is a path component in one and a range operator in the other.
@@ -690,6 +821,168 @@ class RefusalTests(unittest.TestCase):
         for word in self.LITERAL_BRACE_WORDS:
             with self.subTest(word=word):
                 self.assertFalse(self.bash_expands(word), f"bash expands {word!r}")
+                self.assertIsNone(gate.refusal(f"git log {word} -1"))
+
+    def test_a_word_bash_rebuilds_is_refused_in_a_git_invocation(self) -> None:
+        # The gate reads words as typed; bash would rebuild these before git
+        # runs, and the rebuilt word can spell any refused argument. `$G` is
+        # a variable, `$(...)` and backticks are substitutions, `$'\\x74'` is
+        # the letter t through an ANSI-C escape, and double quotes quote
+        # none of them. The refusal names the word and the `$(...)` form.
+        for command in (
+            "git diff $(echo /dev/null) ./cosign.key",
+            "git diff `echo /dev/null` ./cosign.key",
+            "git diff `printf -- --no-index` ./LICENSE ./cosign.key",
+            "git log --outpu$'\\x74'=cosign.pub -1",
+            "G=/dev/null; git diff $G ./cosign.key",
+            'git diff "$G" ./cosign.key',
+            'git diff "$(echo /dev/null)" ./cosign.key',
+            'git diff "`echo /dev/null`" ./cosign.key',
+            "git status && git diff $G ./cosign.key",
+            "git log -1 $G",
+        ):
+            with self.subTest(command=command):
+                reason = gate.refusal(command)
+                self.assertIsNotNone(reason, f"{command!r} is let through")
+                self.assertIn("reads words as typed", reason or "")
+
+    def test_a_quoted_or_escaped_dollar_is_a_literal(self) -> None:
+        # Single quotes and a backslash quote `$` and the backtick, and
+        # double quotes quote an escaped one. shlex hands back the same word
+        # for `'$x'` and `$x`, so the rule reads the masked twin, where only
+        # the `$` bash would act on survives.
+        for command in (
+            "git log --format='%h $x'",
+            'git log --format="%h \\$x"',
+            "git diff HEAD -- \\$x",
+            "git log -G'\\$x' --oneline",
+            "git log -S'`' -p",
+            'git diff -- "a`b"'.replace("`", "\\`"),
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(gate.refusal(command), f"{command!r} is refused")
+        for twin, expands in (
+            ("$G", True),
+            ("$", True),
+            ("Q$QQ", True),
+            ("`echo", True),
+            ("/dev/null`", True),
+            ("QQQQQQQ", False),
+            ("HEAD@{1}", False),
+            ("--format=QQQQQQQ", False),
+        ):
+            with self.subTest(twin=twin):
+                self.assertEqual(gate.expands_at_runtime(twin), expands)
+        self.assertEqual(gate.mask_quotes('"a $b `c` \\$d"'), 'QQQ$QQ`Q`QQQQQ')
+        self.assertEqual(gate.mask_quotes("'a $b'"), "QQQQQQ")
+        self.assertEqual(gate.mask_quotes("$'\\x74'"), "$QQQQQQ")
+
+    def test_a_dollar_on_another_command_is_not_gated(self) -> None:
+        # The rule is scoped to the git invocation: a variable in the echo
+        # before it, or a substitution whose *inner* command is git, is
+        # bash's business, and the inner git is checked as its own segment.
+        for command in (
+            "echo $HOME; git diff HEAD",
+            'echo "$(date)"; git diff HEAD',
+            "x=$(git log -1); git diff HEAD",
+            "for f in $(git diff --name-only HEAD); do echo $f; done",
+            "git diff HEAD | grep $x",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(gate.refusal(command), f"{command!r} is refused")
+        self.assertIsNotNone(gate.refusal("x=$(git diff $G ./cosign.key)"))
+
+    # Words bash rebuilds before git runs, in every spelling the rule is
+    # for, beside the quoted forms it must leave alone. Each is inserted
+    # verbatim into a bash script, so the quoting is bash's; `G` is set so
+    # `$G` and its relatives become a word other than the one typed.
+    EXPANSION_CORPUS = (
+        "$G",
+        "${G}",
+        "${G:-x}",
+        "$(echo /dev/null)",
+        "`echo /dev/null`",
+        "--outpu$'\\x74'=cosign.pub",
+        "--no-inde$G",
+        '"$G"',
+        '"$(echo /dev/null)"',
+        '"`echo /dev/null`"',
+        "x$G",
+        "$Gx",
+        "${G}x",
+        "$(printf -- --no-index)",
+        "'$G'",
+        "'$(echo /dev/null)'",
+        "'`echo /dev/null`'",
+        "\\$G",
+        '"\\$G"',
+        "'%h $x'",
+        "HEAD@{1}",
+        "docs/quality.md",
+    )
+
+    # The words of that corpus bash leaves as typed, which the hook must too.
+    LITERAL_EXPANSION_WORDS = (
+        "'$G'",
+        "'$(echo /dev/null)'",
+        "'`echo /dev/null`'",
+        "\\$G",
+        '"\\$G"',
+        "'%h $x'",
+        "HEAD@{1}",
+        "docs/quality.md",
+    )
+
+    @staticmethod
+    def bash_rebuilds(word: str) -> bool:
+        """Whether bash builds this word at runtime rather than reading it as typed.
+
+        Two things bash exposes are read: a word built from a variable comes
+        out different when the variable changes, and a command substitution
+        shows in the `-x` trace as a second command run before printf. Quote
+        removal alone (`'$G'`, `"\\$G"`) does neither. `G` and `Gx` are the
+        variable names the corpus uses; both are set so `$Gx` reads a value
+        rather than nothing. An ANSI-C escape (`$'\\x74'`) is neither a
+        variable nor a command, so this reference does not see it; that
+        spelling is held to REFUSED_COMMANDS and to the reach test that
+        runs it through bash instead.
+        """
+        outputs: list[bytes] = []
+        for value in ("t", "u"):
+            result = subprocess.run(
+                ["bash", "--norc", "--noprofile", "-x", "-c", 'printf "%s\\0" ' + word],
+                capture_output=True,
+                env={"PATH": os.environ.get("PATH", ""), "G": value, "Gx": value},
+                check=False,
+            )
+            if result.returncode != 0:
+                raise AssertionError(f"bash could not run {word!r}: {result.stderr!r}")
+            if sum(line.startswith(b"+") for line in result.stderr.splitlines()) > 1:
+                return True
+            outputs.append(result.stdout)
+        return outputs[0] != outputs[1]
+
+    def test_the_expansion_rule_against_bash_rather_than_a_label(self) -> None:
+        # Bash is the ground truth. Every corpus word bash rebuilds must be
+        # refused, and every word of the literal set must be allowed. The
+        # counts keep the check from going vacuous if the corpus shrinks.
+        self.assertGreaterEqual(len(self.EXPANSION_CORPUS), 22)
+        self.assertEqual(len(set(self.EXPANSION_CORPUS)), len(self.EXPANSION_CORPUS))
+        rebuilt = 0
+        for word in self.EXPANSION_CORPUS:
+            with self.subTest(word=word):
+                if not self.bash_rebuilds(word):
+                    continue
+                rebuilt += 1
+                reason = gate.refusal(f"git diff {word}")
+                self.assertIsNotNone(reason, f"bash rebuilds {word!r}; the hook let it through")
+                # `${G}` meets the brace rule first; both refusals say so.
+                self.assertIn("as typed", reason or "")
+        self.assertGreaterEqual(rebuilt, 12)
+        for word in self.LITERAL_EXPANSION_WORDS:
+            with self.subTest(word=word):
+                self.assertIn(word, self.EXPANSION_CORPUS)
+                self.assertFalse(self.bash_rebuilds(word), f"bash rebuilds {word!r}")
                 self.assertIsNone(gate.refusal(f"git log {word} -1"))
 
     def test_a_process_substitution_in_a_git_word_is_refused(self) -> None:
