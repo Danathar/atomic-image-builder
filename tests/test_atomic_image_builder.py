@@ -3908,6 +3908,37 @@ class BuilderTests(unittest.TestCase):
                 self.assertIn(atomic_image_builder.usage_text(), buffer.getvalue())
                 app_cls.assert_not_called()
 
+    def test_main_rejects_unknown_arguments_instead_of_starting_the_wizard(self) -> None:
+        # #366: main() used to look only at argv[1] and fall through to the
+        # wizard for anything it did not recognise, so a typo in a script or a
+        # `podman run` cleared the screen and sat at "Press Enter". Every shape
+        # below has to fail closed: usage on stderr, exit 2, App never built.
+        cases = {
+            "unknown long flag": ["--bogus"],
+            "lowercase -v is not -V": ["-v"],
+            "combined short flags": ["-hV"],
+            "help typo": ["--hlep"],
+            "positional word": ["build"],
+            "known flag with trailing extra": ["--version", "--bogus"],
+            "known flag after an unknown one": ["--bogus", "--help"],
+            "same known flag twice": ["--help", "--help"],
+        }
+        for label, arguments in cases.items():
+            with self.subTest(label):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with patch("sys.argv", ["atomic-image-builder", *arguments]):
+                    with patch.object(atomic_image_builder, "App") as app_cls:
+                        with redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                            with self.assertRaises(SystemExit) as raised:
+                                atomic_image_builder.main()
+                self.assertEqual(raised.exception.code, 2)
+                app_cls.assert_not_called()
+                # `--version --bogus` used to print the version to stdout and
+                # exit 0, which is exactly what a script would then trust.
+                self.assertEqual(stdout.getvalue(), "", "a rejected invocation must not print to stdout")
+                self.assertIn(f"{atomic_image_builder.TOOL_COMMAND}: unrecognized arguments: {' '.join(arguments)}", stderr.getvalue())
+                self.assertIn(atomic_image_builder.usage_text(), stderr.getvalue())
+
     def test_main_runs_app_and_exits_zero_on_success(self) -> None:
         with patch("sys.argv", ["atomic-image-builder"]):
             with patch.object(atomic_image_builder, "App") as app_cls:
