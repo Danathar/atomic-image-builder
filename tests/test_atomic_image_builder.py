@@ -11328,7 +11328,62 @@ class BuilderTests(unittest.TestCase):
         app.gum = stub
         app.add_copr()
         self.assertEqual(app.config.copr_repos, [])
-        self.assertIn(("error", "Enter the COPR repo as owner/project."), app.gum.messages)
+        self.assertIn(("error", "Enter the COPR repo as owner/project or @group/project."), app.gum.messages)
+
+    def test_add_copr_accepts_group_owner_and_project_directory(self) -> None:
+        # `man dnf5-copr`: OWNER is a username or a @groupname, and PROJECT may
+        # be a project directory such as project:custom:123. The wizard used to
+        # reject both with the "owner/project" error, telling a user who typed
+        # @caddy/caddy that they had the format wrong (#348).
+        for repo in ("@caddy/caddy", "@fedora-llvm-team/llvm-snapshots", "user/project:custom:123"):
+            with self.subTest(repo=repo):
+                app = self.make_app()
+                stub = GumStub()
+                stub.input = lambda *, prompt, repo=repo, **_kwargs: repo if prompt == "COPR repo: " else ""
+                app.gum = stub
+                app.add_copr()
+                self.assertEqual(app.config.copr_repos, [repo])
+                self.assertEqual([m for m in app.gum.messages if m[0] == "error"], [])
+
+    def test_add_copr_still_rejects_misplaced_at_and_colon(self) -> None:
+        # The loosening is exactly what dnf5 accepts: "@" only leads the owner
+        # and colons only appear in the project, so the values that reach
+        # build.sh and recipe.yml stay repo specs rather than anything else.
+        for repo in ("owner@group/project", "@/project", "@group/", "own:er/project", "@group/project/extra", "@@group/project"):
+            with self.subTest(repo=repo):
+                app = self.make_app()
+                stub = GumStub()
+                stub.input = lambda *, prompt, repo=repo, **_kwargs: repo if prompt == "COPR repo: " else ""
+                app.gum = stub
+                app.add_copr()
+                self.assertEqual(app.config.copr_repos, [])
+                self.assertIn(("error", "Enter the COPR repo as owner/project or @group/project."), app.gum.messages)
+
+    def test_validate_config_accepts_group_copr_from_loaded_state(self) -> None:
+        # validate_config shares COPR_REPO_RE with add_copr, so a state file
+        # carrying a group COPR must pass the pre-write gate too, not just the
+        # wizard prompt.
+        app = self.make_app()
+        app.config.copr_repos = ["@caddy/caddy", "user/project:custom:123"]
+        app.validate_config()
+        app.config.copr_repos = ["@caddy/caddy", "bad;rm/project"]
+        with self.assertRaisesRegex(CommandError, "Invalid COPR repository value"):
+            app.validate_config()
+
+    def test_group_copr_reaches_build_sh_and_recipe_unchanged(self) -> None:
+        app = self.make_app()
+        app.config.copr_repos = ["@caddy/caddy", "user/project:custom:123"]
+        build_sh = app.generate_build_sh()
+        # shlex.quote leaves "@" and ":" bare, so dnf5 sees exactly what the
+        # user typed; pin that rather than the quoting helper's behaviour.
+        self.assertIn("dnf5 -y copr enable @caddy/caddy", build_sh)
+        self.assertIn("dnf5 -y copr disable @caddy/caddy", build_sh)
+        self.assertIn("dnf5 -y copr enable user/project:custom:123", build_sh)
+        bluebuild = self.make_bluebuild_app()
+        bluebuild.config.copr_repos = ["@caddy/caddy", "user/project:custom:123"]
+        recipe = bluebuild.generate_recipe()
+        self.assertIn('        - "@caddy/caddy"', recipe)
+        self.assertIn('        - "user/project:custom:123"', recipe)
 
     def test_add_copr_returns_without_adding_repo_when_packages_fail_validation(self) -> None:
         app = self.make_app()
