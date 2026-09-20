@@ -2205,6 +2205,15 @@ class Gum:
         # spinner_result() keeps the child's stderr, so the error the user
         # sees is the one `gh` wrote.
         proc = self.spinner_result(title, command, cwd=cwd)
+        if proc.returncode == 130:
+            # The wrapped command took the Ctrl+C: `gh` exits 130 on SIGINT,
+            # as the shell convention has it. Handing the command straight to
+            # gum spin used to surface that as gum's own 130, which
+            # require_spinner_success() turns into KeyboardInterrupt and
+            # main() into exit 130. The bash wrapper now keeps that status in
+            # the file instead, so map it back here rather than report an
+            # interrupted clone as a failed one.
+            raise KeyboardInterrupt()
         if proc.returncode != 0:
             raise CommandError(command_failure_detail(command, proc))
         return proc.stdout

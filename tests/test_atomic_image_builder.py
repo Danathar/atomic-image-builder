@@ -4630,6 +4630,25 @@ class BuilderTests(unittest.TestCase):
         with patch("atomic_image_builder.run", side_effect=self.run_spinner_without_gum):
             gum.spinner("Cloning...", ["bash", "-c", "echo 'Cloning into ...' >&2"])
 
+    def test_gum_spinner_helpers_keep_the_wrapped_commands_ctrl_c_an_interrupt(self) -> None:
+        # Before #363 the command went straight to gum spin, which exits with
+        # its child's code, so `gh` taking the Ctrl+C (exit 130) reached
+        # require_spinner_success() as gum's 130 and became KeyboardInterrupt
+        # -- exit 130 from main(). The bash wrapper now ends in the status
+        # printf, so bash and gum exit 0 and the 130 sits in the status file:
+        # it must still come out as an interrupt, not as a CommandError that
+        # reports an interrupted clone as a failed one and exits 1.
+        gum = Gum()
+        with patch("atomic_image_builder.run", side_effect=self.run_spinner_without_gum):
+            with self.assertRaises(KeyboardInterrupt):
+                gum.spinner("Cloning...", ["bash", "-c", "exit 130"])
+            with self.assertRaises(KeyboardInterrupt):
+                gum.spinner_capture("Loading...", ["bash", "-c", "echo partial; exit 130"])
+            # spinner_result() hands the status back for the caller to judge,
+            # as it always has; 130 is just a status there.
+            proc = gum.spinner_result("Checking...", ["bash", "-c", "exit 130"])
+        self.assertEqual(proc.returncode, 130)
+
     def test_gum_spinner_helpers_share_one_bash_wrapper(self) -> None:
         # require_spinner_success() may read a nonzero gum exit as "gum itself
         # failed" only while every spinner ends its `bash -c` in the status
