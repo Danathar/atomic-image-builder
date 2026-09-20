@@ -256,10 +256,14 @@ INSTALLER_UNVERIFIED_SWITCH_COMMENT = (
     "# Signing Key section and repeat the enforced switch so later upgrades verify it.",
 )
 # dnf5 prints this when -C (cache-only) is used and no repository metadata has
-# been downloaded yet. Matched so package search can offer to fix it in place
-# instead of naming a command the user may have no shell to run.
+# been downloaded yet. Matched so package search and the exact-name check can
+# offer to fix it in place instead of naming a command the user may have no
+# shell to run.
 DNF5_NO_CACHE_MARKER = "cache-only enabled but no cache"
-PACKAGE_SEARCH_NEEDS_METADATA = "Package search needs local DNF metadata. Use exact-name entry instead."
+PACKAGE_SEARCH_NEEDS_METADATA = (
+    "Package search needs local DNF metadata. "
+    "Exact-name entry still works without it, but names are then only checked by the GitHub build."
+)
 DNF5_MISSING_MARKERS = (
     "no matches found",
     "no package matched",
@@ -3084,6 +3088,7 @@ class App:
         self.menu_section(
             "Validation",
             "This tool will try to catch obvious package-name mistakes here first.",
+            "That check uses local DNF metadata. If it is missing, this tool offers to download it.",
             "The GitHub build is still the final check.",
             "Leave this empty if you want to go back without adding anything.",
         )
@@ -4289,8 +4294,9 @@ class App:
         # image runs this app as its entrypoint -- a `podman run` user has no
         # shell in which to go run dnf5. That is the same reason preflight()
         # walks people through `gh auth login` instead of telling them to.
-        self.gum.warn("Package search needs local DNF metadata, which is not available yet.")
+        self.gum.warn("Checking package names needs local DNF metadata, which is not available yet.")
         self.gum.hint("Refreshing downloads the repository metadata dnf5 uses to match package names.")
+        self.gum.hint("This is a large download: well over 100 MB for the standard Fedora repositories.")
         print()
         if not self.gum.confirm("Refresh package metadata now?"):
             return False
@@ -4307,18 +4313,26 @@ class App:
         self.gum.success("Package metadata refreshed.")
         return True
 
-    def lookup_host_packages(self, packages: Sequence[str]) -> dict[str, bool | None]:
+    def lookup_host_packages(self, packages: Sequence[str], *, allow_metadata_refresh: bool = True) -> dict[str, bool | None]:
         # Host-side dnf5 checks are a lightweight "spellcheck" for manual RPM
         # names. They are not a perfect model of the final image build, but they
         # catch obvious mistakes like typos before we create a repo.
         #
         # This checks every requested package in a single dnf5 invocation
         # rather than one invocation per package. dnf5's first repoquery call
-        # pays a real, human-perceptible cost to warm its metadata cache;
+        # pays a real, human-perceptible cost to load its metadata cache;
         # every call after that is fast. One call per package meant only the
         # first package's "Checking package name" spinner was ever visible
         # for more than a flash, even though every package genuinely was
         # being checked -- discovered by watching a real demo recording.
+        #
+        # The query is cache-only (-C), the same as search_host_packages().
+        # Without it, dnf5 fetches missing or expired repository metadata on
+        # its own -- about 160 MB on Fedora -- behind a spinner that says only
+        # "Checking package name" (#369). A missing cache is instead met with
+        # the same refresh offer the search path makes, and a declined offer
+        # leaves the names unchecked rather than blocking entry: the GitHub
+        # build checks them anyway.
         results: dict[str, bool | None] = {}
         to_check: list[str] = []
         for package in packages:
@@ -4345,6 +4359,7 @@ class App:
                 "env",
                 f"XDG_STATE_HOME={state_dir}",
                 "dnf5",
+                "-C",
                 "repoquery",
                 "--available",
                 "--qf",
@@ -4359,6 +4374,19 @@ class App:
         # multiple results print back to back with no separator at all.
         names = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
         detail = "\n".join(part for part in [proc.stdout, proc.stderr] if part).lower()
+        if proc.returncode != 0 and DNF5_NO_CACHE_MARKER in detail:
+            # Offer the fix, then check again. The retry has the offer
+            # disabled so a refresh that reports success without producing
+            # usable metadata cannot loop. Nothing is cached on this path:
+            # a declined download is not a verdict on the names, and a later
+            # accepted refresh (here or from search) must be able to check
+            # them for real.
+            if allow_metadata_refresh and self.refresh_package_metadata():
+                results.update(self.lookup_host_packages(to_check, allow_metadata_refresh=False))
+                return results
+            for package in to_check:
+                results[package] = None
+            return results
         has_missing_marker = any(marker in detail for marker in DNF5_MISSING_MARKERS)
         for package in to_check:
             if package in names:

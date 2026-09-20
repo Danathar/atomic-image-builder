@@ -4186,6 +4186,157 @@ class BuilderTests(unittest.TestCase):
         mock.assert_called_once_with(["tmux"])
         self.assertTrue(result)
 
+    def test_lookup_host_packages_queries_cache_only(self) -> None:
+        # Without -C, dnf5 fetches missing or expired repository metadata on
+        # its own -- about 160 MB on Fedora -- behind a spinner that only says
+        # "Checking package name", while the search screen on the same empty
+        # cache stops and asks first (#369). The flag is what makes the empty
+        # cache a reported failure this code can answer with an offer.
+        app = self.make_app()
+        stub = GumStub()
+        calls: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            calls.append(list(command))
+            return subprocess.CompletedProcess(list(command), 0, "tmux\n", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            app.lookup_host_packages(["tmux"])
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn("-C", calls[0])
+        self.assertLess(calls[0].index("-C"), calls[0].index("repoquery"))
+
+    def test_lookup_host_packages_keeps_names_unchecked_when_refresh_is_declined(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        commands: list[list[str]] = []
+        prompts: list[str] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                list(command),
+                1,
+                "",
+                'Cache-only enabled but no cache for repository "fedora"',
+            )
+
+        def fake_confirm(prompt, **_kwargs):
+            prompts.append(prompt)
+            return False
+
+        stub.spinner_result = fake_spinner_result
+        stub.confirm = fake_confirm
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with redirect_stdout(io.StringIO()):
+                results = app.lookup_host_packages(["tmux", "htop"])
+
+        self.assertEqual(prompts, ["Refresh package metadata now?"])
+        # Unchecked, not missing: the names are kept and the GitHub build
+        # gets the final say, the same as when dnf5 is not installed.
+        self.assertEqual(results, {"tmux": None, "htop": None})
+        # Declining must not download anything.
+        self.assertTrue(all("makecache" not in command for command in commands))
+        self.assertEqual(len(commands), 1)
+        # A declined download is not a verdict on the names. Cache nothing, so
+        # a refresh accepted later can check them for real.
+        self.assertEqual(app.package_lookup_cache, {})
+
+    def test_lookup_host_packages_refreshes_metadata_then_checks_again(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        commands: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            commands.append(list(command))
+            if "makecache" in command:
+                return subprocess.CompletedProcess(list(command), 0, "Metadata cache created.", "")
+            if len([c for c in commands if "repoquery" in c]) == 1:
+                return subprocess.CompletedProcess(
+                    list(command),
+                    1,
+                    "",
+                    'Cache-only enabled but no cache for repository "fedora"',
+                )
+            return subprocess.CompletedProcess(list(command), 0, "tmux\n", "")
+
+        stub.spinner_result = fake_spinner_result
+        stub.confirm = lambda _prompt, **_kwargs: True
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with redirect_stdout(io.StringIO()):
+                results = app.lookup_host_packages(["tmux", "nethock"])
+
+        self.assertEqual(results, {"tmux": True, "nethock": False})
+        # The failed query, the refresh, then the query again.
+        self.assertEqual(len(commands), 3)
+        self.assertEqual(commands[1][-1], "makecache")
+        self.assertIn("-C", commands[2])
+        self.assertEqual(app.package_lookup_cache, {"tmux": True, "nethock": False})
+
+    def test_lookup_host_packages_does_not_loop_when_refresh_leaves_cache_empty(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        commands: list[list[str]] = []
+
+        def fake_spinner_result(_title, command, *, cwd=None):
+            commands.append(list(command))
+            if "makecache" in command:
+                return subprocess.CompletedProcess(list(command), 0, "", "")
+            return subprocess.CompletedProcess(
+                list(command),
+                1,
+                "",
+                'Cache-only enabled but no cache for repository "fedora"',
+            )
+
+        stub.spinner_result = fake_spinner_result
+        stub.confirm = lambda _prompt, **_kwargs: True
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with redirect_stdout(io.StringIO()):
+                results = app.lookup_host_packages(["tmux"])
+
+        self.assertEqual(results, {"tmux": None})
+        # Query, refresh, query -- and then it stops rather than offering again.
+        self.assertEqual(len(commands), 3)
+        self.assertEqual(len([c for c in commands if "makecache" in c]), 1)
+
+    def test_manual_entry_keeps_names_and_warns_when_metadata_refresh_is_declined(self) -> None:
+        # The whole path from the exact-name screen: dnf5 has no cache, the
+        # user declines the download, and the names go in unchecked with the
+        # existing "could not fully check" warning instead of being dropped.
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.CompletedProcess(
+            list(command), 1, "", 'Cache-only enabled but no cache for repository "fedora"'
+        )
+        stub.confirm = lambda _prompt, **_kwargs: False
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with redirect_stdout(io.StringIO()):
+                accepted = app.filter_available_manual_packages(["tmux", "htop"])
+
+        self.assertEqual(accepted, ["tmux", "htop"])
+        self.assertFalse(app.last_manual_package_check_had_missing)
+        self.assertTrue(
+            any(level == "warn" and "Could not fully check" in message for level, message in stub.messages)
+        )
+        self.assertTrue(any(level == "hint" and "tmux, htop" in message for level, message in stub.messages))
+
+    def test_package_search_needs_metadata_message_no_longer_points_at_a_silent_download(self) -> None:
+        # The old wording sent people to exact-name entry as the way around
+        # the download. Now that both paths ask first, the message has to say
+        # what exact-name entry actually gives them without metadata.
+        message = atomic_image_builder.PACKAGE_SEARCH_NEEDS_METADATA
+        self.assertNotIn("instead", message)
+        self.assertIn("Exact-name entry", message)
+        self.assertIn("GitHub build", message)
+
     def test_search_host_packages_parses_results_and_limits_output(self) -> None:
         app = self.make_app()
         seen_commands: list[list[str]] = []
