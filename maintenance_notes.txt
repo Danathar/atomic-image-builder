@@ -36,7 +36,14 @@ outcome (#344).  When the reading job has no env:/steps: anchor at the expected
 indentation it raises CommandError rather than returning the text unchanged,
 because that no-op is exactly the failure this section warns about.  When no
 job reads the variable it does nothing, which is the shape of a workflow whose
-owner removed the signing steps.
+owner removed the signing steps.  Indentation is the only thing it is strict
+about within a job: the presence check is by key name among the 6-space
+entries directly under the job's env: block, so an owner's differing value or
+trailing comment counts as defined and is left alone, and the env:/steps:
+anchors tolerate an inline comment.  The alternative was a duplicate mapping
+key, which GitHub refuses to parse (#345).  An env: that already carries an
+inline value (env: { FOO: bar }) cannot take nested entries; that shape raises
+CommandError rather than writing a second env: key into the same job.
 
 The paths-ignore state-file entry is the exception to "no match, no change":
 it is inserted as a new sequence item, so a shape mismatch corrupts the file

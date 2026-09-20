@@ -1383,6 +1383,12 @@ def patch_cosign_compatibility(workflow_text: str) -> str:
     return "\n".join(lines)
 
 
+# A job-level `env: {}` -- an empty flow mapping, optionally commented. It
+# holds nothing, so it can be unwrapped into a block and entries written
+# beneath it; `env: { FOO: bar }` cannot, and is handled separately.
+WORKFLOW_EMPTY_ENV_RE = re.compile(r"^env:\s*\{\s*\}\s*(#.*)?$")
+
+
 # A job ID under `jobs:`, bare or quoted, opening a block (no inline value):
 #   build_push:
 #   "build_push":   # quoting is legal YAML and some owners' editors emit it
@@ -1443,6 +1449,44 @@ def workflow_job_ranges(lines: Sequence[str]) -> list[tuple[str, int, int]]:
     return ranges
 
 
+def workflow_job_level_key_index(job: Sequence[str], key: str) -> int | None:
+    """Return the index within `job` of the first job-level line declaring `key`.
+
+    Job-level keys sit at exactly four spaces. The match goes through
+    workflow_key() rather than a literal `    env:` so a key carrying a
+    comment or trailing whitespace (`env: # build settings`, `env: `) is
+    found and extended instead of missed and duplicated (#345).
+    """
+    for index, line in enumerate(job):
+        if line.startswith("    ") and not line.startswith("     ") and workflow_key(line.strip()) == key:
+            return index
+    return None
+
+
+def workflow_job_env_keys(job: Sequence[str], env_at: int) -> set[str]:
+    """Return the names of the keys directly under the job-level `env:` at `env_at`.
+
+    The block runs until the first non-blank, non-comment line at the job's
+    own indentation or shallower; only its direct children count. Other keys
+    sit at six spaces too -- the job's `outputs:` entries, a step-level
+    `env:` -- and taking one of those for the job env entry leaves the real
+    block without it while every guard that tests the variable goes on
+    reading it undefined.
+    """
+    defined: set[str] = set()
+    for line in job[env_at + 1 :]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if len(line) - len(line.lstrip()) <= 4:
+            break
+        if line.startswith("      ") and not line.startswith("       "):
+            key = workflow_key(stripped)
+            if key is not None:
+                defined.add(key)
+    return defined
+
+
 def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[str, str]]) -> str:
     """Define each variable, at job level, in every job that reads it.
 
@@ -1453,6 +1497,24 @@ def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[
     owner added ahead of it is false forever, both cosign steps are skipped,
     and the image is published unsigned while the run stays green. That is
     what searching the whole file for the first `env:` did (#344).
+
+    Within a job, presence is decided by key name, not by comparing the
+    whole line to the value this tool would write. An owner who renamed the
+    secret the value reads (`secrets.COSIGN_KEY`), or hung a comment on the
+    line, has still defined the key -- and GitHub rejects a workflow with a
+    duplicate mapping key (`'SIGNING_ENABLED' is already defined`), so
+    writing our line next to theirs stops the repository building until
+    they hand-edit it (#345). The differing value is theirs and is left as
+    it is; the update preview then shows nothing to change for that key,
+    which is the truth. Only a key nested under the job-level `env:` block
+    this tool extends counts as defined -- see workflow_job_env_keys().
+
+    An existing job-level `env:` is extended whatever follows the colon -- a
+    comment, trailing whitespace, or an empty `{}` that is unwrapped into a
+    block. The one shape that cannot take nested entries is an `env:` with
+    an inline value, and the alternative to stopping there is a second
+    `env:` key in the same job, which the parser rejects, so that shape
+    fails closed. Without any `env:` the block is opened above `steps:`.
 
     A job that reads the variable but has neither an `env:` nor a `steps:`
     key at the expected indentation cannot be patched, and the only outcome
@@ -1466,9 +1528,7 @@ def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[
     lines = workflow_text.splitlines()
     changed = False
     for name, value in entries:
-        # Job-level env is at 6 spaces (4 for job indent + 2 for key).  We must
-        # check at this exact indentation, otherwise a step-level env entry with
-        # the same key fools the check into thinking the job-level one exists.
+        # Job-level env is at 6 spaces (4 for job indent + 2 for key).
         wanted = f"      {name}: {value}"
         reads = re.compile(rf"\benv\.{re.escape(name)}\b")
         ranges = workflow_job_ranges(lines)
@@ -1489,21 +1549,34 @@ def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[
             job = lines[start:end]
             if not any(reads.search(line) for line in job if not line.lstrip().startswith("#")):
                 continue
-            if wanted in job:
-                continue
-            if "    env:" in job:
-                lines.insert(start + job.index("    env:") + 1, wanted)
-            elif "    steps:" in job:
-                steps_at = start + job.index("    steps:")
-                lines[steps_at:steps_at] = ["    env:", wanted]
+            env_at = workflow_job_level_key_index(job, "env")
+            if env_at is not None:
+                if name in workflow_job_env_keys(job, env_at):
+                    continue
+                stripped = job[env_at].strip()
+                empty = WORKFLOW_EMPTY_ENV_RE.match(stripped)
+                if empty:
+                    comment = empty.group(1)
+                    lines[start + env_at] = "    env:" + (f" {comment}" if comment else "")
+                elif workflow_block_key(stripped) != "env":
+                    raise CommandError(
+                        f"This workflow's '{job_name}' job-level 'env:' carries an inline value "
+                        f"({stripped!r}), so this tool cannot add '{name}' beneath it, and writing a "
+                        f"second 'env:' key would stop the workflow parsing. Rewrite that 'env:' as a "
+                        f"block mapping with one entry per line, then run this update again."
+                    )
+                lines.insert(start + env_at + 1, wanted)
             else:
-                raise CommandError(
-                    f"This workflow's '{job_name}' job reads env.{name}, but the job has no 'env:' "
-                    f"or 'steps:' key where this tool expects one, so it cannot define the variable "
-                    f"there. Left undefined, every condition that tests it is false and the steps "
-                    f"it guards are skipped. Add '{name}: {value}' under that job's 'env:' by hand, "
-                    f"then run this update again."
-                )
+                steps_at = workflow_job_level_key_index(job, "steps")
+                if steps_at is None:
+                    raise CommandError(
+                        f"This workflow's '{job_name}' job reads env.{name}, but the job has no 'env:' "
+                        f"or 'steps:' key where this tool expects one, so it cannot define the variable "
+                        f"there. Left undefined, every condition that tests it is false and the steps "
+                        f"it guards are skipped. Add '{name}: {value}' under that job's 'env:' by hand, "
+                        f"then run this update again."
+                    )
+                lines[start + steps_at:start + steps_at] = ["    env:", wanted]
             changed = True
     if not changed:
         return workflow_text
