@@ -249,8 +249,11 @@ SHELLCHECK_VALUE_OPTIONS = frozenset(
 # command rather than as a leading assignment on a gated one: the spellings
 # that reach the same environment put it behind `env`, or in an `export` or
 # `declare` of an earlier segment, where neither split_segment()'s
-# environment list nor the operand scan looks. See sets_shellcheck_opts().
-SHELLCHECK_OPTS_ASSIGNMENT = "SHELLCHECK_OPTS="
+# environment list nor the operand scan looks. Both of bash's assignment
+# operators are listed: `+=` appends, and appending to a variable that is not
+# set creates it, so `SHELLCHECK_OPTS+=./.env` reaches ShellCheck exactly as
+# `=` does (review on #425). See sets_shellcheck_opts().
+SHELLCHECK_OPTS_ASSIGNMENTS = ("SHELLCHECK_OPTS=", "SHELLCHECK_OPTS+=")
 
 # The option with which `env` re-splits one word into a command line of its
 # own, in the two spellings that attach the string to the option word
@@ -792,6 +795,10 @@ def sets_shellcheck_opts(token: str) -> bool:
     before the command name, so there is no shellcheck invocation to scope it
     to at the point it is read.
 
+    Bash has two assignment operators and both are matched: `+=` appends,
+    and appending to an unset variable creates it, so the append spelling
+    reaches ShellCheck's environment as surely as `=` does.
+
     `env -S` re-splits its argument into a command line of its own, which puts
     the assignment and the command it runs inside a single word; the word is
     split on whitespace and each piece tested, and the option's attached
@@ -810,7 +817,7 @@ def sets_shellcheck_opts(token: str) -> bool:
             word = word[len(option) :]
             break
     return any(
-        piece.startswith(SHELLCHECK_OPTS_ASSIGNMENT) for piece in word.split()
+        piece.startswith(SHELLCHECK_OPTS_ASSIGNMENTS) for piece in word.split()
     )
 
 

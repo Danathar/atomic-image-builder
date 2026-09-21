@@ -150,8 +150,9 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   SHELLCHECK_OPTS=./.env;` puts it in a command of its own. It is therefore
   refused wherever the word stands -- on the command, behind `env` including
   its `-i` and `-S` forms, or as an `export`, `declare` or `typeset` earlier
-  in the string -- and whatever value it carries, since nothing in this
-  repository sets it; the cost is that a word which only quotes the
+  in the string -- in both of bash's assignment spellings, since `+=` on a
+  variable that is not set creates it -- and whatever value it carries, since
+  nothing in this repository sets it; the cost is that a word which only quotes the
   assignment is refused too, so the variable is searched for by name without
   the `=`. Same finding as
   [arch-bootc#314](https://github.com/Danathar/arch-bootc/issues/314) and

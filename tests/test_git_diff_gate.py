@@ -195,6 +195,10 @@ REFUSED_COMMANDS = (
     ("export SHELLCHECK_OPTS=./.env; shellcheck contrib/aib", "exports it from a segment with no gated command in it"),
     ("declare -x SHELLCHECK_OPTS=./.env; shellcheck contrib/aib", "declares it in an earlier command of the same string"),
     ("SHELLCHECK_OPTS='-s bash' shellcheck contrib/aib", "sets the variable at all, which nothing here does"),
+    ("SHELLCHECK_OPTS+=./.env shellcheck contrib/aib", "appends to the variable, which creates it when unset"),
+    ("env SHELLCHECK_OPTS+=./.env shellcheck contrib/aib", "appends behind a wrapper"),
+    ("export SHELLCHECK_OPTS+=./.env; shellcheck contrib/aib", "appends from an earlier segment"),
+    ("declare SHELLCHECK_OPTS+=./.env; shellcheck contrib/aib", "appends in a declare of an earlier segment"),
     ("git status && shellcheck ./cosign.key", "hides behind an earlier command"),
     ("git diff 'unterminated", "cannot be parsed, so it is not let through"),
 )
@@ -611,6 +615,7 @@ class ReachTests(unittest.TestCase):
                 "SHELLCHECK_OPTS=./.env shellcheck ./ok.sh",
                 "env SHELLCHECK_OPTS=./.env shellcheck ./ok.sh",
                 "export SHELLCHECK_OPTS=./.env; shellcheck ./ok.sh",
+                "SHELLCHECK_OPTS+=./.env shellcheck ./ok.sh",
             ):
                 with self.subTest(command=command):
                     result = subprocess.run(
@@ -1365,6 +1370,9 @@ class RefusalTests(unittest.TestCase):
             "SHELLCHECK_OPTS=./.env",
             "SHELLCHECK_OPTS=",
             "SHELLCHECK_OPTS=-s bash",
+            "SHELLCHECK_OPTS+=./.env",
+            "SHELLCHECK_OPTS+=",
+            "-SSHELLCHECK_OPTS+=./.env shellcheck contrib/aib",
             "-SSHELLCHECK_OPTS=./.env shellcheck contrib/aib",
             "--split-string=SHELLCHECK_OPTS=./.env shellcheck contrib/aib",
         ):
