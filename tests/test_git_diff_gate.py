@@ -157,6 +157,10 @@ REFUSED_COMMANDS = (
     ("shellcheck $(>cosign.pub)", "writes from inside a command substitution argument"),
     ("podman images `printf x >cosign.pub`", "writes from inside a backtick argument"),
     ("hadolint $F", "hands hadolint a word built at runtime"),
+    ("PYTHONPATH=/tmp python3 maintenance_audit.py --skip-upstream", "puts a module ahead of the audit's imports"),
+    ("LD_PRELOAD=x.so shellcheck contrib/aib", "loads code before the linter runs"),
+    ("GH_HOST=other gh label list", "sends the token to another host"),
+    ("CONTAINERS_CONF=f podman ps", "re-points podman through its environment"),
     ("2>`printf err` podman images >cosign.pub", "writes past a backtick target before the name"),
     ("shellcheck contrib/aib >(cat) >cosign.pub", "carries the redirection across an output substitution"),
     ("podman images <(true) 2>cosign.pub", "writes stderr past a process substitution"),
@@ -252,6 +256,8 @@ ALLOWED_COMMANDS = (
     "echo $(podman images)",
     "for f in $(gh label list --json name -q '.[].name'); do echo $f; done",
     "gh search issues --repo x 'a $b'",
+    "FOO=1 echo x; podman images",
+    "x=1; podman images",
 )
 
 

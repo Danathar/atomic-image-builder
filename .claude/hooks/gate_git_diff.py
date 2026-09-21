@@ -733,6 +733,16 @@ def refusal(command: str) -> str | None:
                     "(2>&1, >&2, an input redirection, and a redirection on a command no "
                     "allow rule covers are not refused)"
                 )
+            if prefix and names:
+                return (
+                    f"{names[0]}= before `{' '.join(prefix)}` is an environment the "
+                    "command runs under, and for these commands that changes what runs "
+                    "or where it goes -- PYTHONPATH= puts a module of its own ahead of "
+                    "the audit's imports, LD_PRELOAD= loads code before a line is "
+                    "linted, GH_HOST= sends the token elsewhere, CONTAINERS_CONF= "
+                    "re-points podman; run the command without the assignment (a git "
+                    "invocation is not affected by this rule)"
+                )
             continue
         for token in segment:
             if token.startswith(PROCESS_SUBSTITUTION):
