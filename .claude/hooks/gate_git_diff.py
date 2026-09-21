@@ -709,15 +709,17 @@ def refusal(command: str) -> str | None:
         names, command_name, arguments = split_segment(segment)
         if command_name != "git":
             prefix = gated_prefix(segment)
-            if prefix and any(
-                token.startswith(PROCESS_SUBSTITUTION) for token in segment
+            if prefix and (
+                any(token.startswith(PROCESS_SUBSTITUTION) for token in segment)
+                or any(expands_at_runtime(twin) for twin in twins)
             ):
                 return (
-                    f"a process substitution in `{' '.join(prefix)}` runs the command "
-                    "inside it as part of a string the allow rule approved on its prefix "
-                    "alone, and that inner command is held to no rule -- `podman images "
-                    ">(cat >cosign.pub)` truncates the file while podman prints as usual; "
-                    "write the inner command as a command of its own"
+                    f"a substitution -- $(...), a backtick, <(...) or >(...) -- in "
+                    f"`{' '.join(prefix)}` runs the command inside it as part of a string "
+                    "the allow rule approved on its prefix alone, and that inner command "
+                    "is held to no rule: `podman images >(cat >cosign.pub)` and "
+                    "`shellcheck $(>cosign.pub)` truncate the file while the command "
+                    "prints as usual; write the inner command as a command of its own"
                 )
             redirection = writing_redirection(segment) if prefix else None
             if prefix and redirection:
