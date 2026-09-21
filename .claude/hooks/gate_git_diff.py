@@ -461,7 +461,8 @@ def segments(tokens: list[str], masked: list[str]) -> list[tuple[list[str], list
     with the `$` still in place, so `>$(printf cosign.pub) git diff HEAD`
     is one command whose redirection names a target built at runtime, and
     a split that ended the command at the `(` had put that redirection in a
-    segment with no git in it (review on #414).
+    segment with no git in it (review on #414). A `<(...)` or `>(...)` is
+    nested the same way, with its opening token kept in the outer command.
 
     Each segment is returned as (words, twins): the tokens of the command
     and their masked copies in the same order, so a check that needs to
@@ -472,6 +473,17 @@ def segments(tokens: list[str], masked: list[str]) -> list[tuple[list[str], list
     outer: list[tuple[list[str], list[str]]] = []
     for token, twin in zip(tokens, masked, strict=True):
         if twin == "(" and found[-1][0] and found[-1][0][-1].endswith("$"):
+            outer.append(found.pop())
+            found.append(([], []))
+            continue
+        if twin in PROCESS_SUBSTITUTION:
+            # A process substitution is a nested command too, and the `<(`
+            # stays in the outer command as the operand it becomes, so
+            # `shellcheck <(printf x) >cosign.pub` is one shellcheck command
+            # whose redirection is its own (review on #420), and the `<(`
+            # refusal for a git word still sees its token.
+            found[-1][0].append(token)
+            found[-1][1].append(twin)
             outer.append(found.pop())
             found.append(([], []))
             continue

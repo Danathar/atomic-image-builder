@@ -145,6 +145,9 @@ REFUSED_COMMANDS = (
     ("shellcheck $(git ls-files '*.sh') >cosign.pub", "carries the redirection across a substitution"),
     ("echo $(podman images >cosign.pub)", "writes from inside a substitution"),
     ("/usr/bin/shellcheck contrib/aib >cosign.pub", "names the linter by path"),
+    ("shellcheck <(printf x) >cosign.pub", "carries the redirection across a process substitution"),
+    ("shellcheck contrib/aib >(cat) >cosign.pub", "carries the redirection across an output substitution"),
+    ("podman images <(true) 2>cosign.pub", "writes stderr past a process substitution"),
     ("git diff 'unterminated", "cannot be parsed, so it is not let through"),
 )
 
@@ -226,6 +229,8 @@ ALLOWED_COMMANDS = (
     ">out echo x; podman images",
     "shellcheck contrib/aib; { hadolint Containerfile; } >cosign.pub",
     "(shellcheck contrib/aib) >cosign.pub",
+    "cat <(shellcheck contrib/aib) >out",
+    "diff <(podman images) <(podman ps)",
 )
 
 
