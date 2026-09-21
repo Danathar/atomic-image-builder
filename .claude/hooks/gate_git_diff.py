@@ -37,6 +37,20 @@ an argument to Bash, and every form above matches the allowed prefix, so none
 of them raises a prompt. This hook is what makes the deny rules true of the
 whole tool surface rather than of one tool.
 
+The redirection is not git's alone. Thirteen other allow rows in
+`.claude/settings.json` carry a trailing `:*` -- "this command with any
+arguments" -- and an output redirection is part of the string that rule
+matches, so `shellcheck contrib/aib >cosign.pub` truncated the trust anchor
+before a line was linted (bash opens the target first, so the file is
+emptied even when the command then fails) and `hadolint Containerfile
+>.claude/settings.json` overwrote the file holding these rules, both with no
+prompt. Those commands are named in GATED_PREFIXES, and an output
+redirection inside any of them is refused the way one inside a git
+invocation is; descriptor forms, input redirections, pipes and a command no
+allow rule covers are left alone. The rows with no `:*` (`ruff check`,
+`actionlint`, the exact test commands) need no entry: a redirection makes
+the string match none of them and Claude Code prompts.
+
 It runs on `PreToolUse` for `Bash` and exits 2 -- the blocking code, whose
 stderr goes back to the model as the reason -- when a `git` invocation in the
 command carries one of those arguments. Anything else exits 0 and is left
@@ -110,6 +124,46 @@ REFUSED_ENVIRONMENT = (
 # them so a `git` call after `&&`, in a pipeline or inside `$(...)` is read as
 # a command rather than as arguments to the first one.
 OPERATORS = frozenset({"&&", "||", ";", "|", "&", "(", ")", "{", "}", "\n"})
+
+# The allow rows in `.claude/settings.json` that carry a trailing `:*`, other
+# than git's, which refusal() covers above: each is a command prefix the
+# permission layer approves with any arguments after it, and a shell output
+# redirection is part of "any arguments". An output redirection inside one of
+# these commands is refused for the reason it is refused inside a git one --
+# the shell opens the target before the command runs. The rows with no `:*`
+# (`ruff check`, `actionlint`, `python3 -m unittest discover -s tests`, ...)
+# are absent on purpose: a redirection makes the string match none of them and
+# Claude Code prompts. tests/test_git_diff_gate.py derives this list from the
+# settings file rather than restating it, so a rule added there fails until it
+# is listed here. None of these commands takes a flag that names a file to
+# write (shellcheck and hadolint report to stdout, `just --fmt --check` only
+# checks, `maintenance_audit.py` has no output option), so the redirection is
+# the whole of the write primitive on this list.
+GATED_PREFIXES = (
+    ("shellcheck",),
+    ("hadolint",),
+    ("python3", "maintenance_audit.py", "--skip-upstream"),
+    ("just", "--fmt", "--check"),
+    ("skopeo", "inspect"),
+    ("podman", "ps"),
+    ("podman", "logs"),
+    ("podman", "inspect"),
+    ("podman", "images"),
+    ("podman", "image", "exists"),
+    ("gh", "label", "list"),
+    ("gh", "search", "issues"),
+    ("gh", "search", "prs"),
+)
+
+# Shell words that stand before the name of the command they run, which a
+# leading-words match has to step over the way it steps over an assignment:
+# `time shellcheck x >out` and `command shellcheck x >out` are shellcheck's
+# redirection. A wrapper's own options are not modelled, so `env -i shellcheck`
+# is not matched; it matches no allow rule either, and prompts on its own.
+COMMAND_WRAPPERS = frozenset(
+    {"time", "command", "builtin", "exec", "env", "nohup", "nice"}
+)
+
 
 VERB_PREFIXES = ("$(", "(", "`", "<(", ">(")
 
@@ -341,6 +395,33 @@ def mask_quotes(command: str) -> str:
     return "".join(masked)
 
 
+def strip_comments(command: str) -> str:
+    """The command with every shell comment removed.
+
+    A `#` that begins a word after whitespace (or the start of the string)
+    starts a comment bash drops through the end of the line, so `shellcheck
+    contrib/aib # output > file` opens nothing and must not be refused for
+    the `>` in the comment (review on aurora-zfs-simple#211, the bash twin
+    of this hook). The spans are found on the quote-masked copy, where a
+    quoted `#` is a `Q`, and cut from the command itself; tokenize() is then
+    handed a string with no comment in it, and its `commenters = ""` still
+    holds for the `#` this leaves in place: one inside a word (`HEAD^#x`),
+    which is a character of the word, and one straight after an operator
+    (`;#`), which is kept as a word and can only over-refuse.
+    """
+    masked = mask_quotes(command)
+    kept: list[str] = []
+    index = 0
+    while index < len(command):
+        if masked[index] == "#" and (index == 0 or masked[index - 1] in " \t\n"):
+            end = masked.find("\n", index)
+            index = len(command) if end == -1 else end
+            continue
+        kept.append(command[index])
+        index += 1
+    return "".join(kept)
+
+
 def tokenize(command: str) -> list[str]:
     """The command's words and shell operators, or a failure.
 
@@ -407,7 +488,8 @@ def segments(tokens: list[str], masked: list[str]) -> list[tuple[list[str], list
     with the `$` still in place, so `>$(printf cosign.pub) git diff HEAD`
     is one command whose redirection names a target built at runtime, and
     a split that ended the command at the `(` had put that redirection in a
-    segment with no git in it (review on #414).
+    segment with no git in it (review on #414). A `<(...)` or `>(...)` is
+    nested the same way, with its opening token kept in the outer command.
 
     Each segment is returned as (words, twins): the tokens of the command
     and their masked copies in the same order, so a check that needs to
@@ -418,6 +500,17 @@ def segments(tokens: list[str], masked: list[str]) -> list[tuple[list[str], list
     outer: list[tuple[list[str], list[str]]] = []
     for token, twin in zip(tokens, masked, strict=True):
         if twin == "(" and found[-1][0] and found[-1][0][-1].endswith("$"):
+            outer.append(found.pop())
+            found.append(([], []))
+            continue
+        if twin in PROCESS_SUBSTITUTION:
+            # A process substitution is a nested command too, and the `<(`
+            # stays in the outer command as the operand it becomes, so
+            # `shellcheck <(printf x) >cosign.pub` is one shellcheck command
+            # whose redirection is its own (review on #420), and the `<(`
+            # refusal for a git word still sees its token.
+            found[-1][0].append(token)
+            found[-1][1].append(twin)
             outer.append(found.pop())
             found.append(([], []))
             continue
@@ -447,6 +540,25 @@ def assignment(token: str) -> str | None:
     return name if "=" in bare(token) and name.isidentifier() else None
 
 
+def after_redirection(segment: list[str], index: int) -> int:
+    """The index just past the redirection whose operator is at `index`.
+
+    A redirection is its operator and the token after it, the target. A
+    target that opens a backtick substitution runs to the token that closes
+    it, since shlex splits the substitution's words apart: `` >`printf
+    cosign.pub` shellcheck contrib/aib `` still finds its name at shellcheck
+    (review on #420, for split_segment() before it).
+    """
+    index += 1  # the operator
+    if index < len(segment):
+        target = segment[index]
+        index += 1  # the target
+        if target.startswith("`") and not (len(target) > 1 and target.endswith("`")):
+            while index < len(segment) and not segment[index - 1].endswith("`"):
+                index += 1
+    return index
+
+
 def split_segment(segment: list[str]) -> tuple[list[str], str, list[str]]:
     """A segment as (environment names, command, arguments).
 
@@ -473,15 +585,7 @@ def split_segment(segment: list[str]) -> tuple[list[str], str, list[str]]:
             index += 1
             continue
         if REDIRECTION.match(token):
-            index += 1  # the operator
-            if index < len(segment):
-                target = segment[index]
-                index += 1  # the target
-                if target.startswith("`") and not (
-                    len(target) > 1 and target.endswith("`")
-                ):
-                    while index < len(segment) and not segment[index - 1].endswith("`"):
-                        index += 1
+            index = after_redirection(segment, index)
             continue
         if (
             DESCRIPTOR.match(token)
@@ -492,6 +596,85 @@ def split_segment(segment: list[str]) -> tuple[list[str], str, list[str]]:
             continue
         return names, bare(token).rsplit("/", 1)[-1], segment[index + 1 :]
     return names, "", []
+
+
+def command_words(segment: list[str]) -> tuple[list[str], bool]:
+    """The words of a segment that the command receives, in order.
+
+    A redirection -- its operator, its target and a descriptor written before
+    it -- is the shell's, not the command's, and bash lets it stand anywhere
+    in the simple command, so `>cosign.pub shellcheck x` and `shellcheck
+    >cosign.pub x` both come back as `['shellcheck', 'x']`. A leading
+    assignment and a leading wrapper word (`time`, `command`, `env`) are
+    stepped over too, since neither is part of the prefix an allow rule
+    matches. The first word left is the command's name, with a leading path
+    stripped the way split_segment() strips it. The second value says
+    whether a wrapper was stepped over: its own options come before the name
+    it runs (`command -p shellcheck x`), so gated_prefix() then looks for the
+    prefix at every later word rather than only the first.
+    """
+    words: list[str] = []
+    wrapped = False
+    index = 0
+    while index < len(segment):
+        token = segment[index]
+        if REDIRECTION.match(token):
+            index = after_redirection(segment, index)
+            continue
+        if (
+            DESCRIPTOR.match(token)
+            and index + 1 < len(segment)
+            and REDIRECTION.match(segment[index + 1])
+        ):
+            index += 1  # the descriptor; the operator is next
+            continue
+        if token.startswith(PROCESS_SUBSTITUTION):
+            index += 1  # the substitution's opening; its body is a segment of its own
+            continue
+        if not words and (
+            assignment(token) is not None or bare(token) in COMMAND_WRAPPERS
+        ):
+            wrapped = wrapped or bare(token) in COMMAND_WRAPPERS
+            index += 1
+            continue
+        words.append(bare(token).rsplit("/", 1)[-1] if not words else token)
+        index += 1
+    return words, wrapped
+
+
+def gated_prefix(segment: list[str]) -> tuple[str, ...] | None:
+    """The GATED_PREFIXES entry this segment's leading words match, or None.
+
+    Behind a wrapper the name may stand after the wrapper's own options
+    (`command -p shellcheck x >cosign.pub`), so every later word is tried as
+    the start; without one, only the first word names the command.
+    """
+    words, wrapped = command_words(segment)
+    starts = range(len(words)) if wrapped else range(min(len(words), 1))
+    for start in starts:
+        candidates = [bare(words[start]).rsplit("/", 1)[-1], *words[start + 1 :]]
+        for prefix in GATED_PREFIXES:
+            if tuple(candidates[: len(prefix)]) == prefix:
+                return prefix
+    return None
+
+
+def writing_redirection(segment: list[str]) -> str | None:
+    """The first redirection in `segment` that opens a path for writing,
+    spelled as typed with its descriptor, or None."""
+    for index, token in enumerate(segment):
+        if not REDIRECTION.match(token):
+            continue
+        target = segment[index + 1] if index + 1 < len(segment) else ""
+        if not redirection_writes_a_path(token, target):
+            continue
+        descriptor = (
+            segment[index - 1]
+            if index > 0 and DESCRIPTOR.match(segment[index - 1])
+            else ""
+        )
+        return f"{descriptor}{token}{target}"
+    return None
 
 
 def global_refusal(arguments: list[str]) -> str | None:
@@ -511,6 +694,7 @@ def global_refusal(arguments: list[str]) -> str | None:
 def refusal(command: str) -> str | None:
     """Why this command is blocked, or None when it is left alone."""
     try:
+        command = strip_comments(command)
         tokens = tokenize(command)
         masked = tokenize(mask_quotes(command))
     except ValueError:
@@ -524,6 +708,41 @@ def refusal(command: str) -> str | None:
     for segment, twins in segments(tokens, masked):
         names, command_name, arguments = split_segment(segment)
         if command_name != "git":
+            prefix = gated_prefix(segment)
+            if prefix and (
+                any(token.startswith(PROCESS_SUBSTITUTION) for token in segment)
+                or any(expands_at_runtime(twin) for twin in twins)
+            ):
+                return (
+                    f"a substitution -- $(...), a backtick, <(...) or >(...) -- in "
+                    f"`{' '.join(prefix)}` runs the command inside it as part of a string "
+                    "the allow rule approved on its prefix alone, and that inner command "
+                    "is held to no rule: `podman images >(cat >cosign.pub)` and "
+                    "`shellcheck $(>cosign.pub)` truncate the file while the command "
+                    "prints as usual; write the inner command as a command of its own"
+                )
+            redirection = writing_redirection(segment) if prefix else None
+            if prefix and redirection:
+                return (
+                    f"{redirection} makes the shell open a file for writing before "
+                    f"`{' '.join(prefix)}` runs, which truncates it whatever the command "
+                    "then prints; the allow rule for that command matches its prefix and "
+                    "the redirection is the rest of the string, so nothing else would "
+                    "prompt -- it is the same write this hook refuses for `git diff HEAD "
+                    ">cosign.pub`. These commands print to stdout, so read that or pipe it "
+                    "(2>&1, >&2, an input redirection, and a redirection on a command no "
+                    "allow rule covers are not refused)"
+                )
+            if prefix and names:
+                return (
+                    f"{names[0]}= before `{' '.join(prefix)}` is an environment the "
+                    "command runs under, and for these commands that changes what runs "
+                    "or where it goes -- PYTHONPATH= puts a module of its own ahead of "
+                    "the audit's imports, LD_PRELOAD= loads code before a line is "
+                    "linted, GH_HOST= sends the token elsewhere, CONTAINERS_CONF= "
+                    "re-points podman; run the command without the assignment (a git "
+                    "invocation is not affected by this rule)"
+                )
             continue
         for token in segment:
             if token.startswith(PROCESS_SUBSTITUTION):
