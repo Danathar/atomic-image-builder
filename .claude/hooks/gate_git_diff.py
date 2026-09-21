@@ -70,6 +70,21 @@ brace or an unquoted leading `~` is refused instead, since `{x,.env}` is two
 words to bash and `~` is `$HOME`, and neither is a spelling any lint run
 here needs.
 
+Not every operand arrives in the argv, either. `SHELLCHECK_OPTS` is not a
+list of options despite the name: ShellCheck splits it and prepends it to its
+own argument list, operands included, so `SHELLCHECK_OPTS=./.env shellcheck
+contrib/aib` lints the `.env` as well and prints its lines back while the
+argv the operand scan reads names only `contrib/aib`. The assignment stands
+*before* the command name, so a refusal scoped to a shellcheck invocation
+catches only the leading spelling: `env SHELLCHECK_OPTS=./.env shellcheck
+contrib/aib` hides it behind a wrapper, where split_segment() never looks,
+and `export SHELLCHECK_OPTS=./.env; shellcheck contrib/aib` puts it in a
+segment of its own with no gated command in it at all. So it is refused
+wherever the word stands and whatever value it carries -- nothing in this
+repository sets the variable, which is what lets the rule be unconditional
+rather than a judgement about which values are harmless. See
+sets_shellcheck_opts().
+
 It runs on `PreToolUse` for `Bash` and exits 2 -- the blocking code, whose
 stderr goes back to the model as the reason -- when a `git` invocation in the
 command carries one of those arguments. Anything else exits 0 and is left
@@ -82,7 +97,7 @@ as the stricter test and is not one, because it folds `..` away before
 comparing -- a sibling checkout resolves to an allowed prefix while still
 naming a denied file.
 
-Two limits of the shellcheck scan, stated rather than implied. A glob is
+Three limits of the shellcheck scan, stated rather than implied. A glob is
 expanded against the directory this hook runs in, which is the session's
 working directory rather than the checkout root, and against the files that
 exist when it runs; a file created between the check and the command is the
@@ -90,7 +105,11 @@ one case where the words bash builds are not the words checked here. And a
 `shellcheck -x` run whose target names an outside file in a `source`
 directive reads that file on the operands' behalf: the operands are checked,
 what the tool then opens for them is not. `-x` is load-bearing in this
-repository's own lint command, so it is not refused.
+repository's own lint command, so it is not refused. And the `SHELLCHECK_OPTS`
+rule reads the word rather than the command it belongs to, so a word that
+merely quotes the assignment is refused with one that makes it: search for
+the variable by its name alone (`grep -n SHELLCHECK_OPTS docs/SECURITY-AI.md`)
+rather than with the `=` attached.
 """
 
 from __future__ import annotations
@@ -222,6 +241,23 @@ SHELLCHECK_VALUE_OPTIONS = frozenset(
         "--wiki-link-count",
     }
 )
+
+# The assignment that hands ShellCheck an operand through its environment
+# instead of its argv. ShellCheck splits `SHELLCHECK_OPTS` on whitespace and
+# prepends the pieces to its own argument list, and an operand among them is
+# linted and printed back like any other. Matched as a word anywhere in the
+# command rather than as a leading assignment on a gated one: the spellings
+# that reach the same environment put it behind `env`, or in an `export` or
+# `declare` of an earlier segment, where neither split_segment()'s
+# environment list nor the operand scan looks. See sets_shellcheck_opts().
+SHELLCHECK_OPTS_ASSIGNMENT = "SHELLCHECK_OPTS="
+
+# The option with which `env` re-splits one word into a command line of its
+# own, in the two spellings that attach the string to the option word
+# (`env -S'SHELLCHECK_OPTS=./.env shellcheck x'`). The detached spellings need
+# no entry: the string is then a word of its own, and sets_shellcheck_opts()
+# splits every word it is given.
+ENV_SPLIT_STRING = ("--split-string=", "-S")
 
 # The file shapes `.claude/settings.json` denies the Read tool, as basename
 # patterns. Staying inside the checkout is not enough on its own: `cosign.key`
@@ -743,6 +779,41 @@ def gated_prefix(segment: list[str]) -> tuple[str, ...] | None:
     return None
 
 
+def sets_shellcheck_opts(token: str) -> bool:
+    """Does this word assign `SHELLCHECK_OPTS`?
+
+    Every spelling that puts the variable in ShellCheck's environment writes
+    the assignment as a word: on the gated command itself
+    (`SHELLCHECK_OPTS=x shellcheck ...`), as an argument to a wrapper
+    (`env SHELLCHECK_OPTS=x shellcheck ...`, with or without `-i`), or in an
+    earlier command of the same string (`export SHELLCHECK_OPTS=x; ...`, and
+    `declare` or `typeset` where the tokenizer sees them). So the test is the
+    word, and every word of the command is tested -- the assignment stands
+    before the command name, so there is no shellcheck invocation to scope it
+    to at the point it is read.
+
+    `env -S` re-splits its argument into a command line of its own, which puts
+    the assignment and the command it runs inside a single word; the word is
+    split on whitespace and each piece tested, and the option's attached
+    spellings are stripped from the front first.
+
+    The token is the word with its quotes removed, so `SHELLCHECK_OPTS='-s
+    bash'` and `env 'SHELLCHECK_OPTS'=./.env` are found as readily as the bare
+    form -- the second is not an assignment to bash at all, but `env` reads
+    the argv string it becomes as one. A word that only quotes the assignment
+    without making it (`grep 'SHELLCHECK_OPTS=' docs/SECURITY-AI.md`) is
+    refused with the rest; the variable can be searched for by name alone.
+    """
+    word = bare(token)
+    for option in ENV_SPLIT_STRING:
+        if word.startswith(option):
+            word = word[len(option) :]
+            break
+    return any(
+        piece.startswith(SHELLCHECK_OPTS_ASSIGNMENT) for piece in word.split()
+    )
+
+
 def denied_read_shape(path: str) -> bool:
     """Does this path's basename carry one of the Read(...) deny shapes?"""
     return any(
@@ -934,6 +1005,24 @@ def refusal(command: str) -> str | None:
         # The masked copy split differently, so which tokens are separators
         # cannot be told; refused rather than guessed at.
         return "the command's quoting cannot be matched to its words, so its git arguments cannot be checked"
+    for token in tokens:
+        # Read before the segments are walked, because the word need not be
+        # in a segment that names a gated command at all: an `export` in an
+        # earlier segment reaches the later shellcheck just as a leading
+        # assignment does.
+        if sets_shellcheck_opts(token):
+            return (
+                "SHELLCHECK_OPTS is not a list of options despite the name -- shellcheck "
+                "splits it and prepends it to its own argument list, operands included, so "
+                "SHELLCHECK_OPTS=./.env in front of a lint run lints the .env as well and "
+                "prints its lines back, past the Read(./cosign.key), Read(./.env) and "
+                "Read(**/*.pem) deny rules in .claude/settings.json and with no such path "
+                "in the argv the operand scan reads; the assignment stands before the "
+                "command name, so it is refused wherever it is written -- on the command, "
+                "behind env, or as an export or declare in an earlier command of the same "
+                "string -- and whatever value it carries, since nothing in this repository "
+                "sets the variable; pass shellcheck's options after its name instead"
+            )
     for segment, twins in segments(tokens, masked):
         names, command_name, arguments = split_segment(segment)
         if command_name != "git":

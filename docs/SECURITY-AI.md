@@ -139,7 +139,21 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   `source` directive reads that file on the operands' behalf. The target of
   an input redirection is checked the same way, since a `-` operand makes the
   linter read standard input and `shellcheck - < .env` prints the file back
-  exactly as naming it would; only `/dev/null` is exempt. Same finding as
+  exactly as naming it would; only `/dev/null` is exempt. Not every operand
+  arrives in the argv, either: `SHELLCHECK_OPTS` is not a list of options
+  despite the name -- the linter splits it and prepends it to its own argument
+  list, operands included, so `SHELLCHECK_OPTS=./.env` in front of a lint run
+  lints the `.env` as well and prints its lines back, while the argv the
+  operand scan reads names only the script. The assignment stands before the
+  command name, so the refusal cannot be scoped to the invocation it feeds:
+  `env SHELLCHECK_OPTS=./.env` hides it behind a wrapper and `export
+  SHELLCHECK_OPTS=./.env;` puts it in a command of its own. It is therefore
+  refused wherever the word stands -- on the command, behind `env` including
+  its `-i` and `-S` forms, or as an `export`, `declare` or `typeset` earlier
+  in the string -- and whatever value it carries, since nothing in this
+  repository sets it; the cost is that a word which only quotes the
+  assignment is refused too, so the variable is searched for by name without
+  the `=`. Same finding as
   [arch-bootc#314](https://github.com/Danathar/arch-bootc/issues/314) and
   [aurora-zfs-simple#206](https://github.com/Danathar/aurora-zfs-simple/issues/206).
 - `maintenance_audit.py` fails when a workflow action is not covered by the
