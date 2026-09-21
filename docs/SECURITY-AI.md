@@ -116,6 +116,32 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   settings file, so a `:*` row added there fails until the hook lists it, and
   shows the truncation in a throwaway directory first. Same fix as
   [zfs-kinoite-complex#224](https://github.com/Danathar/zfs-kinoite-complex/pull/224).
+  The *read* is not git's alone either. The linter prints the source line
+  above every diagnostic it reports, so pointing it at `./.env` printed back
+  every unexported `NAME=value` line of a file `Read(./.env)` denies -- values
+  included -- and pointing it at `./cosign.key` printed the key's `BEGIN` line
+  and its base64 body, because a base64 line ending in `=` is an assignment to
+  the linter and earns an `SC2034` with the line above it. No permission
+  pattern closes that, since those match by prefix: a rule naming a directory
+  of scripts still matches a command that appends a path in someone's home
+  directory. So the same hook gives such an invocation an operand scan: every
+  operand must stay inside the checkout and must not carry one of the shapes
+  the `Read(...)` rules name (`cosign.key`, `.env`, `.env.*`, `*.pem`,
+  `id_rsa`, `id_ed25519`), matched on the basename wherever the file sits, and
+  a word the scan does not recognise as an option is checked as a path rather
+  than waved through. A glob is expanded and each file it names is checked,
+  which is what keeps the lint command CONTRIBUTING.md and the pull-request
+  template name -- it ends in a glob over the end-to-end suites -- working; a
+  brace or an unquoted leading `~` is refused instead, because `{x,.env}` is
+  two words to bash and `~` is a home directory. Two limits are stated in the
+  hook rather than implied: the glob is expanded against the files that exist
+  when the hook runs, and an `-x` run whose target names an outside file in a
+  `source` directive reads that file on the operands' behalf. The target of
+  an input redirection is checked the same way, since a `-` operand makes the
+  linter read standard input and `shellcheck - < .env` prints the file back
+  exactly as naming it would; only `/dev/null` is exempt. Same finding as
+  [arch-bootc#314](https://github.com/Danathar/arch-bootc/issues/314) and
+  [aurora-zfs-simple#206](https://github.com/Danathar/aurora-zfs-simple/issues/206).
 - `maintenance_audit.py` fails when a workflow action is not covered by the
   pin tables, or when a pinned SHA disagrees with them. That check is what
   stops an unpinned action reaching generated repositories.

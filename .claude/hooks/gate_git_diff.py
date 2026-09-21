@@ -51,6 +51,25 @@ allow rule covers are left alone. The rows with no `:*` (`ruff check`,
 `actionlint`, the exact test commands) need no entry: a redirection makes
 the string match none of them and Claude Code prompts.
 
+Nor is the *read* git's alone. `Bash(shellcheck:*)` is allowed outright too,
+and ShellCheck prints the **source line** above every diagnostic it reports,
+so pointing it at a denied file prints that file back: `shellcheck ./.env`
+prints every unexported `NAME=value` line, values included, and `shellcheck
+./cosign.key` prints the key's `-----BEGIN-----` line and its base64 body,
+because a line of base64 ending in `=` is an assignment to ShellCheck and
+each one earns an `SC2034` with the line above it. It is a lossy `cat`, and
+for the shapes the deny rules name the loss is nothing that matters. No
+permission pattern closes it, because those match by prefix:
+`Bash(shellcheck tests/*)` still matches `shellcheck tests/x.sh
+/home/me/.aws/credentials`. So a shellcheck invocation gets an operand scan
+of its own (see shellcheck_refusal()): every operand must stay inside the
+checkout and must not carry one of the `Read(...)` deny shapes. A glob is
+expanded here and each file it names is checked, which is what keeps this
+repository's own lint command -- it ends in `tests/e2e/*.sh` -- working; a
+brace or an unquoted leading `~` is refused instead, since `{x,.env}` is two
+words to bash and `~` is `$HOME`, and neither is a spelling any lint run
+here needs.
+
 It runs on `PreToolUse` for `Bash` and exits 2 -- the blocking code, whose
 stderr goes back to the model as the reason -- when a `git` invocation in the
 command carries one of those arguments. Anything else exits 0 and is left
@@ -62,10 +81,22 @@ Resolving them with `realpath` and comparing against the checkout root reads
 as the stricter test and is not one, because it folds `..` away before
 comparing -- a sibling checkout resolves to an allowed prefix while still
 naming a denied file.
+
+Two limits of the shellcheck scan, stated rather than implied. A glob is
+expanded against the directory this hook runs in, which is the session's
+working directory rather than the checkout root, and against the files that
+exist when it runs; a file created between the check and the command is the
+one case where the words bash builds are not the words checked here. And a
+`shellcheck -x` run whose target names an outside file in a `source`
+directive reads that file on the operands' behalf: the operands are checked,
+what the tool then opens for them is not. `-x` is load-bearing in this
+repository's own lint command, so it is not refused.
 """
 
 from __future__ import annotations
 
+import fnmatch
+import glob
 import json
 import re
 import shlex
@@ -163,6 +194,59 @@ GATED_PREFIXES = (
 COMMAND_WRAPPERS = frozenset(
     {"time", "command", "builtin", "exec", "env", "nohup", "nice"}
 )
+
+# ShellCheck's options that take their value as the *next* word, in both
+# spellings. The attached forms (`-sbash`, `--shell=bash`) need no entry:
+# each is one dash-prefixed word and the operand scan steps over it with the
+# other options. `--rcfile` is absent on purpose -- it only accepts the
+# attached `--rcfile=FILE` form -- and so is `-C`, whose argument is optional
+# and must be attached, so `shellcheck -C always` is the flag plus a file
+# named `always`, which is how ShellCheck reads it too.
+SHELLCHECK_VALUE_OPTIONS = frozenset(
+    {
+        "-i",
+        "-e",
+        "-f",
+        "-o",
+        "-P",
+        "-s",
+        "-S",
+        "-W",
+        "--include",
+        "--exclude",
+        "--format",
+        "--enable",
+        "--source-path",
+        "--shell",
+        "--severity",
+        "--wiki-link-count",
+    }
+)
+
+# The file shapes `.claude/settings.json` denies the Read tool, as basename
+# patterns. Staying inside the checkout is not enough on its own: `cosign.key`
+# and a `.env` live there, and they are the files those rules exist for. The
+# match is on the basename wherever the file sits, which is wider than
+# `Read(./cosign.key)`; a `cosign.key` one directory down is the same secret.
+# tests/test_git_diff_gate.py derives this list from the settings file, so a
+# `Read(...)` rule added there fails until it is listed here.
+DENIED_READ_SHAPES = (
+    "cosign.key",
+    ".env",
+    ".env.*",
+    "*.pem",
+    "id_rsa",
+    "id_ed25519",
+)
+
+# The characters that make bash expand a word into filenames. Unlike a brace
+# or a `~`, a glob is expanded here rather than refused: this repository's own
+# lint command ends in `tests/e2e/*.sh`, and refusing it would mean the check
+# CONTRIBUTING.md and the pull-request template both name could not be run.
+# Python's glob reads `*`, `?` and `[...]` the way bash does with its default
+# options -- no `dotglob`, no `globstar`, no `extglob` -- so the files it
+# names are the words bash would hand ShellCheck.
+GLOB = frozenset("*?[")
 
 
 VERB_PREFIXES = ("$(", "(", "`", "<(", ">(")
@@ -659,6 +743,151 @@ def gated_prefix(segment: list[str]) -> tuple[str, ...] | None:
     return None
 
 
+def denied_read_shape(path: str) -> bool:
+    """Does this path's basename carry one of the Read(...) deny shapes?"""
+    return any(
+        fnmatch.fnmatchcase(path.rsplit("/", 1)[-1], shape)
+        for shape in DENIED_READ_SHAPES
+    )
+
+
+def shellcheck_arguments(
+    segment: list[str], twins: list[str]
+) -> list[tuple[str, str]]:
+    """The words a `shellcheck` invocation receives, each with its twin.
+
+    The walk is command_words()'s: a redirection, a descriptor written before
+    one, a leading assignment and a leading wrapper word belong to the shell
+    rather than to the command. Everything after the word naming shellcheck
+    is returned, which is where gated_prefix() found the name -- behind a
+    wrapper that may be its own options (`command -p shellcheck x`). The
+    masked twin travels with the word so a check that has to know what bash
+    would quote can read it: shlex hands back the same `*.sh` for `'*.sh'`.
+    """
+    words: list[tuple[str, str]] = []
+    index = 0
+    while index < len(segment):
+        token = segment[index]
+        if REDIRECTION.match(token):
+            index = after_redirection(segment, index)
+            continue
+        if (
+            DESCRIPTOR.match(token)
+            and index + 1 < len(segment)
+            and REDIRECTION.match(segment[index + 1])
+        ):
+            index += 1  # the descriptor; the operator is next
+            continue
+        if token.startswith(PROCESS_SUBSTITUTION):
+            index += 1  # the substitution's opening; its body is a segment of its own
+            continue
+        if not words and (
+            assignment(token) is not None or bare(token) in COMMAND_WRAPPERS
+        ):
+            index += 1
+            continue
+        words.append((token, twins[index]))
+        index += 1
+    for position, (token, _) in enumerate(words):
+        if bare(token).rsplit("/", 1)[-1] == "shellcheck":
+            return words[position + 1 :]
+    return []
+
+
+def reading_redirections(
+    segment: list[str], twins: list[str]
+) -> list[tuple[str, str]]:
+    """The targets of the redirections in `segment` that open a path for
+    reading, each with its masked twin.
+
+    Only a bare `<` (with or without a descriptor: `<f`, `0<f`) opens a
+    path. `<<` reads a here-document, `<<<` a here-string, and `<&` and `<>`
+    duplicate or open read-write, which writing_redirection() already
+    refuses. A here-string's word is content, not a path, and cannot name a
+    file without a substitution, which is refused before this runs.
+    """
+    targets: list[tuple[str, str]] = []
+    for index, token in enumerate(segment):
+        if token != "<" or index + 1 >= len(segment):
+            continue
+        targets.append((segment[index + 1], twins[index + 1]))
+    return targets
+
+
+def shellcheck_refusal(segment: list[str], twins: list[str]) -> str | None:
+    """Why this shellcheck invocation must not run, or None.
+
+    Everything here is refused by default: a word the scan does not recognise
+    as an option is treated as a path and checked, so an option this list
+    forgets costs a refused lint run rather than an unwatched read.
+
+    A `-` operand makes ShellCheck read standard input, and `shellcheck - <
+    .env` prints the file back exactly as `shellcheck ./.env` would, so the
+    target of an input redirection is checked as an operand: it must stay
+    inside the checkout, carry none of the deny shapes, and be spelled out
+    (no brace, no leading `~`, no glob -- bash refuses an ambiguous redirect
+    itself, but a glob naming exactly one denied file is not ambiguous).
+    """
+    for target, twin in reading_redirections(segment, twins):
+        if target == "/dev/null":
+            continue  # nothing to print back; `</dev/null` is how a session says "no stdin"
+        if (
+            brace_would_expand(target)
+            or twin.startswith("~")
+            or any(char in twin for char in GLOB)
+            or unsafe_operand(target)
+            or denied_read_shape(target)
+        ):
+            return (
+                f"<{target} feeds shellcheck a file on standard input, and shellcheck "
+                "prints the source line above every diagnostic it reports, so a "
+                "redirection from a file that leaves the checkout, or that carries "
+                "one of the shapes the Read(./cosign.key), Read(./.env) and "
+                "Read(**/*.pem) deny rules in .claude/settings.json name, prints that "
+                "file back exactly as naming it as an operand would; redirect from a "
+                "script inside the checkout, spelled out in full"
+            )
+    skip_value = False
+    for token, twin in shellcheck_arguments(segment, twins):
+        if skip_value:
+            skip_value = False
+            continue
+        if brace_would_expand(token) or twin.startswith("~"):
+            return (
+                f"{token} is not the word shellcheck would receive -- bash rewrites it "
+                "first, expanding a brace into several words and an unquoted leading ~ "
+                "into a home directory outside the checkout -- and this gate reads words "
+                "as typed, so the path it checked would not be the path shellcheck "
+                "opened; spell every path out in full, relative to the checkout (a "
+                "glob is expanded here and each file it names is checked)"
+            )
+        if token in SHELLCHECK_VALUE_OPTIONS:
+            skip_value = True
+            continue
+        if token == "-" or token.startswith("-"):
+            continue
+        candidates = [token]
+        if any(char in twin for char in GLOB) and not unsafe_operand(token):
+            # Matching nothing leaves the pattern as the word bash passes on,
+            # which shellcheck then fails to open; that is the literal, and it
+            # is checked as one.
+            candidates = sorted(glob.glob(token)) or [token]
+        for candidate in candidates:
+            if unsafe_operand(candidate) or denied_read_shape(candidate):
+                return (
+                    f"{candidate} is a path shellcheck would print back: it prints the "
+                    "source line above every diagnostic it reports, so an operand that "
+                    "leaves the checkout, or that carries one of the shapes the "
+                    "Read(./cosign.key), Read(./.env) and Read(**/*.pem) deny rules in "
+                    ".claude/settings.json name, hands the file's own lines to the model "
+                    "-- every unexported NAME=value line of a .env, the base64 body of a "
+                    "signing key -- past rules that gate the Read tool and say nothing "
+                    "about what an allow-listed Bash command opens; lint this "
+                    "repository's own scripts instead"
+                )
+    return None
+
+
 def writing_redirection(segment: list[str]) -> str | None:
     """The first redirection in `segment` that opens a path for writing,
     spelled as typed with its descriptor, or None."""
@@ -743,6 +972,10 @@ def refusal(command: str) -> str | None:
                     "re-points podman; run the command without the assignment (a git "
                     "invocation is not affected by this rule)"
                 )
+            if prefix == ("shellcheck",):
+                reason = shellcheck_refusal(segment, twins)
+                if reason is not None:
+                    return reason
             continue
         for token in segment:
             if token.startswith(PROCESS_SUBSTITUTION):

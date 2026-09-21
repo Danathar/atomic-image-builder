@@ -24,6 +24,7 @@ rather than assuming.
 
 from __future__ import annotations
 
+import fnmatch
 import importlib.util
 import io
 import json
@@ -164,6 +165,28 @@ REFUSED_COMMANDS = (
     ("2>`printf err` podman images >cosign.pub", "writes past a backtick target before the name"),
     ("shellcheck contrib/aib >(cat) >cosign.pub", "carries the redirection across an output substitution"),
     ("podman images <(true) 2>cosign.pub", "writes stderr past a process substitution"),
+    ("shellcheck ./.env", "prints every unexported NAME=value line of a denied file"),
+    ("shellcheck ./cosign.key", "prints the signing key's lines back as source lines"),
+    ("shellcheck contrib/aib ./cosign.key", "hides the denied file behind a real script"),
+    ("shellcheck secrets/.env", "prints a denied shape one directory down"),
+    ("shellcheck deploy/tls.pem", "prints a file the Read(**/*.pem) rule denies"),
+    ("shellcheck ~/.ssh/id_rsa", "names a home file through a tilde bash expands"),
+    ("shellcheck /etc/shadow", "names an absolute path outside the checkout"),
+    ("shellcheck ../sibling/cosign.key", "climbs out of the checkout to a denied file"),
+    ("shellcheck {contrib/aib,.env}", "brace-expands into a denied file before shellcheck runs"),
+    ("shellcheck -s bash ./.env", "hides the denied file behind an option's value"),
+    ("shellcheck -e SC2034 -- ./.env", "hides the denied file after an end-of-options word"),
+    ("command -p shellcheck ./.env", "hid the denied file behind a wrapper's option"),
+    ("shellcheck - < .env", "feeds the denied file to shellcheck on standard input"),
+    ("shellcheck -s bash - <./cosign.key", "feeds the signing key on standard input, operator attached"),
+    ("shellcheck - 0< secrets/.env", "feeds a denied shape through an explicit descriptor"),
+    ("shellcheck - < ~/.aws/credentials", "redirects from a home file through a tilde"),
+    ("shellcheck - < /etc/shadow", "redirects from an absolute path outside the checkout"),
+    ("shellcheck - < ../sibling/.env", "redirects from a denied file outside the checkout"),
+    ("shellcheck - < {contrib/aib,.env}", "brace-expands the redirection target"),
+    ("shellcheck - < secrets/*.pem", "globs the redirection target onto a denied shape"),
+    ("< .env shellcheck -", "redirects from the denied file before the command name"),
+    ("git status && shellcheck ./cosign.key", "hides behind an earlier command"),
     ("git diff 'unterminated", "cannot be parsed, so it is not let through"),
 )
 
@@ -222,6 +245,10 @@ ALLOWED_COMMANDS = (
     "ruff check",
     "python3 -m unittest discover -s tests",
     "shellcheck contrib/aib 2>&1 | tail -5",
+    "shellcheck - < contrib/aib",
+    "shellcheck -s bash - <tests/e2e/smoke.sh",
+    "shellcheck - <<< 'echo hi'",
+    "shellcheck contrib/aib < /dev/null",
     "hadolint Containerfile",
     "python3 maintenance_audit.py --skip-upstream",
     "just --fmt --check",
@@ -258,6 +285,22 @@ ALLOWED_COMMANDS = (
     "gh search issues --repo x 'a $b'",
     "FOO=1 echo x; podman images",
     "x=1; podman images",
+    # The lint command CONTRIBUTING.md, the pull-request template and
+    # ci.yml all name, verbatim. Refusing this would mean the check the
+    # contributor is asked to run could not be run.
+    "shellcheck -x contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh"
+    " tests/test_entrypoint.sh tests/e2e/*.sh",
+    "shellcheck contrib/aib",
+    "shellcheck -s bash -S warning contrib/aib",
+    "shellcheck --shell=bash --severity=warning contrib/aib",
+    "shellcheck --rcfile=.shellcheckrc contrib/aib",
+    "shellcheck -f diff contrib/aib | git apply",
+    "shellcheck -C always contrib/aib",
+    "shellcheck - <contrib/aib",
+    "shellcheck -e SC2034 -x tests/e2e/lib.sh",
+    "shellcheck tests/e2e/*.sh",
+    "shellcheck 'tests/e2e/lib.sh'",
+    "cat ~/.bashrc; shellcheck contrib/aib",
 )
 
 
@@ -1218,6 +1261,60 @@ class RefusalTests(unittest.TestCase):
         self.assertIsNone(gate.global_refusal(["log", "-c", "-p"]))
         self.assertIsNone(gate.global_refusal(["diff", "-C"]))
 
+    def test_a_shellcheck_glob_is_judged_by_the_files_it_names(self) -> None:
+        # The one expansion the scan performs instead of refusing, because
+        # this repository's own lint command ends in a glob. So the test is
+        # what bash would hand shellcheck: the same pattern is refused or
+        # allowed by what is on disk beside it, not by how it is spelled.
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "ok.sh").write_text("#!/bin/bash\ntrue\n")
+            here = os.getcwd()
+            os.chdir(tmp)
+            try:
+                self.assertIsNone(gate.refusal("shellcheck *.sh"))
+                self.assertIsNone(gate.refusal("shellcheck .env*"))
+                Path(tmp, ".env").write_text("TOKEN=stand-in\n")
+                self.assertIsNotNone(
+                    gate.refusal("shellcheck .env*"),
+                    "a glob that now names a denied file is let through, and bash "
+                    "expands it before shellcheck prints the file back",
+                )
+                Path(tmp, "tls.pem").write_text("-----BEGIN-----\n")
+                self.assertIsNotNone(
+                    gate.refusal("shellcheck *"),
+                    "a bare glob beside a denied file is let through; bash expands it "
+                    "to that file, which is not a dotfile and not hidden from it",
+                )
+                self.assertIsNone(
+                    gate.refusal("shellcheck '.env*'"),
+                    "a quoted glob is a literal to bash, and no file is named .env*",
+                )
+            finally:
+                os.chdir(here)
+
+    def test_a_denied_shape_is_matched_on_the_basename(self) -> None:
+        # `Read(**/*.pem)` denies the shape wherever it sits, and a
+        # `cosign.key` one directory down is the same secret as the one at
+        # the root, so the scan does not anchor on the path.
+        for path in ("cosign.key", "a/b/cosign.key", ".env", "x/.env.local", "a/k.pem"):
+            with self.subTest(path=path):
+                self.assertTrue(gate.denied_read_shape(path))
+        for path in ("contrib/aib", "tests/e2e/lib.sh", "docs/env.md", "pem.sh"):
+            with self.subTest(path=path):
+                self.assertFalse(gate.denied_read_shape(path))
+
+    def test_the_operand_scan_reads_past_every_value_taking_option(self) -> None:
+        # An option whose value the scan does not skip is read as a path, and
+        # a path the scan does not reach is read as an option; both spellings
+        # of each option are checked because shellcheck accepts both.
+        for option in sorted(gate.SHELLCHECK_VALUE_OPTIONS):
+            with self.subTest(option=option):
+                self.assertIsNone(gate.refusal(f"shellcheck {option} x contrib/aib"))
+                self.assertIsNotNone(
+                    gate.refusal(f"shellcheck {option} x ./cosign.key"),
+                    f"{option}'s value swallowed the operand after it",
+                )
+
 
 class MainTests(unittest.TestCase):
     def test_a_refused_command_exits_two_and_explains(self) -> None:
@@ -1316,6 +1413,30 @@ class RegistrationTests(unittest.TestCase):
                 "no longer describes this file",
             )
 
+    def test_every_read_denial_has_a_shape_the_operand_scan_knows(self) -> None:
+        # The scan's list is a restatement of the deny rules, and a rule added
+        # to the settings file without one here is a file the Read tool
+        # refuses and an allow-listed `shellcheck` prints back.
+        for rule in self.settings["permissions"]["deny"]:
+            if not rule.startswith("Read("):
+                continue
+            shape = rule[len("Read(") : -1].rsplit("/", 1)[-1]
+            with self.subTest(rule=rule):
+                self.assertTrue(
+                    any(
+                        shape == known or fnmatch.fnmatchcase(shape, known)
+                        for known in gate.DENIED_READ_SHAPES
+                    ),
+                    f"{rule} is denied to the Read tool but {shape} is not a shape "
+                    "gate_git_diff.py refuses as a shellcheck operand",
+                )
+
+    def test_shellcheck_is_still_allowed_with_any_argument(self) -> None:
+        # The operand scan exists because this rule matches by prefix. If the
+        # row ever names its files, the scan is guarding a path no session
+        # takes and this module is measuring nothing.
+        self.assertIn("Bash(shellcheck:*)", self.settings["permissions"]["allow"])
+
     def test_the_hook_is_executable(self) -> None:
         # It carries a shebang and is run by path in CONTRIBUTING's terms; a
         # non-executable file with a shebang is a trap for the next reader.
@@ -1348,6 +1469,19 @@ class DocumentTests(unittest.TestCase):
         for prefix in gate.GATED_PREFIXES:
             with self.subTest(prefix=prefix):
                 self.assertIn(spellings.get(prefix, " ".join(prefix)), body)
+
+    def test_the_enforcement_section_names_the_shellcheck_operand_scan(self) -> None:
+        # A reader who knows only that the redirection is refused will read
+        # `shellcheck ./.env` as covered. The section has to say what the
+        # operand scan tests, and the shapes it names have to be the ones the
+        # hook refuses.
+        section = DOC.read_text().split("## What is enforced rather than trusted", 1)
+        self.assertEqual(len(section), 2)
+        body = section[1].split("\n## ", 1)[0]
+        self.assertIn("source line", body)
+        for shape in gate.DENIED_READ_SHAPES:
+            with self.subTest(shape=shape):
+                self.assertIn(f"`{shape}`", body)
 
     def test_the_options_the_document_names_are_the_ones_refused(self) -> None:
         # The document is where a reader learns what the gate covers. A list
