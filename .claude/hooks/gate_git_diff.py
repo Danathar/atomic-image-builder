@@ -513,6 +513,25 @@ def assignment(token: str) -> str | None:
     return name if "=" in bare(token) and name.isidentifier() else None
 
 
+def after_redirection(segment: list[str], index: int) -> int:
+    """The index just past the redirection whose operator is at `index`.
+
+    A redirection is its operator and the token after it, the target. A
+    target that opens a backtick substitution runs to the token that closes
+    it, since shlex splits the substitution's words apart: `` >`printf
+    cosign.pub` shellcheck contrib/aib `` still finds its name at shellcheck
+    (review on #420, for split_segment() before it).
+    """
+    index += 1  # the operator
+    if index < len(segment):
+        target = segment[index]
+        index += 1  # the target
+        if target.startswith("`") and not (len(target) > 1 and target.endswith("`")):
+            while index < len(segment) and not segment[index - 1].endswith("`"):
+                index += 1
+    return index
+
+
 def split_segment(segment: list[str]) -> tuple[list[str], str, list[str]]:
     """A segment as (environment names, command, arguments).
 
@@ -539,15 +558,7 @@ def split_segment(segment: list[str]) -> tuple[list[str], str, list[str]]:
             index += 1
             continue
         if REDIRECTION.match(token):
-            index += 1  # the operator
-            if index < len(segment):
-                target = segment[index]
-                index += 1  # the target
-                if target.startswith("`") and not (
-                    len(target) > 1 and target.endswith("`")
-                ):
-                    while index < len(segment) and not segment[index - 1].endswith("`"):
-                        index += 1
+            index = after_redirection(segment, index)
             continue
         if (
             DESCRIPTOR.match(token)
@@ -577,7 +588,7 @@ def command_words(segment: list[str]) -> list[str]:
     while index < len(segment):
         token = segment[index]
         if REDIRECTION.match(token):
-            index += 2  # the operator and its target
+            index = after_redirection(segment, index)
             continue
         if (
             DESCRIPTOR.match(token)

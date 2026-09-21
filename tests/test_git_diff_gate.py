@@ -146,6 +146,8 @@ REFUSED_COMMANDS = (
     ("echo $(podman images >cosign.pub)", "writes from inside a substitution"),
     ("/usr/bin/shellcheck contrib/aib >cosign.pub", "names the linter by path"),
     ("shellcheck <(printf x) >cosign.pub", "carries the redirection across a process substitution"),
+    (">`printf cosign.pub` shellcheck contrib/aib", "hid the linter behind a backtick target"),
+    ("2>`printf err` podman images >cosign.pub", "writes past a backtick target before the name"),
     ("shellcheck contrib/aib >(cat) >cosign.pub", "carries the redirection across an output substitution"),
     ("podman images <(true) 2>cosign.pub", "writes stderr past a process substitution"),
     ("git diff 'unterminated", "cannot be parsed, so it is not let through"),
@@ -599,6 +601,8 @@ class RefusalTests(unittest.TestCase):
             (["/usr/bin/shellcheck", "x"], ["shellcheck", "x"]),
             (["python3", "maintenance_audit.py", ">", "o", "--skip-upstream"], ["python3", "maintenance_audit.py", "--skip-upstream"]),
             (["env", "-i", "shellcheck", "x"], ["-i", "shellcheck", "x"]),
+            ([">", "`printf", "cosign.pub`", "shellcheck", "x"], ["shellcheck", "x"]),
+            ([">", "`x`", "shellcheck", "x"], ["shellcheck", "x"]),
         ):
             with self.subTest(segment=segment):
                 self.assertEqual(gate.command_words(segment), words)
