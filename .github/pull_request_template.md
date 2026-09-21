@@ -26,10 +26,16 @@ release rehearsal. CI runs the automated ones again on this PR.
 - [ ] `python3 -m coverage run -m unittest discover -s tests && python3 -m coverage report --fail-under=90`
 - [ ] `ruff check`
 - [ ] `shellcheck -x contrib/aib container/entrypoint.sh tests/test_contrib_aib.sh tests/test_entrypoint.sh tests/e2e/*.sh`
+- [ ] `tests/test_contrib_aib.sh`
+- [ ] `tests/test_entrypoint.sh`
 - [ ] `actionlint`
 - [ ] `hadolint Containerfile container/Containerfile.coverage`
 
 <!--
+`shellcheck` is static analysis only. The two harnesses listed after it are the
+behavioral tests for `contrib/aib` and `container/entrypoint.sh`, and CI runs
+both -- linting those files is not running them.
+
 The pinned install for the Python tools is in CONTRIBUTING.md's Tests section.
 A docs-only change does not need every box ticked -- say which ones you skipped
 and why rather than ticking them all.
