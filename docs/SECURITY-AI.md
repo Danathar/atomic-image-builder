@@ -136,7 +136,10 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   two words to bash and `~` is a home directory. Two limits are stated in the
   hook rather than implied: the glob is expanded against the files that exist
   when the hook runs, and an `-x` run whose target names an outside file in a
-  `source` directive reads that file on the operands' behalf. Same finding as
+  `source` directive reads that file on the operands' behalf. The target of
+  an input redirection is checked the same way, since a `-` operand makes the
+  linter read standard input and `shellcheck - < .env` prints the file back
+  exactly as naming it would; only `/dev/null` is exempt. Same finding as
   [arch-bootc#314](https://github.com/Danathar/arch-bootc/issues/314) and
   [aurora-zfs-simple#206](https://github.com/Danathar/aurora-zfs-simple/issues/206).
 - `maintenance_audit.py` fails when a workflow action is not covered by the

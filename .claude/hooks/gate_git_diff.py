@@ -794,13 +794,59 @@ def shellcheck_arguments(
     return []
 
 
+def reading_redirections(
+    segment: list[str], twins: list[str]
+) -> list[tuple[str, str]]:
+    """The targets of the redirections in `segment` that open a path for
+    reading, each with its masked twin.
+
+    Only a bare `<` (with or without a descriptor: `<f`, `0<f`) opens a
+    path. `<<` reads a here-document, `<<<` a here-string, and `<&` and `<>`
+    duplicate or open read-write, which writing_redirection() already
+    refuses. A here-string's word is content, not a path, and cannot name a
+    file without a substitution, which is refused before this runs.
+    """
+    targets: list[tuple[str, str]] = []
+    for index, token in enumerate(segment):
+        if token != "<" or index + 1 >= len(segment):
+            continue
+        targets.append((segment[index + 1], twins[index + 1]))
+    return targets
+
+
 def shellcheck_refusal(segment: list[str], twins: list[str]) -> str | None:
     """Why this shellcheck invocation must not run, or None.
 
     Everything here is refused by default: a word the scan does not recognise
     as an option is treated as a path and checked, so an option this list
     forgets costs a refused lint run rather than an unwatched read.
+
+    A `-` operand makes ShellCheck read standard input, and `shellcheck - <
+    .env` prints the file back exactly as `shellcheck ./.env` would, so the
+    target of an input redirection is checked as an operand: it must stay
+    inside the checkout, carry none of the deny shapes, and be spelled out
+    (no brace, no leading `~`, no glob -- bash refuses an ambiguous redirect
+    itself, but a glob naming exactly one denied file is not ambiguous).
     """
+    for target, twin in reading_redirections(segment, twins):
+        if target == "/dev/null":
+            continue  # nothing to print back; `</dev/null` is how a session says "no stdin"
+        if (
+            brace_would_expand(target)
+            or twin.startswith("~")
+            or any(char in twin for char in GLOB)
+            or unsafe_operand(target)
+            or denied_read_shape(target)
+        ):
+            return (
+                f"<{target} feeds shellcheck a file on standard input, and shellcheck "
+                "prints the source line above every diagnostic it reports, so a "
+                "redirection from a file that leaves the checkout, or that carries "
+                "one of the shapes the Read(./cosign.key), Read(./.env) and "
+                "Read(**/*.pem) deny rules in .claude/settings.json name, prints that "
+                "file back exactly as naming it as an operand would; redirect from a "
+                "script inside the checkout, spelled out in full"
+            )
     skip_value = False
     for token, twin in shellcheck_arguments(segment, twins):
         if skip_value:
