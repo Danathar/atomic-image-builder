@@ -16,7 +16,7 @@ A guided terminal tool that turns the customizations already on your atomic desk
 > **Safe to explore — it won't touch the system you're running on.** The scan only reads your `rpm-ostree` state; everything it creates happens on GitHub. It never modifies, rebases, or removes packages from your current install. Switching your machine to the built image is a separate, deliberate step you take later.
 
 > [!WARNING]
-> **0.9 beta, not fully tested.** Review the changes it makes before applying them.
+> **0.10 beta, not fully tested.** Review the changes it makes before applying them.
 
 ## Quick start
 
