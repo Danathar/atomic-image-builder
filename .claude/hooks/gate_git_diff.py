@@ -395,6 +395,33 @@ def mask_quotes(command: str) -> str:
     return "".join(masked)
 
 
+def strip_comments(command: str) -> str:
+    """The command with every shell comment removed.
+
+    A `#` that begins a word after whitespace (or the start of the string)
+    starts a comment bash drops through the end of the line, so `shellcheck
+    contrib/aib # output > file` opens nothing and must not be refused for
+    the `>` in the comment (review on aurora-zfs-simple#211, the bash twin
+    of this hook). The spans are found on the quote-masked copy, where a
+    quoted `#` is a `Q`, and cut from the command itself; tokenize() is then
+    handed a string with no comment in it, and its `commenters = ""` still
+    holds for the `#` this leaves in place: one inside a word (`HEAD^#x`),
+    which is a character of the word, and one straight after an operator
+    (`;#`), which is kept as a word and can only over-refuse.
+    """
+    masked = mask_quotes(command)
+    kept: list[str] = []
+    index = 0
+    while index < len(command):
+        if masked[index] == "#" and (index == 0 or masked[index - 1] in " \t\n"):
+            end = masked.find("\n", index)
+            index = len(command) if end == -1 else end
+            continue
+        kept.append(command[index])
+        index += 1
+    return "".join(kept)
+
+
 def tokenize(command: str) -> list[str]:
     """The command's words and shell operators, or a failure.
 
@@ -571,7 +598,7 @@ def split_segment(segment: list[str]) -> tuple[list[str], str, list[str]]:
     return names, "", []
 
 
-def command_words(segment: list[str]) -> list[str]:
+def command_words(segment: list[str]) -> tuple[list[str], bool]:
     """The words of a segment that the command receives, in order.
 
     A redirection -- its operator, its target and a descriptor written before
@@ -581,9 +608,13 @@ def command_words(segment: list[str]) -> list[str]:
     assignment and a leading wrapper word (`time`, `command`, `env`) are
     stepped over too, since neither is part of the prefix an allow rule
     matches. The first word left is the command's name, with a leading path
-    stripped the way split_segment() strips it.
+    stripped the way split_segment() strips it. The second value says
+    whether a wrapper was stepped over: its own options come before the name
+    it runs (`command -p shellcheck x`), so gated_prefix() then looks for the
+    prefix at every later word rather than only the first.
     """
     words: list[str] = []
+    wrapped = False
     index = 0
     while index < len(segment):
         token = segment[index]
@@ -597,22 +628,34 @@ def command_words(segment: list[str]) -> list[str]:
         ):
             index += 1  # the descriptor; the operator is next
             continue
+        if token.startswith(PROCESS_SUBSTITUTION):
+            index += 1  # the substitution's opening; its body is a segment of its own
+            continue
         if not words and (
             assignment(token) is not None or bare(token) in COMMAND_WRAPPERS
         ):
+            wrapped = wrapped or bare(token) in COMMAND_WRAPPERS
             index += 1
             continue
         words.append(bare(token).rsplit("/", 1)[-1] if not words else token)
         index += 1
-    return words
+    return words, wrapped
 
 
 def gated_prefix(segment: list[str]) -> tuple[str, ...] | None:
-    """The GATED_PREFIXES entry this segment's leading words match, or None."""
-    words = command_words(segment)
-    for prefix in GATED_PREFIXES:
-        if tuple(words[: len(prefix)]) == prefix:
-            return prefix
+    """The GATED_PREFIXES entry this segment's leading words match, or None.
+
+    Behind a wrapper the name may stand after the wrapper's own options
+    (`command -p shellcheck x >cosign.pub`), so every later word is tried as
+    the start; without one, only the first word names the command.
+    """
+    words, wrapped = command_words(segment)
+    starts = range(len(words)) if wrapped else range(min(len(words), 1))
+    for start in starts:
+        candidates = [bare(words[start]).rsplit("/", 1)[-1], *words[start + 1 :]]
+        for prefix in GATED_PREFIXES:
+            if tuple(candidates[: len(prefix)]) == prefix:
+                return prefix
     return None
 
 
@@ -651,6 +694,7 @@ def global_refusal(arguments: list[str]) -> str | None:
 def refusal(command: str) -> str | None:
     """Why this command is blocked, or None when it is left alone."""
     try:
+        command = strip_comments(command)
         tokens = tokenize(command)
         masked = tokenize(mask_quotes(command))
     except ValueError:
@@ -665,6 +709,16 @@ def refusal(command: str) -> str | None:
         names, command_name, arguments = split_segment(segment)
         if command_name != "git":
             prefix = gated_prefix(segment)
+            if prefix and any(
+                token.startswith(PROCESS_SUBSTITUTION) for token in segment
+            ):
+                return (
+                    f"a process substitution in `{' '.join(prefix)}` runs the command "
+                    "inside it as part of a string the allow rule approved on its prefix "
+                    "alone, and that inner command is held to no rule -- `podman images "
+                    ">(cat >cosign.pub)` truncates the file while podman prints as usual; "
+                    "write the inner command as a command of its own"
+                )
             redirection = writing_redirection(segment) if prefix else None
             if prefix and redirection:
                 return (

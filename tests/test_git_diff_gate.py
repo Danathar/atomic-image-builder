@@ -147,6 +147,13 @@ REFUSED_COMMANDS = (
     ("/usr/bin/shellcheck contrib/aib >cosign.pub", "names the linter by path"),
     ("shellcheck <(printf x) >cosign.pub", "carries the redirection across a process substitution"),
     (">`printf cosign.pub` shellcheck contrib/aib", "hid the linter behind a backtick target"),
+    ("command -p shellcheck contrib/aib >cosign.pub", "hid the linter behind a wrapper's option"),
+    ("env -i podman images >cosign.pub", "hid podman behind a wrapper's option"),
+    ("shellcheck contrib/aib >cosign.pub # ok", "writes before a comment"),
+    ("shellcheck contrib/aib '#' >cosign.pub", "writes past a quoted hash"),
+    ("podman images >(cat >cosign.pub)", "writes from inside a process substitution argument"),
+    (">(cat >cosign.pub) podman images", "writes from a process substitution before the name"),
+    ("gh label list <(true)", "hands gh a process substitution"),
     ("2>`printf err` podman images >cosign.pub", "writes past a backtick target before the name"),
     ("shellcheck contrib/aib >(cat) >cosign.pub", "carries the redirection across an output substitution"),
     ("podman images <(true) 2>cosign.pub", "writes stderr past a process substitution"),
@@ -233,6 +240,11 @@ ALLOWED_COMMANDS = (
     "(shellcheck contrib/aib) >cosign.pub",
     "cat <(shellcheck contrib/aib) >out",
     "diff <(podman images) <(podman ps)",
+    "shellcheck contrib/aib # output > file",
+    "podman images # >(cat >cosign.pub)",
+    "git diff HEAD # > cosign.pub",
+    "shellcheck contrib/aib #comment\nhadolint Containerfile",
+    "command -v shellcheck",
 )
 
 
@@ -605,10 +617,31 @@ class RefusalTests(unittest.TestCase):
             ([">", "`x`", "shellcheck", "x"], ["shellcheck", "x"]),
         ):
             with self.subTest(segment=segment):
-                self.assertEqual(gate.command_words(segment), words)
+                self.assertEqual(gate.command_words(segment)[0], words)
         self.assertEqual(gate.gated_prefix(["podman", ">", "o", "image", "exists", "x"]), ("podman", "image", "exists"))
+        self.assertEqual(gate.gated_prefix(["command", "-p", "/usr/bin/shellcheck", "x"]), ("shellcheck",))
         self.assertIsNone(gate.gated_prefix(["podman", "rmi", "x", ">", "o"]))
         self.assertIsNone(gate.gated_prefix(["python3", "maintenance_audit.py", ">", "o"]))
+        self.assertIsNone(gate.gated_prefix(["echo", "shellcheck", "x"]))
+
+    def test_a_comment_is_dropped_only_where_bash_drops_it(self) -> None:
+        # A `#` that begins a word after whitespace starts a comment; one
+        # inside a word or straight after an operator is kept, and a quoted
+        # one is a literal. A comment ends at the newline, so the command on
+        # the next line is still read.
+        for command, stripped in (
+            ("shellcheck x # out > f", "shellcheck x "),
+            ("# only a comment", ""),
+            ("shellcheck x #c\nhadolint y >o", "shellcheck x \nhadolint y >o"),
+            ("git diff HEAD^#x", "git diff HEAD^#x"),
+            ("echo x;#c >o", "echo x;#c >o"),
+            ("shellcheck '#' >o", "shellcheck '#' >o"),
+            ('echo "a # b"', 'echo "a # b"'),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(gate.strip_comments(command), stripped)
+        self.assertIsNotNone(gate.refusal("shellcheck x #c\nhadolint y >o"))
+        self.assertIsNotNone(gate.refusal("git diff --stat#x /etc/passwd /dev/null"))
 
     def test_a_redirection_is_refused_for_what_the_shell_opens(self) -> None:
         # The rule is the operator and the target's shape. Every operator with
