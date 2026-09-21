@@ -91,7 +91,31 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   always-allowed `git diff` is a file reader:
   `git diff --no-index /dev/null ./cosign.key` prints the key the rule above
   denies, because that rule gates the Read tool and never sees a path handed
-  to Bash.
+  to Bash. The redirection is not git's alone, and the same hook refuses it
+  inside the other allow-listed commands that take arguments: an allow rule
+  ending in `:*` means "this command with any arguments", and a redirection
+  is part of the string that rule matches, so `hadolint Containerfile
+  >cosign.pub` truncated the trust anchor before a line was linted (bash
+  opens the target first, so the file is emptied even when the command then
+  fails), and the same spelling overwrote the permission table itself,
+  neither with a prompt. The gated rows are `shellcheck`, `hadolint`, the
+  `--skip-upstream` audit run, `just --fmt --check`, `skopeo inspect`,
+  `podman ps`, `podman logs`, `podman inspect`, `podman images`,
+  `podman image exists`, `gh label list`, `gh search issues` and
+  `gh search prs`; the redirection is refused wherever it is written in the
+  command -- after it, before its name, after an assignment or `time`, or
+  carried across a `$(...)` -- and a redirection to `/dev/null` is refused
+  with the rest, because the rule is the operator rather than a list of
+  harmless targets. Pipes, `2>&1` and the other descriptor forms, and input
+  redirections are untouched. The rows with no `:*` (`ruff check`,
+  `actionlint`, the exact test commands) need no entry: a redirection makes
+  the string match none of them and Claude Code prompts, as it does for a
+  command no rule covers at all. None of the gated commands takes a flag that
+  names a file to write, so the redirection is the whole of the primitive on
+  this list. `tests/test_git_diff_gate.py` derives the list from the
+  settings file, so a `:*` row added there fails until the hook lists it, and
+  shows the truncation in a throwaway directory first. Same fix as
+  [zfs-kinoite-complex#224](https://github.com/Danathar/zfs-kinoite-complex/pull/224).
 - `maintenance_audit.py` fails when a workflow action is not covered by the
   pin tables, or when a pinned SHA disagrees with them. That check is what
   stops an unpinned action reaching generated repositories.

@@ -130,6 +130,21 @@ REFUSED_COMMANDS = (
     ("git diff <(true) /etc/passwd", "hides an absolute operand behind the ) of a substitution"),
     ("git diff HEAD >(cat) -- README.md", "substitutes a /dev/fd path for git to write through"),
     ("git log -p <(true)", "substitutes a /dev/fd path into git log"),
+    ("shellcheck contrib/aib >cosign.pub", "truncates the trust anchor through an allow-listed linter"),
+    ("hadolint Containerfile >.claude/settings.json", "overwrites the permission table through hadolint"),
+    ("python3 maintenance_audit.py --skip-upstream >> out", "appends through the allow-listed audit"),
+    ("just --fmt --check 2>cosign.pub", "opens a file for stderr through the allow-listed formatter"),
+    ("skopeo inspect docker://x &>cosign.pub", "opens a path for both streams through skopeo"),
+    ("podman image exists x >|cosign.pub", "opens a path past noclobber through a three-word prefix"),
+    ("gh search prs --repo x <>cosign.pub", "opens a path read-write through gh"),
+    (">cosign.pub shellcheck contrib/aib", "truncates with the redirection before the linter's name"),
+    ("git status; >cosign.pub podman images", "hides the redirection-first form behind an allowed prefix"),
+    ("FOO=bar shellcheck contrib/aib >cosign.pub", "writes with an assignment before the linter"),
+    ("time shellcheck contrib/aib >cosign.pub", "writes with a keyword before the linter"),
+    ("shellcheck contrib/aib {fd}>cosign.pub", "writes through a {name} descriptor on the linter"),
+    ("shellcheck $(git ls-files '*.sh') >cosign.pub", "carries the redirection across a substitution"),
+    ("echo $(podman images >cosign.pub)", "writes from inside a substitution"),
+    ("/usr/bin/shellcheck contrib/aib >cosign.pub", "names the linter by path"),
     ("git diff 'unterminated", "cannot be parsed, so it is not let through"),
 )
 
@@ -187,6 +202,30 @@ ALLOWED_COMMANDS = (
     "git diff --stat | head -20",
     "ruff check",
     "python3 -m unittest discover -s tests",
+    "shellcheck contrib/aib 2>&1 | tail -5",
+    "hadolint Containerfile",
+    "python3 maintenance_audit.py --skip-upstream",
+    "just --fmt --check",
+    "skopeo inspect docker://ghcr.io/x:latest | jq .Digest",
+    "podman images --format '{{.Repository}}'",
+    "gh search issues --repo Danathar/atomic-image-builder --json number",
+    "shellcheck contrib/aib <contrib/aib",
+    "podman logs c >&2",
+    "podman ps 2>&-",
+    # A command no allow rule covers prompts on its own, so a redirection on
+    # it is not this hook's to refuse: the two exact rows (`ruff check`,
+    # `python3 -m unittest discover -s tests`) carry no `:*`, and the last two
+    # are refused by the Bash tool itself before any rule or hook sees them
+    # ("does not accept compound statements with redirection", 2.1.267).
+    "ruff check >cosign.pub",
+    "python3 -m unittest discover -s tests >out",
+    "python3 maintenance_audit.py >cosign.pub",
+    "echo x >cosign.pub",
+    "echo x >out; shellcheck contrib/aib",
+    "shellcheck contrib/aib | tee out",
+    ">out echo x; podman images",
+    "shellcheck contrib/aib; { hadolint Containerfile; } >cosign.pub",
+    "(shellcheck contrib/aib) >cosign.pub",
 )
 
 
@@ -331,6 +370,43 @@ class ReachTests(unittest.TestCase):
             "the command just shown to truncate a file is not refused",
         )
 
+    def test_bash_truncates_the_target_of_a_redirection_on_a_command_that_is_not_git(self) -> None:
+        # The write primitive is not git's alone. A rule ending in `:*` means
+        # "this command with any arguments", and a redirection is part of the
+        # string that rule matches, so `python3 maintenance_audit.py
+        # --skip-upstream >cosign.pub` was approved on its prefix and bash
+        # opened the target before python3 ran. Shown against a stand-in in a
+        # throwaway directory where the script does not even exist: the file
+        # is emptied although the command then fails.
+        with tempfile.TemporaryDirectory() as tmp:
+            victim = Path(tmp) / "victim"
+            victim.write_text("ORIGINAL-CONTENT\n")
+            result = subprocess.run(
+                [
+                    "bash",
+                    "--norc",
+                    "--noprofile",
+                    "-c",
+                    "python3 maintenance_audit.py --skip-upstream >victim",
+                ],
+                cwd=tmp,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            written = victim.read_text()
+        self.assertNotEqual(result.returncode, 0, "the stand-in command was meant to fail")
+        self.assertNotIn(
+            "ORIGINAL-CONTENT",
+            written,
+            "bash no longer truncates the target before the command runs; re-derive why "
+            "GATED_PREFIXES exists",
+        )
+        self.assertIsNotNone(
+            gate.refusal("python3 maintenance_audit.py --skip-upstream >cosign.pub"),
+            "the command just shown to truncate a file is not refused",
+        )
+
     def test_git_reads_a_home_file_named_with_a_tilde(self) -> None:
         # bash expands `~` to $HOME before git runs, so `git diff --
         # ~/.aws/credentials ~/.bashrc` is a two-operand plain-file diff of
@@ -471,6 +547,59 @@ class RefusalTests(unittest.TestCase):
                     gate.refusal(command),
                     f"{command!r} is refused; a gate that blocks ordinary work gets removed",
                 )
+
+    def test_every_allow_rule_with_arguments_is_refused_a_writing_redirection(self) -> None:
+        # The list of gated commands lives in the hook; this is what keeps it
+        # from drifting. Deriving the commands from the settings file rather
+        # than restating them means a rule added there with a trailing `:*`
+        # fails here until the hook lists it. The git rows are the hook's
+        # first half; the rows with no `:*` need no entry, because a
+        # redirection makes the string match none of them and Claude Code
+        # prompts -- `test_ordinary_commands_pass_through` holds that half
+        # with `ruff check >cosign.pub`.
+        allow = json.loads(SETTINGS.read_text(encoding="utf-8"))["permissions"]["allow"]
+        prefixes = [
+            rule[len("Bash(") : -len(":*)")]
+            for rule in allow
+            if rule.startswith("Bash(") and rule.endswith(":*)")
+        ]
+        gated = [prefix for prefix in prefixes if not prefix.startswith("git ")]
+        self.assertGreaterEqual(len(gated), 13, gated)
+        self.assertEqual(
+            sorted(tuple(prefix.split()) for prefix in gated),
+            sorted(gate.GATED_PREFIXES),
+            "GATED_PREFIXES and the `:*` allow rows of .claude/settings.json disagree",
+        )
+        for prefix in gated:
+            command = f"{prefix} >cosign.pub"
+            with self.subTest(command=command):
+                reason = gate.refusal(command)
+                self.assertIsNotNone(reason, f"{command!r} was not refused")
+                self.assertIn(">cosign.pub", reason or "")
+                self.assertIn(prefix, reason or "")
+
+    def test_the_command_words_are_read_past_redirections_and_prefixes(self) -> None:
+        # command_words() is what the prefix is matched against, so it has to
+        # step over a redirection wherever bash lets it stand, and over an
+        # assignment or a keyword before the name, or the prefix is missed and
+        # the write goes through.
+        for segment, words in (
+            (["shellcheck", "x", ">", "out"], ["shellcheck", "x"]),
+            ([">", "out", "shellcheck", "x"], ["shellcheck", "x"]),
+            (["2", ">", "err", "podman", "images"], ["podman", "images"]),
+            (["{fd}", ">", "out", "podman", "images"], ["podman", "images"]),
+            (["FOO=bar", "shellcheck", "x", ">", "out"], ["shellcheck", "x"]),
+            (["time", "shellcheck", "x"], ["shellcheck", "x"]),
+            (["command", "podman", ">", "out", "images"], ["podman", "images"]),
+            (["/usr/bin/shellcheck", "x"], ["shellcheck", "x"]),
+            (["python3", "maintenance_audit.py", ">", "o", "--skip-upstream"], ["python3", "maintenance_audit.py", "--skip-upstream"]),
+            (["env", "-i", "shellcheck", "x"], ["-i", "shellcheck", "x"]),
+        ):
+            with self.subTest(segment=segment):
+                self.assertEqual(gate.command_words(segment), words)
+        self.assertEqual(gate.gated_prefix(["podman", ">", "o", "image", "exists", "x"]), ("podman", "image", "exists"))
+        self.assertIsNone(gate.gated_prefix(["podman", "rmi", "x", ">", "o"]))
+        self.assertIsNone(gate.gated_prefix(["python3", "maintenance_audit.py", ">", "o"]))
 
     def test_a_redirection_is_refused_for_what_the_shell_opens(self) -> None:
         # The rule is the operator and the target's shape. Every operator with
@@ -1149,6 +1278,21 @@ class DocumentTests(unittest.TestCase):
             "the enforcement section no longer names the hook, so the document claims a "
             "denial the Bash surface does not have",
         )
+
+    def test_the_enforcement_section_names_the_commands_that_are_not_git(self) -> None:
+        # The document is where a reader learns that the redirection refusal
+        # covers the other allow-listed commands too, and which ones. The
+        # audit is named by its flag rather than its file, because
+        # tests/test_security_ai_doc.py holds that exactly one bullet of the
+        # section names `maintenance_audit.py`, and that bullet is the audit's
+        # own.
+        section = DOC.read_text().split("## What is enforced rather than trusted", 1)
+        self.assertEqual(len(section), 2)
+        body = section[1].split("\n## ", 1)[0]
+        spellings = {("python3", "maintenance_audit.py", "--skip-upstream"): "`--skip-upstream` audit"}
+        for prefix in gate.GATED_PREFIXES:
+            with self.subTest(prefix=prefix):
+                self.assertIn(spellings.get(prefix, " ".join(prefix)), body)
 
     def test_the_options_the_document_names_are_the_ones_refused(self) -> None:
         # The document is where a reader learns what the gate covers. A list
