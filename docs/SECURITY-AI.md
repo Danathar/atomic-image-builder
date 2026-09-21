@@ -152,9 +152,11 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   its `-i` and `-S` forms, or as an `export`, `declare` or `typeset` earlier
   in the string -- in both of bash's assignment spellings, since `+=` on a
   variable that is not set creates it -- and whatever value it carries, since
-  nothing in this repository sets it; the cost is that a word which only quotes the
-  assignment is refused too, so the variable is searched for by name without
-  the `=`. Same finding as
+  nothing in this repository sets it. The cost is the over-refusal: a word
+  which only quotes the assignment is refused too, so the variable is searched
+  for by name without the `=`, and the `env NAME+=` spellings are refused
+  although they reach no linter, since `env` splits an argument at the first
+  `=` and so sets a variable named `SHELLCHECK_OPTS+`. Same finding as
   [arch-bootc#314](https://github.com/Danathar/arch-bootc/issues/314) and
   [aurora-zfs-simple#206](https://github.com/Danathar/aurora-zfs-simple/issues/206).
 - `maintenance_audit.py` fails when a workflow action is not covered by the

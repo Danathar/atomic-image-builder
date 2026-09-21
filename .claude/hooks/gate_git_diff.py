@@ -109,7 +109,10 @@ repository's own lint command, so it is not refused. And the `SHELLCHECK_OPTS`
 rule reads the word rather than the command it belongs to, so a word that
 merely quotes the assignment is refused with one that makes it: search for
 the variable by its name alone (`grep -n SHELLCHECK_OPTS docs/SECURITY-AI.md`)
-rather than with the `=` attached.
+rather than with the `=` attached. Matching both assignment operators widens
+that residual by one: the `env NAME+=` spellings reach no linter, because
+`env` splits an argument at the first `=` and so sets a variable named
+`SHELLCHECK_OPTS+` that ShellCheck never reads, and they are refused anyway.
 """
 
 from __future__ import annotations
@@ -797,7 +800,13 @@ def sets_shellcheck_opts(token: str) -> bool:
 
     Bash has two assignment operators and both are matched: `+=` appends,
     and appending to an unset variable creates it, so the append spelling
-    reaches ShellCheck's environment as surely as `=` does.
+    reaches ShellCheck's environment as surely as `=` does -- as a prefix, and
+    in an `export`, `declare` or `typeset`. The `env`-mediated spellings of
+    `+=` are the one place this over-refuses: `env` splits an argument at the
+    first `=` and so sets a variable named `SHELLCHECK_OPTS+`, which ShellCheck
+    never reads. They are refused with the rest rather than carved out, because
+    the carve-out would be a claim about how a wrapper parses its arguments
+    rather than about the word, and this predicate reads the word.
 
     `env -S` re-splits its argument into a command line of its own, which puts
     the assignment and the command it runs inside a single word; the word is
@@ -1027,8 +1036,10 @@ def refusal(command: str) -> str | None:
                 "in the argv the operand scan reads; the assignment stands before the "
                 "command name, so it is refused wherever it is written -- on the command, "
                 "behind env, or as an export or declare in an earlier command of the same "
-                "string -- and whatever value it carries, since nothing in this repository "
-                "sets the variable; pass shellcheck's options after its name instead"
+                "string -- with either of bash's assignment operators, since `+=` onto an "
+                "unset variable just sets it, and whatever value it carries, since nothing "
+                "in this repository sets the variable; pass shellcheck's options after its "
+                "name instead"
             )
     for segment, twins in segments(tokens, masked):
         names, command_name, arguments = split_segment(segment)

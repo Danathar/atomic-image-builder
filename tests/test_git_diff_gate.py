@@ -196,9 +196,12 @@ REFUSED_COMMANDS = (
     ("declare -x SHELLCHECK_OPTS=./.env; shellcheck contrib/aib", "declares it in an earlier command of the same string"),
     ("SHELLCHECK_OPTS='-s bash' shellcheck contrib/aib", "sets the variable at all, which nothing here does"),
     ("SHELLCHECK_OPTS+=./.env shellcheck contrib/aib", "appends to the variable, which creates it when unset"),
-    ("env SHELLCHECK_OPTS+=./.env shellcheck contrib/aib", "appends behind a wrapper"),
+    ("env SHELLCHECK_OPTS+=./.env shellcheck contrib/aib", "spells the append behind a wrapper that does not read it, and is refused by the word anyway"),
     ("export SHELLCHECK_OPTS+=./.env; shellcheck contrib/aib", "appends from an earlier segment"),
     ("declare SHELLCHECK_OPTS+=./.env; shellcheck contrib/aib", "appends in a declare of an earlier segment"),
+    ("declare -x SHELLCHECK_OPTS+=./.env; shellcheck contrib/aib", "exports that append from the declare that reaches a later command"),
+    ("typeset -x SHELLCHECK_OPTS+=./.env; shellcheck contrib/aib", "spells that declare by its other name"),
+    ("SHELLCHECK_OPTS+=' ./.env' shellcheck contrib/aib", "appends a whitespace-separated piece the linter splits back out"),
     ("git status && shellcheck ./cosign.key", "hides behind an earlier command"),
     ("git diff 'unterminated", "cannot be parsed, so it is not let through"),
 )
@@ -601,11 +604,14 @@ class ReachTests(unittest.TestCase):
         # than taken from the manual page: the linter splits the variable and
         # prepends it to its own argument list, operands included, so the file
         # named in it is linted and printed back while the argv names only the
-        # script. All three spellings the gate refuses -- the leading
-        # assignment, `env NAME=`, and an `export` in an earlier command --
-        # reach the linter as this one environment, so running it through bash
-        # in each spelling is what shows the gate is not refusing three
-        # unrelated things.
+        # script. The spellings the gate refuses -- the leading assignment,
+        # `env NAME=`, and an `export` or `declare -x` in an earlier command,
+        # the last three with either assignment operator -- reach the linter as
+        # this one environment, so running it through bash in each spelling is
+        # what shows the gate is not refusing several unrelated things. `+=` is
+        # here because appending to an unset variable is how bash spells
+        # setting it: the path arrives with nothing in front of it, exactly as
+        # `=` leaves it. Where that rule over-refuses is the next test.
         if shutil.which("shellcheck") is None:
             self.skipTest("shellcheck is not installed")
         with tempfile.TemporaryDirectory() as tmp:
@@ -616,6 +622,9 @@ class ReachTests(unittest.TestCase):
                 "env SHELLCHECK_OPTS=./.env shellcheck ./ok.sh",
                 "export SHELLCHECK_OPTS=./.env; shellcheck ./ok.sh",
                 "SHELLCHECK_OPTS+=./.env shellcheck ./ok.sh",
+                "export SHELLCHECK_OPTS+=./.env; shellcheck ./ok.sh",
+                "declare -x SHELLCHECK_OPTS+=./.env; shellcheck ./ok.sh",
+                "typeset -x SHELLCHECK_OPTS+=./.env; shellcheck ./ok.sh",
             ):
                 with self.subTest(command=command):
                     result = subprocess.run(
@@ -635,6 +644,41 @@ class ReachTests(unittest.TestCase):
                         gate.refusal(command),
                         "the command just shown to print the file back is not refused",
                     )
+
+    def test_env_does_not_append_the_way_bash_does(self) -> None:
+        # Where matching both assignment operators over-refuses, shown rather
+        # than assumed. `env` splits an argument at the first `=`, so
+        # `env SHELLCHECK_OPTS+=x` sets a variable named `SHELLCHECK_OPTS+`
+        # and ShellCheck never reads it -- the file is not printed back. The
+        # word is refused anyway, because the word is what the predicate reads
+        # and carving this out would make the rule a claim about how each
+        # wrapper parses its arguments. The corpus lists this spelling, so
+        # this test is what keeps its entry honest about why it is refused.
+        # If a future `env` learns bash's append, the first assertion fails and
+        # says so, and the refusal was already in place.
+        if shutil.which("shellcheck") is None:
+            self.skipTest("shellcheck is not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "ok.sh").write_text("#!/bin/bash\ntrue\n")
+            Path(tmp, ".env").write_text("SECRET_TOKEN=stand-in-not-a-secret\n")
+            command = "env SHELLCHECK_OPTS+=./.env shellcheck ./ok.sh"
+            result = subprocess.run(
+                ["bash", "--norc", "--noprofile", "-c", command],
+                cwd=tmp,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotIn(
+                "SECRET_TOKEN=stand-in-not-a-secret",
+                result.stdout,
+                "env now reads bash's append operator; the refusal of this "
+                "spelling has stopped being an over-refusal",
+            )
+            self.assertIsNotNone(
+                gate.refusal(command),
+                "the append spelling is refused behind env too, by the word",
+            )
 
 
 class RefusalTests(unittest.TestCase):
@@ -1372,6 +1416,7 @@ class RefusalTests(unittest.TestCase):
             "SHELLCHECK_OPTS=-s bash",
             "SHELLCHECK_OPTS+=./.env",
             "SHELLCHECK_OPTS+=",
+            "SHELLCHECK_OPTS+= ./.env",
             "-SSHELLCHECK_OPTS+=./.env shellcheck contrib/aib",
             "-SSHELLCHECK_OPTS=./.env shellcheck contrib/aib",
             "--split-string=SHELLCHECK_OPTS=./.env shellcheck contrib/aib",
@@ -1380,8 +1425,13 @@ class RefusalTests(unittest.TestCase):
                 self.assertTrue(gate.sets_shellcheck_opts(word))
         for word in (
             "SHELLCHECK_OPTS",
+            # The name with the operator's first character and no `=`: bash
+            # reads no assignment here, and neither does this.
+            "SHELLCHECK_OPTS+",
             "MY_SHELLCHECK_OPTS=./.env",
+            "MY_SHELLCHECK_OPTS+=./.env",
             "SHELLCHECK_OPTS_EXTRA=./.env",
+            "SHELLCHECK_OPTS_EXTRA+=./.env",
             "SHELLCHECKOPTS=./.env",
             "shellcheck",
             "contrib/aib",
@@ -1395,10 +1445,13 @@ class RefusalTests(unittest.TestCase):
         # it, and the generic environment refusal for a gated command names
         # only the variable it found; this one has to say what the linter does
         # with that variable, or the retry is "the same thing behind `env`".
+        # It names the operator for the same reason: a message that speaks only
+        # of `SHELLCHECK_OPTS=` invites the retry with a `+` in it.
         reason = gate.refusal("env SHELLCHECK_OPTS=./.env shellcheck contrib/aib")
         self.assertIsNotNone(reason)
         self.assertIn("SHELLCHECK_OPTS", reason or "")
         self.assertIn("prepends", reason or "")
+        self.assertIn("+=", reason or "")
 
     def test_the_operand_scan_reads_past_every_value_taking_option(self) -> None:
         # An option whose value the scan does not skip is read as a path, and
