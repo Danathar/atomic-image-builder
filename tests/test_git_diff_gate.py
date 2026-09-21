@@ -29,6 +29,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -186,6 +187,18 @@ REFUSED_COMMANDS = (
     ("shellcheck - < {contrib/aib,.env}", "brace-expands the redirection target"),
     ("shellcheck - < secrets/*.pem", "globs the redirection target onto a denied shape"),
     ("< .env shellcheck -", "redirects from the denied file before the command name"),
+    ("SHELLCHECK_OPTS=./.env shellcheck contrib/aib", "hands the linter a denied operand through its environment"),
+    ("env SHELLCHECK_OPTS=./.env shellcheck contrib/aib", "hides that assignment behind a wrapper"),
+    ("env -i SHELLCHECK_OPTS=./.env shellcheck contrib/aib", "hides it behind a wrapper's own option"),
+    ("env 'SHELLCHECK_OPTS'=./.env shellcheck contrib/aib", "quotes the name bash would not read as an assignment and env does"),
+    ("env -S 'SHELLCHECK_OPTS=./.env shellcheck contrib/aib'", "splits the assignment and the command out of one word"),
+    ("export SHELLCHECK_OPTS=./.env; shellcheck contrib/aib", "exports it from a segment with no gated command in it"),
+    ("declare -x SHELLCHECK_OPTS=./.env; shellcheck contrib/aib", "declares it in an earlier command of the same string"),
+    ("SHELLCHECK_OPTS='-s bash' shellcheck contrib/aib", "sets the variable at all, which nothing here does"),
+    ("SHELLCHECK_OPTS+=./.env shellcheck contrib/aib", "appends to the variable, which creates it when unset"),
+    ("env SHELLCHECK_OPTS+=./.env shellcheck contrib/aib", "appends behind a wrapper"),
+    ("export SHELLCHECK_OPTS+=./.env; shellcheck contrib/aib", "appends from an earlier segment"),
+    ("declare SHELLCHECK_OPTS+=./.env; shellcheck contrib/aib", "appends in a declare of an earlier segment"),
     ("git status && shellcheck ./cosign.key", "hides behind an earlier command"),
     ("git diff 'unterminated", "cannot be parsed, so it is not let through"),
 )
@@ -301,6 +314,10 @@ ALLOWED_COMMANDS = (
     "shellcheck tests/e2e/*.sh",
     "shellcheck 'tests/e2e/lib.sh'",
     "cat ~/.bashrc; shellcheck contrib/aib",
+    # The variable is refused by the word that assigns it, so naming it
+    # without the `=` -- which is how it is searched for -- is not an
+    # assignment and is not refused.
+    "grep -rn SHELLCHECK_OPTS docs/SECURITY-AI.md",
 )
 
 
@@ -578,6 +595,46 @@ class ReachTests(unittest.TestCase):
             gate.refusal(command),
             "the command just shown to overwrite a file is not refused",
         )
+
+    def test_shellcheck_lints_the_operand_it_is_given_in_its_environment(self) -> None:
+        # The primitive the SHELLCHECK_OPTS refusal exists for, shown rather
+        # than taken from the manual page: the linter splits the variable and
+        # prepends it to its own argument list, operands included, so the file
+        # named in it is linted and printed back while the argv names only the
+        # script. All three spellings the gate refuses -- the leading
+        # assignment, `env NAME=`, and an `export` in an earlier command --
+        # reach the linter as this one environment, so running it through bash
+        # in each spelling is what shows the gate is not refusing three
+        # unrelated things.
+        if shutil.which("shellcheck") is None:
+            self.skipTest("shellcheck is not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "ok.sh").write_text("#!/bin/bash\ntrue\n")
+            Path(tmp, ".env").write_text("SECRET_TOKEN=stand-in-not-a-secret\n")
+            for command in (
+                "SHELLCHECK_OPTS=./.env shellcheck ./ok.sh",
+                "env SHELLCHECK_OPTS=./.env shellcheck ./ok.sh",
+                "export SHELLCHECK_OPTS=./.env; shellcheck ./ok.sh",
+                "SHELLCHECK_OPTS+=./.env shellcheck ./ok.sh",
+            ):
+                with self.subTest(command=command):
+                    result = subprocess.run(
+                        ["bash", "--norc", "--noprofile", "-c", command],
+                        cwd=tmp,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertIn(
+                        "SECRET_TOKEN=stand-in-not-a-secret",
+                        result.stdout,
+                        "shellcheck no longer reads operands out of SHELLCHECK_OPTS; "
+                        "re-derive why sets_shellcheck_opts() exists",
+                    )
+                    self.assertIsNotNone(
+                        gate.refusal(command),
+                        "the command just shown to print the file back is not refused",
+                    )
 
 
 class RefusalTests(unittest.TestCase):
@@ -1302,6 +1359,46 @@ class RefusalTests(unittest.TestCase):
         for path in ("contrib/aib", "tests/e2e/lib.sh", "docs/env.md", "pem.sh"):
             with self.subTest(path=path):
                 self.assertFalse(gate.denied_read_shape(path))
+
+    def test_the_shellcheck_environment_is_read_as_a_word_not_a_position(self) -> None:
+        # The assignment stands before the command name, so there is no
+        # shellcheck invocation to scope the refusal to when the word is read:
+        # the test is the word itself, wherever in the command it sits. A name
+        # that merely starts or ends the same is a different variable and is
+        # not refused, or the rule would spread to words that set nothing.
+        for word in (
+            "SHELLCHECK_OPTS=./.env",
+            "SHELLCHECK_OPTS=",
+            "SHELLCHECK_OPTS=-s bash",
+            "SHELLCHECK_OPTS+=./.env",
+            "SHELLCHECK_OPTS+=",
+            "-SSHELLCHECK_OPTS+=./.env shellcheck contrib/aib",
+            "-SSHELLCHECK_OPTS=./.env shellcheck contrib/aib",
+            "--split-string=SHELLCHECK_OPTS=./.env shellcheck contrib/aib",
+        ):
+            with self.subTest(word=word):
+                self.assertTrue(gate.sets_shellcheck_opts(word))
+        for word in (
+            "SHELLCHECK_OPTS",
+            "MY_SHELLCHECK_OPTS=./.env",
+            "SHELLCHECK_OPTS_EXTRA=./.env",
+            "SHELLCHECKOPTS=./.env",
+            "shellcheck",
+            "contrib/aib",
+            "-x",
+        ):
+            with self.subTest(word=word):
+                self.assertFalse(gate.sets_shellcheck_opts(word))
+
+    def test_the_shellcheck_environment_refusal_names_the_variable(self) -> None:
+        # The model retries a refusal it cannot act on rather than reporting
+        # it, and the generic environment refusal for a gated command names
+        # only the variable it found; this one has to say what the linter does
+        # with that variable, or the retry is "the same thing behind `env`".
+        reason = gate.refusal("env SHELLCHECK_OPTS=./.env shellcheck contrib/aib")
+        self.assertIsNotNone(reason)
+        self.assertIn("SHELLCHECK_OPTS", reason or "")
+        self.assertIn("prepends", reason or "")
 
     def test_the_operand_scan_reads_past_every_value_taking_option(self) -> None:
         # An option whose value the scan does not skip is read as a path, and
