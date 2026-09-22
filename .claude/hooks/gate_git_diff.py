@@ -1282,6 +1282,118 @@ def shellcheck_refusal(
     return None
 
 
+# The options that tell `just` which file to parse. `--fmt --check` prints the
+# source line of the first parse error it hits, so the file these name is read
+# back to the model a line at a time: `-f` and `--justfile` in all three
+# spellings bash hands over (separate word, `=`, attached to the short form),
+# and `-d`/`--working-directory`, which names the directory `just` then searches
+# for a `justfile` of its own.
+JUST_PATH_OPTIONS = frozenset({"-f", "--justfile", "-d", "--working-directory"})
+
+
+def just_path_values(invocation: Invocation) -> list[tuple[str, str]]:
+    """The paths a `just --fmt --check` invocation would open, with their twins.
+
+    Every spelling of `-f`/`--justfile`/`-d`/`--working-directory` bash passes
+    through: the value as a separate word, `--justfile=PATH`, and `-fPATH`
+    attached to the short form. Positional words are recipe arguments rather
+    than paths and are left alone -- `--fmt` runs no recipe.
+    """
+    values: list[tuple[str, str]] = []
+    words: list[tuple[str, str]] = []
+    for position, token in enumerate(invocation.words):
+        if bare(token).rsplit("/", 1)[-1] == "just":
+            words = list(
+                zip(
+                    invocation.words[position + 1 :],
+                    invocation.twins[position + 1 :],
+                    strict=True,
+                )
+            )
+            break
+    expect_value = False
+    for token, twin in words:
+        if expect_value:
+            expect_value = False
+            values.append((token, twin))
+            continue
+        if token in JUST_PATH_OPTIONS:
+            expect_value = True
+            continue
+        if "=" in token and token.split("=", 1)[0] in JUST_PATH_OPTIONS:
+            index = token.index("=") + 1
+            values.append((token.split("=", 1)[1], twin[index:]))
+            continue
+        if len(token) > 2 and token[:2] in JUST_PATH_OPTIONS:
+            values.append((token[2:], twin[2:]))
+    return values
+
+
+def just_refusal(
+    invocation: Invocation, segment: list[str], twins: list[str]
+) -> str | None:
+    """Why this `just --fmt --check` invocation must not run, or None.
+
+    `just` reports a parse error with the offending source line printed under
+    it, so `just --fmt --check --justfile ./.env` prints that file's first
+    `NAME=value` line, value included, past the `Read(./.env)` deny rule --
+    leading comments and blank lines parse, so the line it reaches is the
+    first one that carries a secret rather than a header. A `-` or
+    `/dev/stdin` justfile reads standard input, so the target of an input
+    redirection is checked the way shellcheck_refusal() checks one.
+    """
+    for target, twin in reading_redirections(segment, twins):
+        if target == "/dev/null":
+            continue
+        if (
+            brace_would_expand(target)
+            or twin.startswith("~")
+            or any(char in twin for char in GLOB)
+            or unsafe_operand(target)
+            or denied_read_shape(target)
+        ):
+            return (
+                f"<{target} feeds `just --fmt --check` a file on standard input, which "
+                "it parses as a justfile and prints the offending source line back "
+                "from -- `just --fmt --check --justfile /dev/stdin < ./.env` and "
+                "`-f -` both print the line the Read(./cosign.key), Read(./.env) and "
+                "Read(**/*.pem) deny rules exist to keep out of the transcript; format "
+                "a justfile inside the checkout, named as a path"
+            )
+    for token, twin in just_path_values(invocation):
+        if brace_would_expand(token) or twin.startswith("~"):
+            return (
+                f"{token} is not the word just would receive -- bash rewrites it first, "
+                "expanding a brace into several words and an unquoted leading ~ into a "
+                "home directory outside the checkout -- and this gate reads words as "
+                "typed, so the path it checked would not be the path just opened; "
+                "spell every path out in full, relative to the checkout"
+            )
+        candidates = [token]
+        if any(char in twin for char in GLOB) and not unsafe_operand(token):
+            candidates = sorted(glob.glob(token)) or [token]
+        for candidate in candidates:
+            if (
+                candidate in {"-", "/dev/stdin"}
+                or candidate.startswith("/dev/fd/")
+                or unsafe_operand(candidate)
+                or denied_read_shape(candidate)
+            ):
+                return (
+                    f"{candidate} is a path just would print back: `--fmt --check` "
+                    "reports a parse error with the source line under it, so a justfile "
+                    "that leaves the checkout, that is read from standard input, or "
+                    "that carries one of the shapes the Read(./cosign.key), "
+                    "Read(./.env) and Read(**/*.pem) deny rules in "
+                    ".claude/settings.json name, hands that file's own line to the "
+                    "model -- the first NAME=value line of a .env arrives whole, value "
+                    "included -- past rules that gate the Read tool and say nothing "
+                    "about what an allow-listed Bash command opens; format this "
+                    "repository's own justfiles instead"
+                )
+    return None
+
+
 def writing_redirection(segment: list[str]) -> str | None:
     """The first redirection in `segment` that opens a path for writing,
     spelled as typed with its descriptor, or None."""
@@ -1451,6 +1563,10 @@ def refusal(command: str) -> str | None:
                 )
             if prefix == ("shellcheck",):
                 reason = shellcheck_refusal(invocation, segment, twins)
+                if reason is not None:
+                    return reason
+            if prefix == ("just", "--fmt", "--check"):
+                reason = just_refusal(invocation, segment, twins)
                 if reason is not None:
                     return reason
             continue

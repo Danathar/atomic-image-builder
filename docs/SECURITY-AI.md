@@ -139,7 +139,18 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   `source` directive reads that file on the operands' behalf. The target of
   an input redirection is checked the same way, since a `-` operand makes the
   linter read standard input and `shellcheck - < .env` prints the file back
-  exactly as naming it would; only `/dev/null` is exempt. Not every operand
+  exactly as naming it would; only `/dev/null` is exempt. `shellcheck` is not
+  the only linter here that echoes its input: `just --fmt --check` reports a
+  parse error with the offending source line printed under it, and a
+  justfile's comments and blank lines parse, so
+  `just --fmt --check --justfile ./.env` prints back the first line of that
+  file carrying a value rather than its header. The values of its `-f`,
+  `--justfile`, `-d` and `--working-directory` options get the same scan the
+  lint operands do, in each of the three spellings bash passes through (a
+  separate word, `--justfile=PATH`, `-fPATH` attached), and `-f -` and
+  `--justfile /dev/stdin` put an input redirection back in scope; a bare
+  `just --fmt --check` is untouched. Same finding as
+  [#431](https://github.com/Danathar/atomic-image-builder/issues/431). Not every operand
   arrives in the argv, either: `SHELLCHECK_OPTS` is not a list of options
   despite the name -- the linter splits it and prepends it to its own argument
   list, operands included, so `SHELLCHECK_OPTS=./.env` in front of a lint run
@@ -181,10 +192,11 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   no subcommand the allow list covers; a glob in a git word is bash's to
   expand, because a glob cannot leave the working directory without a `/`, a
   `..` or a `~`, each already refused in the pattern; and an input redirection
-  is checked for `shellcheck` alone, because `shellcheck` is the one of these
-  commands that prints the source line back -- `hadolint` reports a position
-  and the character it did not expect, never the line, which a test runs
-  rather than assumes. `tests/test_git_diff_gate.py` holds that whole corpus
+  is checked for the two commands that print a source line back --
+  `shellcheck`, whose `-` operand reads standard input, and
+  `just --fmt --check`, whose `-f -` and `--justfile /dev/stdin` do --
+  while `hadolint` reports a position and the character it did not expect,
+  never the line, which a test runs rather than assumes. `tests/test_git_diff_gate.py` holds that whole corpus
   as a table of (shape, command, decision, why) rows, so a new shape is one
   row and a shape deliberately allowed is visibly a decision rather than an
   omission. Same corpus as
