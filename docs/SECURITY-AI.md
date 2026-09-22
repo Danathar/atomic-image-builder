@@ -181,17 +181,18 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   call, so an `export` allowed on its own would still be in the environment of
   the next call's `git diff`. The name a command is spelled with is the same
   problem once more -- a path, a wrapper (`env`, `command`, `nice`,
-  `timeout`, `noglob`), or a brace, since `{,git} diff` expands to an empty
-  word and `git` and bash drops the empty one and runs git -- so the hook
-  reads the command's name through one walk that steps over the shell's own
-  words, and the git half and the redirection half of it see the same
-  command. `noglob` is zsh's: bash has no such command but opens the
-  redirection before saying so, and zsh runs the command, so
-  `noglob podman ps >out` truncates the file either way. `xargs` is refused
-  instead of stepped over whenever the command it runs is git or one of the
-  gated rows, wherever it stands among the wrappers (`timeout 5 xargs git
-  diff`): it adds words read from standard input, or from the file `-a`
-  names, to that command, so `xargs git diff <list.txt` prints a key that
+  `timeout`, `noglob`, each by its basename, so `/usr/bin/timeout` too), or
+  a brace, since `{,git} diff` expands to an empty word and `git` and bash
+  drops the empty one and runs git -- so the hook reads the command's name
+  through one walk that steps over the shell's own words, and the git half
+  and the redirection half of it see the same command. `noglob` is zsh's:
+  bash has no such command but opens the redirection before saying so, and
+  zsh runs the command, so `noglob podman ps >out` truncates the file either
+  way. `xargs` is refused instead of stepped over whenever the command it
+  runs is git or one of the gated rows, wherever it stands among the
+  wrappers (`timeout 5 xargs git diff`): it adds words read from standard
+  input, or from the file `-a` names, to that command, so
+  `xargs git diff <list.txt` prints a key that
   list.txt names while the string names no operand at all, and Claude Code
   matches `xargs git diff` to the `git diff` row, so nothing prompts. An
   `xargs` in front of a command no rule covers (`xargs echo`) is left alone,

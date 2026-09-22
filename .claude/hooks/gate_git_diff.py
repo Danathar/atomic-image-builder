@@ -352,13 +352,19 @@ GATED_PREFIXES = (
 # Shell words that stand before the name of the command they run, which a
 # leading-words match has to step over the way it steps over an assignment:
 # `time shellcheck x >out` and `command shellcheck x >out` are shellcheck's
-# redirection, and `env git diff --no-index a b` is git's operand. A wrapper's
-# own options are not modelled as taking values, so the name is looked for at
-# every word after one (`command -p shellcheck x`, `timeout 5 shellcheck x`),
-# which can only over-refuse. `noglob` is zsh's: bash has no such command and
-# fails, but only after it has opened the redirection, and zsh runs the
-# command, so `noglob podman ps >out` truncates `out` in either shell, and
-# Claude Code steps over it before matching an allow rule as it does `nohup`.
+# redirection, and `env git diff --no-index a b` is git's operand. A wrapper
+# is matched on its basename, the way the command name is, so
+# `/usr/bin/timeout 5 shellcheck x >out` is `timeout` too -- Claude Code's
+# matcher strips the path the same way before it steps over a wrapper. A path
+# bash builds at runtime (`$D/nohup git diff`) is stepped over like any other,
+# and its `$` is then refused with the gated command behind it, as a `$` in
+# any word of a gated segment is. A wrapper's own options are not modelled as
+# taking values, so the name is looked for at every word after one (`command
+# -p shellcheck x`, `timeout 5 shellcheck x`), which can only over-refuse.
+# `noglob` is zsh's: bash has no such command and fails, but only after it
+# has opened the redirection, and zsh runs the command, so `noglob podman ps
+# >out` truncates `out` in either shell, and Claude Code steps over it before
+# matching an allow rule as it does `nohup`.
 # A wrapper that takes its command from somewhere else -- `sh -c`, `find
 # -exec` -- is absent on purpose: the command it runs is not a word of this
 # string, and neither matches an allow rule, so Claude Code prompts for them
@@ -1164,9 +1170,10 @@ def command_words(segment: list[str], twins: list[str] | None = None) -> Invocat
     backtick substitution runs to the token that closes it, since shlex
     splits the substitution's words apart: `` >`printf x` git diff `` still
     finds its name at git. A leading assignment and a leading wrapper word
-    (`time`, `command`, `env`) are stepped over too, since neither is part of
-    the prefix an allow rule matches; the assignment is kept, because a
-    variable set on a gated command is the environment it runs under.
+    (`time`, `command`, `env`, by basename, so `/usr/bin/env` too) are
+    stepped over too, since neither is part of the prefix an allow rule
+    matches; the assignment is kept, because a variable set on a gated
+    command is the environment it runs under.
 
     The first word left is the command's name, with a leading path stripped,
     so `/usr/bin/git` and `git` are one command. `wrapped` says whether a
@@ -1208,7 +1215,7 @@ def command_words(segment: list[str], twins: list[str] | None = None) -> Invocat
                 assignments.append(assigned)
                 index += 1
                 continue
-            if bare(token) in COMMAND_WRAPPERS:
+            if bare(token).rsplit("/", 1)[-1] in COMMAND_WRAPPERS:
                 wrapped = True
                 index += 1
                 continue
@@ -1950,7 +1957,7 @@ def refusal(command: str) -> str | None:
                 "command needs after its name instead"
             )
     for segment, twins in segments(tokens, masked):
-        if segment and bare(segment[0]) == "env":
+        if segment and bare(segment[0]).rsplit("/", 1)[-1] == "env":
             # A detached env -S/--split-string, in any spelling env
             # accepts (clustered, abbreviated) -- its own word, not
             # `-S'...'` or `--split-string='...'` attached to one word:

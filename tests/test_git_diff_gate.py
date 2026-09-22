@@ -435,6 +435,12 @@ REACH_CORPUS = (
     ),
     (
         "environment",
+        "/usr/bin/env -S 'FOO=x\\_GIT_EXTERNAL_DIFF=./evil\\_git diff' HEAD",
+        REFUSED,
+        "the same detached -S with env spelled as a path",
+    ),
+    (
+        "environment",
         "gh release create v$TAG",
         ALLOWED,
         "v sits ahead of a live $ the same shape a dangerous name does, but reaches no REFUSED_ENVIRONMENT name and names no gated command",
@@ -515,6 +521,16 @@ REACH_CORPUS = (
     ("command name", "git diff --name-only | xargs echo", ALLOWED, "xargs in front of a command no rule covers: Claude Code prompts for it"),
     ("command name", "git ls-files -z | xargs -0 grep -l shellcheck", ALLOWED, "a gated name among the arguments of the command xargs runs is not the command"),
     ("command name", "git log --grep=xargs -1", ALLOWED, "the word xargs as an argument runs nothing"),
+    ("command name", "/usr/bin/noglob podman ps >out", REFUSED, "a wrapper spelled as a path is the same wrapper, and Claude Code compares its basename"),
+    ("command name", "/usr/bin/timeout 5 shellcheck contrib/aib >out", REFUSED, "the same with the wrapper's own argument before the linter"),
+    ("command name", "/usr/bin/env shellcheck contrib/aib >out", REFUSED, "env by path hides the linter's redirection no better than env"),
+    ("command name", "/usr/bin/nohup podman ps >out", REFUSED, "nohup by path"),
+    ("command name", "/usr/bin/timeout 5 shellcheck ./.env", REFUSED, "the operand scan reads past a path-spelled wrapper too"),
+    ("command name", "/usr/bin/nohup git diff --no-index /dev/null ./cosign.key", REFUSED, "and so does the git scan"),
+    ("command name", "/usr/bin/timeout 5 xargs git diff", REFUSED, "and the xargs refusal"),
+    ("command name", "$D/nohup git diff HEAD", REFUSED, "a wrapper path bash builds at runtime can be any program"),
+    ("command name", "/usr/bin/nohup git diff HEAD", ALLOWED, "stepping over the path-spelled wrapper finds an ordinary git diff"),
+    ("command name", "/usr/bin/env echo x >out", ALLOWED, "a redirection on a command no rule covers, behind a path-spelled wrapper"),
     # 5. Options that load or write, per tool.
     ("options", "git -c diff.external=/tmp/evil diff", REFUSED, "the shortest path from a permitted git diff to running a program"),
     ("options", "git -P -c diff.external=/tmp/evil diff", REFUSED, "an unrefused global option ahead of it does not hide it"),
@@ -1048,6 +1064,7 @@ class ReachCorpusTests(unittest.TestCase):
                 "env git diff --no-index /dev/null ./cosign.key",
                 "command git diff --no-index /dev/null ./cosign.key",
                 "nice git diff --no-index /dev/null ./cosign.key",
+                "/usr/bin/env git diff --no-index /dev/null ./cosign.key",
                 "{,git} diff --no-index /dev/null ./cosign.key",
             ):
                 with self.subTest(command=command):
