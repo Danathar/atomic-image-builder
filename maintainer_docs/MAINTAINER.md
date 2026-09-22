@@ -156,16 +156,16 @@ release](#cutting-a-release).
 
 ## What runs automatically
 
-| Workflow                      | Fires on                           | Does                                                                                                                                            |
-| ----------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ci.yml`                      | push, PR, dispatch                 | Tests, coverage gate at 90%, ruff; builds the image and collects e2e coverage when image files change                                           |
-| `publish-image.yml`           | push to `main`, release, dispatch  | Builds and pushes to GHCR                                                                                                                       |
-| `update-homebrew-formula.yml` | release published, dispatch        | Points the formula at the release and pushes to `main`                                                                                          |
-| `publish-wrapper.yml`         | release published, dispatch        | Attaches `contrib/aib` and its sha256 to the release, which is what the recommended wrapper install downloads and verifies                      |
-| `maintenance-audit.yml`       | Mondays 06:00 UTC, dispatch        | Snapshot drift (and its tracking issue), action pin coverage, pin freshness, formula pin, released wrapper vs `contrib/aib`                     |
-| `nightly-compliance.yml`      | Daily 04:17 UTC, dispatch          | Rebuilds `main`'s image from scratch and re-runs the gate against it; a failure means something outside the repo moved                          |
-| `triage.yml`                  | Issue opened, dispatch             | Adds an `acmm-lN` label by title, and `security` when the text names cosign, a token, or prompt injection. Additive only; never removes a label |
-| `ai-fix.yml`                  | `ai-fix-requested` label, dispatch | Posts the current gate result on the issue as context. Read-only: no code writes, no pull request, no model                                     |
+| Workflow                      | Fires on                           | Does                                                                                                                                                                          |
+| ----------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ci.yml`                      | push, PR, dispatch                 | Tests, coverage gate at 90%, ruff, shellcheck, actionlint, hadolint; builds the image and collects e2e coverage when image files change                                       |
+| `publish-image.yml`           | push to `main`, release, dispatch  | Builds and pushes to GHCR                                                                                                                                                     |
+| `update-homebrew-formula.yml` | release published, dispatch        | Points the formula at the release and pushes to `main`                                                                                                                        |
+| `publish-wrapper.yml`         | release published, dispatch        | Attaches `contrib/aib` and its sha256 to the release, which is what the recommended wrapper install downloads and verifies                                                    |
+| `maintenance-audit.yml`       | Mondays 06:00 UTC, dispatch        | Snapshot drift (and its tracking issue), action pin coverage, pin freshness, formula pin, released wrapper vs `contrib/aib`                                                   |
+| `nightly-compliance.yml`      | Daily 04:17 UTC, dispatch          | Rebuilds `main`'s image from scratch and re-runs the gate against it; a failure means something outside the repo moved                                                        |
+| `triage.yml`                  | Issue opened, dispatch             | Adds an `acmm-lN` label by title, and `security` when the text names cosign, a signing key, gh_token, a credential, or prompt injection. Additive only; never removes a label |
+| `ai-fix.yml`                  | `ai-fix-requested` label, dispatch | Posts the current gate result on the issue as context. Read-only: no code writes, no pull request, no model                                                                   |
 
 Only a build of `main` tags the image `latest` — a release published from an
 older commit must not drag `latest` backwards. All events that write image
