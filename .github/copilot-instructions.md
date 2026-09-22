@@ -142,7 +142,10 @@ document a tool enforces rather than asks you to remember, in three permission
 layers plus a hook:
 
 - **allow** the repo's own read-only gate, so running the checks does not cost
-  a prompt every time.
+  a prompt every time. The coverage gate in *Before you push* is the one
+  exception, and it prompts every time: it reads its threshold with a command
+  substitution, `$(jq ...)`, and Claude Code asks before running any command
+  that contains one, whatever the allow rows say.
 - **ask** before anything outward-facing: a push, a PR, a release, a workflow
   dispatch, an image build.
 - **deny** outright what has no legitimate use here: force-push, hard reset,
