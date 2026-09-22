@@ -97,12 +97,15 @@ NUMBER_WORDS = {
 }
 
 # The one *Before you push* command no allow row in `.claude/settings.json`
-# matches. `Bash(python3 -m coverage report)` is an exact row, so the gated
-# form with `--fail-under=` does not match it, and widening the row to `:*`
-# would also mean adding the command to the hook's GATED_PREFIXES -- an
-# output redirection inside an allowed command is what that table exists to
-# refuse. Exempted by name, and the exemption is asserted in both directions
-# below so it cannot quietly outlive the row it describes.
+# matches, and no row could: it reads the gate with a command substitution,
+# `$(jq ...)`, and Claude Code's Bash tool asks before running any command
+# that contains one, whatever the allow rows say. Widening the exact row
+# `Bash(python3 -m coverage report)` to `:*` would not spare that prompt, and
+# it would put the command in the hook's GATED_PREFIXES, which refuses a
+# substitution outright -- the gate would stop running at all (#434). So the
+# *Mechanical limits* allow bullet names this command as its exception.
+# Exempted by name, and the exemption is asserted in both directions below so
+# it cannot quietly outlive the row it describes, or the reason it gives.
 UNALLOWED_FENCE_COMMAND_PREFIX = "python3 -m coverage report --fail-under="
 
 # Every `Bash(...)` deny row in `.claude/settings.json`, paired with the
@@ -586,8 +589,8 @@ class BeforeYouPushFenceTests(CopilotDocumentTestCase):
     def test_every_fence_command_is_allow_listed_or_exempt(self) -> None:
         # The *Mechanical limits* section promises the allow layer covers "the
         # repo's own read-only gate, so running the checks does not cost a
-        # prompt every time". That is a claim about this fence, and it is
-        # checkable against the rows.
+        # prompt every time", less the one exception it names. That is a claim
+        # about this fence, and it is checkable against the rows.
         allow = self.settings["permissions"]["allow"]
         exempt = []
         for command in self.fence_commands():
@@ -600,13 +603,24 @@ class BeforeYouPushFenceTests(CopilotDocumentTestCase):
             f"{COPILOT_RELATIVE}'s fence has a command no allow row in "
             f".claude/settings.json matches, beyond the one exempted here",
         )
-        # The other direction. If a row is ever added that does match the
-        # exempted command, this exemption is stale and has to go rather than
-        # sit here asserting nothing.
-        self.assertFalse(
-            any(allow_rule_matches(rule, exempt[0]) for rule in allow),
-            f"{exempt[0]!r} is now allow-listed; drop "
-            f"UNALLOWED_FENCE_COMMAND_PREFIX",
+        # A row that starts matching the exempted command empties `exempt`
+        # and fails the assertion above. What is left to hold is the reason:
+        # the command still reads the gate with the substitution that makes
+        # Claude Code prompt, and the allow bullet still names it as the
+        # exception rather than promising every check runs unprompted, which
+        # is the claim #434 found false.
+        self.assertIn(
+            "$(",
+            exempt[0],
+            f"{exempt[0]!r} no longer reads the gate with a command "
+            f"substitution, so the reason UNALLOWED_FENCE_COMMAND_PREFIX gives "
+            f"for exempting it is gone",
+        )
+        self.assertRegex(
+            squashed(self.section("Mechanical limits")),
+            r"coverage gate .* prompts every time: .* command substitution",
+            f"{COPILOT_RELATIVE}'s allow bullet no longer names the coverage "
+            f"gate as the command that prompts",
         )
 
     def test_pinned_tool_versions_match_what_ci_installs(self) -> None:
