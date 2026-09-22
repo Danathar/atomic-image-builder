@@ -138,7 +138,8 @@ A person who was not in your head will read what you write. Write for them.
 ## Mechanical limits
 
 `.claude/settings.json` is committed and shared. It is the part of this
-document a tool enforces rather than asks you to remember, in three layers:
+document a tool enforces rather than asks you to remember, in three permission
+layers plus a hook:
 
 - **allow** the repo's own read-only gate, so running the checks does not cost
   a prompt every time.
@@ -146,11 +147,19 @@ document a tool enforces rather than asks you to remember, in three layers:
   dispatch, an image build.
 - **deny** outright what has no legitimate use here: force-push, hard reset,
   broad Podman or Buildah cleanup, repo deletion, anything that rebases the
-  host, and reading a signing key or `.env`.
+  host, and reading a signing key, `.env`, a PEM file or an SSH private key.
 
 The deny list is not advice. Treat a refusal as the answer rather than
 something to route around, and if a rule blocks work that is genuinely needed,
 change the rule in a reviewed commit instead of working past it.
+
+The hook is the layer a permission pattern cannot express, and the reason an
+allow row is not a promise that every spelling of that command runs.
+`.claude/hooks/gate_git_diff.py` is registered `PreToolUse` on Bash and
+refuses the arguments that would reach a denied path through an allowed
+command: `git diff --no-index` on a file the index does not hold, an output
+redirection inside any allowed command, a linter pointed at a denied file.
+`docs/SECURITY-AI.md` carries the reasoning and the full list of shapes.
 
 `.claude/settings.local.json` stays gitignored. That is where personal
 allowances belong, and nothing in it is shared or reviewed.
