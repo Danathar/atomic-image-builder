@@ -74,16 +74,32 @@ Not every operand arrives in the argv, either. `SHELLCHECK_OPTS` is not a
 list of options despite the name: ShellCheck splits it and prepends it to its
 own argument list, operands included, so `SHELLCHECK_OPTS=./.env shellcheck
 contrib/aib` lints the `.env` as well and prints its lines back while the
-argv the operand scan reads names only `contrib/aib`. The assignment stands
-*before* the command name, so a refusal scoped to a shellcheck invocation
-catches only the leading spelling: `env SHELLCHECK_OPTS=./.env shellcheck
-contrib/aib` hides it behind a wrapper, where split_segment() never looks,
-and `export SHELLCHECK_OPTS=./.env; shellcheck contrib/aib` puts it in a
-segment of its own with no gated command in it at all. So it is refused
-wherever the word stands and whatever value it carries -- nothing in this
-repository sets the variable, which is what lets the rule be unconditional
-rather than a judgement about which values are harmless. See
-sets_shellcheck_opts().
+argv the operand scan reads names only `contrib/aib`. It is one of a family:
+`GIT_EXTERNAL_DIFF` names a program git runs on every file it diffs,
+`GIT_CONFIG_*` and `GIT_DIR` re-point what git reads, `PYTHONPATH` puts a
+module of its own ahead of the audit's imports, and `LD_PRELOAD` loads code
+into any of them. Each stands *before* the command name, so a refusal scoped
+to the invocation it feeds catches only the leading spelling, and bash has
+eight others: `VAR+=x cmd` (appending to an unset variable creates it),
+`env VAR=x cmd`, `env -i`, `env 'VAR'=x`, `env -S'VAR=x cmd'`,
+`--split-string=`, `export VAR=x; cmd`, and `declare -x` / `typeset -x` in a
+segment of its own with no gated command in it at all. So a word assigning
+one of those names is refused wherever it stands and whatever value it
+carries -- nothing in this repository sets any of them, which is what lets
+the rule be unconditional rather than a judgement about which values are
+harmless. Unconditional also closes what scoping it to "a string that also
+runs a gated command" cannot: the Bash tool's shell outlives one call, so an
+`export` approved on its own would still be in the environment of the next
+call's `git diff`. See REFUSED_ENVIRONMENT and assigned_environment().
+
+The name a command is spelled with is the last of that family. A path
+(`/usr/bin/git`), a wrapper (`env`, `command`, `nice`, `timeout`) and a brace
+(`{,git} diff` -- bash drops the empty word and runs git) all reach the same
+tool while spelling the name differently, and a scan that read only the first
+word of the segment found no gated command in any of them and checked nothing
+else. command_words() steps over the shell's own words to the name, and
+gated_prefix() and git_arguments() both read the result, so the git half and
+the redirection half of this hook see the same command.
 
 It runs on `PreToolUse` for `Bash` and exits 2 -- the blocking code, whose
 stderr goes back to the model as the reason -- when a `git` invocation in the
@@ -105,11 +121,38 @@ one case where the words bash builds are not the words checked here. And a
 `shellcheck -x` run whose target names an outside file in a `source`
 directive reads that file on the operands' behalf: the operands are checked,
 what the tool then opens for them is not. `-x` is load-bearing in this
-repository's own lint command, so it is not refused. And the `SHELLCHECK_OPTS`
+repository's own lint command, so it is not refused. And the environment
 rule reads the word rather than the command it belongs to, so a word that
 merely quotes the assignment is refused with one that makes it: search for
-the variable by its name alone (`grep -n SHELLCHECK_OPTS docs/SECURITY-AI.md`)
+a variable by its name alone (`grep -n SHELLCHECK_OPTS docs/SECURITY-AI.md`)
 rather than with the `=` attached.
+
+Four shapes of the same corpus (#428) are decided the other way, and are
+written here rather than left undecided:
+
+* The pager. `GIT_PAGER=prog git log` runs nothing: git spawns a pager only
+  when stdout is a terminal, and a command run by the Bash tool has a pipe,
+  which is also why `PAGER=cat git log` stays unprompted. Held by a reach
+  test rather than by this paragraph, so a git that changed it would fail.
+* `GIT_SSH_COMMAND`, `GIT_ASKPASS` and `GIT_EDITOR` name programs git runs
+  for a connection or an edit. `git diff`, `git log` and `git status` are the
+  whole of the allow list and make neither, so no rule here reaches them.
+* `PYTHONSTARTUP` is read by an interactive interpreter only, and
+  `PYTEST_ADDOPTS` by a pytest this repository's rules never start: the
+  `python3` rows are `python3 -m unittest discover -s tests` and the
+  `--skip-upstream` audit.
+* A glob in a git word is expanded by bash rather than refused here, because
+  a glob cannot name a file outside the working directory without a `/`, a
+  `..` or a `~` in the pattern, and unsafe_operand() refuses each of those in
+  the pattern as readily as in a plain operand. The shellcheck scan expands
+  its own globs because there the *result* can be a denied shape inside the
+  checkout; `git diff` reads nothing it is not already allowed to read.
+
+And one residual, which a `PreToolUse` hook reading one command string cannot
+close: a wrapper that takes its command from somewhere this hook cannot read
+-- `sh -c '...'`, `xargs`, `find -exec` -- reaches any tool. None of them
+matches an allow rule, so Claude Code prompts for them on its own; that
+prompt, not this hook, is what covers them.
 """
 
 from __future__ import annotations
@@ -120,6 +163,7 @@ import json
 import re
 import shlex
 import sys
+from typing import NamedTuple
 
 # Long options that reach outside the index, by the name git knows them by.
 # Matched against unambiguous-prefix abbreviations too: git resolves any
@@ -146,6 +190,11 @@ VALUED_SHORT = frozenset("BCGILMOSUXln")
 # and `--git-dir` points the whole command at another checkout. Position
 # matters: `git log -c` and `git diff -C` are ordinary diff options and are
 # left alone, so these are only refused ahead of the subcommand.
+# `--upload-pack` and `--receive-pack` name a program to run at the other end
+# of a connection. git takes neither before a subcommand today -- they are
+# options of `fetch`, `clone` and `push`, none of which any allow rule covers
+# -- so they are listed against a git that starts accepting them there rather
+# than for a hole that is open now (#428).
 REFUSED_GLOBAL = (
     "-c",
     "-C",
@@ -154,20 +203,102 @@ REFUSED_GLOBAL = (
     "--git-dir",
     "--work-tree",
     "--namespace",
+    "--upload-pack",
+    "--receive-pack",
 )
 
-# Environment variables with the same reach, set as a prefix to the command.
-# `GIT_EXTERNAL_DIFF` names a program git runs on every file it diffs; the
-# `GIT_CONFIG*` family and `GIT_DIR` re-point what the command reads.
+# Environment variables with the same reach, and what each one reaches. A
+# variable is one row: the name, as an fnmatch pattern so a numbered family
+# (`GIT_CONFIG_KEY_0`) is one entry, and the clause the refusal is built from.
+# Every row is refused wherever the word assigning it stands -- see
+# assigned_environment() for the spellings -- so the list is names that reach
+# a command `.claude/settings.json` allows, not names that merely look
+# dangerous; the four decided the other way are in the module docstring.
 REFUSED_ENVIRONMENT = (
-    "GIT_EXTERNAL_DIFF",
-    "GIT_CONFIG",
-    "GIT_CONFIG_GLOBAL",
-    "GIT_CONFIG_SYSTEM",
-    "GIT_CONFIG_COUNT",
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    (
+        "GIT_EXTERNAL_DIFF",
+        "names a program git runs on every file it diffs",
+    ),
+    (
+        "GIT_CONFIG*",
+        "injects configuration into git before the subcommand runs, which is "
+        "what `-c diff.external=` does in git's own spelling",
+    ),
+    (
+        "GIT_DIR",
+        "re-points the repository the command reads",
+    ),
+    (
+        "GIT_WORK_TREE",
+        "re-points the tree the command compares against",
+    ),
+    (
+        "GIT_INDEX_FILE",
+        "re-points the index the command diffs against",
+    ),
+    (
+        "GIT_NAMESPACE",
+        "re-points the refs the command resolves",
+    ),
+    (
+        "GIT_OBJECT_DIRECTORY",
+        "re-points the object store the command reads",
+    ),
+    (
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "adds an object store the command reads",
+    ),
+    (
+        "SHELLCHECK_OPTS",
+        "is not a list of options despite the name -- shellcheck splits it and "
+        "prepends it to its own argument list, operands included, so "
+        "SHELLCHECK_OPTS=./.env in front of a lint run lints the .env as well "
+        "and prints its lines back, past the Read(./cosign.key), Read(./.env) "
+        "and Read(**/*.pem) deny rules in .claude/settings.json and with no "
+        "such path in the argv the operand scan reads",
+    ),
+    (
+        "PYTHONPATH",
+        "puts a module of its own ahead of the audit's imports",
+    ),
+    (
+        "PYTHONHOME",
+        "re-points the standard library the audit imports from",
+    ),
+    (
+        "LD_PRELOAD",
+        "loads a library of its own into every one of these commands before a "
+        "line is linted or a diff is printed",
+    ),
+    (
+        "LD_AUDIT",
+        "loads a library of its own into the dynamic linker of every one of "
+        "these commands",
+    ),
+    (
+        "LD_LIBRARY_PATH",
+        "re-points the shared libraries every one of these commands loads",
+    ),
+    (
+        "GH_HOST",
+        "sends the token gh authenticates with to another host",
+    ),
+    (
+        "GH_ENTERPRISE_TOKEN",
+        "replaces the token gh authenticates with",
+    ),
+    (
+        "CONTAINERS_CONF",
+        "re-points podman's and skopeo's configuration, runtime included",
+    ),
+    (
+        "CONTAINERS_REGISTRIES_CONF",
+        "re-points the registries podman and skopeo resolve an image against",
+    ),
+    (
+        "CONTAINERS_STORAGE_CONF",
+        "re-points the image store podman reads",
+    ),
 )
 
 # Shell operators that end one command and begin another. The scan follows
@@ -208,10 +339,26 @@ GATED_PREFIXES = (
 # Shell words that stand before the name of the command they run, which a
 # leading-words match has to step over the way it steps over an assignment:
 # `time shellcheck x >out` and `command shellcheck x >out` are shellcheck's
-# redirection. A wrapper's own options are not modelled, so `env -i shellcheck`
-# is not matched; it matches no allow rule either, and prompts on its own.
+# redirection, and `env git diff --no-index a b` is git's operand. A wrapper's
+# own options are not modelled as taking values, so the name is looked for at
+# every word after one (`command -p shellcheck x`, `timeout 5 shellcheck x`),
+# which can only over-refuse. A wrapper that takes its command from somewhere
+# else -- `sh -c`, `xargs`, `find -exec` -- is absent on purpose: the command
+# it runs is not a word of this string, and none of them matches an allow rule,
+# so Claude Code prompts for them on its own.
 COMMAND_WRAPPERS = frozenset(
-    {"time", "command", "builtin", "exec", "env", "nohup", "nice"}
+    {
+        "time",
+        "command",
+        "builtin",
+        "exec",
+        "env",
+        "nohup",
+        "nice",
+        "timeout",
+        "stdbuf",
+        "setsid",
+    }
 )
 
 # ShellCheck's options that take their value as the *next* word, in both
@@ -242,25 +389,28 @@ SHELLCHECK_VALUE_OPTIONS = frozenset(
     }
 )
 
-# The assignment that hands ShellCheck an operand through its environment
-# instead of its argv. ShellCheck splits `SHELLCHECK_OPTS` on whitespace and
-# prepends the pieces to its own argument list, and an operand among them is
-# linted and printed back like any other. Matched as a word anywhere in the
-# command rather than as a leading assignment on a gated one: the spellings
-# that reach the same environment put it behind `env`, or in an `export` or
-# `declare` of an earlier segment, where neither split_segment()'s
-# environment list nor the operand scan looks. Both of bash's assignment
-# operators are listed: `+=` appends, and appending to a variable that is not
-# set creates it, so `SHELLCHECK_OPTS+=./.env` reaches ShellCheck exactly as
-# `=` does (review on #425). See sets_shellcheck_opts().
-SHELLCHECK_OPTS_ASSIGNMENTS = ("SHELLCHECK_OPTS=", "SHELLCHECK_OPTS+=")
-
 # The option with which `env` re-splits one word into a command line of its
 # own, in the two spellings that attach the string to the option word
 # (`env -S'SHELLCHECK_OPTS=./.env shellcheck x'`). The detached spellings need
-# no entry: the string is then a word of its own, and sets_shellcheck_opts()
+# no entry: the string is then a word of its own, and assigned_environment()
 # splits every word it is given.
 ENV_SPLIT_STRING = ("--split-string=", "-S")
+
+# `env`'s own option for relocating the child process before it runs, in
+# both spellings GNU env documents (`-C DIR`, `--chdir=DIR`). `env -C
+# /tmp/other git diff` reaches the allow-listed `git diff` the same walk
+# git_arguments() already does, but every operand it reads after that is
+# read as though the command still ran from this checkout -- a foreign
+# repository's unstaged content prints past a git invocation whose own
+# operands name nothing this hook refuses. No other name in
+# COMMAND_WRAPPERS defines either spelling, so the check needs no record
+# of which wrapper matched.
+WRAPPER_RELOCATION = frozenset({"-C", "--chdir"})
+
+# Both of bash's assignment operators, longest first. `+=` appends, and
+# appending to a variable that is not set creates it, so `SHELLCHECK_OPTS+=x`
+# reaches the command's environment exactly as `=` does (review on #425).
+ASSIGNMENT_OPERATORS = ("+=", "=")
 
 # The file shapes `.claude/settings.json` denies the Read tool, as basename
 # patterns. Staying inside the checkout is not enough on its own: `cosign.key`
@@ -452,6 +602,43 @@ def expands_at_runtime(twin: str) -> bool:
     through single quotes.
     """
     return any(char in twin for char in EXPANSION)
+
+
+RUNTIME_ASSIGNMENT_NAME = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\+?\Z")
+
+
+def runtime_assignment(token: str, twin: str) -> bool:
+    """Does this word concatenate a plain variable name onto a live `$` or
+    backtick that bash expands before assigned_environment() ever reads it?
+
+    `export GIT_EXTERNAL_DIFF$'=./evil'` is one word to bash -- an
+    unquoted bareword and an ANSI-C-quoted string concatenate with nothing
+    between them -- and it assigns exactly what `export
+    GIT_EXTERNAL_DIFF=./evil` does once the quote expands. Read as typed,
+    the token still carries a literal `=` (shlex only strips the quote
+    marks, and single quotes pass their contents through unchanged), but
+    it sits right after the `$`, so assigned_name()'s partition on the
+    first `=` returns `GIT_EXTERNAL_DIFF$` -- a name carrying a live `$`
+    that matches no REFUSED_ENVIRONMENT pattern.
+
+    The test is the word up to its first live expansion character (found
+    in `twin`, the masked copy from mask_quotes(): a `$` or backtick that
+    survives it is one bash acts on): if that prefix alone is already a
+    plain bash identifier -- `GIT_EXTERNAL_DIFF`, optionally with a
+    trailing `+` -- the word plausibly continues into a variable name this
+    scan cannot read past the expansion, and it is refused rather than
+    partitioned on whatever `=` happens to follow. `x=$(git log -1)` does
+    not match: its `$` sits after the `=` this scan already read `x` off
+    of, not before it, so the assigned name is the literal `x` regardless
+    of what the substitution's value becomes. `--outpu$'\\x74'=cosign.pub`
+    does not match either: `--outpu` is not a bash identifier, so this is
+    left to the git-argument scan that already refuses it by a different
+    route.
+    """
+    for index, char in enumerate(token):
+        if char in EXPANSION and index < len(twin) and twin[index] == char:
+            return bool(RUNTIME_ASSIGNMENT_NAME.match(token[:index]))
+    return False
 
 
 def unsafe_operand(token: str) -> bool:
@@ -658,9 +845,20 @@ def bare(token: str) -> str:
 
 
 def assignment(token: str) -> str | None:
-    """The variable name in a `NAME=value` prefix, or None."""
-    name = bare(token).split("=", 1)[0]
-    return name if "=" in bare(token) and name.isidentifier() else None
+    """The variable name in a `NAME=value` or `NAME+=value` prefix, or None.
+
+    Both of bash's assignment operators are read, and the longer one first:
+    `NAME+=value` is an assignment to bash as surely as `NAME=value` is, and
+    splitting on `=` alone reads its name as `NAME+`, which is not an
+    identifier -- so the word was not an assignment to step over, and the
+    walk below took it for the name of the command.
+    """
+    word = bare(token)
+    for operator in ASSIGNMENT_OPERATORS:
+        name, found, _ = word.partition(operator)
+        if found and name.isidentifier():
+            return name
+    return None
 
 
 def after_redirection(segment: list[str], index: int) -> int:
@@ -670,7 +868,7 @@ def after_redirection(segment: list[str], index: int) -> int:
     target that opens a backtick substitution runs to the token that closes
     it, since shlex splits the substitution's words apart: `` >`printf
     cosign.pub` shellcheck contrib/aib `` still finds its name at shellcheck
-    (review on #420, for split_segment() before it).
+    (review on #420, for the name walk before it).
     """
     index += 1  # the operator
     if index < len(segment):
@@ -682,62 +880,58 @@ def after_redirection(segment: list[str], index: int) -> int:
     return index
 
 
-def split_segment(segment: list[str]) -> tuple[list[str], str, list[str]]:
-    """A segment as (environment names, command, arguments).
+class Invocation(NamedTuple):
+    """A segment read as the command bash would run.
 
-    The command is the first token that is neither an assignment nor part of
-    a redirection. Bash lets a redirection precede the command name, so in
-    `>cosign.pub git diff HEAD` the first token is `>` and the command is
-    still git; reading `>` as the name left the whole segment unchecked. A
-    redirection is its operator, the token after it (the target), and a
-    descriptor right before it (the `2` of `2>err`, the `{fd}` of
-    `{fd}>file`). shlex does not say whether the descriptor touched the
-    operator, so `2 >err git log` is read the same way; that names a command
-    called `2` as git, which can only over-refuse. A target that opens a
-    backtick substitution runs to the token that closes it, since shlex
-    splits the substitution's words apart: `` >`printf x` git diff `` still
-    finds its name at git.
+    `words` are the words the command receives, its own name first; `twins`
+    are their masked copies, in the same order, for a check that has to know
+    what bash would quote. `wrapped` says whether a wrapper word was stepped
+    over, `name` is the token that named the command as it was typed (before
+    a path or a substitution prefix was stripped from it), and `assignments`
+    are the variables assigned before the name, which are the command's
+    environment rather than its arguments.
     """
-    names: list[str] = []
-    index = 0
-    while index < len(segment):
-        token = segment[index]
-        name = assignment(token)
-        if name is not None:
-            names.append(name)
-            index += 1
-            continue
-        if REDIRECTION.match(token):
-            index = after_redirection(segment, index)
-            continue
-        if (
-            DESCRIPTOR.match(token)
-            and index + 1 < len(segment)
-            and REDIRECTION.match(segment[index + 1])
-        ):
-            index += 1  # the descriptor; the operator is next
-            continue
-        return names, bare(token).rsplit("/", 1)[-1], segment[index + 1 :]
-    return names, "", []
+
+    words: list[str]
+    twins: list[str]
+    wrapped: bool
+    name: str
+    assignments: list[str]
 
 
-def command_words(segment: list[str]) -> tuple[list[str], bool]:
+def command_words(segment: list[str], twins: list[str] | None = None) -> Invocation:
     """The words of a segment that the command receives, in order.
 
     A redirection -- its operator, its target and a descriptor written before
     it -- is the shell's, not the command's, and bash lets it stand anywhere
     in the simple command, so `>cosign.pub shellcheck x` and `shellcheck
-    >cosign.pub x` both come back as `['shellcheck', 'x']`. A leading
-    assignment and a leading wrapper word (`time`, `command`, `env`) are
-    stepped over too, since neither is part of the prefix an allow rule
-    matches. The first word left is the command's name, with a leading path
-    stripped the way split_segment() strips it. The second value says
-    whether a wrapper was stepped over: its own options come before the name
-    it runs (`command -p shellcheck x`), so gated_prefix() then looks for the
-    prefix at every later word rather than only the first.
+    >cosign.pub x` both come back as `['shellcheck', 'x']`; reading the `>`
+    as the name left the whole segment unchecked. A target that opens a
+    backtick substitution runs to the token that closes it, since shlex
+    splits the substitution's words apart: `` >`printf x` git diff `` still
+    finds its name at git. A leading assignment and a leading wrapper word
+    (`time`, `command`, `env`) are stepped over too, since neither is part of
+    the prefix an allow rule matches; the assignment is kept, because a
+    variable set on a gated command is the environment it runs under.
+
+    The first word left is the command's name, with a leading path stripped,
+    so `/usr/bin/git` and `git` are one command. `wrapped` says whether a
+    wrapper was stepped over: its own options come before the name it runs
+    (`command -p shellcheck x`), so gated_prefix() and git_arguments() then
+    look at every later word rather than only the first.
+
+    This is the one walk. It used to be three -- one for git's name, one for
+    the gated prefixes, one for shellcheck's operands -- which is how `env
+    git diff --no-index a b` came to be read as a git invocation by none of
+    them (#428).
     """
+    if twins is None:
+        twins = segment
     words: list[str] = []
+    kept: list[str] = []
+    assignments: list[str] = []
     wrapped = False
+    name = ""
     index = 0
     while index < len(segment):
         token = segment[index]
@@ -754,50 +948,135 @@ def command_words(segment: list[str]) -> tuple[list[str], bool]:
         if token.startswith(PROCESS_SUBSTITUTION):
             index += 1  # the substitution's opening; its body is a segment of its own
             continue
-        if not words and (
-            assignment(token) is not None or bare(token) in COMMAND_WRAPPERS
-        ):
-            wrapped = wrapped or bare(token) in COMMAND_WRAPPERS
-            index += 1
-            continue
-        words.append(bare(token).rsplit("/", 1)[-1] if not words else token)
+        if not words:
+            assigned = assignment(token)
+            if assigned is not None:
+                assignments.append(assigned)
+                index += 1
+                continue
+            if bare(token) in COMMAND_WRAPPERS:
+                wrapped = True
+                index += 1
+                continue
+            name = token
+            words.append(bare(token).rsplit("/", 1)[-1])
+        else:
+            words.append(token)
+        kept.append(twins[index])
         index += 1
-    return words, wrapped
+    return Invocation(words, kept, wrapped, name, assignments)
 
 
-def gated_prefix(segment: list[str]) -> tuple[str, ...] | None:
-    """The GATED_PREFIXES entry this segment's leading words match, or None.
+def name_positions(invocation: Invocation) -> range:
+    """Where in `words` the name of the command may stand.
 
-    Behind a wrapper the name may stand after the wrapper's own options
-    (`command -p shellcheck x >cosign.pub`), so every later word is tried as
-    the start; without one, only the first word names the command.
+    Behind a wrapper the name may follow the wrapper's own options (`command
+    -p shellcheck x`, `env -i podman images`, `timeout 5 shellcheck x`), so
+    every word is tried as the start; without one, only the first word names
+    the command. Trying every word behind a wrapper can only over-refuse --
+    an operand that happens to spell a gated name is read as the command --
+    and modelling each wrapper's options is where the next hole hides.
     """
-    words, wrapped = command_words(segment)
-    starts = range(len(words)) if wrapped else range(min(len(words), 1))
-    for start in starts:
-        candidates = [bare(words[start]).rsplit("/", 1)[-1], *words[start + 1 :]]
+    if invocation.wrapped:
+        return range(len(invocation.words))
+    return range(min(len(invocation.words), 1))
+
+
+def gated_prefix(invocation: Invocation) -> tuple[str, ...] | None:
+    """The GATED_PREFIXES entry this invocation's leading words match, or None."""
+    for start in name_positions(invocation):
+        candidates = [
+            bare(invocation.words[start]).rsplit("/", 1)[-1],
+            *invocation.words[start + 1 :],
+        ]
         for prefix in GATED_PREFIXES:
             if tuple(candidates[: len(prefix)]) == prefix:
                 return prefix
     return None
 
 
-def sets_shellcheck_opts(token: str) -> bool:
-    """Does this word assign `SHELLCHECK_OPTS`?
+def git_arguments(invocation: Invocation) -> list[str] | None:
+    """The words a `git` invocation receives, or None when this is not one.
 
-    Every spelling that puts the variable in ShellCheck's environment writes
-    the assignment as a word: on the gated command itself
-    (`SHELLCHECK_OPTS=x shellcheck ...`), as an argument to a wrapper
-    (`env SHELLCHECK_OPTS=x shellcheck ...`, with or without `-i`), or in an
-    earlier command of the same string (`export SHELLCHECK_OPTS=x; ...`, and
-    `declare` or `typeset` where the tokenizer sees them). So the test is the
-    word, and every word of the command is tested -- the assignment stands
-    before the command name, so there is no shellcheck invocation to scope it
-    to at the point it is read.
+    The name is looked for exactly where gated_prefix() looks for one of
+    its own, so `env git diff --no-index a b`, `nice git ...` and
+    `/usr/bin/git ...` are the git invocation they run as. A redirection and
+    its target are not in `words`, which is why `git diff HEAD </dev/null`
+    is not read as a `/dev/null` operand.
+    """
+    for start in name_positions(invocation):
+        if bare(invocation.words[start]).rsplit("/", 1)[-1] == "git":
+            return invocation.words[start + 1 :]
+    return None
 
-    Bash has two assignment operators and both are matched: `+=` appends,
-    and appending to an unset variable creates it, so the append spelling
-    reaches ShellCheck's environment as surely as `=` does.
+
+def command_start(invocation: Invocation) -> int | None:
+    """The position in `words` where the gated command's own name was
+    found, whether that is `git` or a GATED_PREFIXES entry, or None.
+
+    gated_prefix() and git_arguments() each run this same search and stop
+    at their own match; kept here as one search so a wrapper's own option
+    words -- which stand at every position before this one when the
+    invocation is wrapped -- can be told from the command's, for
+    wrapper_chdir().
+    """
+    for start in name_positions(invocation):
+        bare_word = bare(invocation.words[start]).rsplit("/", 1)[-1]
+        if bare_word == "git":
+            return start
+        candidates = [bare_word, *invocation.words[start + 1 :]]
+        for prefix in GATED_PREFIXES:
+            if tuple(candidates[: len(prefix)]) == prefix:
+                return start
+    return None
+
+
+def wrapper_chdir(invocation: Invocation) -> str | None:
+    """The wrapper option that relocates this invocation before its gated
+    command runs, or None.
+
+    Only the words ahead of command_start() are the wrapper's own --
+    `env -C /tmp/other git diff` and `env --chdir=/tmp/other git diff`
+    both put `git` at a later position than 0, and everything before it
+    is env's, not git's. `-C` after the name is git's own diff option
+    (`git diff -C`) and is left to global_refusal(), which only reads
+    `-C` ahead of a subcommand -- there is none to be ahead of here, since
+    this only runs when a wrapper was stepped over.
+
+    Position 0 is read from `invocation.name` rather than
+    `invocation.words[0]`: command_words() runs the first word through
+    `bare().rsplit("/", 1)[-1]` to turn a path into a bare command name,
+    and `--chdir=/tmp/other` has a `/` of its own -- the same walk would
+    turn it into `other` and lose the option entirely. Every later
+    position is stored unprocessed already.
+    """
+    if not invocation.wrapped:
+        return None
+    start = command_start(invocation)
+    if start is None:
+        return None
+    for index in range(start):
+        token = invocation.name if index == 0 else invocation.words[index]
+        if token.split("=", 1)[0] in WRAPPER_RELOCATION:
+            return token
+    return None
+
+
+def assigned_environment(token: str) -> tuple[str, str] | None:
+    """The REFUSED_ENVIRONMENT row this word assigns, or None.
+
+    Every spelling that puts a variable in a command's environment writes the
+    assignment as a word: on the gated command itself (`SHELLCHECK_OPTS=x
+    shellcheck ...`), as an argument to a wrapper (`env GIT_DIR=x git ...`,
+    with or without `-i`), or in an earlier command of the same string
+    (`export GIT_EXTERNAL_DIFF=x; git diff`, and `declare -x` or `typeset -x`
+    where the tokenizer sees them). So the test is the word, and every word of
+    the command is tested -- the assignment stands before the command name, so
+    there is no invocation to scope it to at the point it is read.
+
+    Bash has two assignment operators and both are matched: `+=` appends, and
+    appending to an unset variable creates it, so the append spelling reaches
+    the environment as surely as `=` does.
 
     `env -S` re-splits its argument into a command line of its own, which puts
     the assignment and the command it runs inside a single word; the word is
@@ -805,20 +1084,77 @@ def sets_shellcheck_opts(token: str) -> bool:
     spellings are stripped from the front first.
 
     The token is the word with its quotes removed, so `SHELLCHECK_OPTS='-s
-    bash'` and `env 'SHELLCHECK_OPTS'=./.env` are found as readily as the bare
+    bash'` and `env 'GIT_DIR'=/tmp/other` are found as readily as the bare
     form -- the second is not an assignment to bash at all, but `env` reads
     the argv string it becomes as one. A word that only quotes the assignment
     without making it (`grep 'SHELLCHECK_OPTS=' docs/SECURITY-AI.md`) is
-    refused with the rest; the variable can be searched for by name alone.
+    refused with the rest; a variable can be searched for by name alone.
+
+    `readonly NAME=x` and a bare `declare NAME=x` do not export, so they reach
+    no child; they are refused with the rest all the same, because the rule is
+    the word that assigns the name rather than a model of which builtin
+    exports. That direction over-refuses, which is the safe one.
     """
     word = bare(token)
     for option in ENV_SPLIT_STRING:
         if word.startswith(option):
             word = word[len(option) :]
             break
-    return any(
-        piece.startswith(SHELLCHECK_OPTS_ASSIGNMENTS) for piece in word.split()
-    )
+    for piece in word.split():
+        name = assigned_name(piece)
+        if name is None:
+            continue
+        for pattern, reach in REFUSED_ENVIRONMENT:
+            if fnmatch.fnmatchcase(name, pattern):
+                return name, reach
+    return None
+
+
+def assigned_name(piece: str) -> str | None:
+    """The variable name a `NAME=`/`NAME+=` word assigns, or None.
+
+    Looser than assignment(): `env 'NAME'=value` is not an assignment to bash
+    at all, and the quotes are gone by the time this reads the word, so the
+    name is taken from the text before the operator without asking whether
+    bash would have honoured it. `env` reads the argv string it becomes as an
+    assignment, which is the point.
+    """
+    for operator in ASSIGNMENT_OPERATORS:
+        name, found, _ = piece.partition(operator)
+        if found and name:
+            return name
+    return None
+
+
+def env_split_escape(token: str) -> str | None:
+    """The backslash escape in an `env -S`/`--split-string` argument this
+    scan does not parse, or None.
+
+    env's own splitting language treats a backslash specially before its
+    own word split ever runs: `\\_` is a space that still separates two
+    words the way an unescaped one does (documented for a shebang line,
+    where runs of whitespace collapse to one before env ever sees them),
+    `\\ ` (backslash space) folds the space it precedes into the word
+    instead of splitting on it, and `\\c`, `\\#`, `\\$`, a quote and the
+    control-character spellings (`\\n`, `\\t`, ...) each rewrite the string
+    before that split runs too. word.split() in assigned_environment()
+    only recognises the whitespace already sitting in the token, so
+    `env -S'FOO=x\\_GIT_EXTERNAL_DIFF=./evil\\_git diff'` -- which env
+    itself splits into `FOO=x`, `GIT_EXTERNAL_DIFF=./evil`, `git` and
+    `diff` -- arrives at word.split() as one merged piece whose assigned
+    name is only `FOO`, and the refused row never fires while the git
+    invocation env actually runs carries the driver.
+
+    Implementing env's splitting language is not attempted here: a split
+    string carrying a backslash is refused outright instead, since a name
+    this scan cannot see split out is a name it cannot clear.
+    """
+    word = bare(token)
+    for option in ENV_SPLIT_STRING:
+        if word.startswith(option):
+            word = word[len(option) :]
+            return word if "\\" in word else None
+    return None
 
 
 def denied_read_shape(path: str) -> bool:
@@ -829,46 +1165,24 @@ def denied_read_shape(path: str) -> bool:
     )
 
 
-def shellcheck_arguments(
-    segment: list[str], twins: list[str]
-) -> list[tuple[str, str]]:
+def shellcheck_arguments(invocation: Invocation) -> list[tuple[str, str]]:
     """The words a `shellcheck` invocation receives, each with its twin.
 
-    The walk is command_words()'s: a redirection, a descriptor written before
-    one, a leading assignment and a leading wrapper word belong to the shell
-    rather than to the command. Everything after the word naming shellcheck
-    is returned, which is where gated_prefix() found the name -- behind a
-    wrapper that may be its own options (`command -p shellcheck x`). The
-    masked twin travels with the word so a check that has to know what bash
-    would quote can read it: shlex hands back the same `*.sh` for `'*.sh'`.
+    Everything after the word naming shellcheck is returned, which is where
+    gated_prefix() found the name -- behind a wrapper that may be its own
+    options (`command -p shellcheck x`). The masked twin travels with the
+    word so a check that has to know what bash would quote can read it: shlex
+    hands back the same `*.sh` for `'*.sh'`.
     """
-    words: list[tuple[str, str]] = []
-    index = 0
-    while index < len(segment):
-        token = segment[index]
-        if REDIRECTION.match(token):
-            index = after_redirection(segment, index)
-            continue
-        if (
-            DESCRIPTOR.match(token)
-            and index + 1 < len(segment)
-            and REDIRECTION.match(segment[index + 1])
-        ):
-            index += 1  # the descriptor; the operator is next
-            continue
-        if token.startswith(PROCESS_SUBSTITUTION):
-            index += 1  # the substitution's opening; its body is a segment of its own
-            continue
-        if not words and (
-            assignment(token) is not None or bare(token) in COMMAND_WRAPPERS
-        ):
-            index += 1
-            continue
-        words.append((token, twins[index]))
-        index += 1
-    for position, (token, _) in enumerate(words):
+    for position, token in enumerate(invocation.words):
         if bare(token).rsplit("/", 1)[-1] == "shellcheck":
-            return words[position + 1 :]
+            return list(
+                zip(
+                    invocation.words[position + 1 :],
+                    invocation.twins[position + 1 :],
+                    strict=True,
+                )
+            )
     return []
 
 
@@ -892,7 +1206,9 @@ def reading_redirections(
     return targets
 
 
-def shellcheck_refusal(segment: list[str], twins: list[str]) -> str | None:
+def shellcheck_refusal(
+    invocation: Invocation, segment: list[str], twins: list[str]
+) -> str | None:
     """Why this shellcheck invocation must not run, or None.
 
     Everything here is refused by default: a word the scan does not recognise
@@ -926,7 +1242,7 @@ def shellcheck_refusal(segment: list[str], twins: list[str]) -> str | None:
                 "script inside the checkout, spelled out in full"
             )
     skip_value = False
-    for token, twin in shellcheck_arguments(segment, twins):
+    for token, twin in shellcheck_arguments(invocation):
         if skip_value:
             skip_value = False
             continue
@@ -1012,29 +1328,84 @@ def refusal(command: str) -> str | None:
         # The masked copy split differently, so which tokens are separators
         # cannot be told; refused rather than guessed at.
         return "the command's quoting cannot be matched to its words, so its git arguments cannot be checked"
-    for token in tokens:
+    for token, twin in zip(tokens, masked, strict=True):
         # Read before the segments are walked, because the word need not be
         # in a segment that names a gated command at all: an `export` in an
         # earlier segment reaches the later shellcheck just as a leading
-        # assignment does.
-        if sets_shellcheck_opts(token):
+        # assignment does, and an `export` in a string that runs nothing
+        # gated reaches the *next* Bash call, whose command this hook is not
+        # reading yet.
+        if runtime_assignment(token, twin):
             return (
-                "SHELLCHECK_OPTS is not a list of options despite the name -- shellcheck "
-                "splits it and prepends it to its own argument list, operands included, so "
-                "SHELLCHECK_OPTS=./.env in front of a lint run lints the .env as well and "
-                "prints its lines back, past the Read(./cosign.key), Read(./.env) and "
-                "Read(**/*.pem) deny rules in .claude/settings.json and with no such path "
-                "in the argv the operand scan reads; the assignment stands before the "
-                "command name, so it is refused wherever it is written -- on the command, "
-                "behind env, or as an export or declare in an earlier command of the same "
-                "string -- and whatever value it carries, since nothing in this repository "
-                "sets the variable; pass shellcheck's options after its name instead"
+                f"{token} carries a `$` or a backtick past mask_quotes() sitting next to "
+                "an `=`, which is bash rebuilding the word before the command runs rather "
+                "than the literal spelling this scan reads -- `export "
+                "GIT_EXTERNAL_DIFF$'=./evil'` concatenates the bareword and the ANSI-C "
+                "quote into one word and exports GIT_EXTERNAL_DIFF=./evil, and "
+                "assigned_environment() would only find the name up to the `=` sitting "
+                "inside the quote. A word whose assigned name this scan cannot read as "
+                "typed is refused rather than assumed clear of REFUSED_ENVIRONMENT; write "
+                "the assignment as a literal NAME=value word instead"
+            )
+        split_escape = env_split_escape(token)
+        if split_escape is not None:
+            return (
+                f"{token} is env's -S/--split-string argument and carries a backslash "
+                f"escape ({split_escape!r}) -- `\\_`, `\\ `, `\\c`, `\\#`, `\\$`, a quote, "
+                "or a control-character spelling -- which env's own splitting language "
+                "reads before this scan's word.split() ever runs, so a word boundary (or "
+                "an assignment word.split() does not see split out) can hide inside it: "
+                "`\\_` separates two words the way an unescaped space does, and "
+                "word.split() does not split there. Write the assignment and the command "
+                "as separate words instead of inside a split string with an escape in it"
+            )
+        assigned = assigned_environment(token)
+        if assigned is not None:
+            name, reach = assigned
+            return (
+                f"{name} {reach}, so the command is no longer the read or the lint the "
+                "allow list describes. The assignment stands before the command name, so "
+                "it is refused wherever it is written -- on the command, behind env "
+                "including its -i, -S and --split-string forms, or as an export, declare "
+                "or typeset in another command of the same string -- in both of bash's "
+                "assignment operators, since += on an unset variable creates it, and "
+                "whatever value it carries, since nothing in this repository sets it. The "
+                "Bash tool's shell outlives one call, so an export left unrefused here "
+                "would be in the environment of the next call's command; pass what the "
+                "command needs after its name instead"
             )
     for segment, twins in segments(tokens, masked):
-        names, command_name, arguments = split_segment(segment)
-        if command_name != "git":
-            prefix = gated_prefix(segment)
-            if prefix and (
+        invocation = command_words(segment, twins)
+        for position in name_positions(invocation):
+            candidate = (
+                invocation.name if position == 0 else invocation.words[position]
+            )
+            if brace_would_expand(candidate):
+                return (
+                    f"{candidate} carries a brace that bash expands before the command "
+                    "runs, and it is a word this scan reads as the command's name behind "
+                    "a wrapper's own options: `{,git} diff --no-index a b` drops the "
+                    "empty word and runs git, `{,shellcheck} ./.env` runs the linter, and "
+                    "`env -i {,git} diff --no-index a b` hides the same trick behind "
+                    "env's own `-i` -- so which command this segment runs cannot be read "
+                    "from the word as typed; write the command's name out in full"
+                )
+        relocated = wrapper_chdir(invocation)
+        if relocated is not None:
+            return (
+                f"{relocated} changes the working directory a wrapper's command runs "
+                "from before this scan ever decides whether that command is `git` or "
+                "another gated name -- GNU env documents `-C DIR`/`--chdir=DIR` for "
+                "exactly that -- so every operand read after it is read as though the "
+                "command still ran inside this checkout while it did not: `env -C "
+                "/tmp/other git diff` reaches the allow-listed `git diff` and prints "
+                "another repository's unstaged content past operands that name nothing "
+                "this hook refuses. A wrapper that relocates its command is refused "
+                "outright rather than validated against a path this scan cannot resolve"
+            )
+        prefix = gated_prefix(invocation)
+        if prefix is not None:
+            if (
                 any(token.startswith(PROCESS_SUBSTITUTION) for token in segment)
                 or any(expands_at_runtime(twin) for twin in twins)
             ):
@@ -1046,8 +1417,8 @@ def refusal(command: str) -> str | None:
                     "`shellcheck $(>cosign.pub)` truncate the file while the command "
                     "prints as usual; write the inner command as a command of its own"
                 )
-            redirection = writing_redirection(segment) if prefix else None
-            if prefix and redirection:
+            redirection = writing_redirection(segment)
+            if redirection:
                 return (
                     f"{redirection} makes the shell open a file for writing before "
                     f"`{' '.join(prefix)}` runs, which truncates it whatever the command "
@@ -1058,20 +1429,33 @@ def refusal(command: str) -> str | None:
                     "(2>&1, >&2, an input redirection, and a redirection on a command no "
                     "allow rule covers are not refused)"
                 )
-            if prefix and names:
+            if invocation.assignments:
+                # Any name, not only a REFUSED_ENVIRONMENT one: a variable set
+                # on a gated command is nothing an ordinary lint or inspection
+                # run needs, so the position is enough to refuse it and the
+                # name list does not have to be complete for this spelling.
+                # The name list is what covers the spellings that are *not* in
+                # this position -- an `export` in another command of the
+                # string -- where a rule on any name would refuse `x=1; podman
+                # images` and every other ordinary compound command.
                 return (
-                    f"{names[0]}= before `{' '.join(prefix)}` is an environment the "
-                    "command runs under, and for these commands that changes what runs "
-                    "or where it goes -- PYTHONPATH= puts a module of its own ahead of "
-                    "the audit's imports, LD_PRELOAD= loads code before a line is "
-                    "linted, GH_HOST= sends the token elsewhere, CONTAINERS_CONF= "
-                    "re-points podman; run the command without the assignment (a git "
-                    "invocation is not affected by this rule)"
+                    f"{invocation.assignments[0]}= before `{' '.join(prefix)}` is an "
+                    "environment the command runs under, and for these commands that "
+                    "changes what runs or where it goes -- PYTHONPATH= puts a module of "
+                    "its own ahead of the audit's imports, LD_PRELOAD= loads code before "
+                    "a line is linted, GH_HOST= sends the token elsewhere, "
+                    "CONTAINERS_CONF= re-points podman; run the command without the "
+                    "assignment (a git invocation is not affected by this rule, and the "
+                    "names that reach one are refused by REFUSED_ENVIRONMENT wherever "
+                    "they are written)"
                 )
             if prefix == ("shellcheck",):
-                reason = shellcheck_refusal(segment, twins)
+                reason = shellcheck_refusal(invocation, segment, twins)
                 if reason is not None:
                     return reason
+            continue
+        arguments = git_arguments(invocation)
+        if arguments is None:
             continue
         for token in segment:
             if token.startswith(PROCESS_SUBSTITUTION):
@@ -1121,12 +1505,6 @@ def refusal(command: str) -> str | None:
                     "no test here sees; write the argument out literally (a "
                     "single-quoted literal such as --format='%h $x' is not refused, and "
                     "neither is a $ on another command of the same string)"
-                )
-        for name in names:
-            if name in REFUSED_ENVIRONMENT:
-                return (
-                    f"{name} changes what git runs or which repository it reads, "
-                    "so the command is no longer the read the allow list describes"
                 )
         option = global_refusal(arguments)
         if option is not None:

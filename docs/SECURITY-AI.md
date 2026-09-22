@@ -157,6 +157,38 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   the `=`. Same finding as
   [arch-bootc#314](https://github.com/Danathar/arch-bootc/issues/314) and
   [aurora-zfs-simple#206](https://github.com/Danathar/aurora-zfs-simple/issues/206).
+  That variable turned out to be one of a family, and the family is now a
+  table rather than a special case: `GIT_EXTERNAL_DIFF` names a program git
+  runs on every file it diffs, the `GIT_CONFIG_*` family injects
+  `diff.external` without needing `-c`, `GIT_DIR` and its relatives re-point
+  the repository, index and object store, `PYTHONPATH` puts a module ahead of
+  the audit's imports, `LD_PRELOAD` loads code into any of these commands, and
+  `GH_HOST` and `CONTAINERS_CONF` re-point where `gh` sends its token and what
+  `podman` reads. Each is one row of `REFUSED_ENVIRONMENT`, refused in every
+  spelling above, and the refusal is unconditional rather than scoped to a
+  string that also runs a gated command: the Bash tool's shell outlives one
+  call, so an `export` allowed on its own would still be in the environment of
+  the next call's `git diff`. The name a command is spelled with is the same
+  problem once more -- a path, a wrapper (`env`, `command`, `nice`,
+  `timeout`), or a brace, since `{,git} diff` expands to an empty word and
+  `git` and bash drops the empty one and runs git -- so the hook reads the
+  command's name through one walk that steps over the shell's own words, and
+  the git half and the redirection half of it see the same command. Four
+  shapes of that corpus are decided the other way and written down rather than
+  left open: `GIT_PAGER=prog git log` runs nothing, because git spawns a pager
+  only for a terminal and a tool-run command has a pipe (which is why
+  `PAGER=cat git log` is unprompted); `GIT_SSH_COMMAND` and `GIT_EDITOR` reach
+  no subcommand the allow list covers; a glob in a git word is bash's to
+  expand, because a glob cannot leave the working directory without a `/`, a
+  `..` or a `~`, each already refused in the pattern; and an input redirection
+  is checked for `shellcheck` alone, because `shellcheck` is the one of these
+  commands that prints the source line back -- `hadolint` reports a position
+  and the character it did not expect, never the line, which a test runs
+  rather than assumes. `tests/test_git_diff_gate.py` holds that whole corpus
+  as a table of (shape, command, decision, why) rows, so a new shape is one
+  row and a shape deliberately allowed is visibly a decision rather than an
+  omission. Same corpus as
+  [#428](https://github.com/Danathar/atomic-image-builder/issues/428).
 - `maintenance_audit.py` fails when a workflow action is not covered by the
   pin tables, or when a pinned SHA disagrees with them. That check is what
   stops an unpinned action reaching generated repositories.
