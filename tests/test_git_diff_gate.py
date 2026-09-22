@@ -206,6 +206,17 @@ REFUSED_COMMANDS = (
     ("env -S'FOO=x\\_GIT_EXTERNAL_DIFF=./evil\\_git diff'", "merges past word.split() so only the decoy name in front of it is read"),
     ("export GIT_EXTERNAL_DIFF$'=./evil'; git diff HEAD", "concatenates an ANSI-C quote onto the name so the literal scan misses it"),
     ("env -i {,git} diff --no-index /dev/null ./cosign.key", "hides a brace-expanded name behind a wrapper's own option"),
+    (
+        "export 'GIT_EXTERNAL_DIFF'$'=./evil'; git diff HEAD",
+        "quotes the identifier ahead of the ANSI-C escape, which used to shift an index-based scan out of alignment with its "
+        "masked twin and let the assignment through unread",
+    ),
+    (
+        "env -S 'FOO=x\\_GIT_EXTERNAL_DIFF=./evil\\_git diff' HEAD",
+        "splits the assignment out of a *detached* -S argument -- its own word, not attached to the option -- one word later",
+    ),
+    ("env -C/tmp/other git diff", "relocates git through -C's attached short spelling, with no space or ="),
+    ("env --chd=/tmp/other git diff", "relocates git through an unambiguous abbreviation of --chdir"),
 )
 
 # Commands it has to leave alone. Everything an ordinary session runs.
@@ -323,6 +334,13 @@ ALLOWED_COMMANDS = (
     # without the `=` -- which is how it is searched for -- is not an
     # assignment and is not refused.
     "grep -rn SHELLCHECK_OPTS docs/SECURITY-AI.md",
+    # `v` sits ahead of a live `$` the same shape `GIT_EXTERNAL_DIFF$'='`
+    # does, but reaches no REFUSED_ENVIRONMENT name whatever `$TAG`
+    # expands to, and this command is not even gated -- `gh release
+    # create` matches no GATED_PREFIXES row -- so runtime_assignment()
+    # refusing it outright was a plain command the scan had no reach-based
+    # reason to stop.
+    "gh release create v$TAG",
 )
 
 
