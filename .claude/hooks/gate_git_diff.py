@@ -361,6 +361,16 @@ COMMAND_WRAPPERS = frozenset(
     }
 )
 
+# The builtins whose own arguments assign, the same family
+# assigned_environment() already reads every word of, by name --
+# `export`, `declare -x` and `typeset -x` put a variable in every later
+# command's environment; a bare `declare` or `readonly` does not export,
+# but is refused with the rest all the same, the safe over-refusing
+# direction assigned_environment()'s own docstring gives. Used by
+# opaque_assignment_prefix() to scope a check assigned_environment() and
+# runtime_assignment() cannot make by content alone: see there.
+EXPORT_FAMILY = frozenset({"export", "declare", "typeset", "readonly"})
+
 # ShellCheck's options that take their value as the *next* word, in both
 # spellings. The attached forms (`-sbash`, `--shell=bash`) need no entry:
 # each is one dash-prefixed word and the operand scan steps over it with the
@@ -389,32 +399,29 @@ SHELLCHECK_VALUE_OPTIONS = frozenset(
     }
 )
 
-# The option with which `env` re-splits one word into a command line of its
-# own, in the two spellings that attach the string to the option word
-# (`env -S'SHELLCHECK_OPTS=./.env shellcheck x'`). The *detached* spellings
-# -- `-S` or `--split-string` as a word of its own, the string that follows
-# it a separate word again -- are DETACHED_ENV_SPLIT_STRING below: a plain
-# `NAME=value` in that following word is still found by
-# assigned_environment()'s own word.split(), but a backslash in it is env's
-# splitting language, exactly as it is when the option and the string share
-# one word, and env_split_escape() only reads the attached spellings.
-ENV_SPLIT_STRING = ("--split-string=", "-S")
-DETACHED_ENV_SPLIT_STRING = frozenset({"-S", "--split-string"})
-
-# `env`'s own option for relocating the child process before it runs. GNU
-# env documents `-C DIR` and `--chdir=DIR`, and getopt's usual conventions
-# apply to both: the short form's argument may be attached with no
-# separator (`-C/tmp/other`, not only `-C /tmp/other`), and the long form
-# may be abbreviated to any prefix that is unambiguous among env's other
-# options (`--chd=/tmp/other`, `--chdir` alone). `env -C /tmp/other git
-# diff` reaches the allow-listed `git diff` the same walk git_arguments()
-# already does, but every operand it reads after that is read as though
-# the command still ran from this checkout -- a foreign repository's
-# unstaged content prints past a git invocation whose own operands name
-# nothing this hook refuses. No other name in COMMAND_WRAPPERS defines
-# either spelling, so the check needs no record of which wrapper matched.
-# See wrapper_relocates().
+# GNU env's own options this scan has to recognise in every spelling env
+# itself accepts: getopt clustering for the short forms (`-iC/etc` is `-i`
+# then `-C/etc` sharing one word; `-iS'...'` the same for -S) and
+# unambiguous prefix abbreviation for the long forms (`--chd=/tmp/other`,
+# `--split='...'`). `-C, --chdir=DIR` relocates the child before it runs;
+# `-S, --split-string=S` re-splits one word into a command line of its
+# own. Both reach past what an allow rule matches the same way
+# GIT_EXTERNAL_DIFF does: `env -C /tmp/other git diff` reaches the
+# allow-listed `git diff` and prints another repository's unstaged
+# content, and `env -S'SHELLCHECK_OPTS=./.env shellcheck x'` re-splits
+# a word into an assignment and a gated command word.split() never sees
+# as two words. See wrapper_relocates(), env_split_string_value() and
+# env_split_string_detached().
+#
+# `-u, --unset=NAME` is GNU env's third value-taking option; it reaches
+# nothing this scan refuses on its own, but still has to end a short
+# cluster's scan the way `-C` and `-S` do -- `-iuFOO -C /etc` would
+# otherwise walk past its attached value and misread the `C` inside it
+# for env's own -C.
+ENV_VALUED_SHORT = frozenset("CSu")
 WRAPPER_RELOCATION_LONG = "--chdir"
+WRAPPER_SPLIT_STRING_LONG = "--split-string"
+
 
 # Both of bash's assignment operators, longest first. `+=` appends, and
 # appending to a variable that is not set creates it, so `SHELLCHECK_OPTS+=x`
@@ -690,6 +697,39 @@ def runtime_assignment(token: str, twin: str) -> bool:
     return False
 
 
+def opaque_assignment_prefix(word: str, twin: str) -> bool:
+    """Does this word of an export-family command open with a live `$` or
+    backtick, so nothing about the name it assigns can be read at all?
+
+    runtime_assignment() and prefix_reaches_refused_environment() decide a
+    live expansion by testing the *known* prefix ahead of it against
+    REFUSED_ENVIRONMENT's own names, and an empty prefix trivially
+    satisfies every one of them (every name starts with the empty
+    string) -- refusing on content alone here would refuse `curl
+    "$URL=1"` exactly as it refuses `export $'GIT_EXTERNAL_DIFF=./evil'`,
+    since both words are, as far as their own characters go, a live `$`
+    with an `=` somewhere after it and nothing else to go on. The two are
+    only told apart by where the word stands: `curl`'s argument is not
+    read as an assignment by anything, while every word after
+    export/declare/typeset/readonly's own name is -- assigned_environment()
+    already tests all of them by content, and this is the one shape
+    content cannot decide, so the caller passes only those words in (see
+    its use in refusal()).
+
+    `export $'GIT_EXTERNAL_DIFF=./evil'` is one word to bash, an ANSI-C
+    quote with nothing before the `$` to concatenate onto, and it exports
+    exactly what `export GIT_EXTERNAL_DIFF=./evil` does; unlike a bare
+    leading assignment (`NAME=value cmd`), which bash's parser only
+    recognises when the word carries no quote or expansion character at
+    all -- confirmed against bash directly, `$'GIT_FOO=bar' env` and
+    `'GIT_FOO=bar' env` both fail as "command not found" -- export and its
+    family read their own arguments as NAME=value only *after* every
+    expansion has already run, so a live character at the very front
+    reaches a name this scan can never read, however it turns out.
+    """
+    return bool(word[:1] and word[0] in EXPANSION and twin[:1] == word[:1])
+
+
 def unsafe_operand(token: str) -> bool:
     """A path that leaves the checkout, spelled without needing `--no-index`.
 
@@ -755,9 +795,9 @@ def mask_quotes(command: str) -> str:
 
 
 def mask_quotes_stripped(command: str) -> str:
-    """Like mask_quotes(), but with the quote mark itself and an escaping
-    backslash dropped rather than masked, so tokenizing the result lines up
-    character for character with tokenize(command)'s own tokens.
+    """Like mask_quotes(), but with the quote mark itself and a real
+    escaping backslash dropped rather than masked, so tokenizing the result
+    lines up character for character with tokenize(command)'s own tokens.
 
     mask_quotes() keeps every quoted region the same *length* as the
     original command -- that is what strip_comments() needs, to index the
@@ -776,22 +816,40 @@ def mask_quotes_stripped(command: str) -> str:
     not, so the character at the real `$`'s index reads as `Q` and the word
     passed as clear of every REFUSED_ENVIRONMENT name.
 
-    An empty pair (`''`, `""`) is the one place dropping both marks costs
-    something rather than fixing it: shlex still hands back a word for
-    `<<<''`'s here-string target, an empty one, and dropping every
-    character of it leaves nothing in the masked copy to mark that a word
-    stood there at all -- tokenizing it then returns one *fewer* token
-    than tokenize(command) does, and the two cannot be zipped together.
-    A quote character immediately followed by its own match is read as
-    that empty pair and contributes one placeholder `Q` instead of zero
-    characters; nothing walks past index 0 of an empty real token, so its
-    length never has to match the placeholder's.
+    Two shapes need more than dropping the mark to line up right:
+
+    An empty pair (`''`, `""`) loses every character of itself either way,
+    and when it is the *whole word* -- `<<<''`'s here-string target -- that
+    costs something rather than fixing it: nothing is left in the masked
+    copy to mark that a word stood there, so tokenizing it returns one
+    *fewer* token than tokenize(command) does and the two cannot be zipped
+    together. A quote character immediately followed by its own match, at
+    the start and the end of a word (the character before it is absent,
+    whitespace or punctuation, and so is the character after its close),
+    gets one placeholder `Q` instead of zero characters -- nothing walks
+    past index 0 of an empty real token, so its length never has to match
+    the placeholder's. Elsewhere in a word an empty pair contributes
+    nothing, matching shlex exactly: `'GIT_EXTERNAL_DIFF'''$'=./evil'` is
+    still `GIT_EXTERNAL_DIFF=./evil` at both the real and the masked
+    length, since the embedded `''` is not what holds the word together.
+
+    A backslash inside double quotes is only shlex's escape character in
+    front of the quote mark or another backslash (posix shlex's
+    `escapedquotes` is `"` alone); in front of anything else -- `$`, a
+    backtick, an ordinary letter -- it is kept as a literal character of
+    the word and the character after it is read normally, exactly as
+    `"a\\zb"` reaches shlex as the four characters `a\\zb` rather than
+    three. mask_quotes() does not need this distinction: either reading
+    costs the same one `Q` per character against the original command's
+    own length. This one does, since dropping a backslash shlex keeps is
+    the same one-character skew a dropped quote mark caused.
     """
     masked: list[str] = []
     quote = ""
     escaped = False
     index = 0
     length = len(command)
+    boundary = " \t\n" + "".join(PUNCTUATION)
     while index < length:
         char = command[index]
         if escaped:
@@ -800,8 +858,25 @@ def mask_quotes_stripped(command: str) -> str:
         elif quote:
             if char == quote:
                 quote = ""
-            elif quote == '"' and char == "\\":
+            elif quote == '"' and char == "\\" and index + 1 < length and command[index + 1] in ('"', "\\"):
+                # shlex's own escapedquotes rule: it drops this backslash
+                # and keeps only the quote mark or the second backslash,
+                # one character for the pair.
                 escaped = True
+            elif quote == '"' and char == "\\" and index + 1 < length and command[index + 1] in EXPANSION:
+                # Outside shlex's own rule -- posix shlex only special-cases
+                # \" and \\ inside double quotes, so `"a\$b"` reaches shlex
+                # as the four characters a\$b, backslash kept -- but bash's
+                # wider double-quote escape set (\$, \`, \", \\, backslash-
+                # newline) still neutralizes the character after it: git
+                # receives the literal text $x for `"\$x"`, not a variable
+                # bash expands. Both characters are masked, which is what
+                # keeps shlex's own two-character length here, and the one
+                # that would otherwise stay live loses the exemption.
+                masked.append("Q")
+                masked.append("Q")
+                index += 2
+                continue
             elif quote == '"' and char in EXPANSION:
                 masked.append(char)
             else:
@@ -810,7 +885,10 @@ def mask_quotes_stripped(command: str) -> str:
             escaped = True
         elif char in "'\"":
             if index + 1 < length and command[index + 1] == char:
-                masked.append("Q")
+                before = command[index - 1] if index > 0 else ""
+                after = command[index + 2] if index + 2 < length else ""
+                if (not before or before in boundary) and (not after or after in boundary):
+                    masked.append("Q")
                 index += 2
                 continue
             quote = char
@@ -1146,26 +1224,66 @@ def command_start(invocation: Invocation) -> int | None:
     return None
 
 
+def long_option_name(token: str) -> str | None:
+    """The name half of a long-option word (`--chdir` of `--chdir=/tmp`),
+    or None when this is not a long option at all -- `--` alone is
+    excluded too, since it is the operand separator rather than an
+    option with an empty name.
+    """
+    if not token.startswith("--") or token == "--":
+        return None
+    return token.split("=", 1)[0]
+
+
+def long_option_abbreviates(name: str, full: str) -> bool:
+    """Does `name` (a long option's own name, `--` included, no `=value`)
+    reach `full` the way GNU getopt_long resolves an unambiguous prefix?
+    Every caller here has already picked a `full` no other option of the
+    same program begins the same way, which is what makes the prefix
+    unambiguous without walking that program's whole option table --
+    refused_long() reads git's own abbreviated long options the same way.
+    """
+    return len(name) > 2 and full.startswith(name)
+
+
+def env_short_option(token: str, letter: str) -> str | None:
+    """Does this short-option word carry `letter` ("C" or "S"), and if so
+    what value is attached to it in the same word (empty when the value
+    is a separate word instead)? None when the word does not carry it --
+    it is not a short-option word at all, or a different value-taking
+    letter (ENV_VALUED_SHORT) claims the rest of the word first, the way
+    refused_short() already stops its own walk at git's first value-taking
+    letter.
+    """
+    if not token.startswith("-") or token.startswith("--"):
+        return None
+    for index, char in enumerate(token[1:], start=1):
+        if char == letter:
+            return token[index + 1 :]
+        if char in ENV_VALUED_SHORT:
+            return None
+    return None
+
+
 def wrapper_relocates(token: str) -> bool:
     """Is this wrapper option word GNU env's `-C`/`--chdir`, in any spelling
     env itself accepts?
 
-    `token.split("=", 1)[0] in {"-C", "--chdir"}` -- the exact-match test
-    this replaced -- missed two spellings getopt gives env for free: the
-    short option's argument attached with no separator at all
-    (`-C/tmp/other`, not only `-C /tmp/other` or `-C=/tmp/other`, which
-    env does not accept either but this scan need not reject), and any
-    unambiguous abbreviation of the long option (`--chd=/tmp/other`,
-    `--chdir` alone with the value a separate word). No other env long
-    option begins `--ch`, so a prefix match cannot cross into one of
-    them; `--` alone, the operand separator, is excluded by the length
-    check, since every real abbreviation carries at least one letter of
-    `chdir`.
+    `token.split("=", 1)[0] in {"-C", "--chdir"}` -- an early exact-match
+    test -- missed three spellings getopt gives env for free: the short
+    option's argument attached with no separator at all (`-C/tmp/other`,
+    not only `-C /tmp/other` or `-C=/tmp/other`, which env does not accept
+    either but this scan need not reject), `-C` clustered behind one of
+    env's own boolean options (`-iC/tmp/other` is `-i` then `-C/tmp/other`,
+    and GNU env's own getopt_long clusters short options the way git's
+    does), and any unambiguous abbreviation of the long option
+    (`--chd=/tmp/other`, `--chdir` alone with the value a separate word).
     """
-    name = token.split("=", 1)[0]
-    if name.startswith("-C"):
-        return True
-    return len(name) > 2 and name.startswith("--") and WRAPPER_RELOCATION_LONG.startswith(name)
+    name = long_option_name(token)
+    if name is not None:
+        return long_option_abbreviates(name, WRAPPER_RELOCATION_LONG)
+    return env_short_option(token, "C") is not None
+
 
 
 def wrapper_chdir(invocation: Invocation) -> str | None:
@@ -1199,6 +1317,34 @@ def wrapper_chdir(invocation: Invocation) -> str | None:
     return None
 
 
+def env_split_string_value(token: str) -> str | None:
+    """The value attached to this word if it is any spelling of env's own
+    `-S`/`--split-string` carrying it in the same word -- clustered or
+    bare short (`-iS'...'`, `-S'...'`), the exact long option, or an
+    unambiguous abbreviation of it (`--split-string='...'`, `--split='...'`)
+    -- or None when the word carries no attached value this way: it may
+    still be the option alone with its value the next word instead (see
+    env_split_string_detached()), or an ordinary word altogether.
+    """
+    name = long_option_name(token)
+    if name is not None:
+        if long_option_abbreviates(name, WRAPPER_SPLIT_STRING_LONG) and "=" in token:
+            return token.split("=", 1)[1]
+        return None
+    value = env_short_option(token, "S")
+    return value if value else None
+
+
+def env_split_string_detached(token: str) -> bool:
+    """Is this word env's own `-S`/`--split-string`, in any spelling, with
+    nothing attached to it -- so the next word is the string it re-splits?
+    """
+    name = long_option_name(token)
+    if name is not None:
+        return "=" not in token and long_option_abbreviates(name, WRAPPER_SPLIT_STRING_LONG)
+    return env_short_option(token, "S") == ""
+
+
 def assigned_environment(token: str) -> tuple[str, str] | None:
     """The REFUSED_ENVIRONMENT row this word assigns, or None.
 
@@ -1215,10 +1361,12 @@ def assigned_environment(token: str) -> tuple[str, str] | None:
     appending to an unset variable creates it, so the append spelling reaches
     the environment as surely as `=` does.
 
-    `env -S` re-splits its argument into a command line of its own, which puts
-    the assignment and the command it runs inside a single word; the word is
-    split on whitespace and each piece tested, and the option's attached
-    spellings are stripped from the front first.
+    `env -S`, in every spelling env itself accepts -- clustered or bare
+    short, the exact long option, or an unambiguous abbreviation of it --
+    re-splits its argument into a command line of its own, which puts the
+    assignment and the command it runs inside a single word; the word is
+    split on whitespace and each piece tested, and the option's own
+    spelling is stripped from the front first (env_split_string_value()).
 
     The token is the word with its quotes removed, so `SHELLCHECK_OPTS='-s
     bash'` and `env 'GIT_DIR'=/tmp/other` are found as readily as the bare
@@ -1233,10 +1381,9 @@ def assigned_environment(token: str) -> tuple[str, str] | None:
     exports. That direction over-refuses, which is the safe one.
     """
     word = bare(token)
-    for option in ENV_SPLIT_STRING:
-        if word.startswith(option):
-            word = word[len(option) :]
-            break
+    split_value = env_split_string_value(word)
+    if split_value is not None:
+        word = split_value
     for piece in word.split():
         name = assigned_name(piece)
         if name is None:
@@ -1280,18 +1427,19 @@ def env_split_escape(token: str) -> str | None:
     itself splits into `FOO=x`, `GIT_EXTERNAL_DIFF=./evil`, `git` and
     `diff` -- arrives at word.split() as one merged piece whose assigned
     name is only `FOO`, and the refused row never fires while the git
-    invocation env actually runs carries the driver.
+    invocation env actually runs carries the driver. Every spelling
+    env_split_string_value() reads carries the same risk, clustered and
+    abbreviated ones included.
 
     Implementing env's splitting language is not attempted here: a split
     string carrying a backslash is refused outright instead, since a name
     this scan cannot see split out is a name it cannot clear.
     """
     word = bare(token)
-    for option in ENV_SPLIT_STRING:
-        if word.startswith(option):
-            word = word[len(option) :]
-            return word if "\\" in word else None
-    return None
+    split_value = env_split_string_value(word)
+    if split_value is None:
+        return None
+    return split_value if "\\" in split_value else None
 
 
 def denied_read_shape(path: str) -> bool:
@@ -1465,13 +1613,14 @@ def refusal(command: str) -> str | None:
         # The masked copy split differently, so which tokens are separators
         # cannot be told; refused rather than guessed at.
         return "the command's quoting cannot be matched to its words, so its git arguments cannot be checked"
-    # Set the token after a *detached* `env -S`/`--split-string` (its own
-    # word, not `-S'...'` or `--split-string='...'` attached to one word):
-    # the string env re-splits is the word right after it, and a backslash
-    # in that word is env's splitting language the same as it is when the
+    # Set the token after a *detached* env -S/--split-string, in any
+    # spelling env accepts (clustered, abbreviated) -- its own word, not
+    # `-S'...'` or `--split-string='...'` attached to one word: the
+    # string env re-splits is the word right after it, and a backslash in
+    # that word is env's splitting language the same as it is when the
     # option and the string share a word -- env_split_escape() only reads
-    # the attached spellings, since that is the one where the token itself
-    # carries the option's name.
+    # the attached spellings, since that is the one where the token
+    # itself carries the option's name.
     split_string_follows = False
     for token, twin in zip(tokens, masked, strict=True):
         # Read before the segments are walked, because the word need not be
@@ -1494,7 +1643,7 @@ def refusal(command: str) -> str | None:
                     "assignment and the command as separate words instead of inside a "
                     "split string with an escape in it"
                 )
-        if bare(token) in DETACHED_ENV_SPLIT_STRING:
+        if env_split_string_detached(bare(token)):
             split_string_follows = True
         if runtime_assignment(token, twin):
             return (
@@ -1538,6 +1687,28 @@ def refusal(command: str) -> str | None:
             )
     for segment, twins in segments(tokens, masked):
         invocation = command_words(segment, twins)
+        if invocation.words and invocation.words[0] in EXPORT_FAMILY:
+            # Every word after the name is a candidate assignment
+            # assigned_environment() already tests by content; this is
+            # the one shape -- a live `$` or backtick with nothing before
+            # it -- content alone cannot decide (see
+            # opaque_assignment_prefix()), so it is scoped to exactly the
+            # position that reaches a child's environment: this family's
+            # own arguments, read as NAME=value only after bash has
+            # already expanded them.
+            for word, twin in zip(invocation.words[1:], invocation.twins[1:], strict=True):
+                if opaque_assignment_prefix(word, twin):
+                    return (
+                        f"{word} opens with a `$` or a backtick bash expands before "
+                        f"{invocation.words[0]} ever reads it as an argument, so the name "
+                        "it assigns cannot be read here at all -- `export "
+                        "$'GIT_EXTERNAL_DIFF=./evil'` is one word to bash, with nothing "
+                        "before the `$` for a plain-identifier prefix test to read, and "
+                        "it exports exactly what `export GIT_EXTERNAL_DIFF=./evil` does. "
+                        "A word whose assigned name this scan cannot read as typed at "
+                        "all is refused rather than assumed clear of REFUSED_ENVIRONMENT; "
+                        "write the assignment as a literal NAME=value word instead"
+                    )
         for position in name_positions(invocation):
             candidate = (
                 invocation.name if position == 0 else invocation.words[position]

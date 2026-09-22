@@ -404,6 +404,36 @@ REACH_CORPUS = (
     ("environment", "x=1; podman images", ALLOWED, "a variable in another command of the string reaches nothing the allow list covers"),
     ("environment", "FOO=1 echo x; podman images", ALLOWED, "an assignment on a command no rule covers"),
     ("environment", "grep -rn SHELLCHECK_OPTS docs/SECURITY-AI.md", ALLOWED, "the name without the = is not an assignment"),
+    (
+        "environment",
+        "export 'GIT_EXTERNAL_DIFF'$'=./evil'; git diff HEAD",
+        REFUSED,
+        "quotes the identifier ahead of the ANSI-C escape, which used to shift an index-based scan out of alignment with its masked twin",
+    ),
+    (
+        "environment",
+        "export $'GIT_EXTERNAL_DIFF=./evil'; git diff HEAD",
+        REFUSED,
+        "the live $ opens the word with nothing before it, so no identifier prefix is even there to test by content",
+    ),
+    (
+        "environment",
+        "env -S 'FOO=x\\_GIT_EXTERNAL_DIFF=./evil\\_git diff' HEAD",
+        REFUSED,
+        "splits the assignment out of a detached -S argument, one word later",
+    ),
+    (
+        "environment",
+        "gh release create v$TAG",
+        ALLOWED,
+        "v sits ahead of a live $ the same shape a dangerous name does, but reaches no REFUSED_ENVIRONMENT name and names no gated command",
+    ),
+    (
+        "environment",
+        'curl "https://x?a=$B"',
+        ALLOWED,
+        "the same opaque-live-$ shape export's own argument carries, on a command that reads no assignment from any of its words",
+    ),
     # 2. Redirection. Output opens a path for writing before the command
     # runs; input hands a tool a file it prints back when it echoes what it
     # reads, which of the gated commands is shellcheck alone.
@@ -464,6 +494,13 @@ REACH_CORPUS = (
     ("options", "git log -c -p", ALLOWED, "-c after the subcommand is a diff format"),
     ("options", "git log -SOAuth -p", ALLOWED, "the O in a value is text to search for"),
     ("options", "shellcheck -e SC2034 -x tests/e2e/lib.sh", ALLOWED, "-x is load-bearing in this repository's own lint command"),
+    ("options", "env -C/tmp/other git diff", REFUSED, "-C's argument attached with no separator, which env accepts and the exact-match test missed"),
+    ("options", "env -iC/etc git diff HEAD", REFUSED, "-C clustered behind env's own -i, its value the rest of the same word"),
+    ("options", "env -iC /etc git diff HEAD", REFUSED, "the same cluster with the value a separate word"),
+    ("options", "env --chd=/tmp/other git diff", REFUSED, "an unambiguous abbreviation of --chdir"),
+    ("options", "env --split='FOO=x GIT_EXTERNAL_DIFF=./evil git diff HEAD'", REFUSED, "an unambiguous abbreviation of --split-string, carrying the same re-splitting"),
+    ("options", "env -iS'FOO=x GIT_EXTERNAL_DIFF=./evil git diff HEAD'", REFUSED, "-S clustered behind env's own -i, attached to the rest of the word"),
+    ("options", "env -i git diff HEAD", ALLOWED, "env's own -i carries neither letter wrapper_relocates() or env_split_string_value() reads"),
 )
 
 
@@ -1282,6 +1319,61 @@ class RefusalTests(unittest.TestCase):
                 for words, twins in found:
                     self.assertEqual(len(words), len(twins))
         self.assertEqual(gate.mask_quotes(r"""a 'b c' \; "d\"e" f"""), "a QQQQQ QQ QQQQQQ f")
+
+    # Every shape a word's quoting can take that this repository's review
+    # has actually found a skew in: a bare quote, a real escape (the quote
+    # mark, a backslash), a backslash in front of something shlex does not
+    # treat as an escape target at all (an ordinary letter, `$`, a
+    # backtick), an ANSI-C quote, an unquoted-then-quoted word, and an
+    # empty pair both alone and embedded. mask_quotes_stripped()'s whole
+    # point is lining its own tokens up with tokenize(command)'s, character
+    # for character, so runtime_assignment() and opaque_assignment_prefix()
+    # walk the two at the same index; a length that drifts is the failure
+    # mode both bugs shared.
+    QUOTING_ALIGNMENT_CORPUS = (
+        "'x'",
+        '"x"',
+        r"a\zb",
+        r'"a\zb"',
+        r'"a\\b"',
+        r'"a\"b"',
+        r'"a\$b"',
+        r'"a\`b"',
+        "$'x'",
+        "a'b c'd",
+        "'GIT_EXTERNAL_DIFF'$'=./evil'",
+        "'GIT_EXTERNAL_DIFF'''$'=./evil'",
+    )
+
+    # Tokens whose *real* length is deliberately shorter than their masked
+    # one: an empty quoted pair that is the whole word (`''`, `""`)
+    # contributes nothing to the real token but one placeholder `Q` to the
+    # masked one, so tokenize() does not lose the word entirely. Nothing
+    # walks past index 0 of an empty token, so the skew is harmless there
+    # and excluded from the equal-length assertion by name rather than by
+    # writing a second, weaker test.
+    QUOTING_ALIGNMENT_EMPTY_WHOLE_WORD = ("''", '""')
+
+    def test_the_masked_copy_used_for_index_alignment_matches_token_length(self) -> None:
+        for command in self.QUOTING_ALIGNMENT_CORPUS + self.QUOTING_ALIGNMENT_EMPTY_WHOLE_WORD:
+            with self.subTest(command=command):
+                tokens = gate.tokenize(command)
+                masked = gate.tokenize(gate.mask_quotes_stripped(command))
+                self.assertEqual(
+                    len(tokens),
+                    len(masked),
+                    f"{command!r} split into a different number of tokens once masked",
+                )
+                for token, twin in zip(tokens, masked, strict=True):
+                    if command in self.QUOTING_ALIGNMENT_EMPTY_WHOLE_WORD:
+                        continue
+                    self.assertEqual(
+                        len(token),
+                        len(twin),
+                        f"{command!r}: token {token!r} and its masked twin {twin!r} "
+                        "have different lengths, so an index-based scan over them "
+                        "(runtime_assignment(), opaque_assignment_prefix()) drifts",
+                    )
 
     def test_a_paren_glued_to_a_separator_is_read_as_both(self) -> None:
         # shlex glues adjacent punctuation into one token, so `echo x;(git
