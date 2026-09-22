@@ -430,6 +430,12 @@ REACH_CORPUS = (
     ),
     (
         "environment",
+        'export PATH="$PATH:/x"; git diff HEAD',
+        ALLOWED,
+        "the live $ sits at index 5 of an export-family word, not index 0, so opaque_assignment_prefix() does not fire; content-based scoping reads the plain identifier PATH ahead of it and PATH is not a REFUSED_ENVIRONMENT name",
+    ),
+    (
+        "environment",
         'curl "https://x?a=$B"',
         ALLOWED,
         "the same opaque-live-$ shape export's own argument carries, on a command that reads no assignment from any of its words",
@@ -493,6 +499,8 @@ REACH_CORPUS = (
     ("options", "shellcheck -s bash ./.env", REFUSED, "the operand after a value-taking option is still reached"),
     ("options", "git log -c -p", ALLOWED, "-c after the subcommand is a diff format"),
     ("options", "git log -SOAuth -p", ALLOWED, "the O in a value is text to search for"),
+    ("options", "git log -S 'foo\\bar' --oneline", ALLOWED, "git's own pickaxe option, not env's -S -- the backslash in the search string is nothing env ever re-splits"),
+    ("options", "git diff -S 'a\\b' HEAD", ALLOWED, "the same pickaxe option on git diff, detached the way env's -S is when it belongs to env"),
     ("options", "shellcheck -e SC2034 -x tests/e2e/lib.sh", ALLOWED, "-x is load-bearing in this repository's own lint command"),
     ("options", "env -C/tmp/other git diff", REFUSED, "-C's argument attached with no separator, which env accepts and the exact-match test missed"),
     ("options", "env -iC/etc git diff HEAD", REFUSED, "-C clustered behind env's own -i, its value the rest of the same word"),

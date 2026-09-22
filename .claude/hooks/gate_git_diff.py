@@ -1613,15 +1613,6 @@ def refusal(command: str) -> str | None:
         # The masked copy split differently, so which tokens are separators
         # cannot be told; refused rather than guessed at.
         return "the command's quoting cannot be matched to its words, so its git arguments cannot be checked"
-    # Set the token after a *detached* env -S/--split-string, in any
-    # spelling env accepts (clustered, abbreviated) -- its own word, not
-    # `-S'...'` or `--split-string='...'` attached to one word: the
-    # string env re-splits is the word right after it, and a backslash in
-    # that word is env's splitting language the same as it is when the
-    # option and the string share a word -- env_split_escape() only reads
-    # the attached spellings, since that is the one where the token
-    # itself carries the option's name.
-    split_string_follows = False
     for token, twin in zip(tokens, masked, strict=True):
         # Read before the segments are walked, because the word need not be
         # in a segment that names a gated command at all: an `export` in an
@@ -1629,22 +1620,6 @@ def refusal(command: str) -> str | None:
         # assignment does, and an `export` in a string that runs nothing
         # gated reaches the *next* Bash call, whose command this hook is not
         # reading yet.
-        if split_string_follows:
-            split_string_follows = False
-            if "\\" in bare(token):
-                return (
-                    f"{token} is the word right after a detached env -S/--split-string "
-                    "and carries a backslash escape -- `\\_`, `\\ `, `\\c`, `\\#`, `\\$`, "
-                    "a quote, or a control-character spelling -- which env's own "
-                    "splitting language reads before this scan's word.split() ever runs, "
-                    "the same reach env_split_escape() already refuses when the option "
-                    "and the string share one word (`-S'...'`); env reads its argument "
-                    "the same way whichever word carries the option. Write the "
-                    "assignment and the command as separate words instead of inside a "
-                    "split string with an escape in it"
-                )
-        if env_split_string_detached(bare(token)):
-            split_string_follows = True
         if runtime_assignment(token, twin):
             return (
                 f"{token} carries a `$` or a backtick sitting next to an `=`, which is "
@@ -1686,6 +1661,37 @@ def refusal(command: str) -> str | None:
                 "command needs after its name instead"
             )
     for segment, twins in segments(tokens, masked):
+        if segment and bare(segment[0]) == "env":
+            # A detached env -S/--split-string, in any spelling env
+            # accepts (clustered, abbreviated) -- its own word, not
+            # `-S'...'` or `--split-string='...'` attached to one word:
+            # the string env re-splits is the word right after it, and a
+            # backslash in that word is env's splitting language the same
+            # as it is when the option and the string share a word --
+            # env_split_escape() only reads the attached spellings, since
+            # that is the one where the token itself carries the option's
+            # name. Scoped to a segment whose own first word is `env`,
+            # since `-S` is also git's pickaxe option (`git log -S`,
+            # `git diff -S`) and belongs to whatever command reads it --
+            # arming on the bare word regardless of position let
+            # `git log -S 'foo\bar' --oneline`, an ordinary pickaxe search
+            # with a backslash in it, refuse for a reach it never has.
+            for index, word in enumerate(segment[1:], start=1):
+                if env_split_string_detached(bare(word)) and index + 1 < len(segment):
+                    following = segment[index + 1]
+                    if "\\" in bare(following):
+                        return (
+                            f"{following} is the word right after a detached env "
+                            "-S/--split-string and carries a backslash escape -- "
+                            "`\\_`, `\\ `, `\\c`, `\\#`, `\\$`, a quote, or a "
+                            "control-character spelling -- which env's own splitting "
+                            "language reads before this scan's word.split() ever runs, "
+                            "the same reach env_split_escape() already refuses when the "
+                            "option and the string share one word (`-S'...'`); env reads "
+                            "its argument the same way whichever word carries the "
+                            "option. Write the assignment and the command as separate "
+                            "words instead of inside a split string with an escape in it"
+                        )
         invocation = command_words(segment, twins)
         if invocation.words and invocation.words[0] in EXPORT_FAMILY:
             # Every word after the name is a candidate assignment
