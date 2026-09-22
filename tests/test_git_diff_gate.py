@@ -521,7 +521,7 @@ REACH_CORPUS = (
     ("command name", "git diff --name-only | xargs echo", ALLOWED, "xargs in front of a command no rule covers: Claude Code prompts for it"),
     ("command name", "git ls-files -z | xargs -0 grep -l shellcheck", ALLOWED, "a gated name among the arguments of the command xargs runs is not the command"),
     ("command name", "git log --grep=xargs -1", ALLOWED, "the word xargs as an argument runs nothing"),
-    ("command name", "/usr/bin/noglob podman ps >out", REFUSED, "a wrapper spelled as a path is the same wrapper, and Claude Code compares its basename"),
+    ("command name", "/usr/bin/noglob podman ps >out", REFUSED, "a wrapper in /usr/bin is the same wrapper, and Claude Code compares its basename"),
     ("command name", "/usr/bin/timeout 5 shellcheck contrib/aib >out", REFUSED, "the same with the wrapper's own argument before the linter"),
     ("command name", "/usr/bin/env shellcheck contrib/aib >out", REFUSED, "env by path hides the linter's redirection no better than env"),
     ("command name", "/usr/bin/nohup podman ps >out", REFUSED, "nohup by path"),
@@ -529,6 +529,12 @@ REACH_CORPUS = (
     ("command name", "/usr/bin/nohup git diff --no-index /dev/null ./cosign.key", REFUSED, "and so does the git scan"),
     ("command name", "/usr/bin/timeout 5 xargs git diff", REFUSED, "and the xargs refusal"),
     ("command name", "$D/nohup git diff HEAD", REFUSED, "a wrapper path bash builds at runtime can be any program"),
+    ("command name", "./shim/nohup git diff HEAD", REFUSED, "the matcher steps over it as nohup while bash runs the file at that path"),
+    ("command name", "'./shim\\nohup' git diff HEAD", REFUSED, "the matcher cuts the path at a backslash too"),
+    ("command name", "'./shim\\env' git diff --no-index /dev/null ./cosign.key", REFUSED, "the same shim, whatever it is handed"),
+    ("command name", "/tmp/timeout 5 shellcheck contrib/aib", REFUSED, "a path outside /usr/bin and /bin is not the wrapper"),
+    ("command name", "timeout 5 ./shim/nohup git diff HEAD", REFUSED, "behind a wrapper's own argument"),
+    ("command name", "/usr/bin/timeout 60 git diff HEAD", ALLOWED, "the wrapper where the distribution installs it, in front of an ordinary git diff"),
     ("command name", "/usr/bin/nohup git diff HEAD", ALLOWED, "stepping over the path-spelled wrapper finds an ordinary git diff"),
     ("command name", "/usr/bin/env echo x >out", ALLOWED, "a redirection on a command no rule covers, behind a path-spelled wrapper"),
     # 5. Options that load or write, per tool.
@@ -1149,6 +1155,40 @@ class ReachCorpusTests(unittest.TestCase):
             gate.refusal("noglob podman ps >cosign.pub"),
             "the command just shown to truncate a file is not refused",
         )
+
+    def test_bash_runs_the_file_a_wrapper_path_names(self) -> None:
+        # Claude Code's matcher cuts a wrapper word at its last `/` or `\`
+        # and steps over `./shim/nohup` as `nohup`, so `./shim/nohup git diff
+        # HEAD` matches `Bash(git diff:*)`. bash runs the file at that path,
+        # backslash and all, and a file the session wrote can ignore the
+        # ordinary git diff it is handed and print the key instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            (repo / "cosign.pub").write_text("STAND-IN-NOT-A-KEY\n")
+            (repo / "shim").mkdir()
+            for shim in (repo / "shim" / "nohup", repo / "shim\\nohup"):
+                shim.write_text("#!/bin/sh\ncat ./cosign.pub\n")
+                shim.chmod(0o755)
+            for command in ("./shim/nohup git diff HEAD", "'./shim\\nohup' git diff HEAD"):
+                with self.subTest(command=command):
+                    result = subprocess.run(
+                        ["bash", "--norc", "--noprofile", "-c", command],
+                        cwd=repo,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertIn(
+                        "STAND-IN-NOT-A-KEY",
+                        result.stdout,
+                        f"bash no longer runs the file {command!r} names; re-derive "
+                        "why spelled_wrapper_path() refuses it",
+                    )
+                    self.assertIsNotNone(
+                        gate.refusal(command),
+                        "the command just shown to print the file is not refused",
+                    )
 
     def test_the_command_xargs_runs_is_the_one_the_gate_reads(self) -> None:
         # xargs_command_starts() models xargs's own options, and an option

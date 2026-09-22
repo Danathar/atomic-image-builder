@@ -353,12 +353,12 @@ GATED_PREFIXES = (
 # leading-words match has to step over the way it steps over an assignment:
 # `time shellcheck x >out` and `command shellcheck x >out` are shellcheck's
 # redirection, and `env git diff --no-index a b` is git's operand. A wrapper
-# is matched on its basename, the way the command name is, so
-# `/usr/bin/timeout 5 shellcheck x >out` is `timeout` too -- Claude Code's
-# matcher strips the path the same way before it steps over a wrapper. A path
-# bash builds at runtime (`$D/nohup git diff`) is stepped over like any other,
-# and its `$` is then refused with the gated command behind it, as a `$` in
-# any word of a gated segment is. A wrapper's own options are not modelled as
+# is recognised by its last path component, cut at `/` or `\` the way Claude
+# Code's matcher cuts it before it steps over the word, but only the bare
+# name, `/usr/bin/<name>` and `/bin/<name>` are stepped over. Any other path
+# (`./shim/nohup`, `'./shim\nohup'`, `$D/nohup`) runs whatever file is there
+# while the allow rule matched only the words after it, so it is refused;
+# see spelled_wrapper_path(). A wrapper's own options are not modelled as
 # taking values, so the name is looked for at every word after one (`command
 # -p shellcheck x`, `timeout 5 shellcheck x`), which can only over-refuse.
 # `noglob` is zsh's: bash has no such command and fails, but only after it
@@ -1104,6 +1104,19 @@ def bare(token: str) -> str:
     return token
 
 
+# The directories a wrapper spelled as a path may name and still be read as
+# the wrapper: where the distribution installs these programs, which the
+# session cannot write. See spelled_wrapper_path().
+WRAPPER_DIRECTORIES = ("/usr/bin/", "/bin/")
+
+
+def wrapper_basename(token: str) -> str:
+    """The last path component of a word, cut at `/` or `\\` -- the name
+    Claude Code's matcher reads a wrapper word as (it strips the path with
+    `replace(/^.*[\\\\/]/, "")`) before it steps over the word."""
+    return re.split(r"[\\/]", bare(token))[-1]
+
+
 def assignment(token: str) -> str | None:
     """The variable name in a `NAME=value` or `NAME+=value` prefix, or None.
 
@@ -1145,18 +1158,24 @@ class Invocation(NamedTuple):
 
     `words` are the words the command receives, its own name first; `twins`
     are their masked copies, in the same order, for a check that has to know
-    what bash would quote. `wrapped` says whether a wrapper word was stepped
-    over, `name` is the token that named the command as it was typed (before
-    a path or a substitution prefix was stripped from it), and `assignments`
+    what bash would quote. `wrappers` are the wrapper words stepped over
+    before the name, as typed, and `wrapped` says whether there were any;
+    `name` is the token that named the command as it was typed (before a
+    path or a substitution prefix was stripped from it), and `assignments`
     are the variables assigned before the name, which are the command's
     environment rather than its arguments.
     """
 
     words: list[str]
     twins: list[str]
-    wrapped: bool
+    wrappers: list[str]
     name: str
     assignments: list[str]
+
+    @property
+    def wrapped(self) -> bool:
+        """Was a wrapper stepped over before the name?"""
+        return bool(self.wrappers)
 
 
 def command_words(segment: list[str], twins: list[str] | None = None) -> Invocation:
@@ -1170,10 +1189,12 @@ def command_words(segment: list[str], twins: list[str] | None = None) -> Invocat
     backtick substitution runs to the token that closes it, since shlex
     splits the substitution's words apart: `` >`printf x` git diff `` still
     finds its name at git. A leading assignment and a leading wrapper word
-    (`time`, `command`, `env`, by basename, so `/usr/bin/env` too) are
-    stepped over too, since neither is part of the prefix an allow rule
-    matches; the assignment is kept, because a variable set on a gated
-    command is the environment it runs under.
+    (`time`, `command`, `env`, recognised by wrapper_basename(), so
+    `/usr/bin/env` too) are stepped over too, since neither is part of the
+    prefix an allow rule matches; the assignment is kept, because a variable
+    set on a gated command is the environment it runs under, and so is the
+    wrapper word, because a path to it may name some other file
+    (spelled_wrapper_path()).
 
     The first word left is the command's name, with a leading path stripped,
     so `/usr/bin/git` and `git` are one command. `wrapped` says whether a
@@ -1191,7 +1212,7 @@ def command_words(segment: list[str], twins: list[str] | None = None) -> Invocat
     words: list[str] = []
     kept: list[str] = []
     assignments: list[str] = []
-    wrapped = False
+    wrappers: list[str] = []
     name = ""
     index = 0
     while index < len(segment):
@@ -1215,8 +1236,8 @@ def command_words(segment: list[str], twins: list[str] | None = None) -> Invocat
                 assignments.append(assigned)
                 index += 1
                 continue
-            if bare(token).rsplit("/", 1)[-1] in COMMAND_WRAPPERS:
-                wrapped = True
+            if wrapper_basename(token) in COMMAND_WRAPPERS:
+                wrappers.append(token)
                 index += 1
                 continue
             name = token
@@ -1225,7 +1246,7 @@ def command_words(segment: list[str], twins: list[str] | None = None) -> Invocat
             words.append(token)
         kept.append(twins[index])
         index += 1
-    return Invocation(words, kept, wrapped, name, assignments)
+    return Invocation(words, kept, wrappers, name, assignments)
 
 
 def name_positions(invocation: Invocation) -> range:
@@ -1241,6 +1262,33 @@ def name_positions(invocation: Invocation) -> range:
     if invocation.wrapped:
         return range(len(invocation.words))
     return range(min(len(invocation.words), 1))
+
+
+def spelled_wrapper_path(invocation: Invocation) -> tuple[str, str] | None:
+    """The first word read as a wrapper here that is a path to some other
+    file, with the wrapper it passes for; or None.
+
+    Claude Code's matcher steps over `./shim/nohup` and `'./shim\\nohup'` as
+    `nohup` and matches the allow rule against the words after them, while
+    bash runs the file at that path -- which the session can have written
+    itself, and which can then read or write anything. Only the bare name
+    and a path in WRAPPER_DIRECTORIES are the wrapper; a path bash builds at
+    runtime (`$D/nohup`) is neither. The words read are the ones stepped
+    over before the name and, behind a wrapper, every word, the same places
+    name_positions() looks for a name.
+    """
+    behind = invocation.words if invocation.wrapped else []
+    for word in (*invocation.wrappers, *behind):
+        name = wrapper_basename(word)
+        if name not in COMMAND_WRAPPERS:
+            continue
+        spelled = bare(word)
+        if spelled != name and spelled not in {
+            directory + name for directory in WRAPPER_DIRECTORIES
+        }:
+            return word, name
+    return None
+
 
 
 def gated_prefix(invocation: Invocation) -> tuple[str, ...] | None:
@@ -1392,7 +1440,7 @@ def xargs_feeds(words: list[str], index: int) -> str | None:
         name = bare(words[start]).rsplit("/", 1)[-1]
         if name == "xargs":
             fed = xargs_feeds(words, start)
-        elif name in COMMAND_WRAPPERS:
+        elif wrapper_basename(words[start]) in COMMAND_WRAPPERS:
             fed = next(
                 (
                     found
@@ -1957,7 +2005,7 @@ def refusal(command: str) -> str | None:
                 "command needs after its name instead"
             )
     for segment, twins in segments(tokens, masked):
-        if segment and bare(segment[0]).rsplit("/", 1)[-1] == "env":
+        if segment and wrapper_basename(segment[0]) == "env":
             # A detached env -S/--split-string, in any spelling env
             # accepts (clustered, abbreviated) -- its own word, not
             # `-S'...'` or `--split-string='...'` attached to one word:
@@ -2025,6 +2073,18 @@ def refusal(command: str) -> str | None:
                     "env's own `-i` -- so which command this segment runs cannot be read "
                     "from the word as typed; write the command's name out in full"
                 )
+        path = spelled_wrapper_path(invocation)
+        if path is not None:
+            word, wrapper = path
+            return (
+                f"{word} is a path to a file named like the wrapper {wrapper}, and "
+                "that file is what runs: Claude Code's matcher cuts the path at its "
+                f"last / or \\ and steps over the word as {wrapper}, so the allow rule "
+                "matched only the words after it, while bash runs whatever sits at "
+                f"{word} -- a script the session wrote can read or write anything "
+                f"with no prompt. Only {wrapper}, /usr/bin/{wrapper} and "
+                f"/bin/{wrapper} are read as the wrapper; write `{wrapper}` instead"
+            )
         relocated = wrapper_chdir(invocation)
         if relocated is not None:
             return (
