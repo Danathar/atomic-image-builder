@@ -93,13 +93,14 @@ runs a gated command" cannot: the Bash tool's shell outlives one call, so an
 call's `git diff`. See REFUSED_ENVIRONMENT and assigned_environment().
 
 The name a command is spelled with is the last of that family. A path
-(`/usr/bin/git`), a wrapper (`env`, `command`, `nice`, `timeout`) and a brace
-(`{,git} diff` -- bash drops the empty word and runs git) all reach the same
-tool while spelling the name differently, and a scan that read only the first
-word of the segment found no gated command in any of them and checked nothing
-else. command_words() steps over the shell's own words to the name, and
-gated_prefix() and git_arguments() both read the result, so the git half and
-the redirection half of this hook see the same command.
+(`/usr/bin/git`), a wrapper (`env`, `command`, `nice`, `timeout`, `noglob`)
+and a brace (`{,git} diff` -- bash drops the empty word and runs git) all
+reach the same tool while spelling the name differently, and a scan that
+read only the first word of the segment found no gated command in any of
+them and checked nothing else. command_words() steps over the shell's own
+words to the name, and gated_prefix() and git_arguments() both read the
+result, so the git half and the redirection half of this hook see the same
+command.
 
 It runs on `PreToolUse` for `Bash` and exits 2 -- the blocking code, whose
 stderr goes back to the model as the reason -- when a `git` invocation in the
@@ -148,11 +149,23 @@ written here rather than left undecided:
   its own globs because there the *result* can be a denied shape inside the
   checkout; `git diff` reads nothing it is not already allowed to read.
 
+One wrapper is refused rather than stepped over. `xargs` adds words it
+reads from standard input, or from the file its `-a` names, to the command
+it runs, so `xargs git diff <list.txt`, with `/dev/null` and `./cosign.key`
+the two lines of that file, hands git the two operands `--no-index` needs
+while this string names neither of them -- and Claude Code's matcher reads
+`xargs git diff` as `git diff`, so the allow rule approves it and nothing
+prompts. No scan of this string can check words that are not in it, so an
+`xargs` that runs git or a GATED_PREFIXES command is refused wherever it
+stands among the wrappers (see xargs_fed_command()). One in front of a
+command no rule covers (`xargs echo`, `xargs grep -n git`) is left alone:
+Claude Code prompts for that on its own.
+
 And one residual, which a `PreToolUse` hook reading one command string cannot
 close: a wrapper that takes its command from somewhere this hook cannot read
--- `sh -c '...'`, `xargs`, `find -exec` -- reaches any tool. None of them
-matches an allow rule, so Claude Code prompts for them on its own; that
-prompt, not this hook, is what covers them.
+-- `sh -c '...'`, `find -exec` -- reaches any tool. Neither matches an allow
+rule, so Claude Code prompts for them on its own; that prompt, not this hook,
+is what covers them.
 """
 
 from __future__ import annotations
@@ -342,10 +355,19 @@ GATED_PREFIXES = (
 # redirection, and `env git diff --no-index a b` is git's operand. A wrapper's
 # own options are not modelled as taking values, so the name is looked for at
 # every word after one (`command -p shellcheck x`, `timeout 5 shellcheck x`),
-# which can only over-refuse. A wrapper that takes its command from somewhere
-# else -- `sh -c`, `xargs`, `find -exec` -- is absent on purpose: the command
-# it runs is not a word of this string, and none of them matches an allow rule,
-# so Claude Code prompts for them on its own.
+# which can only over-refuse. `noglob` is zsh's: bash has no such command and
+# fails, but only after it has opened the redirection, and zsh runs the
+# command, so `noglob podman ps >out` truncates `out` in either shell, and
+# Claude Code steps over it before matching an allow rule as it does `nohup`.
+# A wrapper that takes its command from somewhere else -- `sh -c`, `find
+# -exec` -- is absent on purpose: the command it runs is not a word of this
+# string, and neither matches an allow rule, so Claude Code prompts for them
+# on its own. `xargs` is absent for the opposite reason: its command is a
+# word of this string, but the operands it hands that command are not, and
+# an allow rule matches `xargs git diff` as readily as `git diff`. Stepping
+# over it would check the operands that are written and pass the ones that
+# are read from standard input, so it is refused instead; see
+# xargs_fed_command().
 COMMAND_WRAPPERS = frozenset(
     {
         "time",
@@ -358,7 +380,46 @@ COMMAND_WRAPPERS = frozenset(
         "timeout",
         "stdbuf",
         "setsid",
+        "noglob",
     }
+)
+
+# xargs's own options, which stand between `xargs` and the command it runs,
+# as GNU findutils parses them (`xargs --help`; tests/test_git_diff_gate.py
+# holds the split against the real xargs). A short option that takes a value
+# reads it from the rest of its word, or from the next word when nothing
+# follows the letter, so `-n1 git` and `-n 1 git` both run git. The letters
+# listed here take no value (`-0`, `-r`) or take one only in the same word
+# (`-i{}`, `-l1`, `-eEOF`), which is why `-i git diff` runs git. A letter in
+# neither set is read both ways -- the next word as its value, and as the
+# command -- so an option this table does not know can only over-refuse.
+# A long option with `=value` attached reads nothing more; alone, one that
+# abbreviates only XARGS_PLAIN_LONG names reads nothing more either, and any
+# other (`--max-a 1`, `--arg-file list.txt`, one xargs does not have) is read
+# both ways too. See xargs_command_starts().
+XARGS_FLAG_SHORT = frozenset("0oprtx")
+XARGS_ATTACHED_SHORT = frozenset("eil")
+XARGS_VALUED_LONG = (
+    "--arg-file",
+    "--delimiter",
+    "--max-args",
+    "--max-chars",
+    "--max-procs",
+    "--process-slot-var",
+)
+XARGS_PLAIN_LONG = (
+    "--null",
+    "--open-tty",
+    "--interactive",
+    "--no-run-if-empty",
+    "--verbose",
+    "--exit",
+    "--show-limits",
+    "--eof",
+    "--replace",
+    "--max-lines",
+    "--help",
+    "--version",
 )
 
 # The builtins whose own arguments assign, the same family
@@ -1203,6 +1264,20 @@ def git_arguments(invocation: Invocation) -> list[str] | None:
     return None
 
 
+def gated_name(words: list[str], start: int) -> str | None:
+    """The gated command `words[start:]` runs, if it is one: `git`, or the
+    GATED_PREFIXES entry its leading words match, spelled out. None
+    otherwise."""
+    bare_word = bare(words[start]).rsplit("/", 1)[-1]
+    if bare_word == "git":
+        return "git"
+    candidates = [bare_word, *words[start + 1 :]]
+    for prefix in GATED_PREFIXES:
+        if tuple(candidates[: len(prefix)]) == prefix:
+            return " ".join(prefix)
+    return None
+
+
 def command_start(invocation: Invocation) -> int | None:
     """The position in `words` where the gated command's own name was
     found, whether that is `git` or a GATED_PREFIXES entry, or None.
@@ -1214,13 +1289,8 @@ def command_start(invocation: Invocation) -> int | None:
     wrapper_chdir().
     """
     for start in name_positions(invocation):
-        bare_word = bare(invocation.words[start]).rsplit("/", 1)[-1]
-        if bare_word == "git":
+        if gated_name(invocation.words, start) is not None:
             return start
-        candidates = [bare_word, *invocation.words[start + 1 :]]
-        for prefix in GATED_PREFIXES:
-            if tuple(candidates[: len(prefix)]) == prefix:
-                return start
     return None
 
 
@@ -1238,12 +1308,119 @@ def long_option_name(token: str) -> str | None:
 def long_option_abbreviates(name: str, full: str) -> bool:
     """Does `name` (a long option's own name, `--` included, no `=value`)
     reach `full` the way GNU getopt_long resolves an unambiguous prefix?
-    Every caller here has already picked a `full` no other option of the
+    The env callers have already picked a `full` no other option of the
     same program begins the same way, which is what makes the prefix
     unambiguous without walking that program's whole option table --
     refused_long() reads git's own abbreviated long options the same way.
+    xargs_option_takes_next_word() walks xargs's whole table instead, and
+    reads a prefix shared with an entry that takes a value as taking one.
     """
     return len(name) > 2 and full.startswith(name)
+
+
+def xargs_option_takes_next_word(word: str) -> bool:
+    """May xargs read the word after this option word as the option's value?
+
+    Answered for the reading that finds the most commands, not only GNU's:
+    a yes sends xargs_command_starts() down both readings, so a wrong yes
+    can only over-refuse and a wrong no is a hole. See XARGS_FLAG_SHORT.
+    """
+    name = long_option_name(word)
+    if name is not None:
+        if "=" in word:
+            return False
+        return any(
+            long_option_abbreviates(name, full) for full in XARGS_VALUED_LONG
+        ) or not any(long_option_abbreviates(name, full) for full in XARGS_PLAIN_LONG)
+    for index, letter in enumerate(word[1:], start=1):
+        if letter in XARGS_FLAG_SHORT:
+            continue
+        if letter in XARGS_ATTACHED_SHORT:
+            return False
+        return index == len(word) - 1
+    return False
+
+
+def xargs_command_starts(words: list[str], index: int) -> list[int]:
+    """Every position in `words` where the command run by the `xargs` at
+    `index` may start.
+
+    xargs stops reading options at its first word that is not one (GNU's
+    getopt runs in `+` mode), and `--` ends them outright. An option that
+    may take the next word as its value forks the walk -- that word read as
+    the value, and read as the command -- so the answer is a list: `xargs
+    -I {} git diff {}` has git at one reading and `{}` at the other.
+    """
+    starts: list[int] = []
+    pending = [index + 1]
+    seen: set[int] = set()
+    while pending:
+        position = pending.pop()
+        if position >= len(words) or position in seen:
+            continue
+        seen.add(position)
+        word = words[position]
+        if word == "--":
+            if position + 1 < len(words):
+                starts.append(position + 1)
+            continue
+        if word.startswith("-") and word != "-":
+            pending.append(position + 1)
+            if xargs_option_takes_next_word(word):
+                pending.append(position + 2)
+            continue
+        starts.append(position)
+    return starts
+
+
+def xargs_feeds(words: list[str], index: int) -> str | None:
+    """The gated command the `xargs` at `words[index]` runs, or None.
+
+    The command it runs may be another wrapper (`xargs nice git diff`,
+    `xargs timeout 5 shellcheck`), and then the gated name is looked for at
+    every later word, the way name_positions() looks behind a wrapper; or
+    another xargs, which is read the same way this one is.
+    """
+    for start in xargs_command_starts(words, index):
+        name = bare(words[start]).rsplit("/", 1)[-1]
+        if name == "xargs":
+            fed = xargs_feeds(words, start)
+        elif name in COMMAND_WRAPPERS:
+            fed = next(
+                (
+                    found
+                    for later in range(start + 1, len(words))
+                    if (found := gated_name(words, later)) is not None
+                ),
+                None,
+            )
+        else:
+            fed = gated_name(words, start)
+        if fed is not None:
+            return fed
+    return None
+
+
+def xargs_fed_command(invocation: Invocation) -> str | None:
+    """The gated command an `xargs` in this invocation runs, or None.
+
+    xargs appends the words it reads from standard input, or from the file
+    its `-a` names, to the command it runs, so `printf '%s\\n' /dev/null
+    ./cosign.key | xargs git diff` hands git two operands that are not in
+    this string, and Claude Code's matcher accepts `xargs git diff` for the
+    `git diff:*` row. The xargs is looked for wherever command_words() looks
+    for a name -- the first word, or behind a wrapper any word (`timeout 5
+    xargs git diff`) -- and it may itself stand behind `nice` or `env`,
+    which command_words() has already stepped over. An xargs whose command
+    is not gated (`xargs echo`, `xargs grep -n git`) is None: no allow rule
+    matches it, so Claude Code prompts.
+    """
+    for start in name_positions(invocation):
+        if bare(invocation.words[start]).rsplit("/", 1)[-1] == "xargs":
+            fed = xargs_feeds(invocation.words, start)
+            if fed is not None:
+                return fed
+    return None
 
 
 def env_short_option(token: str, letter: str) -> str | None:
@@ -1853,6 +2030,19 @@ def refusal(command: str) -> str | None:
                 "another repository's unstaged content past operands that name nothing "
                 "this hook refuses. A wrapper that relocates its command is refused "
                 "outright rather than validated against a path this scan cannot resolve"
+            )
+        fed = xargs_fed_command(invocation)
+        if fed is not None:
+            return (
+                f"xargs runs `{fed}` with words it reads from standard input (or "
+                "from the file -a names) added to the ones written here, so the "
+                f"operands `{fed}` receives are not in this string and none of them "
+                "can be checked -- `xargs git diff <list.txt` prints a key when "
+                "list.txt names /dev/null and ./cosign.key -- and an allow rule for "
+                f"`{fed}` matches it behind xargs as readily as on its own, so nothing "
+                "prompts either. Name the operands in the command itself instead "
+                "(xargs in front of a command no allow rule covers, such as `xargs "
+                "echo`, is not refused)"
             )
         prefix = gated_prefix(invocation)
         if prefix is not None:

@@ -29,7 +29,9 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
+import string
 import subprocess
 import sys
 import tempfile
@@ -498,6 +500,21 @@ REACH_CORPUS = (
     ("command name", "command -v shellcheck", ALLOWED, "naming a command is not running it"),
     ("command name", "echo git diff --no-index a b", ALLOWED, "the name has to stand in command position"),
     ("command name", "sh -c 'git diff --no-index /dev/null ./cosign.key'", ALLOWED, "the command is not a word of this string; it matches no allow rule either, so Claude Code prompts"),
+    ("command name", "noglob git diff --no-index /dev/null ./cosign.key", REFUSED, "zsh's noglob runs the command, and Claude Code steps over it before matching a rule"),
+    ("command name", "noglob shellcheck ./.env", REFUSED, "the same wrapper in front of the linter"),
+    ("command name", "noglob podman ps >out", REFUSED, "bash has no noglob, but it opens the target before it says so"),
+    ("command name", "noglob git diff HEAD", ALLOWED, "stepping over the wrapper finds an ordinary git diff"),
+    ("command name", "printf '%s\\n' /dev/null ./cosign.key | xargs git diff", REFUSED, "xargs hands git operands that are not in the string, and the allow rule matches xargs git diff"),
+    ("command name", "xargs git diff <list.txt", REFUSED, "the same operands read from a file on standard input"),
+    ("command name", "xargs -a list.txt git diff", REFUSED, "the same operands read from a file xargs opens itself"),
+    ("command name", "xargs -r -0 git diff", REFUSED, "behind xargs's own options"),
+    ("command name", "timeout 5 xargs git diff", REFUSED, "behind a wrapper in front of xargs"),
+    ("command name", "printf '%s\\n' ./.env | xargs shellcheck", REFUSED, "the linter prints back a file named only on standard input"),
+    ("command name", "xargs -a list.txt shellcheck", REFUSED, "the same file named in a list the string never shows"),
+    ("command name", "nice xargs shellcheck", REFUSED, "a wrapper before xargs does not hide the linter behind it"),
+    ("command name", "git diff --name-only | xargs echo", ALLOWED, "xargs in front of a command no rule covers: Claude Code prompts for it"),
+    ("command name", "git ls-files -z | xargs -0 grep -l shellcheck", ALLOWED, "a gated name among the arguments of the command xargs runs is not the command"),
+    ("command name", "git log --grep=xargs -1", ALLOWED, "the word xargs as an argument runs nothing"),
     # 5. Options that load or write, per tool.
     ("options", "git -c diff.external=/tmp/evil diff", REFUSED, "the shortest path from a permitted git diff to running a program"),
     ("options", "git -P -c diff.external=/tmp/evil diff", REFUSED, "an unrefused global option ahead of it does not hide it"),
@@ -1051,6 +1068,134 @@ class ReachCorpusTests(unittest.TestCase):
                         gate.refusal(command),
                         "the command just shown to print the key is not refused",
                     )
+
+    def test_git_diffs_the_operands_xargs_reads_rather_than_the_ones_written(self) -> None:
+        # xargs appends the words it reads -- from standard input, or from
+        # the file its `-a` names -- to the command it runs, so the string
+        # names no operand and git still gets the two `--no-index` needs.
+        # Claude Code's matcher reads `xargs git diff` as `git diff`, which
+        # is why xargs is refused rather than stepped over the way `nice`
+        # is: the operands a scan would have to check are not in the string.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            (repo / "cosign.pub").write_text("STAND-IN-NOT-A-KEY\n")
+            (repo / "list.txt").write_text("/dev/null\n./cosign.pub\n")
+            for command in (
+                "printf '%s\\n' /dev/null ./cosign.pub | xargs git diff",
+                "xargs git diff <list.txt",
+                "xargs -a list.txt git diff",
+                "timeout 5 xargs -r git diff <list.txt",
+            ):
+                with self.subTest(command=command):
+                    result = subprocess.run(
+                        ["bash", "--norc", "--noprofile", "-c", command],
+                        cwd=repo,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertIn(
+                        "STAND-IN-NOT-A-KEY",
+                        result.stdout,
+                        f"{command!r} no longer reaches the file; re-derive why "
+                        "xargs_fed_command() refuses xargs in front of git",
+                    )
+                    self.assertIsNotNone(
+                        gate.refusal(command),
+                        "the command just shown to print the file is not refused",
+                    )
+
+    def test_bash_opens_the_target_of_a_noglob_it_cannot_run(self) -> None:
+        # `noglob` is zsh's, and bash reports it as not found -- but only
+        # after opening the redirection, so `noglob podman ps >victim`
+        # empties the file in bash as surely as zsh runs podman into it.
+        # Claude Code steps over it before matching `Bash(podman ps:*)`.
+        with tempfile.TemporaryDirectory() as tmp:
+            victim = Path(tmp) / "victim"
+            victim.write_text("ORIGINAL-CONTENT\n")
+            subprocess.run(
+                ["bash", "--norc", "--noprofile", "-c", "noglob podman ps >victim"],
+                cwd=tmp,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            written = victim.read_text()
+        self.assertNotIn(
+            "ORIGINAL-CONTENT",
+            written,
+            "bash no longer truncates the target in front of a noglob; re-derive why "
+            "noglob is in COMMAND_WRAPPERS",
+        )
+        self.assertIsNotNone(
+            gate.refusal("noglob podman ps >cosign.pub"),
+            "the command just shown to truncate a file is not refused",
+        )
+
+    def test_the_command_xargs_runs_is_the_one_the_gate_reads(self) -> None:
+        # xargs_command_starts() models xargs's own options, and an option
+        # it reads as taking no value where xargs takes one is a hole: the
+        # gate takes the value for the command and never sees the git after
+        # it. So every letter, and every long option `xargs --help` lists, is
+        # run against the real xargs with a value word that is a program of
+        # its own. If xargs runs the word after the value, the option took
+        # it, and the gate has to refuse that spelling with git there. If
+        # xargs runs the value word, the option took nothing, and the gate
+        # has to leave `xargs <option> grep -n git` alone -- without that
+        # half, refusing every xargs with a git anywhere after it would pass.
+        # An option xargs rejects, or one that needs a terminal (`-p`, `-o`;
+        # the new session has none), runs neither program and decides
+        # nothing. Two values, because `-d` takes one character and `-s` a
+        # limit large enough to fit the command it runs.
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, marker in (("1", "RAN-VALUE"), ("4096", "RAN-VALUE"), ("after", "RAN-AFTER")):
+                program = Path(tmp, name)
+                program.write_text(f"#!/bin/sh\necho {marker}\n")
+                program.chmod(0o755)
+            env = {**os.environ, "PATH": f"{tmp}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+            def ran(option: str, value: str) -> str:
+                return subprocess.run(
+                    ["xargs", option, value, "after"],
+                    input="x\n",
+                    cwd=tmp,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    start_new_session=True,
+                    timeout=30,
+                ).stdout
+
+            usage = subprocess.run(["xargs", "--help"], capture_output=True, text=True, check=False).stdout
+            options = [f"-{letter}" for letter in string.ascii_letters + string.digits]
+            options += sorted(set(re.findall(r"--[a-z][a-z-]*", usage)))
+            took_value: list[str] = []
+            took_none: list[str] = []
+            for option in options:
+                outputs = {value: ran(option, value) for value in ("1", "4096")}
+                valued = [value for value, output in outputs.items() if "RAN-AFTER" in output]
+                with self.subTest(option=option):
+                    if valued:
+                        took_value.append(option)
+                        self.assertIsNotNone(
+                            gate.refusal(f"xargs {option} {valued[0]} git diff"),
+                            f"xargs reads the word after {option} as its value, and the "
+                            "gate took that value for the command xargs runs",
+                        )
+                    elif any("RAN-VALUE" in output for output in outputs.values()):
+                        took_none.append(option)
+                        self.assertIsNone(
+                            gate.refusal(f"xargs {option} grep -n git"),
+                            f"xargs reads no value after {option}, and the gate refused an "
+                            "xargs that runs grep",
+                        )
+        # The signal fires both ways, or the loop above checked nothing.
+        for option in ("-n", "-a", "-I", "--arg-file", "--max-args"):
+            self.assertIn(option, took_value)
+        for option in ("-0", "-r", "-i", "--null", "--replace"):
+            self.assertIn(option, took_none)
 
     def test_git_does_not_run_a_pager_when_stdout_is_not_a_terminal(self) -> None:
         # Why `PAGER=cat git log` and `GIT_PAGER=prog git log` are corpus rows
