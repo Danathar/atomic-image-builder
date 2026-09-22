@@ -136,6 +136,13 @@ REFUSED_COMMANDS = (
     ("hadolint Containerfile >.claude/settings.json", "overwrites the permission table through hadolint"),
     ("python3 maintenance_audit.py --skip-upstream >> out", "appends through the allow-listed audit"),
     ("just --fmt --check 2>cosign.pub", "opens a file for stderr through the allow-listed formatter"),
+    ("just --fmt --check --justfile ./.env", "prints a .env line back through the allow-listed formatter"),
+    ("just --fmt --check -f ./cosign.key", "prints a signing key line back through the short justfile option"),
+    ("just --fmt --check --justfile=/home/me/.aws/credentials", "reads a path outside the checkout through the = spelling"),
+    ("just --fmt --check -f/etc/shadow", "reads an absolute path through the attached short option"),
+    ("just --fmt --check -d /tmp/other -f /tmp/other/justfile", "formats a justfile in another tree"),
+    ("just --fmt --check --justfile /dev/stdin < ./.env", "parses a denied file arriving on standard input"),
+    ("just --fmt --check -f - < ./cosign.key", "parses a denied file through the - justfile"),
     ("skopeo inspect docker://x &>cosign.pub", "opens a path for both streams through skopeo"),
     ("podman image exists x >|cosign.pub", "opens a path past noclobber through a three-word prefix"),
     ("gh search prs --repo x <>cosign.pub", "opens a path read-write through gh"),
@@ -281,6 +288,8 @@ ALLOWED_COMMANDS = (
     "hadolint Containerfile",
     "python3 maintenance_audit.py --skip-upstream",
     "just --fmt --check",
+    "just --fmt --check --justfile template_snapshots/containerfile/Justfile",
+    "just --fmt --check -f template_snapshots/containerfile/Justfile < /dev/null",
     "skopeo inspect docker://ghcr.io/x:latest | jq .Digest",
     "podman images --format '{{.Repository}}'",
     "gh search issues --repo Danathar/atomic-image-builder --json number",
@@ -459,8 +468,10 @@ REACH_CORPUS = (
     ("redirection", "git diff HEAD </dev/null", ALLOWED, "git reads no file from standard input, and this is how a session says it has no stdin"),
     ("redirection", "shellcheck contrib/aib </dev/null", ALLOWED, "the exempt target on the read side"),
     ("redirection", "shellcheck - <<< 'echo hi'", ALLOWED, "a here-string carries content, not a path"),
+    ("redirection", "just --fmt --check -f - < ./.env", REFUSED, "a - justfile makes just read standard input, and it prints the line it could not parse"),
     ("redirection", "hadolint Containerfile < contrib/aib", ALLOWED, "hadolint reports a position and the offending character, never the source line"),
     ("redirection", "ruff check >cosign.pub", ALLOWED, "its allow row carries no :*, so the redirection makes the string match no rule and Claude Code prompts"),
+    ("options", "just --fmt --check --justfile ./.env", REFUSED, "an option that hands just a file it prints a line of back"),
     # 3. Word rewriting bash does before the tool sees the word.
     ("word rewriting", "git diff {a,.env}", REFUSED, "a brace is two words to bash and one to a scanner"),
     ("word rewriting", "shellcheck {contrib/aib,.env}", REFUSED, "the same in a lint run"),
@@ -1104,6 +1115,33 @@ class ReachCorpusTests(unittest.TestCase):
                 "hadolint now prints the line it could not parse, so an operand "
                 "that names a denied file prints it back and hadolint needs the "
                 "operand scan shellcheck has",
+            )
+
+    def test_just_prints_the_line_it_could_not_parse(self) -> None:
+        # Why `just --fmt --check` has a scan of its own. It reports a parse
+        # error with the offending source line under it, and a justfile's
+        # comments and blank lines parse, so the line it reaches is the first
+        # one carrying a value. If that ever stops being true the scan is
+        # redundant rather than wrong, so this test records the behaviour the
+        # refusal is for.
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            secret = Path(tmp, "stand-in.env")
+            secret.write_text("# a comment parses\n\nSECRET_TOKEN=stand-in-not-a-secret\n")
+            result = subprocess.run(
+                ["just", "--fmt", "--check", "--justfile", str(secret)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0, "the stand-in was meant not to parse")
+            self.assertIn(
+                "stand-in-not-a-secret",
+                result.stdout + result.stderr,
+                "just no longer prints the line it could not parse; the scan in "
+                "just_refusal() is then belt and braces rather than the thing "
+                "that keeps a denied file out of the transcript",
             )
 
 
