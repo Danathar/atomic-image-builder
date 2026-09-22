@@ -201,6 +201,11 @@ REFUSED_COMMANDS = (
     ("declare SHELLCHECK_OPTS+=./.env; shellcheck contrib/aib", "appends in a declare of an earlier segment"),
     ("git status && shellcheck ./cosign.key", "hides behind an earlier command"),
     ("git diff 'unterminated", "cannot be parsed, so it is not let through"),
+    ("env -C /tmp/other git diff", "relocates git before its operands are read, past a wrapper's own option"),
+    ("env --chdir=/tmp/other git diff", "relocates git through the attached spelling of the same option"),
+    ("env -S'FOO=x\\_GIT_EXTERNAL_DIFF=./evil\\_git diff'", "merges past word.split() so only the decoy name in front of it is read"),
+    ("export GIT_EXTERNAL_DIFF$'=./evil'; git diff HEAD", "concatenates an ANSI-C quote onto the name so the literal scan misses it"),
+    ("env -i {,git} diff --no-index /dev/null ./cosign.key", "hides a brace-expanded name behind a wrapper's own option"),
 )
 
 # Commands it has to leave alone. Everything an ordinary session runs.
