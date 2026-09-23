@@ -353,14 +353,17 @@ GATED_PREFIXES = (
 # leading-words match has to step over the way it steps over an assignment:
 # `time shellcheck x >out` and `command shellcheck x >out` are shellcheck's
 # redirection, and `env git diff --no-index a b` is git's operand. A wrapper
-# is recognised by its last path component, cut at `/` or `\` the way Claude
-# Code's matcher cuts it before it steps over the word, but only the bare
-# name, `/usr/bin/<name>` and `/bin/<name>` are stepped over. Any other path
-# (`./shim/nohup`, `'./shim\nohup'`, `$D/nohup`) runs whatever file is there
-# while the allow rule matched only the words after it, so it is refused;
-# see spelled_wrapper_path(). A wrapper's own options are not modelled as
-# taking values, so the name is looked for at every word after one (`command
-# -p shellcheck x`, `timeout 5 shellcheck x`), which can only over-refuse.
+# is recognised by its last path component, cut at `/` or `\`, both in the
+# word as typed -- which is what Claude Code's matcher cuts before it steps
+# over the word -- and in the word as bash reads it, but only the bare name,
+# `/usr/bin/<name>` and `/bin/<name>`, typed with no quote or backslash, are
+# stepped over. Anything else (`./shim/nohup`, `'./shim\nohup'`,
+# `/usr/bin\timeout`, which bash reads as `/usr/bintimeout`, `$D/nohup`)
+# runs some other file, or none, while the allow rule matched only the words
+# after it, so it is refused; see spelled_wrapper_path(). A wrapper's own
+# options are not modelled as taking values, so the name is looked for at
+# every word after one (`command -p shellcheck x`, `timeout 5 shellcheck x`),
+# which can only over-refuse.
 # `noglob` is zsh's: bash has no such command and fails, but only after it
 # has opened the redirection, and zsh runs the command, so `noglob podman ps
 # >out` truncates `out` in either shell, and Claude Code steps over it before
@@ -1044,6 +1047,65 @@ def punctuation_pieces(run: str) -> list[str]:
     return pieces
 
 
+# Where raw_words() hides a quoted or escaped character from the lexer: the
+# two supplementary private-use planes, whose code points no shell word needs
+# and shlex reads as ordinary word characters.
+HIDDEN = 0xF0000
+
+
+def raw_words(command: str) -> list[str]:
+    """The words of tokenize(command) as they were typed -- quote marks and
+    backslashes kept -- in the same order, one per token.
+
+    shlex hands back `/usr/bintimeout` for `/usr/bin\\timeout`, which is the
+    word bash runs; Claude Code's matcher reads the text as typed and cuts
+    it at the backslash, where it finds `timeout` and steps over it. A check
+    of what the matcher steps over needs the typed text. Every quoted or
+    escaped character, the quote marks and escaping backslashes included, is
+    swapped for a private-use stand-in before the lexer runs, so it splits
+    exactly where it splits the command -- only an unquoted blank or
+    operator is left for it to split on -- and each word is then read back
+    with its stand-ins restored. The quoting rules are shlex's own, the ones
+    tokenize() lexes by, since lining up with its words is the point.
+    """
+    if any(ord(char) >= HIDDEN for char in command):
+        raise ValueError("the command holds a private-use character raw_words() uses")
+    hidden: list[str] = []
+
+    def hide(char: str) -> str:
+        hidden.append(char)
+        return chr(HIDDEN + len(hidden) - 1)
+
+    encoded: list[str] = []
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if escaped:
+            escaped = False
+            encoded.append(hide(char))
+        elif quote:
+            if char == quote:
+                quote = ""
+            elif quote == '"' and char == "\\" and command[index + 1 : index + 2] in ('"', "\\"):
+                escaped = True
+            encoded.append(hide(char))
+        elif char == "\\":
+            escaped = True
+            encoded.append(hide(char))
+        elif char in "'\"":
+            quote = char
+            encoded.append(hide(char))
+        else:
+            encoded.append(char)
+        index += 1
+    return [
+        "".join(hidden[ord(char) - HIDDEN] if ord(char) >= HIDDEN else char for char in word)
+        for word in tokenize("".join(encoded))
+    ]
+
+
 def is_operator(token: str) -> bool:
     return token in OPERATORS or bool(token) and set(token) <= {"&", "|", ";"}
 
@@ -1066,12 +1128,22 @@ def segments(tokens: list[str], masked: list[str]) -> list[tuple[list[str], list
     know what bash would quote -- expands_at_runtime() -- can read the twin
     of the word it is judging.
     """
-    found: list[tuple[list[str], list[str]]] = [([], [])]
-    outer: list[tuple[list[str], list[str]]] = []
-    for token, twin in zip(tokens, masked, strict=True):
-        if twin == "(" and found[-1][0] and found[-1][0][-1].endswith("$"):
+    return [
+        ([tokens[index] for index in positions], [masked[index] for index in positions])
+        for positions in segment_positions(tokens, masked)
+    ]
+
+
+def segment_positions(tokens: list[str], masked: list[str]) -> list[list[int]]:
+    """segments(), as the positions in `tokens` each command's words stand
+    at, so a list lined up with the tokens -- raw_words() -- is split the
+    same way."""
+    found: list[list[int]] = [[]]
+    outer: list[list[int]] = []
+    for index, (_, twin) in enumerate(zip(tokens, masked, strict=True)):
+        if twin == "(" and found[-1] and tokens[found[-1][-1]].endswith("$"):
             outer.append(found.pop())
-            found.append(([], []))
+            found.append([])
             continue
         if twin in PROCESS_SUBSTITUTION:
             # A process substitution is a nested command too, and the `<(`
@@ -1079,20 +1151,18 @@ def segments(tokens: list[str], masked: list[str]) -> list[tuple[list[str], list
             # `shellcheck <(printf x) >cosign.pub` is one shellcheck command
             # whose redirection is its own (review on #420), and the `<(`
             # refusal for a git word still sees its token.
-            found[-1][0].append(token)
-            found[-1][1].append(twin)
+            found[-1].append(index)
             outer.append(found.pop())
-            found.append(([], []))
+            found.append([])
             continue
         if twin == ")" and outer:
             found.append(outer.pop())
             continue
         if is_operator(twin):
-            found.append(([], []))
+            found.append([])
             continue
-        found[-1][0].append(token)
-        found[-1][1].append(twin)
-    return [segment for segment in found if segment[0]]
+        found[-1].append(index)
+    return [positions for positions in found if positions]
 
 
 def bare(token: str) -> str:
@@ -1115,6 +1185,27 @@ def wrapper_basename(token: str) -> str:
     Claude Code's matcher reads a wrapper word as (it strips the path with
     `replace(/^.*[\\\\/]/, "")`) before it steps over the word."""
     return re.split(r"[\\/]", bare(token))[-1]
+
+
+def wrapper_word(token: str, raw: str) -> str | None:
+    """The wrapper a word is read as, or None.
+
+    Either reading makes it one: the last component of the word as typed
+    (`raw`), which is what Claude Code's matcher cuts -- `/usr/bin\\timeout`
+    is `timeout` to it -- or of the word as bash reads it (`token`), which is
+    what runs -- `"nohup"` is nohup to bash."""
+    for reading in (raw, token):
+        name = wrapper_basename(reading)
+        if name in COMMAND_WRAPPERS:
+            return name
+    return None
+
+
+def plain_wrapper_spelling(raw: str, name: str) -> bool:
+    """Is this word, as typed, the wrapper `name` itself: the bare name, or
+    the name in one of WRAPPER_DIRECTORIES, with no quote or backslash?"""
+    spelled = bare(raw)
+    return spelled == name or spelled in {directory + name for directory in WRAPPER_DIRECTORIES}
 
 
 def assignment(token: str) -> str | None:
@@ -1157,18 +1248,20 @@ class Invocation(NamedTuple):
     """A segment read as the command bash would run.
 
     `words` are the words the command receives, its own name first; `twins`
-    are their masked copies, in the same order, for a check that has to know
-    what bash would quote. `wrappers` are the wrapper words stepped over
-    before the name, as typed, and `wrapped` says whether there were any;
-    `name` is the token that named the command as it was typed (before a
-    path or a substitution prefix was stripped from it), and `assignments`
-    are the variables assigned before the name, which are the command's
-    environment rather than its arguments.
+    are their masked copies and `raws` the words as typed (raw_words()), in
+    the same order, for a check that has to know what bash would quote or
+    what the text was. `wrappers` are the wrapper words stepped over before
+    the name, each as bash reads it and as typed, and `wrapped` says whether
+    there were any; `name` is the token that named the command as it was
+    typed (before a path or a substitution prefix was stripped from it), and
+    `assignments` are the variables assigned before the name, which are the
+    command's environment rather than its arguments.
     """
 
     words: list[str]
     twins: list[str]
-    wrappers: list[str]
+    raws: list[str]
+    wrappers: list[tuple[str, str]]
     name: str
     assignments: list[str]
 
@@ -1178,7 +1271,9 @@ class Invocation(NamedTuple):
         return bool(self.wrappers)
 
 
-def command_words(segment: list[str], twins: list[str] | None = None) -> Invocation:
+def command_words(
+    segment: list[str], twins: list[str] | None = None, raws: list[str] | None = None
+) -> Invocation:
     """The words of a segment that the command receives, in order.
 
     A redirection -- its operator, its target and a descriptor written before
@@ -1189,7 +1284,7 @@ def command_words(segment: list[str], twins: list[str] | None = None) -> Invocat
     backtick substitution runs to the token that closes it, since shlex
     splits the substitution's words apart: `` >`printf x` git diff `` still
     finds its name at git. A leading assignment and a leading wrapper word
-    (`time`, `command`, `env`, recognised by wrapper_basename(), so
+    (`time`, `command`, `env`, recognised by wrapper_word(), so
     `/usr/bin/env` too) are stepped over too, since neither is part of the
     prefix an allow rule matches; the assignment is kept, because a variable
     set on a gated command is the environment it runs under, and so is the
@@ -1209,10 +1304,13 @@ def command_words(segment: list[str], twins: list[str] | None = None) -> Invocat
     """
     if twins is None:
         twins = segment
+    if raws is None:
+        raws = segment
     words: list[str] = []
     kept: list[str] = []
+    typed: list[str] = []
     assignments: list[str] = []
-    wrappers: list[str] = []
+    wrappers: list[tuple[str, str]] = []
     name = ""
     index = 0
     while index < len(segment):
@@ -1236,8 +1334,8 @@ def command_words(segment: list[str], twins: list[str] | None = None) -> Invocat
                 assignments.append(assigned)
                 index += 1
                 continue
-            if wrapper_basename(token) in COMMAND_WRAPPERS:
-                wrappers.append(token)
+            if wrapper_word(token, raws[index]) is not None:
+                wrappers.append((token, raws[index]))
                 index += 1
                 continue
             name = token
@@ -1245,8 +1343,9 @@ def command_words(segment: list[str], twins: list[str] | None = None) -> Invocat
         else:
             words.append(token)
         kept.append(twins[index])
+        typed.append(raws[index])
         index += 1
-    return Invocation(words, kept, wrappers, name, assignments)
+    return Invocation(words, kept, typed, wrappers, name, assignments)
 
 
 def name_positions(invocation: Invocation) -> range:
@@ -1264,31 +1363,30 @@ def name_positions(invocation: Invocation) -> range:
     return range(min(len(invocation.words), 1))
 
 
-def spelled_wrapper_path(invocation: Invocation) -> tuple[str, str] | None:
-    """The first word read as a wrapper here that is a path to some other
-    file, with the wrapper it passes for; or None.
+def spelled_wrapper_path(invocation: Invocation) -> tuple[str, str, str] | None:
+    """The first word read as a wrapper here that is not spelled as the
+    wrapper, as typed, as read by bash, and the wrapper it passes for; or
+    None.
 
-    Claude Code's matcher steps over `./shim/nohup` and `'./shim\\nohup'` as
-    `nohup` and matches the allow rule against the words after them, while
-    bash runs the file at that path -- which the session can have written
-    itself, and which can then read or write anything. Only the bare name
-    and a path in WRAPPER_DIRECTORIES are the wrapper; a path bash builds at
-    runtime (`$D/nohup`) is neither. The words read are the ones stepped
-    over before the name and, behind a wrapper, every word, the same places
-    name_positions() looks for a name.
+    Claude Code's matcher cuts a wrapper word as typed at its last `/` or
+    `\\` and steps over `./shim/nohup`, `'./shim\\nohup'` and
+    `/usr/bin\\timeout` as `nohup` and `timeout`, matching the allow rule
+    against the words after them. bash runs the file the word names -- one
+    the session can have written itself, which can then read or write
+    anything, or `/usr/bintimeout`, which does not exist, while the
+    redirection on the command still truncates its target. Only the bare
+    name and a path in WRAPPER_DIRECTORIES, typed with no quote or
+    backslash, are the wrapper; a path bash builds at runtime (`$D/nohup`)
+    is neither. The words read are the ones stepped over before the name
+    and, behind a wrapper, every word, the same places name_positions()
+    looks for a name.
     """
-    behind = invocation.words if invocation.wrapped else []
-    for word in (*invocation.wrappers, *behind):
-        name = wrapper_basename(word)
-        if name not in COMMAND_WRAPPERS:
-            continue
-        spelled = bare(word)
-        if spelled != name and spelled not in {
-            directory + name for directory in WRAPPER_DIRECTORIES
-        }:
-            return word, name
+    behind = zip(invocation.words, invocation.raws) if invocation.wrapped else ()
+    for token, raw in (*invocation.wrappers, *behind):
+        name = wrapper_word(token, raw)
+        if name is not None and not plain_wrapper_spelling(raw, name):
+            return raw, token, name
     return None
-
 
 
 def gated_prefix(invocation: Invocation) -> tuple[str, ...] | None:
@@ -1949,11 +2047,12 @@ def refusal(command: str) -> str | None:
         command = strip_comments(command)
         tokens = tokenize(command)
         masked = tokenize(mask_quotes_stripped(command))
+        raws = raw_words(command)
     except ValueError:
         # Unbalanced quoting. What the shell would do with it cannot be read
         # here, so it is refused rather than guessed at.
         return "the command cannot be parsed as shell words, so its git arguments cannot be checked"
-    if len(tokens) != len(masked):
+    if len(tokens) != len(masked) or len(tokens) != len(raws):
         # The masked copy split differently, so which tokens are separators
         # cannot be told; refused rather than guessed at.
         return "the command's quoting cannot be matched to its words, so its git arguments cannot be checked"
@@ -2004,7 +2103,9 @@ def refusal(command: str) -> str | None:
                 "would be in the environment of the next call's command; pass what the "
                 "command needs after its name instead"
             )
-    for segment, twins in segments(tokens, masked):
+    for positions in segment_positions(tokens, masked):
+        segment = [tokens[index] for index in positions]
+        twins = [masked[index] for index in positions]
         if segment and wrapper_basename(segment[0]) == "env":
             # A detached env -S/--split-string, in any spelling env
             # accepts (clustered, abbreviated) -- its own word, not
@@ -2036,7 +2137,7 @@ def refusal(command: str) -> str | None:
                             "option. Write the assignment and the command as separate "
                             "words instead of inside a split string with an escape in it"
                         )
-        invocation = command_words(segment, twins)
+        invocation = command_words(segment, twins, [raws[index] for index in positions])
         if invocation.words and invocation.words[0] in EXPORT_FAMILY:
             # Every word after the name is a candidate assignment
             # assigned_environment() already tests by content; this is
@@ -2075,15 +2176,17 @@ def refusal(command: str) -> str | None:
                 )
         path = spelled_wrapper_path(invocation)
         if path is not None:
-            word, wrapper = path
+            typed, read, wrapper = path
             return (
-                f"{word} is a path to a file named like the wrapper {wrapper}, and "
-                "that file is what runs: Claude Code's matcher cuts the path at its "
-                f"last / or \\ and steps over the word as {wrapper}, so the allow rule "
-                "matched only the words after it, while bash runs whatever sits at "
-                f"{word} -- a script the session wrote can read or write anything "
-                f"with no prompt. Only {wrapper}, /usr/bin/{wrapper} and "
-                f"/bin/{wrapper} are read as the wrapper; write `{wrapper}` instead"
+                f"{typed} is the wrapper {wrapper} to Claude Code's matcher, which "
+                "cuts the word as typed at its last / or \\ and steps over it, so the "
+                "allow rule matched only the words after it -- but bash reads the "
+                f"word as {read} and runs whatever file that names: one the session "
+                "wrote can read or write anything with no prompt, and one that does "
+                "not exist still leaves a redirection on the command truncating its "
+                f"target. Only {wrapper}, /usr/bin/{wrapper} and /bin/{wrapper}, typed "
+                f"with no quote or backslash, are read as the wrapper; write `{wrapper}` "
+                "instead"
             )
         relocated = wrapper_chdir(invocation)
         if relocated is not None:
