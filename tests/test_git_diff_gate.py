@@ -534,6 +534,13 @@ REACH_CORPUS = (
     ("command name", "'./shim\\env' git diff --no-index /dev/null ./cosign.key", REFUSED, "the same shim, whatever it is handed"),
     ("command name", "/tmp/timeout 5 shellcheck contrib/aib", REFUSED, "a path outside /usr/bin and /bin is not the wrapper"),
     ("command name", "timeout 5 ./shim/nohup git diff HEAD", REFUSED, "behind a wrapper's own argument"),
+    ("command name", "./x\\nohup git diff HEAD", REFUSED, "an unquoted backslash: the matcher reads nohup, bash runs ./xnohup"),
+    ("command name", "timeout 5 ./x\\nohup git diff HEAD", REFUSED, "the same behind a wrapper's own argument"),
+    ("command name", "/usr/bin\\timeout 5 podman ps >out", REFUSED, "the matcher cuts the typed word at the backslash; bash runs /usr/bintimeout, fails, and has truncated out"),
+    ("command name", "/usr/bin\\nohup shellcheck contrib/aib >out", REFUSED, "the same in front of the linter"),
+    ("command name", "x\\nohup podman ps >out", REFUSED, "a backslash with no directory in front of it"),
+    ("command name", '"nohup" podman ps', REFUSED, "a quoted wrapper name is not the plain spelling, whatever it runs"),
+    ("command name", "git log --grep='x\\nohup' -1", ALLOWED, "a wrapper-shaped argument is not a wrapper"),
     ("command name", "/usr/bin/timeout 60 git diff HEAD", ALLOWED, "the wrapper where the distribution installs it, in front of an ordinary git diff"),
     ("command name", "/usr/bin/nohup git diff HEAD", ALLOWED, "stepping over the path-spelled wrapper finds an ordinary git diff"),
     ("command name", "/usr/bin/env echo x >out", ALLOWED, "a redirection on a command no rule covers, behind a path-spelled wrapper"),
@@ -1129,48 +1136,55 @@ class ReachCorpusTests(unittest.TestCase):
                         "the command just shown to print the file is not refused",
                     )
 
-    def test_bash_opens_the_target_of_a_noglob_it_cannot_run(self) -> None:
-        # `noglob` is zsh's, and bash reports it as not found -- but only
-        # after opening the redirection, so `noglob podman ps >victim`
-        # empties the file in bash as surely as zsh runs podman into it.
-        # Claude Code steps over it before matching `Bash(podman ps:*)`.
-        with tempfile.TemporaryDirectory() as tmp:
-            victim = Path(tmp) / "victim"
-            victim.write_text("ORIGINAL-CONTENT\n")
-            subprocess.run(
-                ["bash", "--norc", "--noprofile", "-c", "noglob podman ps >victim"],
-                cwd=tmp,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            written = victim.read_text()
-        self.assertNotIn(
-            "ORIGINAL-CONTENT",
-            written,
-            "bash no longer truncates the target in front of a noglob; re-derive why "
-            "noglob is in COMMAND_WRAPPERS",
-        )
-        self.assertIsNotNone(
-            gate.refusal("noglob podman ps >cosign.pub"),
-            "the command just shown to truncate a file is not refused",
-        )
+    def test_bash_opens_the_target_in_front_of_a_command_it_cannot_run(self) -> None:
+        # bash opens a redirection before it looks the command up, so a
+        # command that is not found still empties the target. `noglob` is
+        # zsh's (zsh runs podman into the file), and `/usr/bin\timeout` is
+        # `/usr/bintimeout` to bash; Claude Code steps over both before it
+        # matches `Bash(podman ps:*)`.
+        for command in ("noglob podman ps >victim", "/usr/bin\\timeout 5 podman ps >victim"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as tmp:
+                victim = Path(tmp) / "victim"
+                victim.write_text("ORIGINAL-CONTENT\n")
+                subprocess.run(
+                    ["bash", "--norc", "--noprofile", "-c", command],
+                    cwd=tmp,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotIn(
+                    "ORIGINAL-CONTENT",
+                    victim.read_text(),
+                    f"bash no longer truncates the target of {command!r}; re-derive why "
+                    "command_words() reads the word as a wrapper",
+                )
+                self.assertIsNotNone(
+                    gate.refusal(command.replace("victim", "cosign.pub")),
+                    "the command just shown to truncate a file is not refused",
+                )
 
     def test_bash_runs_the_file_a_wrapper_path_names(self) -> None:
         # Claude Code's matcher cuts a wrapper word at its last `/` or `\`
         # and steps over `./shim/nohup` as `nohup`, so `./shim/nohup git diff
-        # HEAD` matches `Bash(git diff:*)`. bash runs the file at that path,
-        # backslash and all, and a file the session wrote can ignore the
-        # ordinary git diff it is handed and print the key instead.
+        # HEAD` matches `Bash(git diff:*)`. bash runs the file at that path --
+        # backslash and all when it is quoted, `./xnohup` for an unquoted
+        # `./x\nohup` -- and a file the session wrote can ignore the ordinary
+        # git diff it is handed and print the key instead.
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             subprocess.run(["git", "init", "-q", str(repo)], check=True)
             (repo / "cosign.pub").write_text("STAND-IN-NOT-A-KEY\n")
             (repo / "shim").mkdir()
-            for shim in (repo / "shim" / "nohup", repo / "shim\\nohup"):
+            for shim in (repo / "shim" / "nohup", repo / "shim\\nohup", repo / "xnohup"):
                 shim.write_text("#!/bin/sh\ncat ./cosign.pub\n")
                 shim.chmod(0o755)
-            for command in ("./shim/nohup git diff HEAD", "'./shim\\nohup' git diff HEAD"):
+            for command in (
+                "./shim/nohup git diff HEAD",
+                "'./shim\\nohup' git diff HEAD",
+                "./x\\nohup git diff HEAD",
+                "timeout 5 ./x\\nohup git diff HEAD",
+            ):
                 with self.subTest(command=command):
                     result = subprocess.run(
                         ["bash", "--norc", "--noprofile", "-c", command],
@@ -1622,6 +1636,28 @@ class RefusalTests(unittest.TestCase):
                         "have different lengths, so an index-based scan over them "
                         "(runtime_assignment(), opaque_assignment_prefix()) drifts",
                     )
+
+    def test_each_word_as_typed_lexes_back_to_its_token(self) -> None:
+        # raw_words() is read beside tokenize()'s words by position, so it has
+        # to split where tokenize() does, and each typed word has to be the
+        # text that lexes to its token -- quote marks and backslashes kept,
+        # nothing from a neighbouring word -- or the wrapper check reads one
+        # word's spelling for another's.
+        for command in (
+            *self.QUOTING_ALIGNMENT_CORPUS,
+            *self.QUOTING_ALIGNMENT_EMPTY_WHOLE_WORD,
+            r"""a 'b c' \; "d\"e" f""",
+            r"/usr/bin\timeout 5 podman ps >out",
+            r"'./shim\nohup' git diff HEAD",
+            "x=$(git diff);(echo ';'|cat) <<<''",
+        ):
+            with self.subTest(command=command):
+                tokens = gate.tokenize(command)
+                raws = gate.raw_words(command)
+                self.assertEqual(len(raws), len(tokens), raws)
+                for token, raw in zip(tokens, raws, strict=True):
+                    self.assertEqual(gate.tokenize(raw), [token], f"{raw!r} is not the word typed for {token!r}")
+        self.assertEqual(gate.raw_words(r"/usr/bin\timeout 5"), [r"/usr/bin\timeout", "5"])
 
     def test_a_paren_glued_to_a_separator_is_read_as_both(self) -> None:
         # shlex glues adjacent punctuation into one token, so `echo x;(git
