@@ -51,7 +51,7 @@ Not by watching numbers. By things that fail:
   `.coverage-thresholds.json`, read by the workflow so it cannot drift from
   what the docs say.
 - **Consistency tests.** Several tests exist only to fail when a document
-  drifts from what it describes -- the coverage threshold across four files,
+  drifts from what it describes -- the coverage threshold across five files,
   the pinned tool versions, the agent-guidance files all pointing at one
   canonical brief. This is why a docs-only change still runs the suite.
 - **The weekly audit**, for the things no test can see: a snapshot trailing
