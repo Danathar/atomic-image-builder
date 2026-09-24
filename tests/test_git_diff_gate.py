@@ -196,6 +196,12 @@ REFUSED_COMMANDS = (
     ("shellcheck - < {contrib/aib,.env}", "brace-expands the redirection target"),
     ("shellcheck - < secrets/*.pem", "globs the redirection target onto a denied shape"),
     ("< .env shellcheck -", "redirects from the denied file before the command name"),
+    ("git log --stdin < .env", "prints the file's first line back as a bad revision"),
+    ("git diff --stdin <./cosign.key", "feeds the signing key to git diff's revision list"),
+    ("git log --stdin 0< secrets/.env", "feeds a denied shape through an explicit descriptor"),
+    ("< .env git log --stdin", "redirects from the denied file before git's name"),
+    ("git log --stdin < /etc/shadow", "redirects from an absolute path outside the checkout"),
+    ("git log --stdin 3< .env <&3", "opens the file on another descriptor and duplicates it"),
     ("SHELLCHECK_OPTS=./.env shellcheck contrib/aib", "hands the linter a denied operand through its environment"),
     ("env SHELLCHECK_OPTS=./.env shellcheck contrib/aib", "hides that assignment behind a wrapper"),
     ("env -i SHELLCHECK_OPTS=./.env shellcheck contrib/aib", "hides it behind a wrapper's own option"),
@@ -459,7 +465,8 @@ REACH_CORPUS = (
     ),
     # 2. Redirection. Output opens a path for writing before the command
     # runs; input hands a tool a file it prints back when it echoes what it
-    # reads, which of the gated commands is shellcheck alone.
+    # reads, which of the gated commands shellcheck, `just --fmt --check`
+    # and git's --stdin each do.
     ("redirection", "git diff HEAD >cosign.pub", REFUSED, "truncates the file before git runs"),
     ("redirection", "git log -1 >>out", REFUSED, "appends to it"),
     ("redirection", "git diff HEAD >|x", REFUSED, "opens it past noclobber"),
@@ -473,7 +480,11 @@ REACH_CORPUS = (
     ("redirection", "< .env shellcheck -", REFUSED, "the same with the redirection first"),
     ("redirection", "git diff HEAD 2>&1", ALLOWED, "a descriptor form touches no path"),
     ("redirection", "git diff HEAD >&-", ALLOWED, "closing a descriptor touches no path"),
-    ("redirection", "git diff HEAD </dev/null", ALLOWED, "git reads no file from standard input, and this is how a session says it has no stdin"),
+    ("redirection", "git diff HEAD </dev/null", ALLOWED, "an empty standard input has nothing to print back, and this is how a session says it has no stdin"),
+    ("redirection", "git log --stdin < .env", REFUSED, "--stdin reads revisions from standard input, and git prints the first line that is not one"),
+    ("redirection", "< cosign.key git diff --stdin", REFUSED, "the same with the redirection first"),
+    ("redirection", "git log --stdin < revs.txt", ALLOWED, "a revision list inside the checkout, of no deny shape"),
+    ("redirection", "git log --stdin <<< HEAD~3", ALLOWED, "a here-string carries content, not a path"),
     ("redirection", "shellcheck contrib/aib </dev/null", ALLOWED, "the exempt target on the read side"),
     ("redirection", "shellcheck - <<< 'echo hi'", ALLOWED, "a here-string carries content, not a path"),
     ("redirection", "just --fmt --check -f - < ./.env", REFUSED, "a - justfile makes just read standard input, and it prints the line it could not parse"),
@@ -610,6 +621,37 @@ class ReachTests(unittest.TestCase):
             "the command just shown to read an arbitrary file is not refused",
         )
 
+
+    def test_git_prints_the_first_line_of_a_file_on_standard_input(self) -> None:
+        # Why an input redirection on git is checked at all. `--stdin` reads
+        # revisions from standard input, and the first line that does not
+        # resolve ends the run with `fatal: bad revision '<line>'` -- the
+        # whole line, so a `.env`'s first NAME=value arrives value included.
+        with tempfile.TemporaryDirectory() as tmp:
+            secret = Path(tmp) / ".env"
+            secret.write_text("SECRET_TOKEN=stand-in-not-a-secret\n")
+            for subcommand in ("log", "diff"):
+                with self.subTest(subcommand=subcommand), secret.open() as stdin:
+                    result = subprocess.run(
+                        ["git", subcommand, "--stdin"],
+                        cwd=ROOT,
+                        stdin=stdin,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertIn(
+                        "stand-in-not-a-secret",
+                        result.stdout + result.stderr,
+                        f"git {subcommand} --stdin no longer prints the line it could not "
+                        "resolve; re-derive why the git branch of refusal() checks an input "
+                        "redirection's target",
+                    )
+        for command in ("git log --stdin < .env", "git diff --stdin < ./.env"):
+            with self.subTest(command=command):
+                self.assertIsNotNone(
+                    gate.refusal(command),
+                    "the redirection just shown to print a line of the file is not refused",
+                )
 
     def test_git_reads_the_order_file_from_a_cluster_of_short_options(self) -> None:
         # `-aOorder1` is one shell word, and git reads it as `-a -O order1`.

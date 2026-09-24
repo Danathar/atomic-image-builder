@@ -24,6 +24,13 @@ and the two SSH key patterns. Those two statements are only consistent while
   command -- and shlex hands that `>` back as the first token of the
   segment, where a scan that took the first token for the command name saw
   no `git` at all and checked nothing else in the segment either.
+* `git log --stdin <.env` reads the file git is handed on standard input
+  as a list of revisions, and the first line that is not one ends the run
+  with `fatal: bad revision '<that line>'` -- the first `NAME=value` line of
+  a `.env`, value included. `git diff` and `git show` take `--stdin` too,
+  and bash opens the redirection whatever git's own arguments are, so the
+  target of an input redirection on a git command is checked the way an
+  operand is: inside the checkout, none of the deny shapes, spelled out.
 * `git diff $(echo /dev/null) ./cosign.key` is `--no-index` once more: bash
   rebuilds the word before git runs, and the gate reads words as typed. A
   `$VAR`, a `${VAR}`, a `$(...)` or `` `...` `` substitution and a `$'...'`
@@ -1821,6 +1828,32 @@ def reading_redirections(
     return targets
 
 
+def unsafe_reading_redirection(
+    segment: list[str], twins: list[str]
+) -> str | None:
+    """The first input-redirection target in `segment` that could hand a
+    denied file to the command, or None.
+
+    The target must stay inside the checkout, carry none of the deny shapes,
+    and be spelled out (no brace, no leading `~`, no glob -- bash refuses an
+    ambiguous redirect itself, but a glob naming exactly one denied file is
+    not ambiguous). `/dev/null` is exempt: it has nothing to print back, and
+    `</dev/null` is how a session says it has no stdin.
+    """
+    for target, twin in reading_redirections(segment, twins):
+        if target == "/dev/null":
+            continue
+        if (
+            brace_would_expand(target)
+            or twin.startswith("~")
+            or any(char in twin for char in GLOB)
+            or unsafe_operand(target)
+            or denied_read_shape(target)
+        ):
+            return target
+    return None
+
+
 def shellcheck_refusal(
     invocation: Invocation, segment: list[str], twins: list[str]
 ) -> str | None:
@@ -1837,25 +1870,17 @@ def shellcheck_refusal(
     (no brace, no leading `~`, no glob -- bash refuses an ambiguous redirect
     itself, but a glob naming exactly one denied file is not ambiguous).
     """
-    for target, twin in reading_redirections(segment, twins):
-        if target == "/dev/null":
-            continue  # nothing to print back; `</dev/null` is how a session says "no stdin"
-        if (
-            brace_would_expand(target)
-            or twin.startswith("~")
-            or any(char in twin for char in GLOB)
-            or unsafe_operand(target)
-            or denied_read_shape(target)
-        ):
-            return (
-                f"<{target} feeds shellcheck a file on standard input, and shellcheck "
-                "prints the source line above every diagnostic it reports, so a "
-                "redirection from a file that leaves the checkout, or that carries "
-                "one of the shapes the Read(./cosign.key), Read(./.env) and "
-                "Read(**/*.pem) deny rules in .claude/settings.json name, prints that "
-                "file back exactly as naming it as an operand would; redirect from a "
-                "script inside the checkout, spelled out in full"
-            )
+    target = unsafe_reading_redirection(segment, twins)
+    if target is not None:
+        return (
+            f"<{target} feeds shellcheck a file on standard input, and shellcheck "
+            "prints the source line above every diagnostic it reports, so a "
+            "redirection from a file that leaves the checkout, or that carries "
+            "one of the shapes the Read(./cosign.key), Read(./.env) and "
+            "Read(**/*.pem) deny rules in .claude/settings.json name, prints that "
+            "file back exactly as naming it as an operand would; redirect from a "
+            "script inside the checkout, spelled out in full"
+        )
     skip_value = False
     for token, twin in shellcheck_arguments(invocation):
         if skip_value:
@@ -1957,24 +1982,16 @@ def just_refusal(
     `/dev/stdin` justfile reads standard input, so the target of an input
     redirection is checked the way shellcheck_refusal() checks one.
     """
-    for target, twin in reading_redirections(segment, twins):
-        if target == "/dev/null":
-            continue
-        if (
-            brace_would_expand(target)
-            or twin.startswith("~")
-            or any(char in twin for char in GLOB)
-            or unsafe_operand(target)
-            or denied_read_shape(target)
-        ):
-            return (
-                f"<{target} feeds `just --fmt --check` a file on standard input, which "
-                "it parses as a justfile and prints the offending source line back "
-                "from -- `just --fmt --check --justfile /dev/stdin < ./.env` and "
-                "`-f -` both print the line the Read(./cosign.key), Read(./.env) and "
-                "Read(**/*.pem) deny rules exist to keep out of the transcript; format "
-                "a justfile inside the checkout, named as a path"
-            )
+    target = unsafe_reading_redirection(segment, twins)
+    if target is not None:
+        return (
+            f"<{target} feeds `just --fmt --check` a file on standard input, which "
+            "it parses as a justfile and prints the offending source line back "
+            "from -- `just --fmt --check --justfile /dev/stdin < ./.env` and "
+            "`-f -` both print the line the Read(./cosign.key), Read(./.env) and "
+            "Read(**/*.pem) deny rules exist to keep out of the transcript; format "
+            "a justfile inside the checkout, named as a path"
+        )
     for token, twin in just_path_values(invocation):
         if brace_would_expand(token) or twin.startswith("~"):
             return (
@@ -2306,9 +2323,22 @@ def refusal(command: str) -> str | None:
                     "prints -- the same write --output makes, in the shell's own spelling, "
                     "and one bash accepts before the command name as readily as after it; "
                     "git diff and git log print to stdout, so read that instead (2>&1, "
-                    ">&2, an input redirection, and a redirection on another command of "
-                    "the same string are not refused)"
+                    ">&2, an input redirection from a file inside the checkout, and a "
+                    "redirection on another command of the same string are not refused)"
                 )
+        target = unsafe_reading_redirection(segment, twins)
+        if target is not None:
+            return (
+                f"<{target} hands git a file on standard input, and git log, git diff "
+                "and git show --stdin read it as a list of revisions and stop at the "
+                "first line that is not one with `fatal: bad revision '<that line>'` "
+                "-- the first NAME=value line of a .env, value included -- so a "
+                "redirection from a file that leaves the checkout, or that carries one "
+                "of the shapes the Read(./cosign.key), Read(./.env) and Read(**/*.pem) "
+                "deny rules in .claude/settings.json name, prints a line of it back; "
+                "redirect from a file inside the checkout, spelled out in full "
+                "(</dev/null and a here-string are not refused)"
+            )
         for token, twin in zip(segment, twins, strict=True):
             if expands_at_runtime(twin):
                 return (

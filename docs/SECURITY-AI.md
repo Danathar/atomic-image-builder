@@ -81,8 +81,11 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   also refuses an output redirection on the git command -- `git diff HEAD
   >cosign.pub`, which is `--output` in the shell's spelling and truncates the
   file before git runs, and `>cosign.pub git diff HEAD`, which bash reads as
-  the same command -- while `2>&1`, an input redirection and a redirection on
-  another command of the same string are left alone. A git word bash would
+  the same command -- and an input redirection from a denied or outside
+  path, since `git log --stdin <.env` reads the file as a list of revisions
+  and prints its first line back as `fatal: bad revision '...'`, while
+  `2>&1`, `</dev/null`, an input redirection from a file inside the checkout
+  and a redirection on another command of the same string are left alone. A git word bash would
   rebuild before git runs is refused as well -- `$G`, `$(...)`, a backtick
   substitution, `$'...'` -- because the gate reads words as typed and
   `git diff $(echo /dev/null) ./cosign.key` is `--no-index` once bash has
@@ -212,8 +215,9 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   no subcommand the allow list covers; a glob in a git word is bash's to
   expand, because a glob cannot leave the working directory without a `/`, a
   `..` or a `~`, each already refused in the pattern; and an input redirection
-  is checked for the two commands that print a source line back --
-  `shellcheck`, whose `-` operand reads standard input, and
+  is checked for the three commands that print a line of it back --
+  `git`, whose `--stdin` reads revisions from it, `shellcheck`, whose `-`
+  operand reads standard input, and
   `just --fmt --check`, whose `-f -` and `--justfile /dev/stdin` do --
   while `hadolint` reports a position and the character it did not expect,
   never the line, which a test runs rather than assumes. `tests/test_git_diff_gate.py` holds that whole corpus
