@@ -243,7 +243,10 @@ class _StepHarness(unittest.TestCase):
         env["PYTHONPATH"] = str(self.stubs)
         env["STUB_LOG"] = str(self.log)
         env["STUB_TARBALL"] = str(self.tarball)
+        # Nothing from the machine running this: the global config is an empty
+        # file, and the system config is not read at all.
         env["GIT_CONFIG_GLOBAL"] = str(self.gitconfig)
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
         env.update(overrides)
         return env
 
@@ -465,18 +468,35 @@ class TokenStepTests(unittest.TestCase):
         # checkout runs with persist-credentials: false, so this helper is the
         # only credential git has. Asked the way `git push` asks, it has to
         # answer with the token and the username GitHub expects for one.
+        #
+        # Git asks every configured helper and the first answer wins, so the
+        # host's own helpers (system, global, and the local config of whatever
+        # repository this runs in) are shut out. Otherwise a developer's real
+        # GitHub credential answers first, and a failure would print it. The
+        # assertions below never print what git answered, for the same reason.
         env = {key: value for key, value in step_env(WORKFLOW, PUSH_STEP).items() if key.startswith("GIT_CONFIG_")}
         env = {key: value.strip("\"'") for key, value in env.items()}
-        proc = subprocess.run(
-            ["git", "credential", "fill"],
-            input="protocol=https\nhost=github.com\n\n",
-            env={**os.environ, **env, "GH_TOKEN": "ghs_exampletoken", "GIT_TERMINAL_PROMPT": "0"},
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("username=x-access-token", proc.stdout.splitlines())
-        self.assertIn("password=ghs_exampletoken", proc.stdout.splitlines())
+        with tempfile.TemporaryDirectory() as outside_any_repo:
+            proc = subprocess.run(
+                ["git", "credential", "fill"],
+                input="protocol=https\nhost=github.com\n\n",
+                env={
+                    **os.environ,
+                    **env,
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_CONFIG_GLOBAL": os.devnull,
+                    "GIT_CEILING_DIRECTORIES": outside_any_repo,
+                    "GH_TOKEN": "ghs_exampletoken",
+                    "GIT_TERMINAL_PROMPT": "0",
+                },
+                cwd=outside_any_repo,
+                capture_output=True,
+                text=True,
+            )
+        answered = proc.stdout.splitlines()
+        self.assertEqual(proc.returncode, 0, "git credential fill failed")
+        self.assertTrue("username=x-access-token" in answered, "the helper did not answer with username x-access-token")
+        self.assertTrue("password=ghs_exampletoken" in answered, "the helper did not answer with the step's GH_TOKEN")
 
 
 class PushStepTests(_StepHarness):
