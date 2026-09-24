@@ -1476,6 +1476,31 @@ class RefusalTests(unittest.TestCase):
                 self.assertIn(">cosign.pub", reason or "")
                 self.assertIn(prefix, reason or "")
 
+    def test_no_allow_rule_runs_bash(self) -> None:
+        # aurora-zfs-simple and arch-bootc allow `bash -n`, and their hooks
+        # refuse what it prints there (aurora-zfs-simple#233,
+        # arch-bootc#345): -n stops bash running a script, not printing it,
+        # so `bash -n -v ./cosign.key` prints the key, -o history and -i copy
+        # it into ~/.bash_history, and a syntax error prints its line. This
+        # hook carries none of those rules, because no row here runs bash and
+        # each of those spellings prompts. A row that did would pass the test
+        # above as soon as GATED_PREFIXES listed it, with none of them, so it
+        # fails here until they are ported.
+        allow = json.loads(SETTINGS.read_text(encoding="utf-8"))["permissions"]["allow"]
+        shells = [
+            rule
+            for rule in allow
+            if rule.startswith("Bash(")
+            and re.split(r"[\s:*)]", rule[len("Bash(") :], maxsplit=1)[0].rsplit("/", 1)[-1]
+            in {"bash", "sh"}
+        ]
+        self.assertEqual(
+            shells,
+            [],
+            "an allow row runs a shell; port the bash -n option and operand rules from "
+            "aurora-zfs-simple's gate before allowing it",
+        )
+
     def test_the_command_words_are_read_past_redirections_and_prefixes(self) -> None:
         # command_words() is the one walk both halves of the hook read, so it
         # has to step over a redirection wherever bash lets it stand, and over
