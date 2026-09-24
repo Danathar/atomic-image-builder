@@ -7,18 +7,17 @@ name: Update Homebrew Formula
 # while a formula left behind keeps installing the previous version. This runs
 # it automatically instead.
 #
-# It commits the change on a `formula/<tag>` branch and opens a pull request
-# against main; it never pushes to main. That keeps it working once the
-# `protect main` ruleset (.github/rulesets/main.json) is applied, which has no
-# bypass for anyone.
+# It commits the change on a `formula/<tag>` branch and pushes that branch; it
+# never pushes to main. The `protect main` ruleset
+# (.github/rulesets/main.json) has no bypass for anyone, and it covers only
+# main, so the branch push is allowed.
 #
-# The branch push and the pull request use a GitHub App token, not
-# GITHUB_TOKEN, for two reasons. Actions is not permitted to create pull
-# requests in this repository. And GitHub starts no workflow runs for a pull
+# It does not open the pull request. Actions is not permitted to create pull
+# requests in this repository, and GitHub starts no workflow runs for a pull
 # request opened with GITHUB_TOKEN, so the required `test` check would never
-# report and the pull request would wait forever. A pull request opened by an
-# App does start CI. The App and its two secrets are set up by hand; see
-# docs/branch-protection.md.
+# report on it. Instead the run summary and a reminder issue carry a link that
+# opens the pull request in one click. A person opening it is what makes `test`
+# run. See docs/branch-protection.md.
 on:
   release:
     types: [published]
@@ -30,10 +29,12 @@ on:
         description: "Release tag to point the formula at (e.g. v0.9.1)"
         required: true
 
-# GITHUB_TOKEN only reads: every write in this job (the branch push, the pull
-# request, auto-merge) goes through the App token minted below.
+# contents: write for the `formula/<tag>` branch push; issues: write for the
+# reminder issue. The ruleset refuses any push to main whatever this token can
+# do.
 permissions:
-  contents: read
+  contents: write
+  issues: write
 
 # Serialized: two releases in quick succession must not race to rewrite the
 # same file. Not cancel-in-progress -- an interrupted run could leave the
@@ -48,34 +49,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      # Without the App there is no way to publish the change, and a formula
-      # left on the previous release installs the wrong version with no error
-      # anywhere. So a missing secret fails the run, red, rather than skipping
-      # or falling back to a direct push. Only whether each secret is set
-      # reaches this step, never the secret itself.
-      - name: Check the formula App secrets are set
-        id: secrets
-        env:
-          HAS_APP_ID: ${{ secrets.FORMULA_APP_ID != '' }}
-          HAS_APP_KEY: ${{ secrets.FORMULA_APP_PRIVATE_KEY != '' }}
-        run: |
-          set -euo pipefail
-          missing=()
-          [ "$HAS_APP_ID" = "true" ] || missing+=(FORMULA_APP_ID)
-          [ "$HAS_APP_KEY" = "true" ] || missing+=(FORMULA_APP_PRIVATE_KEY)
-          if [ "${#missing[@]}" -gt 0 ]; then
-            echo "::error title=Formula App secrets missing::The FORMULA_APP_ID and FORMULA_APP_PRIVATE_KEY repository secrets must both be set; missing: ${missing[*]}. This workflow opens the formula pull request with that GitHub App's token. docs/branch-protection.md says how to create the App and set the secrets."
-            exit 1
-          fi
-
       # The release event checks out the tag; the formula lives on main.
-      # persist-credentials: false, because GITHUB_TOKEN here can only read;
-      # the push below authenticates with the App token instead.
       - name: Checkout main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: main
-          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -133,34 +111,11 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # Minted after the formula is written and verified, so nothing that runs
-      # the release's Python ever holds it. Minted on every run, not only when
-      # the formula changed: a dispatch for the tag the formula already names
-      # then proves the App ID, key, installation and permissions without
-      # opening a pull request. Scoped to this repository, with only the two
-      # permissions the steps below use.
-      - name: Mint the formula App token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.FORMULA_APP_ID }}
-          private-key: ${{ secrets.FORMULA_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-          permission-pull-requests: write
-
-      # git asks the credential helper for a password only for this step, and
-      # the helper reads the token from the environment, so the token is never
-      # written to .git/config.
       - name: Push the formula branch
+        id: push
         if: steps.update.outputs.changed == 'true'
         env:
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: credential.helper
-          GIT_CONFIG_VALUE_0: '!f() { echo username=x-access-token; echo "password=${GH_TOKEN}"; }; f'
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -181,123 +136,140 @@ jobs:
           # main may have moved while the release was being published.
           git fetch origin main
           git rebase origin/main
-          # --force: the branch belongs to this workflow. A re-run for the same
-          # tag replaces what an earlier run pushed, and an open pull request
-          # for the branch picks up the new commit.
-          git push --force origin "HEAD:refs/heads/formula/${TAG}"
+          branch="formula/${TAG}"
+          # A re-run for the same tag normally computes the same formula. When
+          # the branch already carries it, the branch is left alone. A push
+          # with this token starts no workflow run, so moving the branch under
+          # a pull request someone already opened would leave its new commit
+          # with no `test` result, and the ruleset would keep it from merging.
+          if git ls-remote --exit-code --heads origin "refs/heads/${branch}" >/dev/null; then
+            git fetch origin "refs/heads/${branch}"
+            if git diff --quiet FETCH_HEAD HEAD -- Formula/; then
+              echo "::notice::${branch} already carries this formula, so it was left as it is."
+            else
+              # The branch belongs to this workflow and holds a formula this
+              # run did not verify, so it is replaced. The summary tells the
+              # person to reopen a pull request already open for it.
+              git push --force origin "HEAD:refs/heads/formula/${TAG}"
+              echo "replaced=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            git push --force origin "HEAD:refs/heads/formula/${TAG}"
+          fi
+          # The link that opens the pull request with its title filled in.
+          # Written only once the branch holds this formula, so the summary and
+          # the issue never offer a link to a branch that is not there.
+          title="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "Point the Homebrew formula at ${TAG}")"
+          echo "compare=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/main...formula/${TAG}?expand=1&title=${title}" >> "$GITHUB_OUTPUT"
+          # Older formula branches are stale. `--check` above fails any tag
+          # that is not the tool's VERSION on main, so a run that gets this
+          # far is for the newest release. Two branches change the same
+          # formula lines, and merging the older one would point Homebrew back
+          # at the previous release. Deleting a branch also closes any pull
+          # request opened from it.
+          stale="$(git ls-remote --heads origin 'refs/heads/formula/*')"
+          while read -r _sha ref; do
+            case "$ref" in
+              "" | "refs/heads/${branch}") ;;
+              refs/heads/formula/*)
+                old="${ref#refs/heads/formula/}"
+                git push origin --delete "refs/heads/formula/${old}"
+                ;;
+            esac
+          done <<< "$stale"
 
-      # Reuses the open pull request for the branch when a re-run finds one.
-      # The body goes through a file so nothing in it is parsed by the shell.
+      # A reminder that outlasts the run page: the formula is not on main
+      # until someone opens and merges the pull request. A re-run reuses the
+      # open reminder for the same tag instead of filing a second one. Only an
+      # issue this workflow opened counts: anyone can open an issue with that
+      # title, and theirs could carry a different link. Bodies go through a
+      # file so nothing in them is parsed by the shell.
       #
-      # Then closes any other open formula pull request. Two releases can run
-      # before the first one's pull request merges, and both change the same
-      # formula lines, so once one merges the other conflicts and nothing
-      # rebases it. The newer one always wins: `--check` above fails any tag
-      # that is not the tool's VERSION on main, so a run that gets this far is
-      # for the newest release, and an older formula pull request is stale.
-      - name: Open the formula pull request
-        id: pr
-        if: steps.update.outputs.changed == 'true'
+      # Then closes the reminders for older tags, whose branches the step
+      # above deleted.
+      - name: Open the reminder issue
+        id: issue
+        if: steps.push.outputs.compare != ''
         env:
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          COMPARE_URL: ${{ steps.push.outputs.compare }}
+          REPLACED: ${{ steps.push.outputs.replaced }}
+          GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          branch="formula/${TAG}"
-          # Every open pull request into main, forks included, because
-          # `gh pr list --head` matches a branch name in any fork. Only this
-          # repository's own branches are ever reused or closed: a fork's pull
-          # request is someone else's work, whatever its branch is called, and
-          # reusing one would turn on auto-merge for code this job never wrote.
-          open="$(gh pr list --base main --state open --limit 100 --json isCrossRepository,number,url,headRefName \
-            --jq '.[] | "\(.isCrossRepository) \(.number) \(.url) \(.headRefName)"')"
+          prefix="Open the Homebrew formula PR for "
+          title="${prefix}${TAG}"
+          open="$(gh issue list --state open --limit 1000 --json number,url,title,author \
+            --jq '.[] | select(.author.login == "app/github-actions") | [.number, .url, .title] | @tsv')"
           url=""
-          while read -r fork _number pr_url head; do
-            if [ "$fork" = "false" ] && [ "$head" = "$branch" ]; then
-              url="$pr_url"
+          while IFS=$'\t' read -r _number issue_url issue_title; do
+            if [ "$issue_title" = "$title" ]; then
+              url="$issue_url"
+              break
             fi
           done <<< "$open"
-          if [ -z "$url" ]; then
-            body="$RUNNER_TEMP/formula-pr-body.md"
+          if [ -n "$url" ] && [ "$REPLACED" = "true" ]; then
+            body="$RUNNER_TEMP/formula-issue-comment.md"
             {
-              echo "Points Formula/atomic-image-builder.rb at the ${TAG} release tarball and its sha256."
+              echo "This run replaced the \`formula/${TAG}\` branch: ${RUN_URL}"
+              echo
+              echo "If the pull request is already open, close and reopen it so \`test\` runs on the new commit. Otherwise open it with the link above."
+            } > "$body"
+            gh issue comment "$url" --body-file "$body"
+          fi
+          if [ -z "$url" ]; then
+            body="$RUNNER_TEMP/formula-issue-body.md"
+            {
+              echo "Release ${TAG} changed the Homebrew formula. The change is on the \`formula/${TAG}\` branch, not on \`main\` yet."
+              echo
+              echo "Open the pull request: ${COMPARE_URL}"
+              echo
+              echo "A person has to open it. GitHub runs no CI on a pull request opened by the workflow's own token, so \`test\` would never run and the pull request could not merge. Merge it once \`test\` passes, then close this issue."
               echo
               echo "Opened by the Update Homebrew Formula workflow: ${RUN_URL}"
-              echo "The job checked the new pin with homebrew_formula.py --check before pushing."
-              echo "Homebrew users get ${TAG} on their next brew upgrade after this merges."
             } > "$body"
-            url="$(gh pr create --base main --head "$branch" --title "Point the Homebrew formula at ${TAG}" --body-file "$body")"
+            url="$(gh issue create --title "$title" --body-file "$body")"
           fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
-          while read -r fork number _url head; do
-            [ "$fork" = "false" ] || continue
-            case "$head" in
-              "$branch") ;;
-              formula/*) gh pr close "$number" --delete-branch --comment "Superseded by ${url}, which points the formula at ${TAG}." ;;
+          while IFS=$'\t' read -r number _issue_url issue_title; do
+            case "$issue_title" in
+              "$title") ;;
+              "$prefix"*) gh issue close "$number" --comment "Superseded by ${url}, for ${TAG}. Its formula branch was deleted." ;;
             esac
           done <<< "$open"
-
-      # Turns on GitHub's auto-merge, so the pull request merges by itself once
-      # the checks main requires have passed. Not `gh pr merge --auto`: when
-      # nothing is required yet -- before the ruleset is applied -- gh merges
-      # on the spot without waiting for `test`. The mutation below never
-      # merges; it only turns auto-merge on, and GitHub refuses when the
-      # repository does not allow auto-merge or nothing is required. Either
-      # way the pull request stays open for a person to merge. That is written
-      # to the summary as a warning, not a failure: the formula change is
-      # already visible as an open pull request.
-      - name: Turn on auto-merge
-        id: automerge
-        if: steps.update.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GH_REPO: ${{ github.repository }}
-          PR_URL: ${{ steps.pr.outputs.url }}
-        run: |
-          set -euo pipefail
-          id="$(gh pr view "$PR_URL" --json id --jq .id)"
-          # $id is a GraphQL variable, not a shell one.
-          # shellcheck disable=SC2016
-          if reason="$(gh api graphql \
-              -f query='mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: MERGE}) { clientMutationId } }' \
-              -f id="$id" 2>&1 >/dev/null)"; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            reason="$(printf '%s' "$reason" | tr '\n' ' ')"
-            echo "reason=$reason" >> "$GITHUB_OUTPUT"
-            echo "::warning title=Formula pull request left open::Auto-merge could not be turned on for ${PR_URL}, so it needs merging by hand. GitHub said: ${reason}"
-          fi
 
       - name: Summarize
         if: always()
         env:
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
-          SECRETS: ${{ steps.secrets.outcome }}
           CHANGED: ${{ steps.update.outputs.changed }}
-          PR_URL: ${{ steps.pr.outputs.url }}
-          AUTO_MERGE: ${{ steps.automerge.outputs.enabled }}
-          AUTO_MERGE_REASON: ${{ steps.automerge.outputs.reason }}
+          COMPARE_URL: ${{ steps.push.outputs.compare }}
+          REPLACED: ${{ steps.push.outputs.replaced }}
+          ISSUE_URL: ${{ steps.issue.outputs.url }}
         run: |
           {
             echo "## Homebrew formula"
             echo
-            if [ "$SECRETS" = "failure" ]; then
-              echo "Did not run: the \`FORMULA_APP_ID\` and \`FORMULA_APP_PRIVATE_KEY\` secrets are not both set. See docs/branch-protection.md."
-            elif [ "$CHANGED" = "true" ] && [ -n "$PR_URL" ]; then
-              echo "Pointed at \`${TAG}\` in ${PR_URL}. Users get it on their next \`brew update && brew upgrade\` after it merges."
+            if [ "$CHANGED" = "true" ] && [ -n "$COMPARE_URL" ]; then
+              echo "Pointed at \`${TAG}\` on the \`formula/${TAG}\` branch. It is not on \`main\` yet."
               echo
-              if [ "$AUTO_MERGE" = "true" ]; then
-                echo "Auto-merge is on: it merges by itself once the required checks pass."
-              elif [ "$AUTO_MERGE" = "false" ]; then
-                echo "**Auto-merge is not on, so the pull request stays open until someone merges it.** GitHub said: ${AUTO_MERGE_REASON}"
+              echo "**[Open the pull request](${COMPARE_URL})**"
+              echo
+              echo "A person has to open it so CI runs: GitHub runs no CI on a pull request opened by this workflow's token, so \`test\` would never report. Merge it once \`test\` passes. Users get \`${TAG}\` on their next \`brew update && brew upgrade\` after that."
+              echo
+              if [ "$REPLACED" = "true" ]; then
+                echo "**The branch held a different formula and was replaced.** If its pull request is already open, close and reopen it so \`test\` runs on the new commit."
+                echo
+              fi
+              if [ -n "$ISSUE_URL" ]; then
+                echo "Reminder issue: ${ISSUE_URL}"
               else
-                echo "**Auto-merge was not attempted.** Check the pull request and merge it by hand."
+                echo "**No reminder issue was opened.** The steps above say why."
               fi
             elif [ "$CHANGED" = "true" ]; then
-              echo "Updated the formula for \`${TAG}\` but did not open a pull request. The steps above say why."
+              echo "Updated the formula for \`${TAG}\` but did not push it. The steps above say why."
             elif [ "$CHANGED" = "false" ]; then
               echo "Already pointed at \`${TAG}\`; nothing to do."
             else

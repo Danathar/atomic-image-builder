@@ -240,25 +240,25 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   `tests/test_workflow_permissions_policy.py` fails when the two disagree, so
   a workflow cannot gain a scope unless the same pull request also changes the
   policy file, which is Tier 4.
-- `GITHUB_TOKEN` cannot create pull requests in this repository. Jobs with
+- Actions cannot create pull requests in this repository. Jobs with
   automated repository-contents write paths declare `contents: write`.
   `ci.yml` / `publish-coverage` commits and pushes the coverage badge and
   trend only to the orphan `coverage-data` branch after a push to `main`.
   `publish-wrapper.yml` / `publish` pushes no commits; it attaches the
   release-bound `aib` wrapper and `aib.sha256` checksum to the published
-  release. No workflow pushes to `main`. The formula update in
-  `update-homebrew-formula.yml` keeps its `GITHUB_TOKEN` at `contents: read`
-  and writes nothing with it. On a published release it mints a token for the
-  formula GitHub App, which can write only contents and pull requests in this
-  one repository. With that token it pushes a single machine-generated sha256,
-  which it verifies before pushing, to a `formula/<tag>` branch, and opens a
-  pull request against `main` that has to pass `test` like any other. Treat a
-  change to the formula workflow as Tier 4.
-- `main` has no branch protection yet. The ruleset that would keep it behind
-  a pull request is committed but not applied. It waits on the formula App
-  being set up and on one release proving the App's pull request gets `test`;
-  [branch protection](branch-protection.md) says what is left and how to
-  check.
+  release. No workflow pushes to `main`. The formula update,
+  `update-homebrew-formula.yml` / `update`, uses no secret and no token but
+  its own `GITHUB_TOKEN`, which holds `contents: write` and `issues: write`
+  and nothing else. On a published release it pushes a single
+  machine-generated sha256, which it verifies before pushing, to a
+  `formula/<tag>` branch, and opens a reminder issue with a link that opens
+  the pull request. A person opens that pull request, so it has to pass
+  `test` like any other. Treat a change to the formula workflow as Tier 4.
+- `main` is protected by the ruleset in
+  [`.github/rulesets/main.json`](../.github/rulesets/main.json): every change
+  arrives as a pull request that passed `test`, with no bypass for anyone.
+  [Branch protection](branch-protection.md) explains each rule and how to
+  check that it is live.
 
 ## Reporting
 
