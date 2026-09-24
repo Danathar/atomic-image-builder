@@ -48,6 +48,7 @@ answers the handful of subcommands those steps use.
 """
 
 import hashlib
+import json
 import os
 import subprocess
 import tempfile
@@ -149,6 +150,7 @@ raise SystemExit(1)
 # answers the subcommands the pull-request and auto-merge steps use. What it
 # answers is set per test through STUB_GH_* variables.
 GH_STUB = '''#!/usr/bin/env python3
+import json
 import os
 import shutil
 import sys
@@ -157,7 +159,19 @@ argv = sys.argv[1:]
 with open(os.environ["STUB_LOG"], "a") as log:
     log.write("gh\\t%s\\n" % "\\t".join(argv))
 if argv[:2] == ["pr", "list"]:
-    print(os.environ.get("STUB_GH_OPEN_PR", ""))
+    # The open pull requests, filtered by --head the way GitHub does, then
+    # printed the way the step's two --jq projections print them: the first
+    # match's url, or one "number head isCrossRepository" line each. The
+    # step's own shell does all the choosing.
+    prs = json.loads(os.environ.get("STUB_GH_PRS", "[]"))
+    if "--head" in argv:
+        matching = [pr for pr in prs if pr["headRefName"] == argv[argv.index("--head") + 1]]
+        print(matching[0]["url"] if matching else "")
+    else:
+        for pr in prs:
+            print("%d %s %s" % (pr["number"], pr["headRefName"], "true" if pr["isCrossRepository"] else "false"))
+elif argv[:2] == ["pr", "close"]:
+    pass
 elif argv[:2] == ["pr", "create"]:
     shutil.copy(argv[argv.index("--body-file") + 1], os.environ["STUB_GH_BODY"])
     print(os.environ["STUB_GH_NEW_PR"])
@@ -619,7 +633,16 @@ class PullRequestStepTests(_StepHarness):
     NEW_PR = "https://github.com/Danathar/atomic-image-builder/pull/501"
     OPEN_PR = "https://github.com/Danathar/atomic-image-builder/pull/499"
 
-    def run_pr_step(self, *, tag: str = "v1.2.3", open_pr: str = "") -> tuple[subprocess.CompletedProcess, dict[str, str]]:
+    @staticmethod
+    def pr(number: int, head: str, *, fork: bool = False) -> dict:
+        return {
+            "number": number,
+            "url": f"https://github.com/Danathar/atomic-image-builder/pull/{number}",
+            "headRefName": head,
+            "isCrossRepository": fork,
+        }
+
+    def run_pr_step(self, *, tag: str = "v1.2.3", prs: list[dict] | None = None) -> tuple[subprocess.CompletedProcess, dict[str, str]]:
         output_file = self.tmp / "github_output"
         output_file.write_text("")
         runner_temp = self.tmp / "runner-temp"
@@ -632,7 +655,7 @@ class PullRequestStepTests(_StepHarness):
                 GITHUB_OUTPUT=str(output_file),
                 RUNNER_TEMP=str(runner_temp),
                 RUN_URL="https://github.com/Danathar/atomic-image-builder/actions/runs/1",
-                STUB_GH_OPEN_PR=open_pr,
+                STUB_GH_PRS=json.dumps(prs or []),
                 STUB_GH_NEW_PR=self.NEW_PR,
                 STUB_GH_BODY=str(self.tmp / "body.md"),
             ),
@@ -642,10 +665,13 @@ class PullRequestStepTests(_StepHarness):
         )
         return proc, self.read_outputs(output_file)
 
+    def gh(self, *subcommand: str) -> list[list[str]]:
+        return [call for call in self.calls("gh") if tuple(call[: len(subcommand)]) == subcommand]
+
     def test_it_opens_a_pull_request_from_the_formula_branch_into_main(self) -> None:
         proc, outputs = self.run_pr_step()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        create = [call for call in self.calls("gh") if call[:2] == ["pr", "create"]]
+        create = self.gh("pr", "create")
         self.assertEqual(len(create), 1)
         args = create[0]
         self.assertEqual(args[args.index("--base") + 1], "main")
@@ -655,17 +681,37 @@ class PullRequestStepTests(_StepHarness):
         self.assertIn("v1.2.3", body)
         self.assertIn("actions/runs/1", body)
         self.assertEqual(outputs["url"], self.NEW_PR)
+        self.assertEqual(self.gh("pr", "close"), [])
 
     def test_a_rerun_reuses_the_open_pull_request(self) -> None:
         # The push step has already moved the branch the pull request tracks;
         # a second `gh pr create` for the same head would fail the run.
-        proc, outputs = self.run_pr_step(open_pr=self.OPEN_PR)
+        proc, outputs = self.run_pr_step(prs=[self.pr(499, "formula/v1.2.3")])
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual([call for call in self.calls("gh") if call[:2] == ["pr", "create"]], [])
+        self.assertEqual(self.gh("pr", "create"), [])
         self.assertEqual(outputs["url"], self.OPEN_PR)
-        listed = [call for call in self.calls("gh") if call[:2] == ["pr", "list"]][0]
-        self.assertEqual(listed[listed.index("--head") + 1], "formula/v1.2.3")
-        self.assertEqual(listed[listed.index("--state") + 1], "open")
+        self.assertEqual(self.gh("pr", "close"), [])
+
+    def test_an_older_release_s_open_pull_request_is_closed_as_superseded(self) -> None:
+        # Two releases before the first pull request merges would leave two
+        # pull requests changing the same formula lines; whichever merged
+        # second would conflict, and nothing rebases it. The older one is the
+        # stale one, so it goes. Someone else's pull request stays, whatever
+        # it is called, and so does anything that is not a formula branch.
+        prs = [
+            self.pr(480, "formula/v1.2.2"),
+            self.pr(481, "formula/v1.2.1", fork=True),
+            self.pr(482, "docs/formula"),
+        ]
+        proc, outputs = self.run_pr_step(prs=prs)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        closed = self.gh("pr", "close")
+        self.assertEqual([call[2] for call in closed], ["480"])
+        self.assertIn("--delete-branch", closed[0])
+        comment = closed[0][closed[0].index("--comment") + 1]
+        self.assertIn(self.NEW_PR, comment)
+        self.assertIn("v1.2.3", comment)
+        self.assertEqual(outputs["url"], self.NEW_PR)
 
 
 class AutoMergeStepTests(_StepHarness):

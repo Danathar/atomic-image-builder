@@ -188,6 +188,13 @@ jobs:
 
       # Reuses the open pull request for the branch when a re-run finds one.
       # The body goes through a file so nothing in it is parsed by the shell.
+      #
+      # Then closes any other open formula pull request. Two releases can run
+      # before the first one's pull request merges, and both change the same
+      # formula lines, so once one merges the other conflicts and nothing
+      # rebases it. The newer one always wins: `--check` above fails any tag
+      # that is not the tool's VERSION on main, so a run that gets this far is
+      # for the newest release, and an older formula pull request is stale.
       - name: Open the formula pull request
         id: pr
         if: steps.update.outputs.changed == 'true'
@@ -212,6 +219,17 @@ jobs:
             url="$(gh pr create --base main --head "$branch" --title "Point the Homebrew formula at ${TAG}" --body-file "$body")"
           fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
+          # Only this repository's own branches: a fork's pull request is
+          # someone else's work, whatever its branch is called.
+          open="$(gh pr list --base main --state open --limit 100 --json number,headRefName,isCrossRepository \
+            --jq '.[] | "\(.number) \(.headRefName) \(.isCrossRepository)"')"
+          while read -r number head fork; do
+            [ "$fork" = "false" ] || continue
+            case "$head" in
+              "$branch") ;;
+              formula/*) gh pr close "$number" --delete-branch --comment "Superseded by ${url}, which points the formula at ${TAG}." ;;
+            esac
+          done <<< "$open"
 
       # Turns on GitHub's auto-merge, so the pull request merges by itself once
       # the checks main requires have passed. Not `gh pr merge --auto`: when

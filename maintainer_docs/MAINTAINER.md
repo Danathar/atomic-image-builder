@@ -91,6 +91,8 @@ pushes the change to a `formula/<tag>` branch, and opens a pull request titled
 *Point the Homebrew formula at <tag>*. The pull request comes from the formula
 GitHub App, so `test` runs on it. Merge it once `test` passes. If
 **Allow auto-merge** is on, it merges by itself; the run summary says which.
+If an older release's formula pull request is still open, the run closes it
+as superseded, because both change the same lines.
 
 If the run fails on its first step with `Formula App secrets missing`, the
 `FORMULA_APP_ID` or `FORMULA_APP_PRIVATE_KEY` secret is not set.
