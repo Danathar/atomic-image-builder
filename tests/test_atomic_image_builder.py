@@ -16174,9 +16174,12 @@ class BuilderTests(unittest.TestCase):
                 self.assertEqual(gum.apply_ansi_fallback("hello", foreground=None), "hello")
 
     def test_apply_ansi_fallback_wraps_text_with_combined_style_codes(self) -> None:
+        # NO_COLOR is pinned empty (colour on) rather than inherited: the
+        # fallback honours it, so a contributor who sets it in their shell
+        # would otherwise see this fail on a clean checkout.
         gum = Gum()
         with patch("sys.stdout.isatty", return_value=True):
-            with patch.dict(os.environ, {"TERM": "xterm-256color"}):
+            with patch.dict(os.environ, {"TERM": "xterm-256color", "NO_COLOR": ""}):
                 result = gum.apply_ansi_fallback(
                     "hello",
                     bold=True,
@@ -16190,9 +16193,12 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(result, "\x1b[1;2;3;4;9;38;5;117;48;5;234mhello\x1b[0m")
 
     def test_apply_ansi_fallback_ignores_unknown_and_falsy_opts(self) -> None:
+        # Colour pinned on, as above. With NO_COLOR inherited this would pass
+        # for the wrong reason: plain text because colour is off, not because
+        # the unknown and falsy options were dropped.
         gum = Gum()
         with patch("sys.stdout.isatty", return_value=True):
-            with patch.dict(os.environ, {"TERM": "xterm-256color"}):
+            with patch.dict(os.environ, {"TERM": "xterm-256color", "NO_COLOR": ""}):
                 result = gum.apply_ansi_fallback("hello", bold=False, align="center", width=40)
         self.assertEqual(result, "hello")
 
