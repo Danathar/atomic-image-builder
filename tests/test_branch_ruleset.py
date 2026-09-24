@@ -22,6 +22,7 @@ by indentation. The reader handles the shapes these workflows write and raises
 on anything else rather than reading it as "no filter".
 """
 
+import fnmatch
 import json
 import re
 import unittest
@@ -35,9 +36,14 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 GITHUB_ACTIONS_APP_ID = 15368
 
 # Trigger keys that narrow which pull requests start a run. `branches` is
-# allowed only when it still names the default branch; the rest are refused.
+# allowed only when a plain pattern covers the default branch and no pattern
+# is negated; the rest are refused.
 NARROWING_FILTERS = ("paths", "paths-ignore", "branches-ignore", "types")
-DIRECT_PUSH_TO_MAIN = re.compile(r"\bgit\s+push\b[^\n]*\s(?:HEAD:)?(?:refs/heads/)?main\b")
+# Git's global options (`-C <dir>`, `-c <key=value>`, `--no-pager`) can sit
+# between `git` and `push`; ci.yml already writes `git -C "$dir" push`.
+DIRECT_PUSH_TO_MAIN = re.compile(
+    r"\bgit(?:\s+-[Cc]\s+\S+|\s+--?[\w-]+(?:=\S+)?)*\s+push\b[^\n]*\s(?:HEAD:)?(?:refs/heads/)?main\b"
+)
 BOLD_LEAD = re.compile(r"^- \*\*(.+?)\*\*", re.M)
 BACKTICKED = re.compile(r"`([^`]+)`")
 
@@ -136,8 +142,13 @@ def pull_request_trigger(text: str) -> tuple[bool, list[str]]:
     narrowing = []
     for key, (value_body, value_inline) in keyed(pr_body).items():
         if key == "branches":
-            listed = value_inline + " " + " ".join(value_body)
-            if not re.search(r"(?<![\w/-])main(?![\w/-])", listed):
+            patterns = [item.strip().strip("'\"") for item in value_inline.strip("[]").split(",") if item.strip()]
+            patterns += [line.strip().removeprefix("- ").strip("'\"") for line in value_body]
+            # GitHub reads branch patterns in order and a `!` pattern removes
+            # what earlier ones matched, so `['**', '!main']` excludes main.
+            if any(pattern.startswith("!") for pattern in patterns):
+                narrowing.append("a negated branch pattern")
+            elif not any(fnmatch.fnmatchcase("main", pattern) for pattern in patterns):
                 narrowing.append("branches without main")
         elif key in NARROWING_FILTERS:
             narrowing.append(key)
@@ -257,9 +268,16 @@ class WorkflowReaderTests(unittest.TestCase):
 
     def test_a_branch_filter_is_allowed_only_with_main(self) -> None:
         self.assertEqual(pull_request_trigger("on:\n  pull_request:\n    branches: [main]\n"), (True, []))
+        self.assertEqual(pull_request_trigger("on:\n  pull_request:\n    branches: ['**']\n"), (True, []))
         self.assertEqual(
             pull_request_trigger("on:\n  pull_request:\n    branches:\n      - release\n"),
             (True, ["branches without main"]),
+        )
+
+    def test_a_negated_branch_pattern_is_seen_even_after_main(self) -> None:
+        self.assertEqual(
+            pull_request_trigger("on:\n  pull_request:\n    branches: ['**', '!main']\n"),
+            (True, ["a negated branch pattern"]),
         )
 
     def test_an_unknown_trigger_key_raises(self) -> None:
@@ -322,10 +340,17 @@ class DocTests(unittest.TestCase):
                 self.assertIn(f"(../.github/workflows/{name})", reason)
 
     def test_the_push_detector_sees_the_forms_a_workflow_would_write(self) -> None:
-        for command in ("git push origin HEAD:main", "git push origin main", "git push -f origin refs/heads/main"):
+        for command in (
+            "git push origin HEAD:main",
+            "git push origin main",
+            "git push -f origin refs/heads/main",
+            'git -C "$worktree" push origin HEAD:main',
+            "git -c http.extraheader=x --no-pager push origin main",
+        ):
             with self.subTest(command=command):
                 self.assertIsNotNone(DIRECT_PUSH_TO_MAIN.search(command))
         self.assertIsNone(DIRECT_PUSH_TO_MAIN.search("git push origin HEAD:coverage-data"))
+        self.assertIsNone(DIRECT_PUSH_TO_MAIN.search('git -C "$badge_worktree" push origin HEAD:coverage-data'))
 
     def test_the_risk_tiers_route_a_ruleset_change_to_tier_four(self) -> None:
         tiers = (ROOT / "docs" / "risk-tiers.md").read_text(encoding="utf-8")
