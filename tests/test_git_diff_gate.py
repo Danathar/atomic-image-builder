@@ -1406,6 +1406,89 @@ class ReachCorpusTests(unittest.TestCase):
             )
 
 
+# The reserved words that open a compound command, and the two (`time`, `!`)
+# that may stand in front of one.
+GROUP_OPENERS = (
+    "if",
+    "for",
+    "while",
+    "until",
+    "case",
+    "select",
+    "function",
+    "coproc",
+    "time",
+    "!",
+)
+
+# Allow-row patterns (the text inside `Bash(...)`) that can reach a grouped
+# command, and ones that cannot. They hold reaches_a_group() to its job:
+# today's settings have none of the first kind, so a check against the
+# settings alone passes whatever it looks for.
+GROUP_REACHING_PATTERNS = (
+    "",
+    "*",
+    ":*",
+    "{ git diff HEAD; } >out",
+    "(git diff HEAD) >out",
+    "if true; then git diff HEAD; fi >out",
+    "for f in a; do git diff HEAD; done >out",
+    "while false; do :; done >out",
+    "if true\nthen git diff HEAD\nfi >out",
+    "if true & then git diff HEAD & fi >out",
+    "if *",
+    "if:*",
+    "if true:*",
+    "for f in a:*",
+    "while *",
+    "i*",
+    "time *",
+    "! *",
+)
+GROUP_PLAIN_PATTERNS = (
+    "git diff:*",
+    "git diff *",
+    "git status*",
+    "git diff HEAD >out",
+    "git diff HEAD 2>&1",
+    "git status && git diff HEAD",
+    "git diff HEAD &>out",
+    "git diff HEAD |& cat",
+    "ruff check",
+    "t:*",
+    "ifconfig:*",
+)
+
+
+def reaches_a_group(pattern: str) -> bool:
+    """Whether a `Bash(...)` pattern can match a command that holds a grouped command.
+
+    An exact pattern that names one has a parenthesis or a brace in it, or, for
+    the keyword forms (`if ...; then ...; fi >f`), what ends each part: a `;`, a
+    newline or a lone `&` (`if true & then ... & fi >f` is the same `if`). The
+    `&` in `&&`, `2>&1`, `&>` and `|&` ends nothing and is not counted. A
+    pattern with a `*` can match one when the text before the `*` is empty or
+    could begin a compound: `Bash(*)`, `Bash(if *)`, `Bash(i*)`, `Bash(time:*)`.
+    """
+    if any(character in pattern for character in "(){};\n"):
+        return True
+    if re.search(r"(?<![&<>|])&(?![&>])", pattern) or not pattern.strip():
+        return True
+    if "*" not in pattern:
+        return False
+    if pattern.endswith(":*") and "*" not in pattern[:-2]:
+        head = pattern[:-2] + " "  # `:*` ends the word in front of it
+    else:
+        head = pattern.split("*", 1)[0]
+    words = head.split()
+    if not words:
+        return True
+    if len(words) == 1 and not head[-1].isspace():
+        # the `*` can finish the word: `Bash(i*)` matches `if ...`
+        return any(opener.startswith(words[0]) for opener in GROUP_OPENERS)
+    return words[0] in GROUP_OPENERS
+
+
 class RefusalTests(unittest.TestCase):
     def test_each_reaching_command_is_refused(self) -> None:
         for command, reach in REFUSED_COMMANDS:
@@ -1514,27 +1597,37 @@ class RefusalTests(unittest.TestCase):
         # subshell or a brace group, whatever the allow rows say about the
         # command inside ("Contains subshell", "Contains compound_statement").
         # Checked on 2.1.273 and 2.1.280 with `Bash(git diff:*)` and
-        # `Bash(git log:*)` allowed, in the default and acceptEdits modes. The
-        # one way such a string ran with no prompt was a row that names the
-        # grouped string itself (`Bash({ git diff HEAD; } >out3.txt)` ran
-        # exactly that string), or a bare `Bash` row that allows everything.
-        # This fails if a row like that is added.
+        # `Bash(git log:*)` allowed, in the default and acceptEdits modes; the
+        # `if`, `for`, `while` and function forms were asked the same way
+        # ("Contains if_statement" and so on). The one way such a string ran
+        # with no prompt was a row that names the grouped string itself
+        # (`Bash({ git diff HEAD; } >out3.txt)` ran exactly that string), or a
+        # row that allows everything (`Bash`, `Bash(*)`). A wildcard row whose
+        # fixed part opens a compound (`Bash(if true:*)`) matches such a string
+        # the same way. This fails if a row like that is added;
+        # reaches_a_group() says what counts (aurora-zfs-simple#241).
         allow = json.loads(SETTINGS.read_text(encoding="utf-8"))["permissions"]["allow"]
         patterns = {rule: rule[len("Bash(") : -1] for rule in allow if rule.startswith("Bash(")}
         self.assertTrue(patterns)
         reaching = [rule for rule in allow if rule == "Bash"] + [
-            rule
-            for rule, pattern in patterns.items()
-            if any(character in pattern for character in "(){}")
-            or pattern.removesuffix(":*").strip() in ("", "*")
+            rule for rule, pattern in patterns.items() if reaches_a_group(pattern)
         ]
         self.assertEqual(
             reaching,
             [],
-            f"{reaching} can let a command that contains a subshell or a brace group run "
-            "with no prompt, and the hook does not charge a redirection written after the "
-            "group to the command inside it. Teach the hook that before adding the row.",
+            f"{reaching} can let a command that contains a subshell, a brace group or an "
+            "if/for/while compound run with no prompt, and the hook does not charge a "
+            "redirection written after the group to the command inside it. Teach the hook "
+            "that before adding the row.",
         )
+
+    def test_the_group_check_tells_grouped_rows_from_plain_ones(self) -> None:
+        for pattern in GROUP_REACHING_PATTERNS:
+            with self.subTest(pattern=pattern):
+                self.assertTrue(reaches_a_group(pattern), "a row that reaches a group went unseen")
+        for pattern in GROUP_PLAIN_PATTERNS:
+            with self.subTest(pattern=pattern):
+                self.assertFalse(reaches_a_group(pattern), "a plain row was taken for a group")
 
     def test_the_command_words_are_read_past_redirections_and_prefixes(self) -> None:
         # command_words() is the one walk both halves of the hook read, so it
