@@ -250,6 +250,10 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   push to `main`. `publish-wrapper.yml` / `publish` pushes no commits; it
   attaches the release-bound `aib` wrapper and `aib.sha256` checksum to the
   published release. Treat a change to the formula workflow as Tier 4.
+- `main` has no branch protection yet. The ruleset that would keep it behind
+  a pull request is committed but not applied, because it would refuse the
+  formula push above; [branch protection](branch-protection.md) says why and
+  how to check.
 
 ## Reporting
 
