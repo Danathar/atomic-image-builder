@@ -79,8 +79,8 @@ what the check then says.
 **Paths:** `.github/workflows/publish-image.yml`,
 `.github/workflows/publish-wrapper.yml`,
 `.github/workflows/update-homebrew-formula.yml`, `homebrew_formula.py`,
-`Formula/`, `.github/policies/workflow-permissions.json`, anything touching
-signing, `GH_TOKEN`, or cosign
+`Formula/`, `.github/policies/workflow-permissions.json`,
+`.github/rulesets/**`, anything touching signing, `GH_TOKEN`, or cosign
 
 `publish-wrapper.yml` is here because it attaches the release-bound `aib` and
 `aib.sha256` that the installation instructions download. The wrapper runs on
@@ -92,6 +92,11 @@ own signature checks do.
 `--update` path downloads the release tarball, computes the digest, and
 rewrites the formula. A defect in it produces a permanently wrong formula just
 as surely as editing `Formula/` by hand would.
+
+`.github/rulesets/**` is here because it is what keeps `main`, which
+`publish-image.yml` signs and ships on every push, behind a pull request once
+it is applied. Loosening it reopens the direct push; see
+[branch protection](branch-protection.md).
 
 **Reaches:** the published image, the release-bound wrapper and its checksum,
 and the Homebrew formula, which is what `brew upgrade` installs. Homebrew never
@@ -108,12 +113,12 @@ report the blocker. [docs/SECURITY-AI.md](SECURITY-AI.md) covers the rest.
 
 ## Quick classification
 
-| If the change touches                                                      | Tier |
-| -------------------------------------------------------------------------- | ---- |
-| only docs, tests, or editor config                                         | 1    |
-| the tool, the local `contrib/aib` wrapper source, or the image             | 2    |
-| bundled snapshots, the pin tables, or the workflow patchers and generators | 3    |
-| publishing, signing, `homebrew_formula.py`, the formula, or tokens         | 4    |
+| If the change touches                                                                  | Tier |
+| -------------------------------------------------------------------------------------- | ---- |
+| only docs, tests, or editor config                                                     | 1    |
+| the tool, the local `contrib/aib` wrapper source, or the image                         | 2    |
+| bundled snapshots, the pin tables, or the workflow patchers and generators             | 3    |
+| publishing, signing, `homebrew_formula.py`, the formula, tokens, or the `main` ruleset | 4    |
 
 A change spanning tiers takes the highest one it touches. When it is not
 obvious, the question that settles it is: *if this is wrong, who finds out,
