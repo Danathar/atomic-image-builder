@@ -3,7 +3,8 @@
 The document tells an agent which security properties of this repository are
 mechanical rather than advisory: what `.claude/settings.json` denies outright,
 what `maintenance_audit.py` fails on, that a workflow needing more than a
-read-only token declares it, and which single workflow pushes to `main`. An
+read-only token declares it, that no workflow pushes to `main`, and how the
+formula update reaches it instead. An
 agent reads it to know what it must not weaken -- and every one of those claims
 is a hand copy of something elsewhere in the tree.
 
@@ -241,9 +242,15 @@ CALLER_DIRECTED_ARGUMENTS: tuple[tuple[tuple[str, ...], str], ...] = (
     ),
 )
 
-# Actions whose whole purpose is opening a pull request. The document says
-# Actions cannot open one here; the tree has to agree.
+# Actions whose whole purpose is opening a pull request. They open it with
+# GITHUB_TOKEN unless told otherwise, and the document says GITHUB_TOKEN cannot
+# open one here; the tree has to agree.
 PR_CREATING_ACTION_SUBSTRINGS = ("create-pull-request", "create-pr", "pull-request-action")
+# The one action that mints the token a pull request may be opened with, and
+# how a step names it: its `id:`, and a GH_TOKEN read from that step's output.
+APP_TOKEN_ACTION = "actions/create-github-app-token@"
+STEP_ID = re.compile(r"^\s+id:\s*(?P<id>[A-Za-z_][\w-]*)\s*$")
+APP_TOKEN_ENV = re.compile(r"^\s+GH_TOKEN:\s*\$\{\{\s*steps\.(?P<id>[\w-]+)\.outputs\.token\s*\}\}\s*$")
 
 
 class DocClaimError(AssertionError):
@@ -535,7 +542,7 @@ def push_targets(argv: str, path: Path) -> set[str]:
             f"{path.name}: `git push{argv}` names no refspec, so the branch it "
             "writes to cannot be read from the workflow"
         )
-    return {spec.rpartition(":")[2].removeprefix("refs/heads/") for spec in refspecs}
+    return {spec.strip("\"'").rpartition(":")[2].removeprefix("refs/heads/") for spec in refspecs}
 
 
 def branch_pushes(branch: str) -> set[tuple[str, str]]:
@@ -960,9 +967,17 @@ class WorkflowPermissionTests(unittest.TestCase):
                         "so what it can write is whatever the repository default happens to be",
                     )
 
-    def test_no_job_can_open_a_pull_request(self) -> None:
+    def test_only_an_app_token_opens_a_pull_request(self) -> None:
+        """GITHUB_TOKEN opens none; the one step that does uses an App token.
+
+        A pull request opened with GITHUB_TOKEN starts no workflow runs, so the
+        `test` check the ruleset requires would never report on it. And the
+        repository setting that stops GITHUB_TOKEN opening one would turn a
+        job that relies on it red at the next release, not in review.
+        """
         bullet = bullet_naming(enforcement_bullets(), "write path")
-        self.assertIn("cannot create pull requests", bullet)
+        self.assertIn("`GITHUB_TOKEN` cannot create pull requests", bullet)
+        openers: set[str] = set()
         for path in workflow_paths():
             text = path.read_text()
             for job, permissions in workflow_permissions(path).items():
@@ -977,8 +992,34 @@ class WorkflowPermissionTests(unittest.TestCase):
                         any(part in match.group("action") for part in PR_CREATING_ACTION_SUBSTRINGS),
                         f"{path.name} uses {match.group('action')}, which opens pull requests",
                     )
+            steps = workflow_steps(path)
+            app_token_steps = {
+                match.group("id")
+                for _name, body in steps
+                if any(APP_TOKEN_ACTION in line for line in body)
+                for line in body
+                if (match := STEP_ID.match(line))
+            }
+            creating = [(name, body) for name, body in steps if any("gh pr create" in line for line in body)]
+            uncommented = [line for line in text.splitlines() if "gh pr create" in line and not line.strip().startswith("#")]
             with self.subTest(workflow=path.name):
-                self.assertNotIn("gh pr create", text)
+                self.assertEqual(
+                    len(uncommented),
+                    sum(1 for _name, body in creating for line in body if "gh pr create" in line),
+                    f"{path.name} runs `gh pr create` outside a named step, where this cannot see its token",
+                )
+            for name, body in creating:
+                tokens = {match.group("id") for line in body if (match := APP_TOKEN_ENV.match(line))}
+                with self.subTest(workflow=path.name, step=name):
+                    self.assertTrue(
+                        tokens and tokens <= app_token_steps,
+                        f"{path.name}'s {name!r} runs `gh pr create` without GH_TOKEN from a "
+                        f"{APP_TOKEN_ACTION} step",
+                    )
+                openers.add(path.name)
+        for name in openers:
+            with self.subTest(opener=name):
+                self.assertIn(f"`{name}`", bullet)
 
     def test_every_contents_write_job_is_named_in_the_enforcement_section(self) -> None:
         bullet = bullet_naming(enforcement_bullets(), "write path")
@@ -1000,51 +1041,39 @@ class WorkflowPermissionTests(unittest.TestCase):
         )
 
 
-class MainWritePathTests(unittest.TestCase):
-    """Exactly one automated write path pushes straight to `main`."""
+class MainPushTests(unittest.TestCase):
+    """No workflow pushes to `main`; the formula update arrives as a pull request."""
 
     def setUp(self) -> None:
         self.bullet = bullet_naming(enforcement_bullets(), "write path")
-        claim = re.search(
-            r"exactly one automated push to `(?P<branch>[^`]+)`: "
-            r"`(?P<workflow>[^`]+\.ya?ml)`\s*/\s*`(?P<job>[A-Za-z_][A-Za-z0-9_-]*)`",
-            self.bullet,
-        )
-        if claim is None:
+        claim = re.search(r"No workflow pushes to `(?P<branch>[^`]+)`\.", self.bullet)
+        formula = re.search(r"The formula update in `(?P<workflow>[^`]+\.ya?ml)`", self.bullet)
+        branch = re.search(r"to a `(?P<prefix>[^`<]+)<tag>` branch", self.bullet)
+        if claim is None or formula is None or branch is None:
             raise DocClaimError(
-                "the write-path bullet does not identify the one automated push "
-                "as `branch`: `workflow` / `job`"
+                "the write-path bullet no longer says which branch no workflow pushes "
+                "to, which workflow carries the formula update, and which branch it "
+                "pushes instead"
             )
         self.branch = claim.group("branch")
-        self.workflow = WORKFLOWS / claim.group("workflow")
-        self.job = claim.group("job")
-        self.permission = next(
-            literal for literal in BACKTICKED.findall(self.bullet) if ":" in literal
-        )
+        self.workflow = WORKFLOWS / formula.group("workflow")
+        self.prefix = branch.group("prefix")
 
-    def test_the_named_workflow_and_job_exist(self) -> None:
-        self.assertTrue(self.workflow.is_file(), f"{self.workflow} does not exist")
-        self.assertIn(
-            self.job,
-            workflow_permissions(self.workflow),
-            f"{self.workflow.name} has no {self.job} job",
-        )
-
-    def test_it_takes_the_permission_the_document_names(self) -> None:
-        key, _, value = self.permission.partition(":")
-        granted = workflow_permissions(self.workflow)[self.job] or {}
+    def test_no_job_pushes_to_the_branch(self) -> None:
+        """"No workflow" is a claim about every job, not only the formula one."""
         self.assertEqual(
-            granted.get(key.strip()),
-            value.strip(),
-            f"{self.workflow.name}'s {self.job} job no longer takes {self.permission}",
+            branch_pushes(self.branch),
+            set(),
+            f"docs/SECURITY-AI.md says no workflow pushes to {self.branch}, but these jobs do",
         )
 
-    def test_it_runs_on_a_published_release(self) -> None:
+    def test_the_formula_workflow_runs_on_a_published_release(self) -> None:
+        self.assertTrue(self.workflow.is_file(), f"{self.workflow} does not exist")
         triggers = workflow_triggers(self.workflow)
         self.assertIn("release:", triggers)
         self.assertIn("published", triggers)
 
-    def test_it_pushes_to_the_branch_the_document_names(self) -> None:
+    def test_it_pushes_only_to_the_branch_the_document_names(self) -> None:
         pushes = [
             (line.strip(), push_targets(match.group("argv"), self.workflow))
             for _name, body in workflow_steps(self.workflow)
@@ -1055,26 +1084,18 @@ class MainWritePathTests(unittest.TestCase):
         self.assertTrue(pushes, f"{self.workflow.name} pushes nothing")
         for push, targets in pushes:
             with self.subTest(push=push):
-                self.assertEqual(
-                    targets,
-                    {self.branch},
-                    f"{self.workflow.name} pushes somewhere other than {self.branch}: {push}",
+                self.assertTrue(
+                    all(target.startswith(self.prefix) for target in targets),
+                    f"{self.workflow.name} pushes somewhere other than {self.prefix}<tag>: {push}",
                 )
 
-    def test_no_other_job_pushes_to_the_branch(self) -> None:
-        """The claim is "exactly one", which is a claim about every other job.
-
-        Reading only the named workflow leaves the count unchecked: a second
-        job can take `contents: write`, be documented in the same bullet as a
-        write path, and push to the branch, and every other assertion here
-        still passes while "exactly one" has stopped being true.
-        """
-        self.assertEqual(
-            branch_pushes(self.branch),
-            {(self.workflow.name, self.job)},
-            f"docs/SECURITY-AI.md claims exactly one automated push to "
-            f"{self.branch}, but these jobs push to it",
-        )
+    def test_its_github_token_only_reads(self) -> None:
+        # Every write goes through the App token. A GITHUB_TOKEN that could
+        # write contents would be a second, unreviewed way onto the branch.
+        self.assertIn("keeps its `GITHUB_TOKEN` at `contents: read`", self.bullet)
+        for job, permissions in workflow_permissions(self.workflow).items():
+            with self.subTest(job=job):
+                self.assertEqual(permissions, {"contents": "read"})
 
     def test_it_verifies_before_it_pushes(self) -> None:
         self.assertIn("verifies before pushing", self.bullet)

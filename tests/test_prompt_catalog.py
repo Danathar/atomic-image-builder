@@ -362,7 +362,7 @@ class NamedMachineryTests(unittest.TestCase):
         """cut-release's 'Do not be surprised by two image publishes'.
 
         The prompt tells the reader to expect one publish from the release
-        event and one from the formula-update push to `main`. That is only
+        event and one from merging the formula pull request into `main`. That is only
         true while publish-image.yml carries both triggers; drop either and
         the advice becomes a reason to go looking for a bug that is not there.
         """

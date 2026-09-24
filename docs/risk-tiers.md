@@ -93,6 +93,12 @@ own signature checks do.
 rewrites the formula. A defect in it produces a permanently wrong formula just
 as surely as editing `Formula/` by hand would.
 
+`update-homebrew-formula.yml` opens the formula pull request with a token for
+a GitHub App, minted from the `FORMULA_APP_ID` and `FORMULA_APP_PRIVATE_KEY`
+secrets. That token can push branches and open and merge pull requests in this
+repository, so asking it for another permission, or pointing it at a branch
+other than `formula/<tag>`, is a change in this tier.
+
 `.github/rulesets/**` is here because it is what keeps `main`, which
 `publish-image.yml` signs and ships on every push, behind a pull request once
 it is applied. Loosening it reopens the direct push; see

@@ -6,8 +6,8 @@ What: Reads the committed ruleset and checks that it keeps `main` behind a
       force-push, 0 approvals); that docs/branch-protection.md explains every
       rule, target and required check in the file and names none the file
       lacks; that every required check is a job that runs on every pull
-      request; and that every workflow that pushes to `main` is named in the
-      doc as the reason the ruleset is not applied.
+      request; that no workflow pushes to `main`; and that the doc names every
+      secret the formula workflow needs before the ruleset can be applied.
 Why: `main` had no branch protection, so any token with `contents: write`
      could push to it, and `publish-image.yml` signs and ships whatever `main`
      holds. A pull request cannot apply a ruleset, so what can be checked here
@@ -327,21 +327,31 @@ class DocTests(unittest.TestCase):
         self.assertIn("--input .github/rulesets/main.json", DOC)
         self.assertIn("gh api repos/Danathar/atomic-image-builder/branches/main --jq .protected", DOC)
 
-    def test_every_workflow_that_pushes_to_main_is_why_the_ruleset_waits(self) -> None:
-        # With no bypass, the applied ruleset refuses these pushes, so while
-        # one exists the doc has to say the ruleset is not applied and why.
+    def test_no_workflow_pushes_to_main(self) -> None:
+        # The ruleset has no bypass, so once it is applied it refuses these
+        # pushes, the job fails, and for the formula workflow `brew upgrade`
+        # keeps installing the previous release. The formula change goes
+        # through a pull request instead; see the doc's "Why it is not
+        # applied yet".
         pushers = [
             path.name
             for path in sorted(WORKFLOWS.glob("*.y*ml"))
             if DIRECT_PUSH_TO_MAIN.search(path.read_text(encoding="utf-8"))
         ]
-        if not pushers:
-            return
-        self.assertIn("**The ruleset is not applied.**", doc_section("Status"))
+        self.assertEqual(pushers, [], "these workflows push straight to main, which the ruleset refuses")
+
+    def test_the_doc_names_every_secret_the_formula_workflow_needs(self) -> None:
+        # The doc is where an admin learns which secrets to create before the
+        # ruleset can be applied. A secret renamed in the workflow and not in
+        # the doc fails every release with an error pointing at the doc.
+        workflow = "update-homebrew-formula.yml"
+        secrets = set(re.findall(r"\bsecrets\.([A-Z0-9_]+)", (WORKFLOWS / workflow).read_text(encoding="utf-8")))
+        self.assertTrue(secrets, f"{workflow} reads no secrets; the doc's setup steps describe ones it needs")
         reason = doc_section("Why it is not applied yet")
-        for name in pushers:
-            with self.subTest(workflow=name):
-                self.assertIn(f"(../.github/workflows/{name})", reason)
+        self.assertIn(f"(../.github/workflows/{workflow})", reason)
+        for name in sorted(secrets):
+            with self.subTest(secret=name):
+                self.assertIn(f"gh secret set {name} ", reason)
 
     def test_the_push_detector_sees_the_forms_a_workflow_would_write(self) -> None:
         for command in (
@@ -358,6 +368,7 @@ class DocTests(unittest.TestCase):
         self.assertIsNone(DIRECT_PUSH_TO_MAIN.search("git push origin HEAD:coverage-data"))
         self.assertIsNone(DIRECT_PUSH_TO_MAIN.search('git -C "$badge_worktree" push origin HEAD:coverage-data'))
         self.assertIsNone(DIRECT_PUSH_TO_MAIN.search("git push origin main:release"))
+        self.assertIsNone(DIRECT_PUSH_TO_MAIN.search('git push --force origin "HEAD:refs/heads/formula/${TAG}"'))
 
     def test_the_risk_tiers_route_a_ruleset_change_to_tier_four(self) -> None:
         tiers = (ROOT / "docs" / "risk-tiers.md").read_text(encoding="utf-8")

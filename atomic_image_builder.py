@@ -304,6 +304,11 @@ ACTION_REF_PINS: dict[str, tuple[str, str]] = {
     "actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f": ACTION_PINS["actions/upload-artifact"],
     "sigstore/cosign-installer@v4.0.0": ("faadad0cce49287aee09b3a48701e75088a2c6ad", "v4.0.0"),
     "sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad": ("faadad0cce49287aee09b3a48701e75088a2c6ad", "v4.0.0"),
+    # Used only by this repository's update-homebrew-formula.yml. Keyed by the
+    # exact SHA rather than added to ACTION_PINS, so the generator never
+    # writes it into a stranger's workflow and the patcher only ever rewrites
+    # this same SHA to itself. The freshness audit still resolves v3.2.0.
+    "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1": ("bcd2ba49218906704ab6c1aa796996da409d3eb1", "v3.2.0"),
 }
 # The rechunk step's Justfile invocation, matched so Chunkah can be swapped in
 # for rpm-ostree. Upstream has shipped two spellings: the pre-rootless

@@ -7,10 +7,18 @@ name: Update Homebrew Formula
 # while a formula left behind keeps installing the previous version. This runs
 # it automatically instead.
 #
-# It pushes straight to main rather than opening a pull request: Actions is not
-# permitted to create pull requests in this repository. The change is a single
-# machine-generated sha256 that the job verifies before pushing, and the weekly
-# maintenance audit re-checks it independently afterwards.
+# It commits the change on a `formula/<tag>` branch and opens a pull request
+# against main; it never pushes to main. That keeps it working once the
+# `protect main` ruleset (.github/rulesets/main.json) is applied, which has no
+# bypass for anyone.
+#
+# The branch push and the pull request use a GitHub App token, not
+# GITHUB_TOKEN, for two reasons. Actions is not permitted to create pull
+# requests in this repository. And GitHub starts no workflow runs for a pull
+# request opened with GITHUB_TOKEN, so the required `test` check would never
+# report and the pull request would wait forever. A pull request opened by an
+# App does start CI. The App and its two secrets are set up by hand; see
+# docs/branch-protection.md.
 on:
   release:
     types: [published]
@@ -22,8 +30,10 @@ on:
         description: "Release tag to point the formula at (e.g. v0.9.1)"
         required: true
 
+# GITHUB_TOKEN only reads: every write in this job (the branch push, the pull
+# request, auto-merge) goes through the App token minted below.
 permissions:
-  contents: write
+  contents: read
 
 # Serialized: two releases in quick succession must not race to rewrite the
 # same file. Not cancel-in-progress -- an interrupted run could leave the
@@ -38,11 +48,34 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
+      # Without the App there is no way to publish the change, and a formula
+      # left on the previous release installs the wrong version with no error
+      # anywhere. So a missing secret fails the run, red, rather than skipping
+      # or falling back to a direct push. Only whether each secret is set
+      # reaches this step, never the secret itself.
+      - name: Check the formula App secrets are set
+        id: secrets
+        env:
+          HAS_APP_ID: ${{ secrets.FORMULA_APP_ID != '' }}
+          HAS_APP_KEY: ${{ secrets.FORMULA_APP_PRIVATE_KEY != '' }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ "$HAS_APP_ID" = "true" ] || missing+=(FORMULA_APP_ID)
+          [ "$HAS_APP_KEY" = "true" ] || missing+=(FORMULA_APP_PRIVATE_KEY)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error title=Formula App secrets missing::The FORMULA_APP_ID and FORMULA_APP_PRIVATE_KEY repository secrets must both be set; missing: ${missing[*]}. This workflow opens the formula pull request with that GitHub App's token. docs/branch-protection.md says how to create the App and set the secrets."
+            exit 1
+          fi
+
       # The release event checks out the tag; the formula lives on main.
+      # persist-credentials: false, because GITHUB_TOKEN here can only read;
+      # the push below authenticates with the App token instead.
       - name: Checkout main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: main
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -100,10 +133,34 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Commit and push
+      # Minted after the formula is written and verified, so nothing that runs
+      # the release's Python ever holds it. Minted on every run, not only when
+      # the formula changed: a dispatch for the tag the formula already names
+      # then proves the App ID, key, installation and permissions without
+      # opening a pull request. Scoped to this repository, with only the two
+      # permissions the steps below use.
+      - name: Mint the formula App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.FORMULA_APP_ID }}
+          private-key: ${{ secrets.FORMULA_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # git asks the credential helper for a password only for this step, and
+      # the helper reads the token from the environment, so the token is never
+      # written to .git/config.
+      - name: Push the formula branch
         if: steps.update.outputs.changed == 'true'
         env:
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: '!f() { echo username=x-access-token; echo "password=${GH_TOKEN}"; }; f'
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -111,11 +168,9 @@ jobs:
           # Scoped to Formula/ rather than committing every modified tracked
           # file with -a. The step's `if:` gate tests `git diff --quiet --
           # Formula/` and `--check` verifies only the formula, so those are the
-          # paths this job has actually established anything about -- and this
-          # is the one automated push to main, with no review between it and
-          # everyone's `brew upgrade`. A pathspec keeps the commit's contents
-          # equal to the verified change instead of equal to whatever the
-          # working tree happened to hold.
+          # paths this job has actually established anything about. A pathspec
+          # keeps the commit's contents equal to the verified change instead of
+          # equal to whatever the working tree happened to hold.
           #
           # Fails closed if that ever diverges: another modified tracked file
           # is left unstaged, and `git rebase` below refuses to run against a
@@ -126,19 +181,98 @@ jobs:
           # main may have moved while the release was being published.
           git fetch origin main
           git rebase origin/main
-          git push origin HEAD:main
+          # --force: the branch belongs to this workflow. A re-run for the same
+          # tag replaces what an earlier run pushed, and an open pull request
+          # for the branch picks up the new commit.
+          git push --force origin "HEAD:refs/heads/formula/${TAG}"
+
+      # Reuses the open pull request for the branch when a re-run finds one.
+      # The body goes through a file so nothing in it is parsed by the shell.
+      - name: Open the formula pull request
+        id: pr
+        if: steps.update.outputs.changed == 'true'
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          branch="formula/${TAG}"
+          url="$(gh pr list --head "$branch" --base main --state open --json url --jq '.[0].url // empty')"
+          if [ -z "$url" ]; then
+            body="$RUNNER_TEMP/formula-pr-body.md"
+            {
+              echo "Points Formula/atomic-image-builder.rb at the ${TAG} release tarball and its sha256."
+              echo
+              echo "Opened by the Update Homebrew Formula workflow: ${RUN_URL}"
+              echo "The job checked the new pin with homebrew_formula.py --check before pushing."
+              echo "Homebrew users get ${TAG} on their next brew upgrade after this merges."
+            } > "$body"
+            url="$(gh pr create --base main --head "$branch" --title "Point the Homebrew formula at ${TAG}" --body-file "$body")"
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      # Turns on GitHub's auto-merge, so the pull request merges by itself once
+      # the checks main requires have passed. Not `gh pr merge --auto`: when
+      # nothing is required yet -- before the ruleset is applied -- gh merges
+      # on the spot without waiting for `test`. The mutation below never
+      # merges; it only turns auto-merge on, and GitHub refuses when the
+      # repository does not allow auto-merge or nothing is required. Either
+      # way the pull request stays open for a person to merge. That is written
+      # to the summary as a warning, not a failure: the formula change is
+      # already visible as an open pull request.
+      - name: Turn on auto-merge
+        id: automerge
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+        run: |
+          set -euo pipefail
+          id="$(gh pr view "$PR_URL" --json id --jq .id)"
+          # $id is a GraphQL variable, not a shell one.
+          # shellcheck disable=SC2016
+          if reason="$(gh api graphql \
+              -f query='mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: MERGE}) { clientMutationId } }' \
+              -f id="$id" 2>&1 >/dev/null)"; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            reason="$(printf '%s' "$reason" | tr '\n' ' ')"
+            echo "reason=$reason" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Formula pull request left open::Auto-merge could not be turned on for ${PR_URL}, so it needs merging by hand. GitHub said: ${reason}"
+          fi
 
       - name: Summarize
         if: always()
         env:
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          SECRETS: ${{ steps.secrets.outcome }}
+          CHANGED: ${{ steps.update.outputs.changed }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          AUTO_MERGE: ${{ steps.automerge.outputs.enabled }}
+          AUTO_MERGE_REASON: ${{ steps.automerge.outputs.reason }}
         run: |
           {
             echo "## Homebrew formula"
             echo
-            if [ "${{ steps.update.outputs.changed }}" = "true" ]; then
-              echo "Pointed at \`${TAG}\` and pushed to \`main\`. Users get it on their next \`brew update && brew upgrade\`."
-            elif [ "${{ steps.update.outputs.changed }}" = "false" ]; then
+            if [ "$SECRETS" = "failure" ]; then
+              echo "Did not run: the \`FORMULA_APP_ID\` and \`FORMULA_APP_PRIVATE_KEY\` secrets are not both set. See docs/branch-protection.md."
+            elif [ "$CHANGED" = "true" ] && [ -n "$PR_URL" ]; then
+              echo "Pointed at \`${TAG}\` in ${PR_URL}. Users get it on their next \`brew update && brew upgrade\` after it merges."
+              echo
+              if [ "$AUTO_MERGE" = "true" ]; then
+                echo "Auto-merge is on: it merges by itself once the required checks pass."
+              elif [ "$AUTO_MERGE" = "false" ]; then
+                echo "**Auto-merge is not on, so the pull request stays open until someone merges it.** GitHub said: ${AUTO_MERGE_REASON}"
+              else
+                echo "**Auto-merge was not attempted.** Check the pull request and merge it by hand."
+              fi
+            elif [ "$CHANGED" = "true" ]; then
+              echo "Updated the formula for \`${TAG}\` but did not open a pull request. The steps above say why."
+            elif [ "$CHANGED" = "false" ]; then
               echo "Already pointed at \`${TAG}\`; nothing to do."
             else
               echo "Did not update the formula for \`${TAG}\`. Run this locally to see why:"

@@ -258,9 +258,9 @@ The formula installs the command as `aib-tool`, which is `TOOL_COMMAND` in `atom
 1. Bump `VERSION` in `atomic_image_builder.py`. It is the single source for the tool's `--version`, the published image's version tag, and the release tag, so they should all agree. Merge it.
 2. Tag and publish the release on GitHub.
 
-That is the whole manual process. `.github/workflows/update-homebrew-formula.yml` takes it from there on `release: published` — it checks out `main` (the release event checks out the tag, and the formula lives on `main`), runs `--update` for the released tag, verifies the result with `--check`, and pushes the one-line change. Users get it on their next `brew update && brew upgrade`.
+That is the whole manual process, apart from merging one pull request. `.github/workflows/update-homebrew-formula.yml` takes it from there on `release: published` — it checks out `main` (the release event checks out the tag, and the formula lives on `main`), runs `--update` for the released tag, verifies the result with `--check`, pushes the one-line change to a `formula/<tag>` branch, and opens a pull request titled "Point the Homebrew formula at <tag>" against `main`. Users get the new version on their next `brew update && brew upgrade` after that pull request merges. If the repository allows auto-merge, it merges by itself once `test` passes; otherwise merge it by hand.
 
-It pushes directly rather than opening a pull request because Actions is not permitted to create pull requests in this repository. The change is a single machine-generated sha256 that the job verifies before pushing.
+It never pushes to `main`. The push and the pull request use a token for a GitHub App, read from the `FORMULA_APP_ID` and `FORMULA_APP_PRIVATE_KEY` secrets, because Actions is not permitted to create pull requests in this repository, and a pull request opened with `GITHUB_TOKEN` would start no CI, so `test` would never report. The job fails if either secret is missing. [docs/branch-protection.md](docs/branch-protection.md) says how the App is set up.
 
 To fix it up by hand — for a release published before that workflow existed, or after a failed run — either dispatch the workflow with the tag, or do it locally:
 
