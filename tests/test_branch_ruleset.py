@@ -40,9 +40,13 @@ GITHUB_ACTIONS_APP_ID = 15368
 # is negated; the rest are refused.
 NARROWING_FILTERS = ("paths", "paths-ignore", "branches-ignore", "types")
 # Git's global options (`-C <dir>`, `-c <key=value>`, `--no-pager`) can sit
-# between `git` and `push`; ci.yml already writes `git -C "$dir" push`.
+# between `git` and `push`; ci.yml already writes `git -C "$dir" push`. The
+# branch a refspec updates is the part after its `:`, so `release:main`
+# pushes to main and `main:release` does not.
 DIRECT_PUSH_TO_MAIN = re.compile(
-    r"\bgit(?:\s+-[Cc]\s+\S+|\s+--?[\w-]+(?:=\S+)?)*\s+push\b[^\n]*\s(?:HEAD:)?(?:refs/heads/)?main\b"
+    r"\bgit(?:\s+-[Cc]\s+\S+|\s+--?[\w-]+(?:=\S+)?)*\s+push\b[^\n]*"
+    r"\s(?:[^\s:]*:)?(?:refs/heads/)?main(?=[\s\"';]|$)",
+    re.M,
 )
 BOLD_LEAD = re.compile(r"^- \*\*(.+?)\*\*", re.M)
 BACKTICKED = re.compile(r"`([^`]+)`")
@@ -346,11 +350,14 @@ class DocTests(unittest.TestCase):
             "git push -f origin refs/heads/main",
             'git -C "$worktree" push origin HEAD:main',
             "git -c http.extraheader=x --no-pager push origin main",
+            "git push origin release:main",
+            "git push origin +HEAD:refs/heads/main",
         ):
             with self.subTest(command=command):
                 self.assertIsNotNone(DIRECT_PUSH_TO_MAIN.search(command))
         self.assertIsNone(DIRECT_PUSH_TO_MAIN.search("git push origin HEAD:coverage-data"))
         self.assertIsNone(DIRECT_PUSH_TO_MAIN.search('git -C "$badge_worktree" push origin HEAD:coverage-data'))
+        self.assertIsNone(DIRECT_PUSH_TO_MAIN.search("git push origin main:release"))
 
     def test_the_risk_tiers_route_a_ruleset_change_to_tier_four(self) -> None:
         tiers = (ROOT / "docs" / "risk-tiers.md").read_text(encoding="utf-8")
