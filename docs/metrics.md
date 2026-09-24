@@ -7,6 +7,11 @@ quality scores and are not, and this repo has already filed one of its own
 metrics as a bug ([#123](https://github.com/Danathar/atomic-image-builder/issues/123))
 by reading it that way.
 
+Dated readings of these numbers are kept in
+[`docs/metrics/`](metrics/2026-09-24.md). Each one carries the exact commands
+that produced it, pinned to a fixed range so they reproduce, and is left as it
+was read.
+
 ## Unit coverage, and its history
 
 The gated one. Current value is on the README badge; the history is a CSV on
