@@ -306,9 +306,12 @@ ALLOWED_COMMANDS = (
     "podman ps 2>&-",
     # A command no allow rule covers prompts on its own, so a redirection on
     # it is not this hook's to refuse: the two exact rows (`ruff check`,
-    # `python3 -m unittest discover -s tests`) carry no `:*`, and the last two
-    # are refused by the Bash tool itself before any rule or hook sees them
-    # ("does not accept compound statements with redirection", 2.1.267).
+    # `python3 -m unittest discover -s tests`) carry no `:*`, and Claude Code
+    # asks before it runs the brace group and the subshell below, whatever the
+    # allow rows say ("Contains compound_statement", "Contains subshell";
+    # 2.1.273 and 2.1.280). This test fails if an allow row that could reach
+    # them is added:
+    # test_no_allow_rule_reaches_a_redirection_written_after_a_group.
     "ruff check >cosign.pub",
     "python3 -m unittest discover -s tests >out",
     "python3 maintenance_audit.py >cosign.pub",
@@ -1499,6 +1502,38 @@ class RefusalTests(unittest.TestCase):
             [],
             "an allow row runs a shell; port the bash -n option and operand rules from "
             "aurora-zfs-simple's gate before allowing it",
+        )
+
+    def test_no_allow_rule_reaches_a_redirection_written_after_a_group(self) -> None:
+        # `(git diff HEAD) >cosign.pub` and `{ git log --stdin; } <.env` write
+        # and read the same files as the refused `git diff HEAD >cosign.pub`
+        # and `git log --stdin <cosign.key`, but the redirection stands
+        # outside the git command, and the hook does not charge it to git
+        # (issue #453). It does not need to while nothing here reaches those
+        # strings: Claude Code asks before it runs any command that contains a
+        # subshell or a brace group, whatever the allow rows say about the
+        # command inside ("Contains subshell", "Contains compound_statement").
+        # Checked on 2.1.273 and 2.1.280 with `Bash(git diff:*)` and
+        # `Bash(git log:*)` allowed, in the default and acceptEdits modes. The
+        # one way such a string ran with no prompt was a row that names the
+        # grouped string itself (`Bash({ git diff HEAD; } >out3.txt)` ran
+        # exactly that string), or a bare `Bash` row that allows everything.
+        # This fails if a row like that is added.
+        allow = json.loads(SETTINGS.read_text(encoding="utf-8"))["permissions"]["allow"]
+        patterns = {rule: rule[len("Bash(") : -1] for rule in allow if rule.startswith("Bash(")}
+        self.assertTrue(patterns)
+        reaching = [rule for rule in allow if rule == "Bash"] + [
+            rule
+            for rule, pattern in patterns.items()
+            if any(character in pattern for character in "(){}")
+            or pattern.removesuffix(":*").strip() in ("", "*")
+        ]
+        self.assertEqual(
+            reaching,
+            [],
+            f"{reaching} can let a command that contains a subshell or a brace group run "
+            "with no prompt, and the hook does not charge a redirection written after the "
+            "group to the command inside it. Teach the hook that before adding the row.",
         )
 
     def test_the_command_words_are_read_past_redirections_and_prefixes(self) -> None:

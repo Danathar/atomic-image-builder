@@ -113,7 +113,13 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   redirections are untouched. The rows with no `:*` (`ruff check`,
   `actionlint`, the exact test commands) need no entry: a redirection makes
   the string match none of them and Claude Code prompts, as it does for a
-  command no rule covers at all. None of the gated commands takes a flag that
+  command no rule covers at all. A redirection written after a subshell or
+  brace group around a git or gated command (`(git diff HEAD) >cosign.pub`,
+  `{ git log --stdin; } <.env`) is not charged to the command inside: Claude
+  Code asks before it runs any command that contains a subshell or a brace
+  group, whatever the allow rows say, and `tests/test_git_diff_gate.py` fails
+  if an allow row that could reach one is added.
+  None of the gated commands takes a flag that
   names a file to write, so the redirection is the whole of the primitive on
   this list. `tests/test_git_diff_gate.py` derives the list from the
   settings file, so a `:*` row added there fails until the hook lists it, and
