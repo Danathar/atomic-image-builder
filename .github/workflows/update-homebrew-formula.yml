@@ -206,7 +206,19 @@ jobs:
         run: |
           set -euo pipefail
           branch="formula/${TAG}"
-          url="$(gh pr list --head "$branch" --base main --state open --json url --jq '.[0].url // empty')"
+          # Every open pull request into main, forks included, because
+          # `gh pr list --head` matches a branch name in any fork. Only this
+          # repository's own branches are ever reused or closed: a fork's pull
+          # request is someone else's work, whatever its branch is called, and
+          # reusing one would turn on auto-merge for code this job never wrote.
+          open="$(gh pr list --base main --state open --limit 100 --json isCrossRepository,number,url,headRefName \
+            --jq '.[] | "\(.isCrossRepository) \(.number) \(.url) \(.headRefName)"')"
+          url=""
+          while read -r fork _number pr_url head; do
+            if [ "$fork" = "false" ] && [ "$head" = "$branch" ]; then
+              url="$pr_url"
+            fi
+          done <<< "$open"
           if [ -z "$url" ]; then
             body="$RUNNER_TEMP/formula-pr-body.md"
             {
@@ -219,11 +231,7 @@ jobs:
             url="$(gh pr create --base main --head "$branch" --title "Point the Homebrew formula at ${TAG}" --body-file "$body")"
           fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
-          # Only this repository's own branches: a fork's pull request is
-          # someone else's work, whatever its branch is called.
-          open="$(gh pr list --base main --state open --limit 100 --json number,headRefName,isCrossRepository \
-            --jq '.[] | "\(.number) \(.headRefName) \(.isCrossRepository)"')"
-          while read -r number head fork; do
+          while read -r fork number _url head; do
             [ "$fork" = "false" ] || continue
             case "$head" in
               "$branch") ;;

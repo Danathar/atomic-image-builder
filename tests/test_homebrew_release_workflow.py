@@ -159,17 +159,12 @@ argv = sys.argv[1:]
 with open(os.environ["STUB_LOG"], "a") as log:
     log.write("gh\\t%s\\n" % "\\t".join(argv))
 if argv[:2] == ["pr", "list"]:
-    # The open pull requests, filtered by --head the way GitHub does, then
-    # printed the way the step's two --jq projections print them: the first
-    # match's url, or one "number head isCrossRepository" line each. The
+    # The open pull requests, printed the way the step's --jq projection
+    # prints them: one "isCrossRepository number url head" line each. The
     # step's own shell does all the choosing.
-    prs = json.loads(os.environ.get("STUB_GH_PRS", "[]"))
-    if "--head" in argv:
-        matching = [pr for pr in prs if pr["headRefName"] == argv[argv.index("--head") + 1]]
-        print(matching[0]["url"] if matching else "")
-    else:
-        for pr in prs:
-            print("%d %s %s" % (pr["number"], pr["headRefName"], "true" if pr["isCrossRepository"] else "false"))
+    for pr in json.loads(os.environ.get("STUB_GH_PRS", "[]")):
+        fork = "true" if pr["isCrossRepository"] else "false"
+        print("%s %d %s %s" % (fork, pr["number"], pr["url"], pr["headRefName"]))
 elif argv[:2] == ["pr", "close"]:
     pass
 elif argv[:2] == ["pr", "create"]:
@@ -690,6 +685,16 @@ class PullRequestStepTests(_StepHarness):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.gh("pr", "create"), [])
         self.assertEqual(outputs["url"], self.OPEN_PR)
+        self.assertEqual(self.gh("pr", "close"), [])
+
+    def test_a_fork_s_pull_request_on_the_same_branch_name_is_never_reused(self) -> None:
+        # `formula/<tag>` is predictable before a release. Reusing a fork's
+        # pull request of that name would hand the next step someone else's
+        # code to turn auto-merge on for.
+        proc, outputs = self.run_pr_step(prs=[self.pr(499, "formula/v1.2.3", fork=True)])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(self.gh("pr", "create")), 1)
+        self.assertEqual(outputs["url"], self.NEW_PR)
         self.assertEqual(self.gh("pr", "close"), [])
 
     def test_an_older_release_s_open_pull_request_is_closed_as_superseded(self) -> None:
