@@ -4,7 +4,7 @@
 [![Unit coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDanathar%2Fatomic-image-builder%2Fcoverage-data%2Fcoverage-unit.json)](docs/coverage.md)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Danathar/atomic-image-builder)
 [![Maintenance assisted by Hivecommons Hive](https://img.shields.io/badge/maintenance%20assisted%20by-Hivecommons%20Hive-1f6feb)](https://github.com/hivecommons/hive)
-[![ACMM L4 Security-Aware](https://img.shields.io/badge/ACMM-L4%20Security--Aware-2da44e)](https://github.com/hivecommons/hive#acmm-levels)
+[![ACMM L5 Semi-Autonomous](https://img.shields.io/badge/ACMM-L5%20Semi--Autonomous-2da44e)](#maintained-with-hive-acmm-l5)
 [![AI assisted](https://img.shields.io/badge/AI-assisted-d29922)](#about-this-project)
 [![License: GPLv3](https://img.shields.io/badge/license-GPLv3-blue)](LICENSE)
 
@@ -99,14 +99,22 @@ Found a security vulnerability instead? Please don't open a public issue for it 
 >
 > It is provided as-is, without any promise that it will be safe for your repositories, data, systems, or build pipeline. Use it carefully, review its changes before applying them, and keep backups where appropriate. The maintainer is not responsible for repository damage, data loss, failed builds, system changes, or other consequences that may result from using this software.
 
-> [!NOTE]
-> **Maintenance on this repository is assisted by [Hivecommons Hive](https://github.com/hivecommons/hive) at ACMM level 4.**
->
-> Hive orchestrates a fleet of AI agents that continuously review this codebase and publish what they find to a living [advisory report](https://github.com/Danathar/atomic-image-builder/issues/11).
->
-> At **L4 (Security-Aware)** all agents may file issues, and the quality, security and CI agents may additionally open pull requests that carry a hold label. The rest stay advisory: they report, they do not act. Every change is still reviewed and merged by a human maintainer.
->
-> Learn more: [Hive](https://github.com/hivecommons/hive) · [Hive Hub](https://hive.kubestellar.io) · [full ACMM policy matrix](https://github.com/hivecommons/hive/blob/v4/src/docs/acmm-policy-matrix.md)
+## Maintained with Hive (ACMM L5)
+
+**This repository's Hive runs at ACMM L5 (Semi-Autonomous).** Maintenance here is assisted by [Hivecommons Hive](https://github.com/hivecommons/hive).
+
+Hive orchestrates a fleet of AI agents that continuously review this codebase and publish what they find to a living [advisory report](https://github.com/Danathar/atomic-image-builder/issues/11).
+
+What L5 means for this repository:
+
+- All of Hive's agents may file issues and open pull requests here.
+- Hive puts a `hold` label on every pull request an agent opens, and nothing merges on its own. A human maintainer reviews agent pull requests in batches and merges the ones that should land.
+- L5 adds three agents. The reviewer works through the open pull requests and backs each finding with a file and line; it never merges, approves or closes one. The architect writes RFCs and opens pull requests for structural changes. The strategist coordinates work across the other agents.
+- The telemetry and operations agents are part of L5 but start paused.
+
+The [ACMM levels table](https://github.com/hivecommons/hive#acmm-levels) in the Hive README describes all six levels in general terms.
+
+Learn more: [Hive](https://github.com/hivecommons/hive) · [Hive Hub](https://hive.kubestellar.io) · [full ACMM policy matrix](https://github.com/hivecommons/hive/blob/v4/src/docs/acmm-policy-matrix.md)
 
 ## License
 
