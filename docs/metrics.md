@@ -43,9 +43,13 @@ gh run download <run-id>       # coverage-e2e, coverage-shell, coverage-maintena
 ## Pull request throughput
 
 ```bash
-gh pr list --state all --limit 200 --json state \
+gh pr list --state all --limit 1000 --json state \
   --jq 'group_by(.state)|map({state:.[0].state,count:length})'
 ```
+
+`--limit` has to stay above the number of pull requests: `gh` returns the most
+recent N and says nothing about the rest. It was 200 until the repository
+passed 200 pull requests, and from then on the command undercounted.
 
 As of 2026-09-03: 112 merged, 1 closed, 3 open.
 
@@ -88,11 +92,12 @@ measures who opens them, not whether they were any good. It would read the
 same on a project merging everything unreviewed. Do not quote it as a quality
 figure.
 
-**100% unit coverage is not 100% tested.** The trend CSV has been flat at 100
-for its whole span, which says the gate is never the binding constraint, not
-that nothing is untested. It measures the source tree under mocks; what a real
-run of the built image executes is the end-to-end tier, and that sits near
-10%. Both facts are true at once and the second is the more informative one.
+**100% unit coverage is not 100% tested.** The trend CSV read 100 from its
+first row until 2026-09-12 and 99 since, well clear of the gate, which says
+the gate is never the binding constraint, not that nothing is untested. It
+measures the source tree under mocks; what a real run of the built image
+executes is the end-to-end tier, and that sits near 10%. Both facts are true
+at once and the second is the more informative one.
 
 **A low advisory number is often the correct reading.** This is the specific
 mistake already made and documented here. The maintenance-audit tier is low
