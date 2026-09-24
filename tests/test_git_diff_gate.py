@@ -1514,26 +1514,35 @@ class RefusalTests(unittest.TestCase):
         # subshell or a brace group, whatever the allow rows say about the
         # command inside ("Contains subshell", "Contains compound_statement").
         # Checked on 2.1.273 and 2.1.280 with `Bash(git diff:*)` and
-        # `Bash(git log:*)` allowed, in the default and acceptEdits modes. The
-        # one way such a string ran with no prompt was a row that names the
-        # grouped string itself (`Bash({ git diff HEAD; } >out3.txt)` ran
-        # exactly that string), or a bare `Bash` row that allows everything.
-        # This fails if a row like that is added.
+        # `Bash(git log:*)` allowed, in the default and acceptEdits modes; the
+        # `if`, `for`, `while` and function forms were asked the same way
+        # ("Contains if_statement" and so on). The one way such a string ran
+        # with no prompt was a row that names the grouped string itself
+        # (`Bash({ git diff HEAD; } >out3.txt)` ran exactly that string), or a
+        # bare `Bash` row that allows everything. This fails if a row like that
+        # is added. A row naming a compound command has a parenthesis or a
+        # brace in it, or, for the keyword forms (`if ...; then ...; fi >f`),
+        # what ends each part: a `;`, a newline or a lone `&` (`if true & then
+        # ... & fi >f` is the same `if`). Those are what it looks for; the `&`
+        # in `&&`, `2>&1`, `&>` and `|&` ends nothing and is not counted
+        # (aurora-zfs-simple#241).
         allow = json.loads(SETTINGS.read_text(encoding="utf-8"))["permissions"]["allow"]
         patterns = {rule: rule[len("Bash(") : -1] for rule in allow if rule.startswith("Bash(")}
         self.assertTrue(patterns)
         reaching = [rule for rule in allow if rule == "Bash"] + [
             rule
             for rule, pattern in patterns.items()
-            if any(character in pattern for character in "(){}")
+            if any(character in pattern for character in "(){};\n")
+            or re.search(r"(?<![&<>|])&(?![&>])", pattern)
             or pattern.removesuffix(":*").strip() in ("", "*")
         ]
         self.assertEqual(
             reaching,
             [],
-            f"{reaching} can let a command that contains a subshell or a brace group run "
-            "with no prompt, and the hook does not charge a redirection written after the "
-            "group to the command inside it. Teach the hook that before adding the row.",
+            f"{reaching} can let a command that contains a subshell, a brace group or an "
+            "if/for/while compound run with no prompt, and the hook does not charge a "
+            "redirection written after the group to the command inside it. Teach the hook "
+            "that before adding the row.",
         )
 
     def test_the_command_words_are_read_past_redirections_and_prefixes(self) -> None:
