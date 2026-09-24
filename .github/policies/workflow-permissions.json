@@ -1,0 +1,47 @@
+{
+  "$comment": "The GITHUB_TOKEN permissions each workflow in .github/workflows/ is allowed to request. tests/test_workflow_permissions_policy.py reads every workflow and fails when one asks for anything not written here, when a workflow is missing from this file, or when an entry here names a workflow or job that no longer exists. So widening a token's reach takes two edits a reviewer sees side by side: the workflow, and this file. `workflow` is the top-level permissions block; null means the file declares none. `jobs` lists only jobs that declare their own block; a job not listed must not declare one. See docs/SECURITY-AI.md.",
+  "workflows": {
+    "ai-fix.yml": {
+      "workflow": {"contents": "read", "issues": "write"},
+      "jobs": {}
+    },
+    "ci.yml": {
+      "workflow": null,
+      "jobs": {
+        "test": {"contents": "read"},
+        "publish-coverage": {"contents": "write"},
+        "container-build": {"contents": "read"}
+      }
+    },
+    "maintenance-audit.yml": {
+      "workflow": null,
+      "jobs": {
+        "audit": {"contents": "read", "issues": "write"}
+      }
+    },
+    "nightly-compliance.yml": {
+      "workflow": {"contents": "read"},
+      "jobs": {}
+    },
+    "publish-image.yml": {
+      "workflow": null,
+      "jobs": {
+        "publish": {"contents": "read", "packages": "write", "id-token": "write"}
+      }
+    },
+    "publish-wrapper.yml": {
+      "workflow": {"contents": "read"},
+      "jobs": {
+        "publish": {"contents": "write"}
+      }
+    },
+    "triage.yml": {
+      "workflow": {"contents": "read", "issues": "write"},
+      "jobs": {}
+    },
+    "update-homebrew-formula.yml": {
+      "workflow": {"contents": "write"},
+      "jobs": {}
+    }
+  }
+}

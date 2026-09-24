@@ -225,7 +225,11 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   pin tables, or when a pinned SHA disagrees with them. That check is what
   stops an unpinned action reaching generated repositories.
 - Default workflow token permissions are read-only; a workflow needing more
-  declares it explicitly.
+  declares it explicitly, and declares it twice: in the workflow, and in
+  [`.github/policies/workflow-permissions.json`](../.github/policies/workflow-permissions.json).
+  `tests/test_workflow_permissions_policy.py` fails when the two disagree, so
+  a workflow cannot gain a scope unless the same pull request also changes the
+  policy file, which is Tier 4.
 - Actions cannot create pull requests in this repository. Jobs with automated
   repository-contents write paths declare `contents: write`. There is exactly
   one automated push to `main`: `update-homebrew-formula.yml` / `update` takes

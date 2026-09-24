@@ -79,7 +79,8 @@ what the check then says.
 **Paths:** `.github/workflows/publish-image.yml`,
 `.github/workflows/publish-wrapper.yml`,
 `.github/workflows/update-homebrew-formula.yml`, `homebrew_formula.py`,
-`Formula/`, anything touching signing, `GH_TOKEN`, or cosign
+`Formula/`, `.github/policies/workflow-permissions.json`, anything touching
+signing, `GH_TOKEN`, or cosign
 
 `publish-wrapper.yml` is here because it attaches the release-bound `aib` and
 `aib.sha256` that the installation instructions download. The wrapper runs on
