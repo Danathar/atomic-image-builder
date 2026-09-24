@@ -50,9 +50,19 @@ click:
    `test` runs because a person opened it.
 3. Merge it once `test` passes, then close the reminder issue.
 
-A re-run for the same tag force-pushes the branch again and reuses the open
-reminder issue instead of filing a second one. Only an issue the workflow
-opened itself counts as the reminder.
+A re-run for the same tag reuses the open reminder issue instead of filing a
+second one. Only an issue the workflow opened itself counts as the reminder.
+If the branch already holds the same formula, the re-run leaves it alone, so
+a pull request already opened from it keeps the commit `test` ran on. If the
+formula differs, the re-run replaces the branch and says so in the summary and
+on the issue. A push with `GITHUB_TOKEN` starts no CI, so if that pull request
+is already open, close and reopen it to run `test` on the new commit.
+
+A run also deletes the `formula/<tag>` branches of older releases and closes
+their reminder issues. `--check` passes only for the tool's `VERSION` on
+`main`, so the run is for the newest release, and merging an older formula
+branch would point Homebrew back at the previous one. Deleting a branch closes
+any pull request opened from it.
 
 ## The ruleset
 

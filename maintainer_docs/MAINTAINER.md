@@ -91,7 +91,10 @@ request: one opened with the workflow's own token would get no CI. Instead,
 the run summary and a reminder issue titled *Open the Homebrew formula PR for
 <tag>* both carry a link. Open it, click **Create pull request** (the title is
 filled in), and merge the pull request once `test` passes. Then close the
-reminder issue.
+reminder issue. If the summary says the branch was replaced and the pull
+request was already open, close and reopen it so `test` runs on the new
+commit. A newer release deletes an older release's formula branch and closes
+its reminder.
 
 To confirm after the merge, switch back to `main` first — the formula changed
 there, not on your release branch:

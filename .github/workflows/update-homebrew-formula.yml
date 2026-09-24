@@ -136,34 +136,71 @@ jobs:
           # main may have moved while the release was being published.
           git fetch origin main
           git rebase origin/main
-          # --force: the branch belongs to this workflow. A re-run for the same
-          # tag replaces what an earlier run pushed, and a pull request already
-          # open for the branch picks up the new commit.
-          git push --force origin "HEAD:refs/heads/formula/${TAG}"
+          branch="formula/${TAG}"
+          # A re-run for the same tag normally computes the same formula. When
+          # the branch already carries it, the branch is left alone. A push
+          # with this token starts no workflow run, so moving the branch under
+          # a pull request someone already opened would leave its new commit
+          # with no `test` result, and the ruleset would keep it from merging.
+          if git ls-remote --exit-code --heads origin "refs/heads/${branch}" >/dev/null; then
+            git fetch origin "refs/heads/${branch}"
+            if git diff --quiet FETCH_HEAD HEAD -- Formula/; then
+              echo "::notice::${branch} already carries this formula, so it was left as it is."
+            else
+              # The branch belongs to this workflow and holds a formula this
+              # run did not verify, so it is replaced. The summary tells the
+              # person to reopen a pull request already open for it.
+              git push --force origin "HEAD:refs/heads/formula/${TAG}"
+              echo "replaced=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            git push --force origin "HEAD:refs/heads/formula/${TAG}"
+          fi
           # The link that opens the pull request with its title filled in.
-          # Written only once the push has succeeded, so the summary and the
-          # issue never offer a link to a branch that is not there.
+          # Written only once the branch holds this formula, so the summary and
+          # the issue never offer a link to a branch that is not there.
           title="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "Point the Homebrew formula at ${TAG}")"
           echo "compare=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/main...formula/${TAG}?expand=1&title=${title}" >> "$GITHUB_OUTPUT"
+          # Older formula branches are stale. `--check` above fails any tag
+          # that is not the tool's VERSION on main, so a run that gets this
+          # far is for the newest release. Two branches change the same
+          # formula lines, and merging the older one would point Homebrew back
+          # at the previous release. Deleting a branch also closes any pull
+          # request opened from it.
+          stale="$(git ls-remote --heads origin 'refs/heads/formula/*')"
+          while read -r _sha ref; do
+            case "$ref" in
+              "" | "refs/heads/${branch}") ;;
+              refs/heads/formula/*)
+                old="${ref#refs/heads/formula/}"
+                git push origin --delete "refs/heads/formula/${old}"
+                ;;
+            esac
+          done <<< "$stale"
 
       # A reminder that outlasts the run page: the formula is not on main
       # until someone opens and merges the pull request. A re-run reuses the
       # open reminder for the same tag instead of filing a second one. Only an
       # issue this workflow opened counts: anyone can open an issue with that
-      # title, and theirs could carry a different link. The body goes through
-      # a file so nothing in it is parsed by the shell.
+      # title, and theirs could carry a different link. Bodies go through a
+      # file so nothing in them is parsed by the shell.
+      #
+      # Then closes the reminders for older tags, whose branches the step
+      # above deleted.
       - name: Open the reminder issue
         id: issue
         if: steps.push.outputs.compare != ''
         env:
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
           COMPARE_URL: ${{ steps.push.outputs.compare }}
+          REPLACED: ${{ steps.push.outputs.replaced }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          title="Open the Homebrew formula PR for ${TAG}"
+          prefix="Open the Homebrew formula PR for "
+          title="${prefix}${TAG}"
           open="$(gh issue list --state open --limit 1000 --json number,url,title,author \
             --jq '.[] | select(.author.login == "app/github-actions") | [.number, .url, .title] | @tsv')"
           url=""
@@ -173,6 +210,15 @@ jobs:
               break
             fi
           done <<< "$open"
+          if [ -n "$url" ] && [ "$REPLACED" = "true" ]; then
+            body="$RUNNER_TEMP/formula-issue-comment.md"
+            {
+              echo "This run replaced the \`formula/${TAG}\` branch: ${RUN_URL}"
+              echo
+              echo "If the pull request is already open, close and reopen it so \`test\` runs on the new commit. Otherwise open it with the link above."
+            } > "$body"
+            gh issue comment "$url" --body-file "$body"
+          fi
           if [ -z "$url" ]; then
             body="$RUNNER_TEMP/formula-issue-body.md"
             {
@@ -187,6 +233,12 @@ jobs:
             url="$(gh issue create --title "$title" --body-file "$body")"
           fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
+          while IFS=$'\t' read -r number _issue_url issue_title; do
+            case "$issue_title" in
+              "$title") ;;
+              "$prefix"*) gh issue close "$number" --comment "Superseded by ${url}, for ${TAG}. Its formula branch was deleted." ;;
+            esac
+          done <<< "$open"
 
       - name: Summarize
         if: always()
@@ -194,6 +246,7 @@ jobs:
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
           CHANGED: ${{ steps.update.outputs.changed }}
           COMPARE_URL: ${{ steps.push.outputs.compare }}
+          REPLACED: ${{ steps.push.outputs.replaced }}
           ISSUE_URL: ${{ steps.issue.outputs.url }}
         run: |
           {
@@ -206,6 +259,10 @@ jobs:
               echo
               echo "A person has to open it so CI runs: GitHub runs no CI on a pull request opened by this workflow's token, so \`test\` would never report. Merge it once \`test\` passes. Users get \`${TAG}\` on their next \`brew update && brew upgrade\` after that."
               echo
+              if [ "$REPLACED" = "true" ]; then
+                echo "**The branch held a different formula and was replaced.** If its pull request is already open, close and reopen it so \`test\` runs on the new commit."
+                echo
+              fi
               if [ -n "$ISSUE_URL" ]; then
                 echo "Reminder issue: ${ISSUE_URL}"
               else

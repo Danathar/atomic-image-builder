@@ -45,7 +45,7 @@ stubbed in a directory placed on `PYTHONPATH`:
 
 The reminder-issue step talks to GitHub only through `gh`, so a third stub,
 an executable `gh` placed first on `PATH`, records each call and answers the
-two subcommands that step uses. It runs the step's own `--jq` filter through
+subcommands that step uses. It runs the step's own `--jq` filter through
 the real `jq`, so which issues count as the reminder is decided by the
 workflow's filter, not by the stub.
 """
@@ -155,7 +155,7 @@ raise SystemExit(1)
 
 
 # Stands in for `gh`. Records each call, keeps a copy of any --body-file, and
-# answers the two subcommands the reminder-issue step uses. `issue list` feeds
+# answers the subcommands the reminder-issue step uses. `issue list` feeds
 # STUB_GH_ISSUES, shaped the way `gh --json` prints issues, through the step's
 # own --jq filter with the real jq.
 GH_STUB = '''#!/usr/bin/env python3
@@ -176,6 +176,10 @@ if argv[:2] == ["issue", "list"]:
 elif argv[:2] == ["issue", "create"]:
     shutil.copy(argv[argv.index("--body-file") + 1], os.environ["STUB_GH_BODY"])
     print(os.environ["STUB_GH_NEW_ISSUE"])
+elif argv[:2] == ["issue", "comment"]:
+    shutil.copy(argv[argv.index("--body-file") + 1], os.environ["STUB_GH_COMMENT"])
+elif argv[:2] == ["issue", "close"]:
+    pass
 else:
     raise SystemExit("stub gh: unsupported invocation %r" % (argv,))
 '''
@@ -587,6 +591,49 @@ class PushStepTests(_StepHarness):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(parse_formula(_git(origin, "show", f"{self.branch()}:{FORMULA}"))[1], TARBALL_SHA)
         self.assertEqual(_git(origin, "rev-list", "--count", f"main..{self.branch()}"), "1")
+        # Replacing it moves any open pull request to a commit `test` never
+        # ran on, so the summary and the issue have to be told.
+        self.assertEqual(self.read_outputs(self.output_file)["replaced"], "true")
+
+    def test_a_rerun_with_the_same_formula_leaves_the_branch_alone(self) -> None:
+        # A push with GITHUB_TOKEN starts no CI. Moving the branch under a
+        # pull request someone already opened would leave its head without a
+        # `test` result, and the ruleset would keep it from merging.
+        origin, clone = self.set_up_clone()
+        self.edit_formula(clone)
+        self.assertEqual(self.run_push_step(clone).returncode, 0)
+        first = _git(origin, "rev-parse", self.branch())
+
+        other = self.tmp / "other"
+        subprocess.run(["git", "clone", "-q", str(origin), str(other)], check=True)
+        (other / "README.md").write_text("landed after the first run\n")
+        _git(other, "add", "README.md")
+        self.commit(other, "unrelated change on main")
+        _git(other, "push", "-q", "origin", "main")
+
+        rerun = self.tmp / "rerun"
+        subprocess.run(["git", "clone", "-q", str(origin), str(rerun)], check=True)
+        self.edit_formula(rerun)
+        proc = self.run_push_step(rerun)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(_git(origin, "rev-parse", self.branch()), first)
+        self.assertEqual(self.read_outputs(self.output_file), {"compare": compare_link(f"v{VERSION}")})
+
+    def test_older_formula_branches_are_deleted_and_nothing_else(self) -> None:
+        # This run is for the newest release (`--check` fails any other tag).
+        # An older formula branch changes the same lines, and merging it would
+        # point Homebrew back at the previous release.
+        origin, clone = self.set_up_clone()
+        for branch in ("formula/v0.0.1", "formula-notes", "feature/formula"):
+            _git(origin, "branch", branch, "main")
+        self.protect_main(origin)
+        self.edit_formula(clone)
+        proc = self.run_push_step(clone)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            _git(origin, "for-each-ref", "--format=%(refname:short)", "refs/heads").split(),
+            ["feature/formula", "formula-notes", self.branch(), "main"],
+        )
 
 
 class IssueStepTests(_StepHarness):
@@ -604,7 +651,9 @@ class IssueStepTests(_StepHarness):
             "author": {"login": author, "is_bot": author.startswith("app/")},
         }
 
-    def run_issue_step(self, *, tag: str = "v1.2.3", issues: list[dict] | None = None) -> tuple[subprocess.CompletedProcess, dict[str, str]]:
+    def run_issue_step(
+        self, *, tag: str = "v1.2.3", issues: list[dict] | None = None, replaced: str = ""
+    ) -> tuple[subprocess.CompletedProcess, dict[str, str]]:
         output_file = self.tmp / "github_output"
         output_file.write_text("")
         runner_temp = self.tmp / "runner-temp"
@@ -614,6 +663,7 @@ class IssueStepTests(_StepHarness):
             env=self.step_env_for(
                 TAG=tag,
                 COMPARE_URL=compare_link(tag),
+                REPLACED=replaced,
                 PATH=self.gh_on_path(),
                 GITHUB_OUTPUT=str(output_file),
                 RUNNER_TEMP=str(runner_temp),
@@ -621,6 +671,7 @@ class IssueStepTests(_StepHarness):
                 STUB_GH_ISSUES=json.dumps(issues or []),
                 STUB_GH_NEW_ISSUE=self.NEW_ISSUE,
                 STUB_GH_BODY=str(self.tmp / "body.md"),
+                STUB_GH_COMMENT=str(self.tmp / "comment.md"),
             ),
             cwd=str(self.tmp),
             capture_output=True,
@@ -638,6 +689,7 @@ class IssueStepTests(_StepHarness):
         env = step_env(WORKFLOW, ISSUE_STEP)
         self.assertEqual(env["GH_TOKEN"], "${{ github.token }}")
         self.assertEqual(env["COMPARE_URL"], "${{ steps.push.outputs.compare }}")
+        self.assertEqual(env["REPLACED"], "${{ steps.push.outputs.replaced }}")
         self.assertEqual(env["TAG"], "${{ github.event.release.tag_name || inputs.tag }}")
 
     def test_it_opens_an_issue_with_the_link(self) -> None:
@@ -660,6 +712,42 @@ class IssueStepTests(_StepHarness):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.gh("issue", "create"), [])
         self.assertEqual(outputs, {"url": self.OPEN_ISSUE})
+
+    def test_a_replaced_branch_is_reported_on_the_reused_reminder(self) -> None:
+        # A pull request already open from the branch now points at a commit
+        # `test` never ran on. Closing and reopening it is what runs `test`.
+        issues = [self.issue(499, "Open the Homebrew formula PR for v1.2.3")]
+        proc, outputs = self.run_issue_step(issues=issues, replaced="true")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        comment = self.gh("issue", "comment")
+        self.assertEqual(len(comment), 1)
+        self.assertEqual(comment[0][2], self.OPEN_ISSUE)
+        self.assertIn("close and reopen it", (self.tmp / "comment.md").read_text())
+        self.assertEqual(outputs, {"url": self.OPEN_ISSUE})
+
+    def test_an_unchanged_branch_adds_nothing_to_the_reminder(self) -> None:
+        issues = [self.issue(499, "Open the Homebrew formula PR for v1.2.3")]
+        proc, _ = self.run_issue_step(issues=issues)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.gh("issue", "comment"), [])
+
+    def test_reminders_for_older_tags_are_closed(self) -> None:
+        # Their branches are gone, and following one would merge a formula
+        # for the previous release. Someone else's issue stays, whatever it is
+        # called, and so does anything that is not a reminder.
+        issues = [
+            self.issue(480, "Open the Homebrew formula PR for v1.2.2"),
+            self.issue(481, "Open the Homebrew formula PR for v1.2.1", author="someone"),
+            self.issue(482, "Homebrew formula notes"),
+        ]
+        proc, outputs = self.run_issue_step(issues=issues)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        closed = self.gh("issue", "close")
+        self.assertEqual([call[2] for call in closed], ["480"])
+        comment = closed[0][closed[0].index("--comment") + 1]
+        self.assertIn(self.NEW_ISSUE, comment)
+        self.assertIn("v1.2.3", comment)
+        self.assertEqual(outputs, {"url": self.NEW_ISSUE})
 
     def test_only_open_issues_are_considered(self) -> None:
         # A closed reminder is one somebody finished with; reusing it would
@@ -699,7 +787,7 @@ class SummaryStepTests(_StepHarness):
         summary = self.tmp / "summary.md"
         summary.write_text("")
         repo = self.make_repo(self.tmp / "repo")
-        base = {"TAG": "v1.2.3", "CHANGED": "", "COMPARE_URL": "", "ISSUE_URL": ""}
+        base = {"TAG": "v1.2.3", "CHANGED": "", "COMPARE_URL": "", "REPLACED": "", "ISSUE_URL": ""}
         proc = subprocess.run(
             ["bash", "-c", step_run_body(WORKFLOW, SUMMARY_STEP)],
             env=self.step_env_for(GITHUB_STEP_SUMMARY=str(summary), **{**base, **env}),
@@ -717,6 +805,7 @@ class SummaryStepTests(_StepHarness):
                 "TAG": "${{ github.event.release.tag_name || inputs.tag }}",
                 "CHANGED": "${{ steps.update.outputs.changed }}",
                 "COMPARE_URL": "${{ steps.push.outputs.compare }}",
+                "REPLACED": "${{ steps.push.outputs.replaced }}",
                 "ISSUE_URL": "${{ steps.issue.outputs.url }}",
             },
         )
@@ -728,6 +817,14 @@ class SummaryStepTests(_StepHarness):
         self.assertIn(f"]({compare_link('v1.2.3')})", text)
         self.assertIn("A person has to open it so CI runs", text)
         self.assertIn(issue, text)
+
+    def test_a_replaced_branch_says_to_reopen_its_pull_request(self) -> None:
+        text = self.summarize(CHANGED="true", COMPARE_URL=compare_link("v1.2.3"), REPLACED="true")
+        self.assertIn("close and reopen it", text)
+
+    def test_a_new_or_untouched_branch_does_not_ask_for_a_reopen(self) -> None:
+        text = self.summarize(CHANGED="true", COMPARE_URL=compare_link("v1.2.3"))
+        self.assertNotIn("close and reopen it", text)
 
     def test_a_missing_reminder_issue_is_called_out(self) -> None:
         text = self.summarize(CHANGED="true", COMPARE_URL=compare_link("v1.2.3"))
