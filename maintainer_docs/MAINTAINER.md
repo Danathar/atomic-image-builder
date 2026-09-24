@@ -87,8 +87,20 @@ gh run watch "$(gh run list --workflow update-homebrew-formula.yml --limit 1 \
 ```
 
 It checks out `main`, points the formula at the release, verifies the digest,
-and pushes. To confirm afterwards, switch back to `main` first — the bot's
-commit landed there, not on your release branch:
+pushes the change to a `formula/<tag>` branch, and opens a pull request titled
+*Point the Homebrew formula at <tag>*. The pull request comes from the formula
+GitHub App, so `test` runs on it. Merge it once `test` passes. If
+**Allow auto-merge** is on, it merges by itself; the run summary says which.
+If an older release's formula pull request is still open, the run closes it
+as superseded, because both change the same lines.
+
+If the run fails on its first step with `Formula App secrets missing`, the
+`FORMULA_APP_ID` or `FORMULA_APP_PRIVATE_KEY` secret is not set.
+[docs/branch-protection.md](../docs/branch-protection.md) says how to set up the
+App and both secrets.
+
+To confirm after the merge, switch back to `main` first — the formula changed
+there, not on your release branch:
 
 ```bash
 git switch main && git pull
@@ -160,7 +172,7 @@ release](#cutting-a-release).
 | ----------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ci.yml`                      | push, PR, dispatch                 | Tests, coverage gate at 90%, ruff, shellcheck, actionlint, hadolint; builds the image and collects e2e coverage when image files change                                       |
 | `publish-image.yml`           | push to `main`, release, dispatch  | Builds and pushes to GHCR                                                                                                                                                     |
-| `update-homebrew-formula.yml` | release published, dispatch        | Points the formula at the release and pushes to `main`                                                                                                                        |
+| `update-homebrew-formula.yml` | release published, dispatch        | Points the formula at the release on a `formula/<tag>` branch and opens a pull request for it with the formula App's token                                                    |
 | `publish-wrapper.yml`         | release published, dispatch        | Attaches `contrib/aib` and its sha256 to the release, which is what the recommended wrapper install downloads and verifies                                                    |
 | `maintenance-audit.yml`       | Mondays 06:00 UTC, dispatch        | Snapshot drift (and its tracking issue), action pin coverage, pin freshness, formula pin, released wrapper vs `contrib/aib`                                                   |
 | `nightly-compliance.yml`      | Daily 04:17 UTC, dispatch          | Rebuilds `main`'s image from scratch and re-runs the gate against it; a failure means something outside the repo moved                                                        |
@@ -172,7 +184,7 @@ older commit must not drag `latest` backwards. All events that write image
 tags share one concurrency group so they cannot race.
 
 Expect a release to produce **two** image publishes: one from the release, one
-from the formula-update push to `main`. Same content, harmless.
+from merging the formula pull request into `main`. Same content, harmless.
 
 ---
 
@@ -261,6 +273,8 @@ will not pick it up on their own. Fix with:
 ```bash
 gh workflow run update-homebrew-formula.yml -f tag=v0.9.1
 ```
+
+then merge the pull request it opens once `test` passes.
 
 ### Failure: the released wrapper is not `contrib/aib`
 
@@ -374,15 +388,17 @@ wrapper keeps that in a named volume; a bare `podman run --rm` repeats it.
   pushes allowed. The PR-per-change habit is convention, not enforcement —
   which matters, because anything landing on `main` immediately becomes the
   published image.
-- **Actions cannot create pull requests** in this repo, which is why the
-  formula update pushes directly instead of opening one, and why
-  `ai-fix.yml` gathers evidence onto an issue rather than proposing a fix. Issues are a separate
+- **Actions cannot create pull requests** in this repo with `GITHUB_TOKEN`,
+  which is why the formula update opens its pull request with a GitHub App
+  token instead, and why `ai-fix.yml` gathers evidence onto an issue rather
+  than proposing a fix. Issues are a separate
   setting and are not blocked — the audit's snapshot-drift tracking issue
   depends on that, so if it ever starts reporting `could not sync`, check
   Settings → Actions → General before assuming the script broke.
 - **Default workflow token permissions are read-only.** Workflows needing more
-  declare it explicitly, as `publish-image.yml` and
-  `update-homebrew-formula.yml` do.
+  declare it explicitly, as `publish-image.yml` does.
+- **Allow auto-merge is off.** The formula workflow asks for auto-merge on its
+  pull request; while this is off, that pull request waits for you to merge it.
 - **Blank issues stay enabled** alongside the forms in
   `.github/ISSUE_TEMPLATE/`. Turning them off would not touch the audit's
   snapshot-drift issue, which is filed through the API and never sees a

@@ -165,13 +165,12 @@ class HomebrewFormulaTests(unittest.TestCase):
     def test_release_workflow_updates_and_verifies_the_formula(self) -> None:
         # The workflow is the only thing that runs --update in anger, so pin the
         # wiring: it must checkout main (a release event checks out the tag, and
-        # the formula lives on main), verify after writing, and push.
+        # the formula lives on main) and verify after writing.
+        # tests/test_homebrew_release_workflow.py runs the push itself.
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/update-homebrew-formula.yml").read_text()
         self.assertIn("ref: main", workflow)
         self.assertIn("homebrew_formula.py --update", workflow)
         self.assertIn("homebrew_formula.py --check", workflow)
-        self.assertIn("contents: write", workflow)
-        self.assertIn("git push origin HEAD:main", workflow)
         # Cancelling mid-run could leave the formula written but unpushed.
         self.assertIn("cancel-in-progress: false", workflow)
 

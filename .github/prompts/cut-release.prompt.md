@@ -21,8 +21,10 @@ sequence.
 3. Open a PR for the bump and merge it once CI is green.
 4. Tag and publish the release, targeting `main`, so the tag points at a commit
    that already carries the new version.
-5. Watch the formula-update workflow, then confirm on `main` rather than on the
-   release branch: the bot's commit landed there.
+5. Watch the formula-update workflow. It opens a pull request titled "Point the
+   Homebrew formula at <tag>" from the formula GitHub App. Merge it once `test`
+   passes, unless auto-merge already did. Then confirm on an up-to-date `main`,
+   not on the release branch.
 
 ## What not to do
 
@@ -32,7 +34,8 @@ sequence.
 - Do not run `brew audit` against a real Homebrew prefix. MAINTAINER.md's
   *Before pushing* explains what that breaks and what to run instead.
 - Do not be surprised by two image publishes. A release produces one from the
-  release event and one from the formula-update push to `main`. Same content.
+  release event and one from merging the formula pull request into `main`.
+  Same content.
 
 ## Done when
 

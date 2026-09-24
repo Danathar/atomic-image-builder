@@ -240,20 +240,25 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   `tests/test_workflow_permissions_policy.py` fails when the two disagree, so
   a workflow cannot gain a scope unless the same pull request also changes the
   policy file, which is Tier 4.
-- Actions cannot create pull requests in this repository. Jobs with automated
-  repository-contents write paths declare `contents: write`. There is exactly
-  one automated push to `main`: `update-homebrew-formula.yml` / `update` takes
-  that permission on a published release and pushes a single machine-generated
-  sha256 that it verifies before pushing. It exists because Actions cannot open
-  a pull request here. `ci.yml` / `publish-coverage` commits and pushes the
-  coverage badge and trend only to the orphan `coverage-data` branch after a
-  push to `main`. `publish-wrapper.yml` / `publish` pushes no commits; it
-  attaches the release-bound `aib` wrapper and `aib.sha256` checksum to the
-  published release. Treat a change to the formula workflow as Tier 4.
+- `GITHUB_TOKEN` cannot create pull requests in this repository. Jobs with
+  automated repository-contents write paths declare `contents: write`.
+  `ci.yml` / `publish-coverage` commits and pushes the coverage badge and
+  trend only to the orphan `coverage-data` branch after a push to `main`.
+  `publish-wrapper.yml` / `publish` pushes no commits; it attaches the
+  release-bound `aib` wrapper and `aib.sha256` checksum to the published
+  release. No workflow pushes to `main`. The formula update in
+  `update-homebrew-formula.yml` keeps its `GITHUB_TOKEN` at `contents: read`
+  and writes nothing with it. On a published release it mints a token for the
+  formula GitHub App, which can write only contents and pull requests in this
+  one repository. With that token it pushes a single machine-generated sha256,
+  which it verifies before pushing, to a `formula/<tag>` branch, and opens a
+  pull request against `main` that has to pass `test` like any other. Treat a
+  change to the formula workflow as Tier 4.
 - `main` has no branch protection yet. The ruleset that would keep it behind
-  a pull request is committed but not applied, because it would refuse the
-  formula push above; [branch protection](branch-protection.md) says why and
-  how to check.
+  a pull request is committed but not applied. It waits on the formula App
+  being set up and on one release proving the App's pull request gets `test`;
+  [branch protection](branch-protection.md) says what is left and how to
+  check.
 
 ## Reporting
 
