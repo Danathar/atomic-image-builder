@@ -52,8 +52,15 @@ SCOPES = {
     "statuses",
 }
 LEVELS = {"read", "write", "none"}
+# The inline values GitHub accepts in place of a mapping.
+INLINE = {"read-all", "write-all", "{}"}
 
-KEY = re.compile(r"^(?P<indent> *)(?P<key>[A-Za-z0-9_-]+):\s*(?P<value>[^#]*?)\s*(?:#.*)?$")
+# A mapping key, bare or quoted: YAML reads `"permissions":` and
+# `'permissions':` as the same key as `permissions:`, and so does Actions.
+KEY = re.compile(
+    r"""^(?P<indent>\ *)(?P<q>["']?)(?P<key>[A-Za-z0-9_-]+)(?P=q):\s*(?P<value>[^#]*?)\s*(?:\#.*)?$""",
+    re.X,
+)
 
 
 def permissions_block(lines: list[str], indent: int) -> dict[str, str] | str | None:
@@ -61,7 +68,7 @@ def permissions_block(lines: list[str], indent: int) -> dict[str, str] | str | N
 
     A mapping for a block, the raw string for an inline value (`read-all`,
     `{}`), or None when no such key sits at that indent. Callers pass a whole
-    file for indent 0 and one job's lines for indent 4.
+    file for indent 0 and one job's body for that file's job-key indent.
     """
     for i, line in enumerate(lines):
         match = KEY.match(line)
@@ -81,32 +88,44 @@ def permissions_block(lines: list[str], indent: int) -> dict[str, str] | str | N
     return None
 
 
-def job_lines(lines: list[str]) -> dict[str, list[str]]:
-    """Each job under the top-level `jobs:` key, as the lines of its block."""
-    starts = [i for i, line in enumerate(lines) if line.rstrip() == "jobs:"]
+def job_lines(lines: list[str]) -> tuple[dict[str, list[str]], int]:
+    """Each job under the top-level `jobs:` key, and the indent of its keys.
+
+    The indent is read off the file rather than assumed: the first job id
+    sets the step, and a job's own keys sit one step further in. A workflow
+    indented by four spaces is as valid as one indented by two, and assuming
+    two would read none of its job blocks.
+    """
+    starts = [i for i, line in enumerate(lines) if KEY.match(line) and KEY.match(line)["key"] == "jobs" and not line[0].isspace()]
     if len(starts) != 1:
         raise AssertionError("expected exactly one top-level jobs: key")
+    body = lines[starts[0] + 1 :]
+    first = next((line for line in body if line.strip() and not line.lstrip().startswith("#")), "")
+    step = len(first) - len(first.lstrip(" "))
+    if not step:
+        raise AssertionError("jobs: has no indented job under it")
     jobs: dict[str, list[str]] = {}
     current = None
-    for line in lines[starts[0] + 1 :]:
+    for line in body:
         if line.strip() and not line.startswith(" "):
             break
         match = KEY.match(line)
-        if match and len(match["indent"]) == 2 and not match["value"]:
+        if match and len(match["indent"]) == step and not match["value"]:
             current = match["key"]
             jobs[current] = []
             continue
         if current is not None:
             jobs[current].append(line)
-    return jobs
+    return jobs, 2 * step
 
 
 def declared(text: str) -> dict[str, object]:
     """What a workflow declares: its top-level block and each job's own block."""
     lines = text.splitlines()
+    bodies, key_indent = job_lines(lines)
     jobs = {}
-    for job, body in job_lines(lines).items():
-        block = permissions_block(body, 4)
+    for job, body in bodies.items():
+        block = permissions_block(body, key_indent)
         if block is not None:
             jobs[job] = block
     return {"workflow": permissions_block(lines, 0), "jobs": jobs}
@@ -150,6 +169,11 @@ class PolicyMatchesWorkflowsTests(unittest.TestCase):
             for block in [entry["workflow"], *entry["jobs"].values()]:
                 if block is None:
                     continue
+                if isinstance(block, str):
+                    # The inline forms the parser returns as written.
+                    with self.subTest(workflow=name, inline=block):
+                        self.assertIn(block, INLINE, f"{name}: {block!r} is not an inline permissions value")
+                    continue
                 for scope, level in block.items():
                     with self.subTest(workflow=name, scope=scope):
                         self.assertIn(scope, SCOPES, f"{name}: {scope!r} is not a GitHub token scope")
@@ -180,6 +204,21 @@ class ParserTests(unittest.TestCase):
     def test_a_step_input_named_permissions_is_not_a_block(self) -> None:
         text = "jobs:\n  a:\n    steps:\n      - with:\n          permissions: write\n"
         self.assertEqual(declared(text), {"workflow": None, "jobs": {}})
+
+    def test_quoted_keys_are_the_same_keys(self) -> None:
+        # YAML and Actions read `"permissions":` as `permissions:`. Missing the
+        # quoted spelling would let a job gain a block this module never sees.
+        text = (
+            "'permissions':\n  \"contents\": read\n"
+            "jobs:\n  a:\n    \"permissions\":\n      'issues': write\n    steps: []\n"
+        )
+        self.assertEqual(declared(text), {"workflow": {"contents": "read"}, "jobs": {"a": {"issues": "write"}}})
+
+    def test_a_four_space_indented_workflow_is_read(self) -> None:
+        # Nothing requires two-space indentation. Assuming it would read no
+        # job blocks in a file that uses four.
+        text = "jobs:\n    a:\n        permissions:\n            contents: write\n        steps: []\n"
+        self.assertEqual(declared(text), {"workflow": None, "jobs": {"a": {"contents": "write"}}})
 
     def test_a_widened_job_is_caught(self) -> None:
         # The regression this module exists for: one more scope on a job.
