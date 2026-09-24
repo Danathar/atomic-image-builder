@@ -65,9 +65,8 @@ Merge once CI is green, then bring your local `main` up to date again:
 git switch main && git pull
 ```
 
-`main` is not protected, so a direct push works too — but everything else here
-goes through a pull request, and CI on the branch is the only thing that checks
-the bump did not break anything.
+`main` is protected by a ruleset, so a direct push is refused: the bump has to
+go through a pull request, and it cannot merge until `test` passes on it.
 
 **4. Tag and publish.**
 
@@ -87,17 +86,12 @@ gh run watch "$(gh run list --workflow update-homebrew-formula.yml --limit 1 \
 ```
 
 It checks out `main`, points the formula at the release, verifies the digest,
-pushes the change to a `formula/<tag>` branch, and opens a pull request titled
-*Point the Homebrew formula at <tag>*. The pull request comes from the formula
-GitHub App, so `test` runs on it. Merge it once `test` passes. If
-**Allow auto-merge** is on, it merges by itself; the run summary says which.
-If an older release's formula pull request is still open, the run closes it
-as superseded, because both change the same lines.
-
-If the run fails on its first step with `Formula App secrets missing`, the
-`FORMULA_APP_ID` or `FORMULA_APP_PRIVATE_KEY` secret is not set.
-[docs/branch-protection.md](../docs/branch-protection.md) says how to set up the
-App and both secrets.
+and pushes the change to a `formula/<tag>` branch. It does not open the pull
+request: one opened with the workflow's own token would get no CI. Instead,
+the run summary and a reminder issue titled *Open the Homebrew formula PR for
+<tag>* both carry a link. Open it, click **Create pull request** (the title is
+filled in), and merge the pull request once `test` passes. Then close the
+reminder issue.
 
 To confirm after the merge, switch back to `main` first — the formula changed
 there, not on your release branch:
@@ -172,7 +166,7 @@ release](#cutting-a-release).
 | ----------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ci.yml`                      | push, PR, dispatch                 | Tests, coverage gate at 90%, ruff, shellcheck, actionlint, hadolint; builds the image and collects e2e coverage when image files change                                       |
 | `publish-image.yml`           | push to `main`, release, dispatch  | Builds and pushes to GHCR                                                                                                                                                     |
-| `update-homebrew-formula.yml` | release published, dispatch        | Points the formula at the release on a `formula/<tag>` branch and opens a pull request for it with the formula App's token                                                    |
+| `update-homebrew-formula.yml` | release published, dispatch        | Points the formula at the release on a `formula/<tag>` branch and opens an issue with the link that opens its pull request                                                    |
 | `publish-wrapper.yml`         | release published, dispatch        | Attaches `contrib/aib` and its sha256 to the release, which is what the recommended wrapper install downloads and verifies                                                    |
 | `maintenance-audit.yml`       | Mondays 06:00 UTC, dispatch        | Snapshot drift (and its tracking issue), action pin coverage, pin freshness, formula pin, released wrapper vs `contrib/aib`                                                   |
 | `nightly-compliance.yml`      | Daily 04:17 UTC, dispatch          | Rebuilds `main`'s image from scratch and re-runs the gate against it; a failure means something outside the repo moved                                                        |
@@ -274,7 +268,8 @@ will not pick it up on their own. Fix with:
 gh workflow run update-homebrew-formula.yml -f tag=v0.9.1
 ```
 
-then merge the pull request it opens once `test` passes.
+then open the pull request from the link in its summary or reminder issue, and
+merge it once `test` passes.
 
 ### Failure: the released wrapper is not `contrib/aib`
 
@@ -384,21 +379,21 @@ wrapper keeps that in a named volume; a bare `podman run --rm` repeats it.
 
 ## Repo settings worth knowing
 
-- **`main` is not protected.** No required reviews, no required checks, direct
-  pushes allowed. The PR-per-change habit is convention, not enforcement —
-  which matters, because anything landing on `main` immediately becomes the
-  published image.
-- **Actions cannot create pull requests** in this repo with `GITHUB_TOKEN`,
-  which is why the formula update opens its pull request with a GitHub App
-  token instead, and why `ai-fix.yml` gathers evidence onto an issue rather
+- **`main` is protected** by the `protect main` ruleset: every change arrives
+  as a pull request that passed `test`, with no bypass and no required
+  approval. That matters, because anything landing on `main` immediately
+  becomes the published image. [docs/branch-protection.md](../docs/branch-protection.md)
+  explains each rule.
+- **Actions cannot create pull requests** in this repo, which is why the
+  formula update leaves you a link to open its pull request instead of opening
+  it, and why `ai-fix.yml` gathers evidence onto an issue rather
   than proposing a fix. Issues are a separate
   setting and are not blocked — the audit's snapshot-drift tracking issue
-  depends on that, so if it ever starts reporting `could not sync`, check
+  and the formula reminder issue depend on that, so if it ever starts reporting `could not sync`, check
   Settings → Actions → General before assuming the script broke.
 - **Default workflow token permissions are read-only.** Workflows needing more
-  declare it explicitly, as `publish-image.yml` does.
-- **Allow auto-merge is off.** The formula workflow asks for auto-merge on its
-  pull request; while this is off, that pull request waits for you to merge it.
+  declare it explicitly, as `publish-image.yml` and
+  `update-homebrew-formula.yml` do.
 - **Blank issues stay enabled** alongside the forms in
   `.github/ISSUE_TEMPLATE/`. Turning them off would not touch the audit's
   snapshot-drift issue, which is filed through the API and never sees a

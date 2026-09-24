@@ -6,8 +6,8 @@ What: Reads the committed ruleset and checks that it keeps `main` behind a
       force-push, 0 approvals); that docs/branch-protection.md explains every
       rule, target and required check in the file and names none the file
       lacks; that every required check is a job that runs on every pull
-      request; that no workflow pushes to `main`; and that the doc names every
-      secret the formula workflow needs before the ruleset can be applied.
+      request; that no workflow pushes to `main`; that the formula workflow
+      needs no secrets; and that the doc names one live ruleset id.
 Why: `main` had no branch protection, so any token with `contents: write`
      could push to it, and `publish-image.yml` signs and ships whatever `main`
      holds. A pull request cannot apply a ruleset, so what can be checked here
@@ -328,11 +328,10 @@ class DocTests(unittest.TestCase):
         self.assertIn("gh api repos/Danathar/atomic-image-builder/branches/main --jq .protected", DOC)
 
     def test_no_workflow_pushes_to_main(self) -> None:
-        # The ruleset has no bypass, so once it is applied it refuses these
-        # pushes, the job fails, and for the formula workflow `brew upgrade`
-        # keeps installing the previous release. The formula change goes
-        # through a pull request instead; see the doc's "Why it is not
-        # applied yet".
+        # The ruleset has no bypass, so it refuses these pushes, the job
+        # fails, and for the formula workflow `brew upgrade` keeps installing
+        # the previous release. The formula change goes through a pull request
+        # instead; see the doc's "How a release reaches main".
         pushers = [
             path.name
             for path in sorted(WORKFLOWS.glob("*.y*ml"))
@@ -340,18 +339,26 @@ class DocTests(unittest.TestCase):
         ]
         self.assertEqual(pushers, [], "these workflows push straight to main, which the ruleset refuses")
 
-    def test_the_doc_names_every_secret_the_formula_workflow_needs(self) -> None:
-        # The doc is where an admin learns which secrets to create before the
-        # ruleset can be applied. A secret renamed in the workflow and not in
-        # the doc fails every release with an error pointing at the doc.
+    def test_the_formula_workflow_needs_no_secrets(self) -> None:
+        # The doc tells an admin there is nothing to set up for a release. A
+        # secret the workflow starts reading would fail the next release on a
+        # repository where nobody created it.
         workflow = "update-homebrew-formula.yml"
-        secrets = set(re.findall(r"\bsecrets\.([A-Z0-9_]+)", (WORKFLOWS / workflow).read_text(encoding="utf-8")))
-        self.assertTrue(secrets, f"{workflow} reads no secrets; the doc's setup steps describe ones it needs")
-        reason = doc_section("Why it is not applied yet")
-        self.assertIn(f"(../.github/workflows/{workflow})", reason)
-        for name in sorted(secrets):
-            with self.subTest(secret=name):
-                self.assertIn(f"gh secret set {name} ", reason)
+        text = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+        self.assertEqual(re.findall(r"\bsecrets\.\w+", text), [])
+        flow = doc_section("How a release reaches main")
+        self.assertIn(f"(../.github/workflows/{workflow})", flow)
+        self.assertIn("needs no secrets", " ".join(flow.split()))
+
+    def test_the_doc_names_one_ruleset_id(self) -> None:
+        # The id in Status is what someone checks the live ruleset against,
+        # and the PUT command is how the file reaches it. Two different ids
+        # would send an update to a ruleset that is not the one described.
+        status = re.search(r"as ruleset `(\d+)`", doc_section("Status"))
+        self.assertIsNotNone(status, "the Status section no longer names the live ruleset's id")
+        ids = set(re.findall(r"repos/Danathar/atomic-image-builder/rulesets/(\d+)", DOC))
+        ids |= set(re.findall(r"id `(\d+)`", DOC))
+        self.assertEqual(ids, {status.group(1)})
 
     def test_the_push_detector_sees_the_forms_a_workflow_would_write(self) -> None:
         for command in (

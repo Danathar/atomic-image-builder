@@ -21,9 +21,10 @@ sequence.
 3. Open a PR for the bump and merge it once CI is green.
 4. Tag and publish the release, targeting `main`, so the tag points at a commit
    that already carries the new version.
-5. Watch the formula-update workflow. It opens a pull request titled "Point the
-   Homebrew formula at <tag>" from the formula GitHub App. Merge it once `test`
-   passes, unless auto-merge already did. Then confirm on an up-to-date `main`,
+5. Watch the formula-update workflow. It pushes a `formula/<tag>` branch and
+   opens a reminder issue, "Open the Homebrew formula PR for <tag>". Open the
+   pull request from the link in that issue or the run summary, merge it once
+   `test` passes, and close the issue. Then confirm on an up-to-date `main`,
    not on the release branch.
 
 ## What not to do

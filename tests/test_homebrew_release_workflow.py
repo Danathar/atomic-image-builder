@@ -1,10 +1,11 @@
 """Execute the `run:` bodies of .github/workflows/update-homebrew-formula.yml.
 
 This workflow is what points the Homebrew formula at a release. It pushes the
-change to a `formula/<tag>` branch and opens a pull request with a GitHub App
-token, so the only thing between the tag being published and users running
-`brew upgrade` is that pull request passing `test` -- and nothing in the suite
-ran a line of its shell. tests/test_workflow_dependencies.py reads it to
+change to a `formula/<tag>` branch and leaves a link, in the run summary and
+in a reminder issue, that opens the pull request in one click. Between the tag
+being published and users running `brew upgrade` stand only that branch, that
+link, and the pull request passing `test` -- and nothing in the suite ran a
+line of its shell. tests/test_workflow_dependencies.py reads it to
 compare install pins; that does not run it. Substring assertions cannot see
 the order those commands run in, whether a failing `--check` stops the push,
 where the push lands, or what happens when the optional coverage tooling is
@@ -42,9 +43,11 @@ stubbed in a directory placed on `PYTHONPATH`:
   (see .github/workflows/ci.yml) and so its absence cannot be arranged by not
   installing it.
 
-The pull-request and auto-merge steps talk to GitHub only through `gh`, so a
-third stub, an executable `gh` placed first on `PATH`, records each call and
-answers the handful of subcommands those steps use.
+The reminder-issue step talks to GitHub only through `gh`, so a third stub,
+an executable `gh` placed first on `PATH`, records each call and answers the
+two subcommands that step uses. It runs the step's own `--jq` filter through
+the real `jq`, so which issues count as the reminder is decided by the
+workflow's filter, not by the stub.
 """
 
 import hashlib
@@ -55,22 +58,27 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _workflow_steps import step_env, step_if, step_run_body, step_with
+from _workflow_steps import step_env, step_if, step_run_body
 from atomic_image_builder import VERSION
 from homebrew_formula import parse_formula, render_formula, tarball_url
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/update-homebrew-formula.yml"
 UPDATE_STEP = "Point the formula at the release"
-SECRETS_STEP = "Check the formula App secrets are set"
-TOKEN_STEP = "Mint the formula App token"
 PUSH_STEP = "Push the formula branch"
-PR_STEP = "Open the formula pull request"
-AUTOMERGE_STEP = "Turn on auto-merge"
+ISSUE_STEP = "Open the reminder issue"
 SUMMARY_STEP = "Summarize"
 FORMULA = "Formula/atomic-image-builder.rb"
-APP_TOKEN = "${{ steps.app-token.outputs.token }}"
-APP_TOKEN_ACTION = "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0"
+REPO = "Danathar/atomic-image-builder"
+
+
+def compare_link(tag: str) -> str:
+    """The link that opens the formula pull request, spelled out by hand."""
+    return (
+        f"https://github.com/{REPO}/compare/main...formula/{tag}"
+        f"?expand=1&title=Point%20the%20Homebrew%20formula%20at%20{tag}"
+    )
+
 
 # Stands in for the release tarball. The digest the formula ends up recording
 # is this content's real sha256, computed by the real fetch_sha256.
@@ -147,36 +155,27 @@ raise SystemExit(1)
 
 
 # Stands in for `gh`. Records each call, keeps a copy of any --body-file, and
-# answers the subcommands the pull-request and auto-merge steps use. What it
-# answers is set per test through STUB_GH_* variables.
+# answers the two subcommands the reminder-issue step uses. `issue list` feeds
+# STUB_GH_ISSUES, shaped the way `gh --json` prints issues, through the step's
+# own --jq filter with the real jq.
 GH_STUB = '''#!/usr/bin/env python3
-import json
 import os
 import shutil
+import subprocess
 import sys
 
 argv = sys.argv[1:]
 with open(os.environ["STUB_LOG"], "a") as log:
     log.write("gh\\t%s\\n" % "\\t".join(argv))
-if argv[:2] == ["pr", "list"]:
-    # The open pull requests, printed the way the step's --jq projection
-    # prints them: one "isCrossRepository number url head" line each. The
-    # step's own shell does all the choosing.
-    for pr in json.loads(os.environ.get("STUB_GH_PRS", "[]")):
-        fork = "true" if pr["isCrossRepository"] else "false"
-        print("%s %d %s %s" % (fork, pr["number"], pr["url"], pr["headRefName"]))
-elif argv[:2] == ["pr", "close"]:
-    pass
-elif argv[:2] == ["pr", "create"]:
+if argv[:2] == ["issue", "list"]:
+    jq = argv[argv.index("--jq") + 1]
+    result = subprocess.run(
+        ["jq", "-r", jq], input=os.environ.get("STUB_GH_ISSUES", "[]"), capture_output=True, text=True, check=True
+    )
+    sys.stdout.write(result.stdout)
+elif argv[:2] == ["issue", "create"]:
     shutil.copy(argv[argv.index("--body-file") + 1], os.environ["STUB_GH_BODY"])
-    print(os.environ["STUB_GH_NEW_PR"])
-elif argv[:2] == ["pr", "view"]:
-    print("PR_kwDOnode")
-elif argv[:2] == ["api", "graphql"]:
-    refusal = os.environ.get("STUB_GH_AUTOMERGE_REFUSAL")
-    if refusal:
-        sys.stderr.write("GraphQL: %s (enablePullRequestAutoMerge)\\n" % refusal)
-        raise SystemExit(1)
+    print(os.environ["STUB_GH_NEW_ISSUE"])
 else:
     raise SystemExit("stub gh: unsupported invocation %r" % (argv,))
 '''
@@ -390,115 +389,6 @@ class UpdateStepTests(_StepHarness):
         self.assertNotIn("changed", outputs)
 
 
-class SecretsStepTests(_StepHarness):
-    """The first step: a missing App secret fails the run instead of skipping it."""
-
-    def run_secrets_step(self, **env: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            ["bash", "-c", step_run_body(WORKFLOW, SECRETS_STEP)],
-            env=self.step_env_for(**env),
-            cwd=str(self.tmp),
-            capture_output=True,
-            text=True,
-        )
-
-    def test_only_whether_each_secret_is_set_reaches_the_step(self) -> None:
-        # The private key never needs to be in a shell's environment to be
-        # checked for; the expression hands the step "true" or "false".
-        self.assertEqual(
-            step_env(WORKFLOW, SECRETS_STEP),
-            {
-                "HAS_APP_ID": "${{ secrets.FORMULA_APP_ID != '' }}",
-                "HAS_APP_KEY": "${{ secrets.FORMULA_APP_PRIVATE_KEY != '' }}",
-            },
-        )
-        self.assertIsNone(step_if(WORKFLOW, SECRETS_STEP))
-
-    def test_both_secrets_set_lets_the_run_continue(self) -> None:
-        proc = self.run_secrets_step(HAS_APP_ID="true", HAS_APP_KEY="true")
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-
-    def test_a_missing_secret_fails_with_an_error_naming_both_and_the_doc(self) -> None:
-        for present, missing in (("HAS_APP_ID", "FORMULA_APP_PRIVATE_KEY"), ("HAS_APP_KEY", "FORMULA_APP_ID")):
-            env = {"HAS_APP_ID": "false", "HAS_APP_KEY": "false", present: "true"}
-            with self.subTest(missing=missing):
-                proc = self.run_secrets_step(**env)
-                self.assertEqual(proc.returncode, 1)
-                error = [line for line in proc.stdout.splitlines() if line.startswith("::error")]
-                self.assertEqual(len(error), 1, proc.stdout)
-                for needle in ("FORMULA_APP_ID", "FORMULA_APP_PRIVATE_KEY", "docs/branch-protection.md", f"missing: {missing}."):
-                    self.assertIn(needle, error[0])
-
-
-class TokenStepTests(unittest.TestCase):
-    """The App token: what it can do, and when it exists."""
-
-    def test_the_token_reaches_this_repository_with_two_permissions_and_no_more(self) -> None:
-        inputs = step_with(WORKFLOW, TOKEN_STEP)
-        self.assertEqual(
-            {key: value for key, value in inputs.items() if key.startswith("permission-")},
-            {"permission-contents": "write", "permission-pull-requests": "write"},
-        )
-        self.assertEqual(inputs["owner"], "${{ github.repository_owner }}")
-        self.assertEqual(inputs["repositories"], "${{ github.event.repository.name }}")
-        self.assertEqual(inputs["client-id"], "${{ secrets.FORMULA_APP_ID }}")
-        self.assertEqual(inputs["private-key"], "${{ secrets.FORMULA_APP_PRIVATE_KEY }}")
-
-    def test_the_token_is_minted_after_the_formula_is_verified_and_on_every_run(self) -> None:
-        # After: nothing that runs the release's Python holds the token.
-        # Every run, not only when the formula changed: a dispatch for the tag
-        # the formula already names is how docs/branch-protection.md has the
-        # App's credentials checked before a real release depends on them.
-        text = WORKFLOW.read_text()
-        self.assertIn(f"uses: {APP_TOKEN_ACTION}", text)
-        order = [line.strip()[len("- name: ") :] for line in text.splitlines() if line.strip().startswith("- name: ")]
-        self.assertLess(order.index(UPDATE_STEP), order.index(TOKEN_STEP))
-        self.assertLess(order.index(TOKEN_STEP), order.index(PUSH_STEP))
-        self.assertIsNone(step_if(WORKFLOW, TOKEN_STEP))
-
-    def test_every_step_that_writes_to_github_uses_the_app_token(self) -> None:
-        # GITHUB_TOKEN here only reads, and a pull request it opened would
-        # start no CI, so `test` would never report on it.
-        for step in (PUSH_STEP, PR_STEP, AUTOMERGE_STEP):
-            with self.subTest(step=step):
-                self.assertEqual(step_env(WORKFLOW, step)["GH_TOKEN"], APP_TOKEN)
-                self.assertEqual(step_if(WORKFLOW, step), "steps.update.outputs.changed == 'true'")
-
-    def test_the_push_step_hands_git_the_app_token_from_the_environment(self) -> None:
-        # checkout runs with persist-credentials: false, so this helper is the
-        # only credential git has. Asked the way `git push` asks, it has to
-        # answer with the token and the username GitHub expects for one.
-        #
-        # Git asks every configured helper and the first answer wins, so the
-        # host's own helpers (system, global, and the local config of whatever
-        # repository this runs in) are shut out. Otherwise a developer's real
-        # GitHub credential answers first, and a failure would print it. The
-        # assertions below never print what git answered, for the same reason.
-        env = {key: value for key, value in step_env(WORKFLOW, PUSH_STEP).items() if key.startswith("GIT_CONFIG_")}
-        env = {key: value.strip("\"'") for key, value in env.items()}
-        with tempfile.TemporaryDirectory() as outside_any_repo:
-            proc = subprocess.run(
-                ["git", "credential", "fill"],
-                input="protocol=https\nhost=github.com\n\n",
-                env={
-                    **os.environ,
-                    **env,
-                    "GIT_CONFIG_NOSYSTEM": "1",
-                    "GIT_CONFIG_GLOBAL": os.devnull,
-                    "GIT_CEILING_DIRECTORIES": outside_any_repo,
-                    "GH_TOKEN": "ghs_exampletoken",
-                    "GIT_TERMINAL_PROMPT": "0",
-                },
-                cwd=outside_any_repo,
-                capture_output=True,
-                text=True,
-            )
-        answered = proc.stdout.splitlines()
-        self.assertEqual(proc.returncode, 0, "git credential fill failed")
-        self.assertTrue("username=x-access-token" in answered, "the helper did not answer with username x-access-token")
-        self.assertTrue("password=ghs_exampletoken" in answered, "the helper did not answer with the step's GH_TOKEN")
-
-
 class PushStepTests(_StepHarness):
     """The step that puts the updated formula on a `formula/<tag>` branch."""
 
@@ -521,19 +411,40 @@ class PushStepTests(_StepHarness):
         )
 
     def run_push_step(self, clone: Path, *, tag: str = f"v{VERSION}") -> subprocess.CompletedProcess:
+        self.output_file = self.tmp / "github_output"
+        self.output_file.write_text("")
         return subprocess.run(
             ["bash", "-c", step_run_body(WORKFLOW, PUSH_STEP)],
-            env=self.step_env_for(TAG=tag),
+            env=self.step_env_for(
+                TAG=tag,
+                GITHUB_OUTPUT=str(self.output_file),
+                GITHUB_SERVER_URL="https://github.com",
+                GITHUB_REPOSITORY=REPO,
+            ),
             cwd=str(clone),
             capture_output=True,
             text=True,
         )
 
+    def protect_main(self, origin: Path) -> None:
+        """Refuse every push to main, the way the `protect main` ruleset does."""
+        hook = origin / "hooks" / "pre-receive"
+        hook.write_text(
+            "#!/bin/sh\n"
+            "while read -r old new ref; do\n"
+            '  if [ "$ref" = refs/heads/main ]; then echo "refused: main is protected" >&2; exit 1; fi\n'
+            "done\n"
+        )
+        hook.chmod(0o755)
+
     def branch(self, tag: str = f"v{VERSION}") -> str:
         return f"formula/{tag}"
 
     def test_the_step_reads_the_tag_from_the_release_or_the_dispatch_input(self) -> None:
-        self.assertEqual(step_env(WORKFLOW, PUSH_STEP)["TAG"], "${{ github.event.release.tag_name || inputs.tag }}")
+        # And nothing else: the push authenticates with the checkout's own
+        # GITHUB_TOKEN, so no secret or other token reaches this step.
+        self.assertEqual(step_env(WORKFLOW, PUSH_STEP), {"TAG": "${{ github.event.release.tag_name || inputs.tag }}"})
+        self.assertEqual(step_if(WORKFLOW, PUSH_STEP), "steps.update.outputs.changed == 'true'")
 
     def test_an_unchanged_formula_would_fail_the_step(self) -> None:
         # Which is what makes the `if:` load-bearing rather than tidy:
@@ -544,17 +455,53 @@ class PushStepTests(_StepHarness):
 
     def test_the_change_lands_on_the_formula_branch_and_main_is_untouched(self) -> None:
         # The ruleset refuses any direct push to main. A step that went back
-        # to `git push origin HEAD:main` would fail every release once it is
-        # applied, and until then would skip the pull request and `test`.
+        # to `git push origin HEAD:main` would fail every release, and would
+        # skip the pull request and `test` wherever the push got through.
         origin, clone = self.set_up_clone()
         main_before = _git(origin, "rev-parse", "main")
         self.edit_formula(clone)
         proc = self.run_push_step(clone)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(_git(origin, "rev-parse", "main"), main_before)
+        self.assertEqual(
+            _git(origin, "for-each-ref", "--format=%(refname)", "refs/heads").split(),
+            [f"refs/heads/{self.branch()}", "refs/heads/main"],
+        )
         pushed = _git(origin, "show", f"{self.branch()}:{FORMULA}")
         self.assertEqual(parse_formula(pushed), (tarball_url(f"v{VERSION}"), TARBALL_SHA))
         self.assertEqual(_git(origin, "rev-parse", f"{self.branch()}^"), main_before)
+
+    def test_the_push_succeeds_where_main_is_protected(self) -> None:
+        # What the release actually runs against: an origin that refuses
+        # every update to main. Any push to main, alone or next to the
+        # branch push, fails the step here.
+        origin, clone = self.set_up_clone()
+        self.protect_main(origin)
+        self.edit_formula(clone)
+        proc = self.run_push_step(clone)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(_git(origin, "rev-list", "--count", f"main..{self.branch()}"), "1")
+
+    def test_the_step_writes_the_link_that_opens_the_pull_request(self) -> None:
+        # The title goes through URL encoding; spaces left raw would cut the
+        # link short wherever it is pasted or rendered.
+        origin, clone = self.set_up_clone()
+        self.edit_formula(clone)
+        proc = self.run_push_step(clone)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.read_outputs(self.output_file), {"compare": compare_link(f"v{VERSION}")})
+
+    def test_a_failed_push_writes_no_link(self) -> None:
+        # The link is what the issue and the summary offer. Written before a
+        # push that then failed, it would point at a branch that is not there.
+        origin, clone = self.set_up_clone()
+        self.edit_formula(clone)
+        hook = origin / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho refused >&2\nexit 1\n")
+        hook.chmod(0o755)
+        proc = self.run_push_step(clone)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(self.read_outputs(self.output_file), {})
 
     def test_the_commit_names_the_release_it_is_for(self) -> None:
         origin, clone = self.set_up_clone()
@@ -642,36 +589,37 @@ class PushStepTests(_StepHarness):
         self.assertEqual(_git(origin, "rev-list", "--count", f"main..{self.branch()}"), "1")
 
 
-class PullRequestStepTests(_StepHarness):
-    """The step that opens the pull request, or finds the one a re-run left."""
+class IssueStepTests(_StepHarness):
+    """The reminder issue that carries the link, opened once per tag."""
 
-    NEW_PR = "https://github.com/Danathar/atomic-image-builder/pull/501"
-    OPEN_PR = "https://github.com/Danathar/atomic-image-builder/pull/499"
+    NEW_ISSUE = f"https://github.com/{REPO}/issues/501"
+    OPEN_ISSUE = f"https://github.com/{REPO}/issues/499"
 
     @staticmethod
-    def pr(number: int, head: str, *, fork: bool = False) -> dict:
+    def issue(number: int, title: str, author: str = "app/github-actions") -> dict:
         return {
             "number": number,
-            "url": f"https://github.com/Danathar/atomic-image-builder/pull/{number}",
-            "headRefName": head,
-            "isCrossRepository": fork,
+            "url": f"https://github.com/{REPO}/issues/{number}",
+            "title": title,
+            "author": {"login": author, "is_bot": author.startswith("app/")},
         }
 
-    def run_pr_step(self, *, tag: str = "v1.2.3", prs: list[dict] | None = None) -> tuple[subprocess.CompletedProcess, dict[str, str]]:
+    def run_issue_step(self, *, tag: str = "v1.2.3", issues: list[dict] | None = None) -> tuple[subprocess.CompletedProcess, dict[str, str]]:
         output_file = self.tmp / "github_output"
         output_file.write_text("")
         runner_temp = self.tmp / "runner-temp"
         runner_temp.mkdir(exist_ok=True)
         proc = subprocess.run(
-            ["bash", "-c", step_run_body(WORKFLOW, PR_STEP)],
+            ["bash", "-c", step_run_body(WORKFLOW, ISSUE_STEP)],
             env=self.step_env_for(
                 TAG=tag,
+                COMPARE_URL=compare_link(tag),
                 PATH=self.gh_on_path(),
                 GITHUB_OUTPUT=str(output_file),
                 RUNNER_TEMP=str(runner_temp),
-                RUN_URL="https://github.com/Danathar/atomic-image-builder/actions/runs/1",
-                STUB_GH_PRS=json.dumps(prs or []),
-                STUB_GH_NEW_PR=self.NEW_PR,
+                RUN_URL=f"https://github.com/{REPO}/actions/runs/1",
+                STUB_GH_ISSUES=json.dumps(issues or []),
+                STUB_GH_NEW_ISSUE=self.NEW_ISSUE,
                 STUB_GH_BODY=str(self.tmp / "body.md"),
             ),
             cwd=str(self.tmp),
@@ -683,109 +631,65 @@ class PullRequestStepTests(_StepHarness):
     def gh(self, *subcommand: str) -> list[list[str]]:
         return [call for call in self.calls("gh") if tuple(call[: len(subcommand)]) == subcommand]
 
-    def test_it_opens_a_pull_request_from_the_formula_branch_into_main(self) -> None:
-        proc, outputs = self.run_pr_step()
+    def test_it_runs_whenever_the_push_left_a_link_and_uses_the_workflow_token(self) -> None:
+        # The link exists only once the branch is pushed. A secret or an App
+        # token here would bring back the setup this flow exists to avoid.
+        self.assertEqual(step_if(WORKFLOW, ISSUE_STEP), "steps.push.outputs.compare != ''")
+        env = step_env(WORKFLOW, ISSUE_STEP)
+        self.assertEqual(env["GH_TOKEN"], "${{ github.token }}")
+        self.assertEqual(env["COMPARE_URL"], "${{ steps.push.outputs.compare }}")
+        self.assertEqual(env["TAG"], "${{ github.event.release.tag_name || inputs.tag }}")
+
+    def test_it_opens_an_issue_with_the_link(self) -> None:
+        proc, outputs = self.run_issue_step()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        create = self.gh("pr", "create")
+        create = self.gh("issue", "create")
         self.assertEqual(len(create), 1)
         args = create[0]
-        self.assertEqual(args[args.index("--base") + 1], "main")
-        self.assertEqual(args[args.index("--head") + 1], "formula/v1.2.3")
-        self.assertEqual(args[args.index("--title") + 1], "Point the Homebrew formula at v1.2.3")
+        self.assertEqual(args[args.index("--title") + 1], "Open the Homebrew formula PR for v1.2.3")
         body = (self.tmp / "body.md").read_text()
-        self.assertIn("v1.2.3", body)
+        self.assertIn(compare_link("v1.2.3"), body)
+        self.assertIn("A person has to open it", body)
+        self.assertIn("`formula/v1.2.3`", body)
         self.assertIn("actions/runs/1", body)
-        self.assertEqual(outputs["url"], self.NEW_PR)
-        self.assertEqual(self.gh("pr", "close"), [])
+        self.assertEqual(outputs, {"url": self.NEW_ISSUE})
 
-    def test_a_rerun_reuses_the_open_pull_request(self) -> None:
-        # The push step has already moved the branch the pull request tracks;
-        # a second `gh pr create` for the same head would fail the run.
-        proc, outputs = self.run_pr_step(prs=[self.pr(499, "formula/v1.2.3")])
+    def test_a_rerun_reuses_the_open_reminder(self) -> None:
+        issues = [self.issue(498, "Open the Homebrew formula PR for v1.2.2"), self.issue(499, "Open the Homebrew formula PR for v1.2.3")]
+        proc, outputs = self.run_issue_step(issues=issues)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(self.gh("pr", "create"), [])
-        self.assertEqual(outputs["url"], self.OPEN_PR)
-        self.assertEqual(self.gh("pr", "close"), [])
+        self.assertEqual(self.gh("issue", "create"), [])
+        self.assertEqual(outputs, {"url": self.OPEN_ISSUE})
 
-    def test_a_fork_s_pull_request_on_the_same_branch_name_is_never_reused(self) -> None:
-        # `formula/<tag>` is predictable before a release. Reusing a fork's
-        # pull request of that name would hand the next step someone else's
-        # code to turn auto-merge on for.
-        proc, outputs = self.run_pr_step(prs=[self.pr(499, "formula/v1.2.3", fork=True)])
+    def test_only_open_issues_are_considered(self) -> None:
+        # A closed reminder is one somebody finished with; reusing it would
+        # hand back a link nobody is looking at.
+        self.run_issue_step()
+        listed = self.gh("issue", "list")
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0][listed[0].index("--state") + 1], "open")
+
+    def test_someone_elses_issue_with_the_same_title_is_not_the_reminder(self) -> None:
+        # Anyone can open an issue, and a tag's reminder title is predictable
+        # before the release. Reusing theirs would put their link, not this
+        # run's, in front of whoever opens the pull request.
+        issues = [self.issue(499, "Open the Homebrew formula PR for v1.2.3", author="someone")]
+        proc, outputs = self.run_issue_step(issues=issues)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(len(self.gh("pr", "create")), 1)
-        self.assertEqual(outputs["url"], self.NEW_PR)
-        self.assertEqual(self.gh("pr", "close"), [])
+        self.assertEqual(len(self.gh("issue", "create")), 1)
+        self.assertEqual(outputs, {"url": self.NEW_ISSUE})
 
-    def test_an_older_release_s_open_pull_request_is_closed_as_superseded(self) -> None:
-        # Two releases before the first pull request merges would leave two
-        # pull requests changing the same formula lines; whichever merged
-        # second would conflict, and nothing rebases it. The older one is the
-        # stale one, so it goes. Someone else's pull request stays, whatever
-        # it is called, and so does anything that is not a formula branch.
-        prs = [
-            self.pr(480, "formula/v1.2.2"),
-            self.pr(481, "formula/v1.2.1", fork=True),
-            self.pr(482, "docs/formula"),
-        ]
-        proc, outputs = self.run_pr_step(prs=prs)
+    def test_a_reminder_for_another_tag_is_not_reused(self) -> None:
+        issues = [self.issue(499, "Open the Homebrew formula PR for v1.2.30")]
+        proc, outputs = self.run_issue_step(issues=issues)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        closed = self.gh("pr", "close")
-        self.assertEqual([call[2] for call in closed], ["480"])
-        self.assertIn("--delete-branch", closed[0])
-        comment = closed[0][closed[0].index("--comment") + 1]
-        self.assertIn(self.NEW_PR, comment)
-        self.assertIn("v1.2.3", comment)
-        self.assertEqual(outputs["url"], self.NEW_PR)
+        self.assertEqual(len(self.gh("issue", "create")), 1)
+        self.assertEqual(outputs, {"url": self.NEW_ISSUE})
 
-
-class AutoMergeStepTests(_StepHarness):
-    """Auto-merge is asked for, never forced, and a refusal does not fail the run."""
-
-    PR = "https://github.com/Danathar/atomic-image-builder/pull/501"
-
-    def run_automerge_step(self, *, refusal: str = "") -> tuple[subprocess.CompletedProcess, dict[str, str]]:
-        output_file = self.tmp / "github_output"
-        output_file.write_text("")
-        proc = subprocess.run(
-            ["bash", "-c", step_run_body(WORKFLOW, AUTOMERGE_STEP)],
-            env=self.step_env_for(
-                PATH=self.gh_on_path(),
-                GITHUB_OUTPUT=str(output_file),
-                PR_URL=self.PR,
-                STUB_GH_AUTOMERGE_REFUSAL=refusal,
-            ),
-            cwd=str(self.tmp),
-            capture_output=True,
-            text=True,
-        )
-        return proc, self.read_outputs(output_file)
-
-    def test_it_turns_on_auto_merge_with_a_merge_commit(self) -> None:
-        proc, outputs = self.run_automerge_step()
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(outputs, {"enabled": "true"})
-        graphql = [call for call in self.calls("gh") if call[:2] == ["api", "graphql"]]
-        self.assertEqual(len(graphql), 1)
-        self.assertIn("id=PR_kwDOnode", graphql[0])
-        query = next(arg for arg in graphql[0] if arg.startswith("query="))
-        self.assertIn("enablePullRequestAutoMerge", query)
-        self.assertIn("mergeMethod: MERGE", query)
-
-    def test_it_never_merges_on_the_spot(self) -> None:
-        # `gh pr merge` merges at once when nothing is required, which before
-        # the ruleset is applied means without waiting for `test`.
-        self.run_automerge_step()
-        self.assertEqual([call for call in self.calls("gh") if call[:2] == ["pr", "merge"]], [])
-
-    def test_a_refusal_leaves_the_pull_request_open_and_says_why(self) -> None:
-        proc, outputs = self.run_automerge_step(refusal="Auto merge is not allowed for this repository")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(outputs["enabled"], "false")
-        self.assertIn("Auto merge is not allowed for this repository", outputs["reason"])
-        warning = [line for line in proc.stdout.splitlines() if line.startswith("::warning")]
-        self.assertEqual(len(warning), 1, proc.stdout)
-        self.assertIn(self.PR, warning[0])
+    def test_the_job_opens_no_pull_request_itself(self) -> None:
+        # One opened with GITHUB_TOKEN starts no CI, so `test` would never
+        # report and it could never merge.
+        self.assertNotIn("gh pr ", WORKFLOW.read_text())
 
 
 class SummaryStepTests(_StepHarness):
@@ -795,7 +699,7 @@ class SummaryStepTests(_StepHarness):
         summary = self.tmp / "summary.md"
         summary.write_text("")
         repo = self.make_repo(self.tmp / "repo")
-        base = {"TAG": "v1.2.3", "SECRETS": "success", "CHANGED": "", "PR_URL": "", "AUTO_MERGE": "", "AUTO_MERGE_REASON": ""}
+        base = {"TAG": "v1.2.3", "CHANGED": "", "COMPARE_URL": "", "ISSUE_URL": ""}
         proc = subprocess.run(
             ["bash", "-c", step_run_body(WORKFLOW, SUMMARY_STEP)],
             env=self.step_env_for(GITHUB_STEP_SUMMARY=str(summary), **{**base, **env}),
@@ -808,26 +712,37 @@ class SummaryStepTests(_StepHarness):
 
     def test_every_value_the_summary_reads_is_passed_in(self) -> None:
         self.assertEqual(
-            set(step_env(WORKFLOW, SUMMARY_STEP)),
-            {"TAG", "SECRETS", "CHANGED", "PR_URL", "AUTO_MERGE", "AUTO_MERGE_REASON"},
+            step_env(WORKFLOW, SUMMARY_STEP),
+            {
+                "TAG": "${{ github.event.release.tag_name || inputs.tag }}",
+                "CHANGED": "${{ steps.update.outputs.changed }}",
+                "COMPARE_URL": "${{ steps.push.outputs.compare }}",
+                "ISSUE_URL": "${{ steps.issue.outputs.url }}",
+            },
         )
+        self.assertEqual(step_if(WORKFLOW, SUMMARY_STEP), "always()")
 
-    def test_missing_secrets_are_named(self) -> None:
-        text = self.summarize(SECRETS="failure")
-        self.assertIn("FORMULA_APP_ID", text)
-        self.assertIn("FORMULA_APP_PRIVATE_KEY", text)
+    def test_a_pushed_branch_gets_the_one_click_link_and_why_a_person_opens_it(self) -> None:
+        issue = f"https://github.com/{REPO}/issues/501"
+        text = self.summarize(CHANGED="true", COMPARE_URL=compare_link("v1.2.3"), ISSUE_URL=issue)
+        self.assertIn(f"]({compare_link('v1.2.3')})", text)
+        self.assertIn("A person has to open it so CI runs", text)
+        self.assertIn(issue, text)
 
-    def test_a_pull_request_left_open_says_so(self) -> None:
-        url = "https://github.com/Danathar/atomic-image-builder/pull/501"
-        text = self.summarize(CHANGED="true", PR_URL=url, AUTO_MERGE="false", AUTO_MERGE_REASON="not allowed")
-        self.assertIn(url, text)
-        self.assertIn("stays open until someone merges it", text)
-        self.assertIn("not allowed", text)
+    def test_a_missing_reminder_issue_is_called_out(self) -> None:
+        text = self.summarize(CHANGED="true", COMPARE_URL=compare_link("v1.2.3"))
+        self.assertIn(compare_link("v1.2.3"), text)
+        self.assertIn("No reminder issue was opened", text)
 
-    def test_auto_merge_on_says_it_merges_by_itself(self) -> None:
-        url = "https://github.com/Danathar/atomic-image-builder/pull/501"
-        text = self.summarize(CHANGED="true", PR_URL=url, AUTO_MERGE="true")
-        self.assertIn("merges by itself", text)
+    def test_a_failed_push_offers_no_link(self) -> None:
+        text = self.summarize(CHANGED="true")
+        self.assertIn("did not push it", text)
+        self.assertNotIn("/compare/", text)
+
+    def test_nothing_to_do_says_so(self) -> None:
+        text = self.summarize(CHANGED="false")
+        self.assertIn("Already pointed at `v1.2.3`; nothing to do.", text)
+        self.assertNotIn("/compare/", text)
 
 
 if __name__ == "__main__":
