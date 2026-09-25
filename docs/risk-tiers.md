@@ -80,7 +80,8 @@ what the check then says.
 `.github/workflows/publish-wrapper.yml`,
 `.github/workflows/update-homebrew-formula.yml`, `homebrew_formula.py`,
 `Formula/`, `.github/policies/workflow-permissions.json`,
-`.github/rulesets/**`, anything touching signing, `GH_TOKEN`, or cosign
+`.github/rulesets/**`, `.claude/settings.json`, `.claude/hooks/`, anything
+touching signing, `GH_TOKEN`, or cosign
 
 `publish-wrapper.yml` is here because it attaches the release-bound `aib` and
 `aib.sha256` that the installation instructions download. The wrapper runs on
@@ -103,6 +104,24 @@ branch other than `formula/<tag>`, is a change in this tier.
 Loosening it reopens the direct push; see
 [branch protection](branch-protection.md).
 
+`.claude/settings.json` and `.claude/hooks/` are here because they are the
+boundary an agent works inside, and the credentials this tier protects are
+what that boundary keeps out of reach. The settings file's `deny` rows are
+what stop a tool call reading `cosign.key` or `.env` or force-pushing, its
+`allow` rows are what run without a prompt, and its `hooks` block is what
+registers the `PreToolUse` gate at all. `.claude/hooks/gate_git_diff.py` is
+that gate: it is what keeps the allow-listed `git diff`, `git log`,
+`shellcheck` and `just --fmt --check` from reading past every `Read(...)`
+deny rule. A widened allow row or a relaxed refusal is not read by someone who
+then decides what to do; it is executed, unprompted, by the next agent that
+runs here, including the one that proposed it. A green unit suite is not the
+evidence for such a change either: the suite checks the settings file against
+the hook and against [docs/SECURITY-AI.md](SECURITY-AI.md), and one pull
+request can change all three, so green says the table is consistent, not that
+widening it was safe. A change that only narrows the boundary -- a new
+refusal, a removed allow row, a new `deny` row -- is still in this tier, and
+its evidence is short: say what it now stops.
+
 **Reaches:** the published image, the release-bound wrapper and its checksum,
 and the Homebrew formula, which is what `brew upgrade` installs. Homebrew never
 polls for releases; it reads the formula file and nothing else, so a formula
@@ -118,12 +137,12 @@ report the blocker. [docs/SECURITY-AI.md](SECURITY-AI.md) covers the rest.
 
 ## Quick classification
 
-| If the change touches                                                                  | Tier |
-| -------------------------------------------------------------------------------------- | ---- |
-| only docs, tests, or editor config                                                     | 1    |
-| the tool, the local `contrib/aib` wrapper source, or the image                         | 2    |
-| bundled snapshots, the pin tables, or the workflow patchers and generators             | 3    |
-| publishing, signing, `homebrew_formula.py`, the formula, tokens, or the `main` ruleset | 4    |
+| If the change touches                                                                                                           | Tier |
+| ------------------------------------------------------------------------------------------------------------------------------- | ---- |
+| only docs, tests, or editor config                                                                                              | 1    |
+| the tool, the local `contrib/aib` wrapper source, or the image                                                                  | 2    |
+| bundled snapshots, the pin tables, or the workflow patchers and generators                                                      | 3    |
+| publishing, signing, `homebrew_formula.py`, the formula, tokens, the `main` ruleset, or the agent permission table and its gate | 4    |
 
 A change spanning tiers takes the highest one it touches. When it is not
 obvious, the question that settles it is: *if this is wrong, who finds out,
