@@ -71,7 +71,7 @@ Supported bases — the scan needs you to be running one of these: **[Universal 
 - **Leaves the system you run it on alone** — the scan reads and never writes: no in-place changes, no automatic rebase, and your layered packages stay exactly where they are.
 - Does not adopt repos it did not create — a repo without `.atomic-image-builder.json` is not treated as managed.
 - Local test builds are Containerfile-only.
-- Advanced BlueBuild modules beyond the guided wizard are out of scope.
+- Advanced BlueBuild modules beyond the guided wizard are out of scope, by design. The wizard only offers choices that produce the same image under either build method. You can add other modules by editing `recipes/recipe.yml` yourself, but the tool rewrites that file on every update, so once you do, stop updating that repo with the tool.
 
 ## Documentation
 

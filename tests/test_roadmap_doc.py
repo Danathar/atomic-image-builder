@@ -62,7 +62,7 @@ README_GAP_SECTION = "What it does not do"
 GAP_SOURCES = {
     "Local test builds are Containerfile-only.": "Local test builds are Containerfile-only.",
     "Advanced BlueBuild modules beyond the guided wizard are out of scope.": (
-        "Advanced BlueBuild modules beyond the guided wizard are out of scope."
+        "Advanced BlueBuild modules beyond the guided wizard are out of scope, by design."
     ),
     "Repos not created by the tool are never adopted.": "Does not adopt repos it did not create",
 }

@@ -27,8 +27,12 @@ asks:
 - **Local test builds are Containerfile-only.** BlueBuild users can't
   test-build locally before pushing the way Containerfile users can.
 - **Advanced BlueBuild modules beyond the guided wizard are out of scope.**
-  The wizard covers the common path; anything past it currently means
-  editing the generated repo by hand.
+  This is a decision, not a TODO (#468): the wizard only offers choices that
+  produce the same image under either build method, and keeping the two
+  methods symmetric matters more during beta than reaching further into
+  BlueBuild's module system. Adding a module by hand means editing the
+  generated recipe, which the tool rewrites on every update, so a repo edited
+  that way should no longer be updated with the tool.
 - **Repos not created by the tool are never adopted.** A repo without
   `.atomic-image-builder.json` stays untouched, by design — worth restating
   here since it shapes what "supporting an existing repo" can ever mean for
@@ -48,9 +52,9 @@ asks:
 
 ## Longer-term / open questions
 
-- Whether advanced BlueBuild module support belongs in the guided wizard at
-  all, or is better left to "generate the repo, then edit it by hand" —
-  worth a decision either way rather than leaving it as an unstated gap.
+Nothing is open here right now. The last entry, whether advanced BlueBuild
+module support belongs in the guided wizard, was decided in #468 and is
+recorded under the gaps above.
 
 ---
 
