@@ -70,6 +70,41 @@ REQUIRED_MENTIONS = (
 )
 
 
+# Tracked files no tier's **Paths:** paragraph covers yet. The document is
+# the map an agent uses to decide how much evidence a change needs, and #467
+# found `.claude/settings.json` outside it: a file the map does not name has no
+# tier at all, and the reader falls back on the Quick classification's "only
+# docs, tests, or editor config" row. Which tier each of these belongs in is a
+# maintainer's decision, so they are listed here rather than guessed at. The
+# ledger is checked both ways: a new file outside every tier fails, and so does
+# an entry the document has since classified, so it can only shrink.
+UNCLASSIFIED = {
+    ".coverage-thresholds.json": "the unit coverage floor CI enforces",
+    ".coveragerc": "what the unit coverage floor measures",
+    ".coveragerc.e2e": "what end-to-end coverage measures",
+    ".coveragerc.maintenance-audit": "what the audit's coverage measures",
+    ".cursor/rules/atomic-image-builder.mdc": "always-on editor agent rule",
+    ".github/ISSUE_TEMPLATE/bug_report.yml": "issue form triage.yml reads",
+    ".github/ISSUE_TEMPLATE/config.yml": "issue chooser",
+    ".github/ISSUE_TEMPLATE/feature_request.yml": "issue form",
+    ".github/auto-qa-tuning.json": "coverage policy the QA agents read",
+    ".github/workflows/ai-fix.yml": "issues: write, passes GH_TOKEN",
+    ".github/workflows/ci.yml": "the required gate; publish-coverage holds contents: write",
+    ".github/workflows/maintenance-audit.yml": "issues: write, passes GH_TOKEN",
+    ".github/workflows/nightly-compliance.yml": "scheduled gate",
+    ".github/workflows/triage.yml": "issues: write, passes GH_TOKEN",
+    ".gitignore": "what can be committed",
+    ".simplecov": "shell coverage configuration",
+    "LICENSE": "licence",
+    "coverage_badge.py": "run by ci.yml's contents: write job",
+    "format_markdown_tables.py": "contributor tool",
+    "maintenance_audit.py": "Tier 3's own evidence command",
+    "maintenance_notes.txt": "maintainer notes",
+    "ruff.toml": "lint configuration CI enforces",
+    "snapshot_drift_issue.py": "opens issues from maintenance-audit.yml",
+}
+
+
 def doc_text() -> str:
     return DOC.read_text()
 
@@ -445,6 +480,51 @@ class PathClaimTests(unittest.TestCase):
                 continue
             with self.subTest(target=target):
                 self.assertTrue((DOC.parent / target.split("#", 1)[0]).exists())
+
+
+def classified_paths() -> set[str]:
+    """Tracked files some tier's **Paths:** paragraph covers.
+
+    Function globs and pin-table names classify code inside a file, not a
+    file, so only the path-shaped claims count here.
+    """
+    covered: set[str] = set()
+    for body in tier_sections().values():
+        for literal in literals(paths_paragraph(body)):
+            kind = classify(literal)
+            if kind in {"tracked-glob", "tracked-dir", "tracked-file"}:
+                covered |= resolve(literal, kind)
+    return covered
+
+
+class TierCompletenessTests(unittest.TestCase):
+    def test_every_tracked_file_falls_in_a_tier_or_the_ledger(self) -> None:
+        missing = tracked_paths() - classified_paths() - set(UNCLASSIFIED)
+        self.assertEqual(
+            missing,
+            set(),
+            "tracked files in no tier of docs/risk-tiers.md: name them in a "
+            "tier's **Paths:** paragraph (or, pending a maintainer's call, in UNCLASSIFIED)",
+        )
+
+    def test_every_ledger_entry_is_still_tracked(self) -> None:
+        self.assertEqual(set(UNCLASSIFIED) - tracked_paths(), set(), "UNCLASSIFIED names a file that is gone")
+
+    def test_no_ledger_entry_is_classified_already(self) -> None:
+        self.assertEqual(
+            set(UNCLASSIFIED) & classified_paths(),
+            set(),
+            "docs/risk-tiers.md now classifies these; drop them from UNCLASSIFIED",
+        )
+
+    def test_the_files_a_tier_already_answers_for_stay_out_of_the_ledger(self) -> None:
+        # The ledger is a list of open questions. A file a tier already
+        # answered for must not be parked in it, or the two can disagree.
+        classified = classified_paths()
+        for path in (".claude/settings.json", "atomic_image_builder.py", "homebrew_formula.py"):
+            with self.subTest(path=path):
+                self.assertIn(path, classified)
+                self.assertNotIn(path, UNCLASSIFIED)
 
 
 class TierOneEvidenceTests(unittest.TestCase):
