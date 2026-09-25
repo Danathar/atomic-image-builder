@@ -22,6 +22,7 @@ document happens to say is vacuous once the document says nothing.
 
 import ast
 import fnmatch
+import json
 import re
 import shlex
 import subprocess
@@ -40,6 +41,7 @@ CI = ROOT / ".github/workflows/ci.yml"
 TOOL = ROOT / "atomic_image_builder.py"
 AUDIT = ROOT / "maintenance_audit.py"
 WORKFLOWS = ROOT / ".github/workflows"
+SETTINGS = ROOT / ".claude/settings.json"
 
 BACKTICKED = re.compile(r"`([^`]+)`")
 TIER_HEADING = re.compile(r"^## Tier (\d+) [-—]")
@@ -590,6 +592,36 @@ class TierFourEvidenceTests(unittest.TestCase):
             release_workflows - named,
             set(),
             "release-triggered workflows missing from Tier 4's **Paths:** paragraph",
+        )
+
+    def test_the_agent_permission_boundary_is_named_in_tier_four(self) -> None:
+        # The settings file's deny rows are what keep a tool call off
+        # cosign.key, and the PreToolUse hooks it registers keep the
+        # allow-listed commands from reading past them. A widened row is run
+        # unprompted by the next agent, so it cannot sit in a tier that merges
+        # on a green unit suite -- which checks the table against itself. The
+        # hook scripts are read from the settings file, so a renamed or added
+        # gate has to be named too.
+        settings = json.loads(SETTINGS.read_text())
+        commands = [
+            hook["command"]
+            for entry in settings.get("hooks", {}).get("PreToolUse", [])
+            for hook in entry.get("hooks", [])
+        ]
+        scripts = set()
+        for command in commands:
+            match = re.search(r"\$CLAUDE_PROJECT_DIR/([^\"\s]+)", command)
+            self.assertIsNotNone(match, f"cannot find the script in hook command {command!r}")
+            scripts.add(match.group(1))
+        self.assertTrue(scripts, ".claude/settings.json registers no PreToolUse hook")
+        covered: set[str] = set()
+        for literal in literals(paths_paragraph(tier_sections()[4])):
+            covered |= resolve(literal, classify(literal))
+        boundary = {str(SETTINGS.relative_to(ROOT))} | scripts
+        self.assertEqual(
+            boundary - covered,
+            set(),
+            "the agent permission boundary is missing from Tier 4's **Paths:** paragraph",
         )
 
     def test_each_release_workflow_holds_a_write_permission(self) -> None:
