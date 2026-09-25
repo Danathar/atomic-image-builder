@@ -1,4 +1,5 @@
 import contextlib
+import dataclasses
 import fcntl
 import http.client
 import io
@@ -3809,6 +3810,34 @@ class BuilderTests(unittest.TestCase):
     def test_config_from_state_payload_rejects_a_non_string_string_field(self) -> None:
         with self.assertRaisesRegex(ValueError, "repo_name must be a string"):
             atomic_image_builder.config_from_state_payload({"repo_name": 42})
+
+    def test_config_from_state_payload_reads_every_config_field(self) -> None:
+        # state_payload() writes Config with asdict(), so every field reaches the
+        # state file. A field the loader cannot read would be dropped on the next
+        # update and its default pushed back to the user's repo, with nothing
+        # failing. Each field must fall under one of the loader's three types.
+        readable = (
+            atomic_image_builder.CONFIG_LIST_FIELDS
+            + atomic_image_builder.CONFIG_STRING_FIELDS
+            + atomic_image_builder.CONFIG_BOOL_FIELDS
+        )
+        self.assertCountEqual(readable, [f.name for f in dataclasses.fields(Config)])
+
+    def test_config_from_state_payload_roundtrips_every_config_field(self) -> None:
+        # Every field gets a non-default value, so one the loader skipped would
+        # come back as its default and fail the comparison.
+        cfg = Config()
+        for name in atomic_image_builder.CONFIG_LIST_FIELDS:
+            setattr(cfg, name, [f"{name}-a", f"{name}-b"])
+        for name in atomic_image_builder.CONFIG_STRING_FIELDS:
+            setattr(cfg, name, "bluebuild" if name == "method" else f"{name}-value")
+        for name in atomic_image_builder.CONFIG_BOOL_FIELDS:
+            setattr(cfg, name, not getattr(Config(), name))
+        self.assertNotEqual(cfg, Config())
+
+        reloaded = atomic_image_builder.config_from_state_payload(json.loads(json.dumps(dataclasses.asdict(cfg))))
+
+        self.assertEqual(reloaded, cfg)
 
     def test_preflight_reports_account_error_when_the_username_cannot_be_read(self) -> None:
         # gh is installed and authenticated, but `gh api user` fails. The tool

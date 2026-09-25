@@ -18,6 +18,7 @@ import urllib.request
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
+from dataclasses import fields as dataclass_fields
 from datetime import datetime, timezone, tzinfo
 from pathlib import Path, PurePosixPath
 
@@ -545,6 +546,16 @@ class Config:
         self.copr_repos = unique(self.copr_repos)
         self.services = unique(self.services)
         self.removed_packages = unique(self.removed_packages)
+
+
+# The state file's schema is Config itself: state_payload() writes every field
+# with asdict(), so the loader reads back the same names rather than keeping a
+# second list that a new field could be left out of. With postponed
+# annotations each type is its source spelling. A field of any other type would
+# be written and never read back, which the round-trip test catches.
+CONFIG_LIST_FIELDS = tuple(f.name for f in dataclass_fields(Config) if f.type == "list[str]")
+CONFIG_STRING_FIELDS = tuple(f.name for f in dataclass_fields(Config) if f.type == "str")
+CONFIG_BOOL_FIELDS = tuple(f.name for f in dataclass_fields(Config) if f.type == "bool")
 
 
 def unique(values: Iterable[str]) -> list[str]:
@@ -1093,32 +1104,16 @@ def config_from_state_payload(data: object) -> Config:
             raise ValueError(f"unsupported state_version: {state_version}")
 
     cfg = Config()
-    list_fields = {
-        "packages",
-        "copr_repos",
-        "services",
-        "removed_packages",
-        "scanned_packages",
-        "scanned_removed",
-    }
-    string_fields = {
-        "method",
-        "base_image_uri",
-        "base_image_name",
-        "repo_name",
-        "image_desc",
-        "github_user",
-    }
-    for name in list_fields:
+    for name in CONFIG_LIST_FIELDS:
         if name in data:
             setattr(cfg, name, validate_string_list(data[name], name))
-    for name in string_fields:
+    for name in CONFIG_STRING_FIELDS:
         if name in data:
             value = data[name]
             if not isinstance(value, str):
                 raise ValueError(f"{name} must be a string")
             setattr(cfg, name, value)
-    for bool_field in ("brew_enabled", "signing_enabled", "scan_customizations_carried"):
+    for bool_field in CONFIG_BOOL_FIELDS:
         if bool_field in data:
             value = data[bool_field]
             if not isinstance(value, bool):
