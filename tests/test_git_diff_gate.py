@@ -522,6 +522,9 @@ REACH_CORPUS = (
     ("word rewriting", "env -S* git diff HEAD", REFUSED, "a glob in a wrapper's option becomes a split string that hands git --output"),
     ("word rewriting", "nice -n* git log -1", REFUSED, "any wrapper word bash expands in front of git is refused the same way"),
     ("word rewriting", "echo *; git diff HEAD", ALLOWED, "a glob on another command of the string is not git's"),
+    ("word rewriting", "env -S@(git*)", REFUSED, "an extglob in a wrapper option ends the segment and hides the git it runs"),
+    ("word rewriting", "(git diff HEAD)", ALLOWED, "a subshell's ( follows no extglob operator"),
+    ("word rewriting", "x=$(git log -1); git diff", ALLOWED, "a $( is a substitution, not a pattern"),
     ("word rewriting", "git diff .env*", REFUSED, "a glob names two untracked files while the word as typed names neither"),
     ("word rewriting", "git diff -- *", REFUSED, "the same rewrite past --, refused with the rest rather than modelled"),
     ("word rewriting", "git diff -- 'tests/*.py'", ALLOWED, "a quoted pattern is git's own pathspec globbing, not bash's"),
@@ -1058,6 +1061,46 @@ class ReachTests(unittest.TestCase):
             written,
             "bash no longer expands a wrapper's globbed option into a split string that "
             "reaches git; re-derive why git_expanding_glob() reads the wrapper words",
+        )
+        self.assertIsNotNone(
+            gate.refusal(command),
+            "the command just shown to overwrite a file is not refused",
+        )
+
+    def test_an_extglob_in_a_wrapper_option_hides_git_from_the_scans(self) -> None:
+        # With extglob on, `@(git*)` is one word bash matches against the
+        # working directory, and the `(` ends the segment the scans read, so
+        # neither half is a git invocation to them. Beside a file named
+        # `-Sgit diff --output=cosign.pub HEAD --`, `env -S@(git*)` hands env
+        # that name as its split string and git writes the diff over the key
+        # (Codex on #480). -O sets extglob at startup, the way a shell with
+        # bash-completion loaded already has it when the line is parsed.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            target = repo / "cosign.pub"
+            target.write_text("ORIGINAL-CONTENT\n")
+            subprocess.run(["git", "-C", str(repo), "add", "cosign.pub"], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-qm", "x"],
+                check=True,
+            )
+            (repo / "-Sgit diff --output=cosign.pub HEAD --").write_text("")
+            target.write_text("ORIGINAL-CONTENT\nchanged\n")
+            command = "env -S@(git*)"
+            subprocess.run(
+                ["bash", "--norc", "--noprofile", "-O", "extglob", "-c", command],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            written = target.read_text()
+        self.assertNotIn(
+            "ORIGINAL-CONTENT\nchanged",
+            written,
+            "bash under extglob no longer expands @(git*) into the split string that "
+            "reaches git; re-derive why extglob_word() reads the whole string",
         )
         self.assertIsNotNone(
             gate.refusal(command),

@@ -464,6 +464,32 @@ def podman_extglob_word(positions: list[int], tokens: list[str], masked: list[st
     return None
 
 
+def extglob_word(tokens: list[str], masked: list[str]) -> str | None:
+    """The first word anywhere in the command that starts an extglob pattern,
+    or None.
+
+    podman_extglob_word() reads one podman segment; this reads the whole
+    string, because the tokenizer ends a segment at the `(` and the command
+    the pattern belongs to can be one no scan below looks at as gated: with
+    extglob on, `env -S@(git*)` beside a file named `-Sgit diff
+    --output=cosign.pub HEAD --` makes env run that git, and neither the env
+    segment (`env -S@`) nor the one after the `(` (`git*`) is a git invocation
+    to the scans (Codex on #480, reproduced under bash -O extglob). A word
+    whose masked twin ends in an unquoted `@`, `+`, `!`, `?` or `*`, with a
+    `(` token next, is the pattern's start; a quoted `'@'(x)` masks to `Q`.
+    A `$(` is a substitution, not a pattern, and `$` is not in the set.
+    """
+    for index, twin in enumerate(masked[:-1]):
+        if masked[index + 1] == "(" and twin and twin[-1] in "@+!?*":
+            # Quote the command the pattern stands in, from its first word,
+            # so the refusal names words the model typed.
+            start = index
+            while start > 0 and not is_operator(masked[start - 1]):
+                start -= 1
+            return " ".join(tokens[start : index + 1])
+    return None
+
+
 # Shell words that stand before the name of the command they run, which a
 # leading-words match has to step over the way it steps over an assignment:
 # `time shellcheck x >out` and `command shellcheck x >out` are shellcheck's
@@ -2307,6 +2333,16 @@ def refusal(command: str) -> str | None:
                 "would be in the environment of the next call's command; pass what the "
                 "command needs after its name instead"
             )
+    extglob = extglob_word(tokens, masked)
+    if extglob is not None:
+        return (
+            f"`{extglob}(` starts an extglob pattern: with `shopt -s extglob` on, which "
+            "Fedora's bash-completion sets, bash reads it as one word and matches it "
+            "against the working directory the way `*` is, and the `(` hides the "
+            "rest of the command from this scan -- beside a file named `-Sgit diff "
+            "--output=cosign.pub HEAD --`, `env -S@(git*)` runs that git and writes "
+            "the diff over cosign.pub; write the words out"
+        )
     for positions in segment_positions(tokens, masked):
         segment = [tokens[index] for index in positions]
         twins = [masked[index] for index in positions]
