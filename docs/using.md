@@ -53,7 +53,10 @@ pull credentials for root before the switch works. See
   build method they use — from a source checkout (see
   [container limitations](installing.md#limitations-of-running-in-a-container)).
   A BlueBuild repo is rendered with the same BlueBuild CLI GitHub Actions
-  uses, pulled from its installer image, and then built with Podman.
+  uses, pulled from its installer image, and then built with Podman. The
+  build renders this tool's current template plus your repo's `cosign.pub`;
+  edits you made by hand to other files in your clone (for example under
+  `files/system/`) are not part of the local test, while in CI they are.
 - The update menu can rotate the repo's cosign signing key and update `cosign.pub`.
 - The disk-image workflow (`build-disk.yml`) and the local `just build-qcow2`
   both run `bootc-image-builder` by digest rather than by tag, for the same

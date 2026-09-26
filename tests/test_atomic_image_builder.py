@@ -8758,7 +8758,7 @@ class BuilderTests(unittest.TestCase):
             command = list(command)
             commands.append((command, cwd))
             if command[:2] == ["podman", "create"]:
-                return subprocess.CompletedProcess(command, 0, "0123abcd\n", "Trying to pull...\n")
+                return subprocess.CompletedProcess(command, 0, "", "Trying to pull...\n")
             if command[:2] == ["podman", "cp"]:
                 Path(command[3]).write_text("#!/bin/sh\nexit 0\n")
             return subprocess.CompletedProcess(command, 0, "", "")
@@ -8804,19 +8804,27 @@ class BuilderTests(unittest.TestCase):
         argv = [command for command, _cwd in commands]
         # By digest, with no --pull policy: the CLI runs on the host as the
         # user, so podman is given the reviewed bytes, not a tag ghcr.io could
-        # repoint. The tag is kept beside it for the weekly audit.
-        self.assertEqual(argv[0], ["podman", "create", atomic_image_builder.BLUEBUILD_CLI_INSTALLER_IMAGE])
+        # repoint. The tag is kept beside it for the weekly audit. The
+        # container is named up front so an interrupted create still has a
+        # handle for the rm -f in the finally.
+        self.assertEqual(argv[0][:3], ["podman", "create", "--name"])
+        container_name = argv[0][3]
+        self.assertTrue(container_name.startswith("atomic-image-builder-bluebuild-installer-"))
+        self.assertEqual(argv[0][4], atomic_image_builder.BLUEBUILD_CLI_INSTALLER_IMAGE)
         self.assertEqual(
             atomic_image_builder.BLUEBUILD_CLI_INSTALLER_IMAGE,
             f"ghcr.io/blue-build/cli@{atomic_image_builder.BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST}",
         )
         self.assertRegex(atomic_image_builder.BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST, r"^sha256:[0-9a-f]{64}$")
-        self.assertEqual(argv[1][:3], ["podman", "cp", "0123abcd:/out/bluebuild"])
+        self.assertEqual(argv[1][:3], ["podman", "cp", f"{container_name}:/out/bluebuild"])
         generate, generate_cwd = commands[2]
         self.assertEqual(generate[0], argv[1][3])
+        # --build-driver podman: the host build that follows uses podman, and
+        # without the flag the CLI prefers docker when a docker with buildx
+        # is on PATH, rendering a Containerfile whose scripts mount has no ,Z.
         self.assertEqual(
             generate[1:],
-            ["generate", "--output", "Containerfile", "--registry", "ghcr.io", "--registry-namespace", "example", "recipes/recipe.yml"],
+            ["generate", "--build-driver", "podman", "--output", "Containerfile", "--registry", "ghcr.io", "--registry-namespace", "example", "recipes/recipe.yml"],
         )
         self.assertEqual(argv[3][:3], ["podman", "build", "-t"])
         self.assertEqual(context_state["build_context"], generate_cwd)
@@ -8828,8 +8836,28 @@ class BuilderTests(unittest.TestCase):
         # No repo and no generated key yet: the marked placeholder stands in
         # so the recipe's signing module has a key to copy.
         self.assertEqual(context_state["cosign_pub"], atomic_image_builder.LOCAL_BUILD_PLACEHOLDER_COSIGN_PUB)
-        self.assertIn(["podman", "rm", "0123abcd"], direct)
+        self.assertIn(["podman", "rm", "-f", container_name], direct)
         self.assertTrue(any(level == "success" and "atomic-image-builder-local-test:dryrun" in message for level, message in stub.messages))
+
+    def test_test_build_locally_removes_the_installer_container_when_the_create_is_interrupted(self) -> None:
+        # Ctrl+C during the create spinner can leave a container podman
+        # already made, and before the container had a name there was no
+        # handle to remove it by: the ID on stdout was never read. The rm -f
+        # by name in the finally covers the create step too.
+        app, stub, _commands, direct = self.bluebuild_local_build_app()
+        real_spinner = stub.spinner_result
+
+        def interrupted_create(title, command, *, cwd=None):
+            if list(command)[:2] == ["podman", "create"]:
+                raise KeyboardInterrupt
+            return real_spinner(title, command, cwd=cwd)
+
+        stub.spinner_result = interrupted_create
+        with self.assertRaises(KeyboardInterrupt):
+            app.test_build_locally()
+        removed = [args for args in direct if args[:3] == ["podman", "rm", "-f"]]
+        self.assertEqual(len(removed), 1)
+        self.assertTrue(removed[0][3].startswith("atomic-image-builder-bluebuild-installer-"))
 
     def test_test_build_locally_uses_the_repos_cosign_pub_for_a_bluebuild_update(self) -> None:
         # The update menu has a clone of the managed repo, whose cosign.pub is
@@ -8884,7 +8912,8 @@ class BuilderTests(unittest.TestCase):
 
     def test_test_build_locally_reports_an_unfetchable_bluebuild_installer_image(self) -> None:
         # Offline, or the tag gone: the failure names the image, nothing is
-        # copied or built, and there is no container to remove.
+        # copied or built. The rm -f by name still runs (check=False, the
+        # container may not exist), because podman can fail after creating.
         app, stub, commands, direct = self.bluebuild_local_build_app()
 
         def failing_create(_title, command, *, cwd=None):
@@ -8897,7 +8926,7 @@ class BuilderTests(unittest.TestCase):
 
         self.assertEqual([command[:2] for command, _cwd in commands], [["podman", "create"]])
         self.assertIn(("error", f"Fetching {atomic_image_builder.BLUEBUILD_CLI_INSTALLER_IMAGE} failed with exit status 125."), stub.messages)
-        self.assertEqual(direct, [])
+        self.assertEqual([args[:3] for args in direct], [["podman", "rm", "-f"]])
         self.assertEqual(stub.prompts, ["Press Enter to return to the menu..."])
 
     def test_test_build_locally_removes_the_installer_container_when_the_copy_fails(self) -> None:
@@ -8913,7 +8942,7 @@ class BuilderTests(unittest.TestCase):
         stub.spinner_result = failing_cp
         app.test_build_locally()
 
-        self.assertIn(["podman", "rm", "0123abcd"], direct)
+        self.assertEqual([args[:3] for args in direct], [["podman", "rm", "-f"]])
         self.assertFalse(any(command[1:2] == ["generate"] or command[:2] == ["podman", "build"] for command, _cwd in commands))
         self.assertTrue(any(level == "error" and "failed with exit status 1" in message for level, message in stub.messages))
 

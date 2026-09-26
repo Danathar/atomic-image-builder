@@ -5042,25 +5042,37 @@ class App:
             # By digest, so no --pull policy is needed: a digest either is in
             # local storage or is fetched, and it names the same bytes either
             # way. See BLUEBUILD_CLI_INSTALLER_IMAGE.
-            created = self.gum.spinner_result(
-                "Fetching the BlueBuild CLI...",
-                ["podman", "create", BLUEBUILD_CLI_INSTALLER_IMAGE],
-            )
-            container_id = (created.stdout or "").strip()
-            if created.returncode != 0 or not container_id:
-                self.report_local_build_failure(f"Fetching {BLUEBUILD_CLI_INSTALLER_IMAGE}", created)
-                return False
+            #
+            # The container is named up front and removed by name in a
+            # finally that also covers the create: podman can have created
+            # the container even when the spinner raises (Ctrl+C), and an ID
+            # read from stdout would not exist yet to be cleaned up then.
+            container_name = f"{TOOL_SLUG}-bluebuild-installer-{secrets.token_hex(8)}"
             try:
+                created = self.gum.spinner_result(
+                    "Fetching the BlueBuild CLI...",
+                    ["podman", "create", "--name", container_name, BLUEBUILD_CLI_INSTALLER_IMAGE],
+                )
+                if created.returncode != 0:
+                    self.report_local_build_failure(f"Fetching {BLUEBUILD_CLI_INSTALLER_IMAGE}", created)
+                    return False
                 copied = self.gum.spinner_result(
                     "Copying the BlueBuild CLI out of its installer image...",
-                    ["podman", "cp", f"{container_id}:/out/bluebuild", str(cli)],
+                    ["podman", "cp", f"{container_name}:/out/bluebuild", str(cli)],
                 )
             finally:
-                run(["podman", "rm", container_id], check=False)
+                run(["podman", "rm", "-f", container_name], check=False)
             if copied.returncode != 0:
                 self.report_local_build_failure("Copying the BlueBuild CLI out of its installer image", copied)
                 return False
-            command = [str(cli), "generate", "--output", "Containerfile"]
+            # CI's action runs the CLI inside its own image, where the CLI
+            # detects itself as the podman driver. On the host the CLI
+            # prefers docker when a docker with buildx is on PATH (the -dx
+            # images ship one), and the template depends on the choice: under
+            # docker the scripts bind mount loses its ,Z relabel and COPY
+            # gains --link. The next step builds with host podman either
+            # way, so the driver is pinned to match it.
+            command = [str(cli), "generate", "--build-driver", "podman", "--output", "Containerfile"]
             # The signing module writes the image's registry path into
             # policy.json, so the rendered Containerfile matches CI's only
             # when it is told the same registry the action tells it.
