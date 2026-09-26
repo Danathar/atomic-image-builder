@@ -46,6 +46,14 @@ asks:
    five-stage runtime). Right now the beta label has no stated exit
    condition, which makes it hard for adopters to judge how far out
    general-availability is.
+
+   **Candidate bar (proposal, not yet a maintainer decision — see #475):**
+   three consecutive tagged releases with no scan/carry/build regression
+   reported against either build method, the coverage gate holding at or
+   above its current threshold across those releases, and zero open
+   correctness issues against the five-stage runtime at time of the third
+   release. This is one concrete way to satisfy priority #1 above; picking
+   it, adjusting it, or replacing it is the maintainer's call.
 2. **BlueBuild local test build parity**, or an explicit decision to leave
    it Containerfile-only with the reason written down, so it stops reading
    as a TODO.
