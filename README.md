@@ -60,7 +60,7 @@ What it creates and maintains is a **separate GitHub repository** that builds yo
 - Add more on top: packages, COPR repos, systemd services, and further base-package removals.
 - Choose the build method — **Containerfile** (from a bundled snapshot of [`ublue-os/image-template`](https://github.com/ublue-os/image-template)) or **BlueBuild** (from [`blue-build/template`](https://github.com/blue-build/template)).
 - Update repos it created, view build status, and rotate the cosign signing key.
-- Test-build a Containerfile image locally with Podman before pushing.
+- Test-build the image locally with Podman before pushing, whichever build method you chose.
 
 Nothing has to be layered for this to be useful — with a clean system it simply starts from the base you are on and you add what you want. And if there is no system to read, as with a bare `podman run`, the tool says so and lets you pick a base image by hand.
 
@@ -70,7 +70,6 @@ Supported bases — the scan needs you to be running one of these: **[Universal 
 
 - **Leaves the system you run it on alone** — the scan reads and never writes: no in-place changes, no automatic rebase, and your layered packages stay exactly where they are.
 - Does not adopt repos it did not create — a repo without `.atomic-image-builder.json` is not treated as managed.
-- Local test builds are Containerfile-only.
 - Advanced BlueBuild modules beyond the guided wizard are out of scope, by design. The wizard only offers choices that produce the same image under either build method. You can add other modules by editing `recipes/recipe.yml` yourself, but the tool rewrites that file on every update, so once you do, stop updating that repo with the tool.
 
 ## Documentation
