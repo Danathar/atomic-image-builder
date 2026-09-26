@@ -1073,6 +1073,50 @@ def mask_quotes_stripped(command: str) -> str:
     return "".join(masked)
 
 
+def join_continuations(command: str) -> str:
+    """The command with every backslash-newline removed the way bash removes
+    it, before any word is read.
+
+    Bash drops an unquoted `\\<newline>` pair, and one inside double quotes,
+    as it reads the line -- before tokenizing, before brace or pathname
+    expansion -- so `podman images --cpu-pro\\<newline>file x` is the profile
+    option to podman and `@\\<newline>(x)` is the extglob `@(x)`, while shlex
+    keeps the newline inside the word and every check downstream sees a
+    spelling bash never runs (review on #481). Inside single quotes the pair
+    is two literal characters and stays. The quote state is walked here
+    rather than read off mask_quotes(), which masks the pair to `QQ` in every
+    quoting and cannot tell single from double.
+    """
+    kept: list[str] = []
+    quote = ""
+    index = 0
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            kept.append(char)
+            index += 1
+            continue
+        if char == "\\" and index + 1 < length:
+            if command[index + 1] == "\n":
+                index += 2
+                continue
+            kept.append(char)
+            kept.append(command[index + 1])
+            index += 2
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        kept.append(char)
+        index += 1
+    return "".join(kept)
+
+
 def strip_comments(command: str) -> str:
     """The command with every shell comment removed.
 
@@ -2159,7 +2203,7 @@ def global_refusal(arguments: list[str]) -> str | None:
 def refusal(command: str) -> str | None:
     """Why this command is blocked, or None when it is left alone."""
     try:
-        command = strip_comments(command)
+        command = strip_comments(join_continuations(command))
         tokens = tokenize(command)
         masked = tokenize(mask_quotes_stripped(command))
         raws = raw_words(command)
