@@ -605,6 +605,11 @@ REACH_CORPUS = (
     ("options", "podman images ~/x", REFUSED, "an unquoted leading ~ is also a word bash rewrites before podman runs"),
     ("options", "podman images 'fedora*'", ALLOWED, "a quoted pattern reaches podman as typed and names no file"),
     ("options", "podman images fedora\\*", ALLOWED, "an escaped * is a literal character, not a glob"),
+    ("options", "podman images @(--cpu-profile=cosign.pub)", REFUSED, "an extglob pattern is one word under shopt -s extglob and matches a file named like the option"),
+    ("options", "podman ps +(--memory-profile=cosign.pub)", REFUSED, "the +(...) extglob form"),
+    ("options", "podman images fedora!(x)", REFUSED, "an extglob suffix on an ordinary word"),
+    ("options", "podman images '@'(x)", ALLOWED, "the @ is quoted, so it is no pattern; bash then errors on the bare parenthesis"),
+    ("options", "podman images --cpu-profile cosign.pub *", REFUSED, "a literal flag beside a glob is refused for the flag"),
 )
 
 

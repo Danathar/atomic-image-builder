@@ -432,6 +432,28 @@ def podman_expanding_path(words: list[str], twins: list[str]) -> str | None:
     return None
 
 
+def podman_extglob_word(positions: list[int], tokens: list[str], masked: list[str]) -> str | None:
+    """The word of this segment that an extglob pattern starts with, or None.
+
+    With `shopt -s extglob` on (Fedora's bash-completion turns it on),
+    `@(...)`, `+(...)`, `!(...)`, `?(...)` and `*(...)` are one word each and
+    match files the way `*` does, so `podman images @(--cpu-profile=cosign.pub)`
+    reaches podman as that option beside a file of that name. The tokenizer
+    ends the segment at the `(`, so the pattern shows up here as the
+    segment's last word ending in one of those five characters, unquoted in
+    its masked twin, with a `(` as the very next token (aurora-zfs-simple#262).
+    A quoted `'@'(x)` masks to `Q`, so it is left alone.
+    """
+    if not positions:
+        return None
+    last = positions[-1]
+    if last + 1 >= len(tokens) or masked[last + 1] != "(":
+        return None
+    if masked[last] and masked[last][-1] in "@+!?*":
+        return tokens[last]
+    return None
+
+
 # Shell words that stand before the name of the command they run, which a
 # leading-words match has to step over the way it steps over an assignment:
 # `time shellcheck x >out` and `command shellcheck x >out` are shellcheck's
@@ -2353,6 +2375,15 @@ def refusal(command: str) -> str | None:
                         "`--cpu-profil*` -- or a bare `*` -- into the profile option that "
                         "overwrites cosign.pub; write the word out, or quote a pattern "
                         "podman should see literally ('fedora*')"
+                    )
+                extglob = podman_extglob_word(positions, tokens, masked)
+                if extglob is not None:
+                    return (
+                        f"{extglob}( is an extglob pattern: with `shopt -s extglob` on, "
+                        "which Fedora's bash-completion sets, bash reads it as one word and "
+                        "matches it against the working directory the way `*` is, so "
+                        "`podman images @(--cpu-profile=cosign.pub)` reaches podman as the "
+                        "profile option beside a file of that name; write the word out"
                     )
                 option = podman_profile_option(invocation.words)
                 if option is not None:
