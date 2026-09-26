@@ -326,7 +326,7 @@ If you would rather run the script directly, you will need these on your host:
 - Python 3.10 or newer
 - `gum`, `git`, `gh`, and `cosign`
 - `dnf5` (used for package-name validation) and `rpm-ostree` (used for system scanning)
-- Optional: `podman`, for local Containerfile test builds
+- Optional: `podman`, for local test builds
 
 The app checks for the required tools at startup and exits if any are missing. On
 Universal Blue and Fedora Atomic desktop images, `dnf5` and `rpm-ostree` are

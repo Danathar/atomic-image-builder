@@ -66,7 +66,7 @@ Regions, in file order:
 
 ### The `App` class
 
-~130 methods, grouped by what they do rather than by where they sit:
+~140 methods, grouped by what they do rather than by where they sit:
 
 | Group                 | Representative methods                                                                                                                                                                                    |
 | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

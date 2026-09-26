@@ -306,6 +306,37 @@ ACTION_REF_PINS: dict[str, tuple[str, str]] = {
     "sigstore/cosign-installer@v4.0.0": ("faadad0cce49287aee09b3a48701e75088a2c6ad", "v4.0.0"),
     "sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad": ("faadad0cce49287aee09b3a48701e75088a2c6ad", "v4.0.0"),
 }
+# The BlueBuild CLI a local test build renders `recipes/recipe.yml` with. It
+# is fetched the way both blue-build/github-action and BlueBuild's own
+# install.sh fetch it: create a container from the installer image and copy
+# `/out/bluebuild` out of it. The tag is the floating one the pinned action
+# above installs by default (`CLI_VERSION_TAG` in its "Determine Vars" step);
+# the digest is what podman is given. The binary runs on the host, as the
+# user, with the user's files and credentials in reach, so like the other two
+# third-party images above it is pinned to the bytes that were reviewed rather
+# than to a tag anyone with push access to the repository can repoint.
+#
+# The cost is the one every pin has, and here it is parity: CI pulls the tag
+# and moves when it moves, while this stays until re-pinned, so a local build
+# can render with a CLI a step behind CI's. maintenance_audit.py's weekly run
+# reports when the tag no longer resolves to this digest
+# (audit_bluebuild_cli_image_pin); re-pin after a local build against the
+# wizard's recipe still renders, and re-read the action's default tag whenever
+# the action pin changes.
+BLUEBUILD_CLI_INSTALLER_IMAGE_REPO = "ghcr.io/blue-build/cli"
+BLUEBUILD_CLI_INSTALLER_IMAGE_TAG = "v0.9-installer"
+BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST = "sha256:1a53a3a145068a38d1c20b00a6047dd2c5e8848f7cd6b6c89d49c793ebd76fd6"
+BLUEBUILD_CLI_INSTALLER_IMAGE = f"{BLUEBUILD_CLI_INSTALLER_IMAGE_REPO}@{BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST}"
+# Written into the local build context when no real key exists yet. The
+# recipe's signing module only copies `cosign.pub` into /etc/pki/containers
+# and names it in policy.json; nothing at build time parses it. A repo the
+# tool created has a real key, and the update path uses that one.
+LOCAL_BUILD_PLACEHOLDER_COSIGN_PUB = (
+    "-----BEGIN PLACEHOLDER-----\n"
+    f"Written by {TOOL_NAME} for a local test build only.\n"
+    "The real cosign.pub is generated when the repository is created.\n"
+    "-----END PLACEHOLDER-----\n"
+)
 # The rechunk step's Justfile invocation, matched so Chunkah can be swapped in
 # for rpm-ostree. Upstream has shipped two spellings: the pre-rootless
 # `sudo -E $(command -v just) ostree-rechunk` and, since ublue-os/image-template
@@ -3562,10 +3593,7 @@ class App:
             # about it.
             if not self.is_universal_blue_base():
                 options.append(brew_label)
-            options.append(full_label)
-            if self.config.method == "containerfile":
-                options.append(local_build_label)
-            options.extend([build_label, cancel_label])
+            options.extend([full_label, local_build_label, build_label, cancel_label])
             choice = self.gum.choose(options, height=10)
             selected = choice[0] if choice else cancel_label
             if selected == build_label:
@@ -4929,7 +4957,7 @@ class App:
         self.gum.enter_to_continue("Press Enter to return to the main menu...")
         return True
 
-    def test_build_locally(self) -> None:
+    def test_build_locally(self, repo_dir: Path | None = None) -> None:
         if os.environ.get("AIB_DISABLE_LOCAL_BUILD"):
             # Set by the container image: podman is present there only as a
             # transitive dependency of rpm-ostree, so an in-container build
@@ -4941,15 +4969,11 @@ class App:
             # over it (the caller clears the screen on its next iteration).
             self.gum.enter_to_continue("Press Enter to return to the menu...")
             return
-        # The two early exits below pause for the same reason the branch above
+        # The early exit below pauses for the same reason the branch above
         # does: run_screen_action pauses only on CommandError, so a plain
         # return goes straight back into the menu loop and its header() clears
         # the screen before the message can be read. podman is not a preflight
-        # requirement, so the second exit is reachable on any Homebrew install.
-        if self.config.method != "containerfile":
-            self.gum.hint("Local test build is Containerfile-only for now.")
-            self.gum.enter_to_continue("Press Enter to return to the menu...")
-            return
+        # requirement, so this exit is reachable on any Homebrew install.
         if not command_exists("podman"):
             self.gum.warn("podman is required to run a local test build.")
             self.gum.hint("Install podman, then try this again.")
@@ -4961,6 +4985,9 @@ class App:
             tmpdir = Path(tmp)
             self.seed_project_template(tmpdir)
             self.write_project_files(tmpdir, include_workflow=False)
+            if self.config.method == "bluebuild" and not self.render_bluebuild_containerfile(tmpdir, repo_dir):
+                self.gum.enter_to_continue("Press Enter to return to the menu...")
+                return
             proc = self.gum.spinner_result(
                 "Testing local podman build...",
                 ["podman", "build", "-t", tag, str(tmpdir)],
@@ -4969,12 +4996,95 @@ class App:
                 self.gum.success(f"Local test build succeeded: {tag}")
                 self.gum.hint(f"Try inspecting it with: podman image inspect {tag}")
             else:
-                self.gum.error(f"Local podman build failed with exit status {proc.returncode}.")
-                stderr = (proc.stderr or "").strip()
-                if stderr:
-                    tail = "\n".join(stderr.splitlines()[-8:])
-                    self.gum.hint(tail)
+                self.report_local_build_failure("Local podman build", proc)
         self.gum.enter_to_continue("Press Enter to return to the menu...")
+
+    def report_local_build_failure(self, what: str, proc: subprocess.CompletedProcess[str]) -> None:
+        # Only the last eight stderr lines are shown: the useful part of a
+        # failed podman build or bluebuild run is at the end, and the whole
+        # log would push the menu off the screen.
+        self.gum.error(f"{what} failed with exit status {proc.returncode}.")
+        stderr = (proc.stderr or "").strip()
+        if stderr:
+            self.gum.hint("\n".join(stderr.splitlines()[-8:]))
+
+    def render_bluebuild_containerfile(self, context: Path, repo_dir: Path | None) -> bool:
+        """Turn the recipe in `context` into a Containerfile podman can build.
+
+        CI never builds a recipe directly: blue-build/github-action installs
+        the BlueBuild CLI and `bluebuild build` renders the recipe into a
+        Containerfile before it hands that to the build driver. The local test
+        build does the same two steps with the same CLI, fetched the way the
+        action (and BlueBuild's own install.sh) fetches it -- a container
+        created from the installer image, with the binary copied out. That
+        avoids both a new host prerequisite and running the CLI inside the
+        tool container, which is the nested build the AIB_DISABLE_LOCAL_BUILD
+        exit refuses. `bluebuild generate` only reads the registry (the base
+        image's digest and OS version) and the recipe schema; nothing is
+        built until podman is, and podman is the same host podman the
+        Containerfile path already uses.
+
+        Returns False after reporting the failed step; the caller pauses.
+        """
+        cosign_pub = managed_path(context, "cosign.pub")
+        if not cosign_pub.exists():
+            # The recipe's signing module fails the build when the CLI has not
+            # copied a public key in, and the CLI copies it from the context
+            # root. The update path has the repo's real key; before the repo
+            # exists there is none, so a marked placeholder stands in.
+            repo_key = managed_path(repo_dir, "cosign.pub") if repo_dir is not None else None
+            if repo_key is not None and repo_key.exists():
+                shutil.copy2(repo_key, cosign_pub)
+            else:
+                cosign_pub.write_text(LOCAL_BUILD_PLACEHOLDER_COSIGN_PUB)
+        with tempfile.TemporaryDirectory(prefix=f"{TOOL_SLUG}-bluebuild-cli.") as tmp:
+            cli = Path(tmp) / "bluebuild"
+            # By digest, so no --pull policy is needed: a digest either is in
+            # local storage or is fetched, and it names the same bytes either
+            # way. See BLUEBUILD_CLI_INSTALLER_IMAGE.
+            #
+            # The container is named up front and removed by name in a
+            # finally that also covers the create: podman can have created
+            # the container even when the spinner raises (Ctrl+C), and an ID
+            # read from stdout would not exist yet to be cleaned up then.
+            container_name = f"{TOOL_SLUG}-bluebuild-installer-{secrets.token_hex(8)}"
+            try:
+                created = self.gum.spinner_result(
+                    "Fetching the BlueBuild CLI...",
+                    ["podman", "create", "--name", container_name, BLUEBUILD_CLI_INSTALLER_IMAGE],
+                )
+                if created.returncode != 0:
+                    self.report_local_build_failure(f"Fetching {BLUEBUILD_CLI_INSTALLER_IMAGE}", created)
+                    return False
+                copied = self.gum.spinner_result(
+                    "Copying the BlueBuild CLI out of its installer image...",
+                    ["podman", "cp", f"{container_name}:/out/bluebuild", str(cli)],
+                )
+            finally:
+                run(["podman", "rm", "-f", container_name], check=False)
+            if copied.returncode != 0:
+                self.report_local_build_failure("Copying the BlueBuild CLI out of its installer image", copied)
+                return False
+            # CI's action runs the CLI inside its own image, where the CLI
+            # detects itself as the podman driver. On the host the CLI
+            # prefers docker when a docker with buildx is on PATH (the -dx
+            # images ship one), and the template depends on the choice: under
+            # docker the scripts bind mount loses its ,Z relabel and COPY
+            # gains --link. The next step builds with host podman either
+            # way, so the driver is pinned to match it.
+            command = [str(cli), "generate", "--build-driver", "podman", "--output", "Containerfile"]
+            # The signing module writes the image's registry path into
+            # policy.json, so the rendered Containerfile matches CI's only
+            # when it is told the same registry the action tells it.
+            owner = (self.config.github_user or self.github_user).lower()
+            if owner:
+                command.extend(["--registry", "ghcr.io", "--registry-namespace", owner])
+            command.append("recipes/recipe.yml")
+            rendered = self.gum.spinner_result("Rendering the recipe with bluebuild generate...", command, cwd=context)
+        if rendered.returncode != 0:
+            self.report_local_build_failure("bluebuild generate", rendered)
+            return False
+        return True
 
     def select_repo(self, *, require_state_file: bool = False) -> tuple[str, str]:
         # This helper centralizes repo picking for update flows. The
@@ -5259,11 +5369,7 @@ class App:
             rotate_label = "Rotate signing key (cosign)"
             save_label = "Save and push changes"
             cancel_label = "Cancel and go back"
-            options.append(review_label)
-            if self.config.method == "containerfile":
-                options.append(local_build_label)
-            options.append(rotate_label)
-            options.extend([save_label, cancel_label])
+            options.extend([review_label, local_build_label, rotate_label, save_label, cancel_label])
             try:
                 choice = self.gum.choose(options, height=14)
             except ScreenBack:
@@ -5279,7 +5385,7 @@ class App:
                 continue
             if selected == local_build_label:
                 self.run_screen_action(
-                    self.test_build_locally,
+                    lambda: self.test_build_locally(repo_dir),
                     return_hint="Press Enter to return to the update menu...",
                 )
                 continue

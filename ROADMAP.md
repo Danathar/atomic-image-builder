@@ -24,8 +24,6 @@ scope boundaries the maintainer chose, not necessarily things that must
 change, but they are the concrete candidates for "what's next" when someone
 asks:
 
-- **Local test builds are Containerfile-only.** BlueBuild users can't
-  test-build locally before pushing the way Containerfile users can.
 - **Advanced BlueBuild modules beyond the guided wizard are out of scope.**
   This is a decision, not a TODO (#468): the wizard only offers choices that
   produce the same image under either build method, and keeping the two
@@ -54,15 +52,14 @@ asks:
    correctness issues against the five-stage runtime at time of the third
    release. This is one concrete way to satisfy priority #1 above; picking
    it, adjusting it, or replacing it is the maintainer's call.
-2. **BlueBuild local test build parity**, or an explicit decision to leave
-   it Containerfile-only with the reason written down, so it stops reading
-   as a TODO.
 
 ## Longer-term / open questions
 
-Nothing is open here right now. The last entry, whether advanced BlueBuild
-module support belongs in the guided wizard, was decided in #468 and is
-recorded under the gaps above.
+Nothing is open here right now. The last two entries were closed: whether
+advanced BlueBuild module support belongs in the guided wizard was decided in
+#468 and is recorded under the gaps above, and BlueBuild local test builds
+reached parity with the Containerfile path in #463, so that gap is gone from
+the README.
 
 ---
 
