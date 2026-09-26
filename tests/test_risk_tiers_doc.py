@@ -70,39 +70,16 @@ REQUIRED_MENTIONS = (
 )
 
 
-# Tracked files no tier's **Paths:** paragraph covers yet. The document is
-# the map an agent uses to decide how much evidence a change needs, and #467
-# found `.claude/settings.json` outside it: a file the map does not name has no
-# tier at all, and the reader falls back on the Quick classification's "only
-# docs, tests, or editor config" row. Which tier each of these belongs in is a
-# maintainer's decision, so they are listed here rather than guessed at. The
-# ledger is checked both ways: a new file outside every tier fails, and so does
-# an entry the document has since classified, so it can only shrink.
-UNCLASSIFIED = {
-    ".coverage-thresholds.json": "the unit coverage floor CI enforces",
-    ".coveragerc": "what the unit coverage floor measures",
-    ".coveragerc.e2e": "what end-to-end coverage measures",
-    ".coveragerc.maintenance-audit": "what the audit's coverage measures",
-    ".cursor/rules/atomic-image-builder.mdc": "always-on editor agent rule",
-    ".github/ISSUE_TEMPLATE/bug_report.yml": "issue form triage.yml reads",
-    ".github/ISSUE_TEMPLATE/config.yml": "issue chooser",
-    ".github/ISSUE_TEMPLATE/feature_request.yml": "issue form",
-    ".github/auto-qa-tuning.json": "coverage policy the QA agents read",
-    ".github/workflows/ai-fix.yml": "issues: write, passes GH_TOKEN",
-    ".github/workflows/ci.yml": "the required gate; publish-coverage holds contents: write",
-    ".github/workflows/maintenance-audit.yml": "issues: write, passes GH_TOKEN",
-    ".github/workflows/nightly-compliance.yml": "scheduled gate",
-    ".github/workflows/triage.yml": "issues: write, passes GH_TOKEN",
-    ".gitignore": "what can be committed",
-    ".simplecov": "shell coverage configuration",
-    "LICENSE": "licence",
-    "coverage_badge.py": "run by ci.yml's contents: write job",
-    "format_markdown_tables.py": "contributor tool",
-    "maintenance_audit.py": "Tier 3's own evidence command",
-    "maintenance_notes.txt": "maintainer notes",
-    "ruff.toml": "lint configuration CI enforces",
-    "snapshot_drift_issue.py": "opens issues from maintenance-audit.yml",
-}
+# Tracked files no tier's **Paths:** paragraph covers yet, each with the
+# reason it is still open. The document is the map an agent uses to decide
+# how much evidence a change needs, and #467 found `.claude/settings.json`
+# outside it: a file the map does not name has no tier at all, and the reader
+# falls back on the Quick classification's first row. #469 closed the 23 files
+# that were parked here, so the ledger is empty; a new tracked file that no
+# tier names fails the completeness test below, and the right fix is to name
+# it in a tier, not to park it here. The ledger is checked both ways: an entry
+# the document has since classified fails too, so it can only shrink.
+UNCLASSIFIED: dict[str, str] = {}
 
 
 def doc_text() -> str:
