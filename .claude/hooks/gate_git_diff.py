@@ -432,6 +432,28 @@ def podman_expanding_path(words: list[str], twins: list[str]) -> str | None:
     return None
 
 
+def podman_extglob_word(positions: list[int], tokens: list[str], masked: list[str]) -> str | None:
+    """The word of this segment that an extglob pattern starts with, or None.
+
+    With `shopt -s extglob` on (Fedora's bash-completion turns it on),
+    `@(...)`, `+(...)`, `!(...)`, `?(...)` and `*(...)` are one word each and
+    match files the way `*` does, so `podman images @(--cpu-profile=cosign.pub)`
+    reaches podman as that option beside a file of that name. The tokenizer
+    ends the segment at the `(`, so the pattern shows up here as the
+    segment's last word ending in one of those five characters, unquoted in
+    its masked twin, with a `(` as the very next token (aurora-zfs-simple#262).
+    A quoted `'@'(x)` masks to `Q`, so it is left alone.
+    """
+    if not positions:
+        return None
+    last = positions[-1]
+    if last + 1 >= len(tokens) or masked[last + 1] != "(":
+        return None
+    if masked[last] and masked[last][-1] in "@+!?*":
+        return tokens[last]
+    return None
+
+
 # Shell words that stand before the name of the command they run, which a
 # leading-words match has to step over the way it steps over an assignment:
 # `time shellcheck x >out` and `command shellcheck x >out` are shellcheck's
@@ -1049,6 +1071,50 @@ def mask_quotes_stripped(command: str) -> str:
             masked.append(char)
         index += 1
     return "".join(masked)
+
+
+def join_continuations(command: str) -> str:
+    """The command with every backslash-newline removed the way bash removes
+    it, before any word is read.
+
+    Bash drops an unquoted `\\<newline>` pair, and one inside double quotes,
+    as it reads the line -- before tokenizing, before brace or pathname
+    expansion -- so `podman images --cpu-pro\\<newline>file x` is the profile
+    option to podman and `@\\<newline>(x)` is the extglob `@(x)`, while shlex
+    keeps the newline inside the word and every check downstream sees a
+    spelling bash never runs (review on #481). Inside single quotes the pair
+    is two literal characters and stays. The quote state is walked here
+    rather than read off mask_quotes(), which masks the pair to `QQ` in every
+    quoting and cannot tell single from double.
+    """
+    kept: list[str] = []
+    quote = ""
+    index = 0
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            kept.append(char)
+            index += 1
+            continue
+        if char == "\\" and index + 1 < length:
+            if command[index + 1] == "\n":
+                index += 2
+                continue
+            kept.append(char)
+            kept.append(command[index + 1])
+            index += 2
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        kept.append(char)
+        index += 1
+    return "".join(kept)
 
 
 def strip_comments(command: str) -> str:
@@ -2137,7 +2203,7 @@ def global_refusal(arguments: list[str]) -> str | None:
 def refusal(command: str) -> str | None:
     """Why this command is blocked, or None when it is left alone."""
     try:
-        command = strip_comments(command)
+        command = strip_comments(join_continuations(command))
         tokens = tokenize(command)
         masked = tokenize(mask_quotes_stripped(command))
         raws = raw_words(command)
@@ -2353,6 +2419,15 @@ def refusal(command: str) -> str | None:
                         "`--cpu-profil*` -- or a bare `*` -- into the profile option that "
                         "overwrites cosign.pub; write the word out, or quote a pattern "
                         "podman should see literally ('fedora*')"
+                    )
+                extglob = podman_extglob_word(positions, tokens, masked)
+                if extglob is not None:
+                    return (
+                        f"{extglob}( is an extglob pattern: with `shopt -s extglob` on, "
+                        "which Fedora's bash-completion sets, bash reads it as one word and "
+                        "matches it against the working directory the way `*` is, so "
+                        "`podman images @(--cpu-profile=cosign.pub)` reaches podman as the "
+                        "profile option beside a file of that name; write the word out"
                     )
                 option = podman_profile_option(invocation.words)
                 if option is not None:

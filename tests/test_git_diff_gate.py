@@ -605,6 +605,15 @@ REACH_CORPUS = (
     ("options", "podman images ~/x", REFUSED, "an unquoted leading ~ is also a word bash rewrites before podman runs"),
     ("options", "podman images 'fedora*'", ALLOWED, "a quoted pattern reaches podman as typed and names no file"),
     ("options", "podman images fedora\\*", ALLOWED, "an escaped * is a literal character, not a glob"),
+    ("options", "podman images @(--cpu-profile=cosign.pub)", REFUSED, "an extglob pattern is one word under shopt -s extglob and matches a file named like the option"),
+    ("options", "podman ps +(--memory-profile=cosign.pub)", REFUSED, "the +(...) extglob form"),
+    ("options", "podman images fedora!(x)", REFUSED, "an extglob suffix on an ordinary word"),
+    ("options", "podman images '@'(x)", ALLOWED, "the @ is quoted, so it is no pattern; bash then errors on the bare parenthesis"),
+    ("options", "podman images --cpu-profile cosign.pub *", REFUSED, "a literal flag beside a glob is refused for the flag"),
+    ("options", "podman images @\\\n(--cpu-profile=cosign.pub)", REFUSED, "a backslash-newline between the @ and the ( is removed by bash before the word is read, leaving the extglob"),
+    ("options", "podman images --cpu-pro\\\nfile cosign.pub", REFUSED, "a backslash-newline inside the option name is removed by bash, leaving --cpu-profile"),
+    ("options", "podman images \"--cpu-pro\\\nfile\" cosign.pub", REFUSED, "inside double quotes the pair is removed too"),
+    ("options", "podman images '--cpu-pro\\\nfile' cosign.pub", ALLOWED, "inside single quotes the backslash and the newline are literal; podman gets no option it knows"),
 )
 
 
@@ -816,6 +825,40 @@ class ReachTests(unittest.TestCase):
             gate.refusal("python3 maintenance_audit.py --skip-upstream >cosign.pub"),
             "the command just shown to truncate a file is not refused",
         )
+
+    def test_bash_removes_a_backslash_newline_before_it_reads_the_word(self) -> None:
+        # A backslash-newline is dropped as bash reads the line, before any
+        # word exists, unquoted or inside double quotes; inside single quotes
+        # it is two literal characters. So `--cpu-pro\<NL>file` reaches podman
+        # as `--cpu-profile`, and `@\<NL>(x)` under extglob is the pattern
+        # `@(x)`, while shlex keeps the newline inside the word. Shown with
+        # printf so the words bash passes are read back exactly.
+        # `shopt -s extglob` must already be on when bash *parses* the line
+        # (a shopt on the same line is too late), which is how a shell with
+        # bash-completion loaded starts; -O sets it at startup the same way.
+        cases = (
+            ([], "printf '[%s]' --cpu-pro\\\nfile", "[--cpu-profile]"),
+            ([], 'printf \'[%s]\' "--cpu-pro\\\nfile"', "[--cpu-profile]"),
+            ([], "printf '[%s]' '--cpu-pro\\\nfile'", "[--cpu-pro\\\nfile]"),
+            (["-O", "extglob"], "printf '[%s]' @\\\n(x)", "[@(x)]"),
+        )
+        for options, script, expected in cases:
+            with self.subTest(script=script):
+                result = subprocess.run(
+                    ["bash", "--norc", "--noprofile", *options, "-c", script],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.stdout, expected)
+        self.assertEqual(gate.join_continuations("a\\\nb"), "ab")
+        self.assertEqual(gate.join_continuations('"a\\\nb"'), '"ab"')
+        self.assertEqual(gate.join_continuations("'a\\\nb'"), "'a\\\nb'")
+        # An escaped backslash before a newline is a literal backslash and a
+        # real newline, which bash keeps as a command separator.
+        self.assertEqual(gate.join_continuations("a\\\\\nb"), "a\\\\\nb")
+        self.assertIsNotNone(gate.refusal("podman images --cpu-pro\\\nfile cosign.pub"))
+        self.assertIsNotNone(gate.refusal("podman images @\\\n(--cpu-profile=cosign.pub)"))
 
     def test_git_reads_a_home_file_named_with_a_tilde(self) -> None:
         # bash expands `~` to $HOME before git runs, so `git diff --
