@@ -129,7 +129,14 @@ one case where the words bash builds are not the words checked here. And a
 `shellcheck -x` run whose target names an outside file in a `source`
 directive reads that file on the operands' behalf: the operands are checked,
 what the tool then opens for them is not. `-x` is load-bearing in this
-repository's own lint command, so it is not refused. And the environment
+repository's own lint command, so it is not refused, and on its own it
+follows a source only to resolve names, printing nothing from the file.
+`--check-sourced` (`-a`) is what turns that follow into a report -- every
+diagnostic in the sourced file, source line above each -- and the script
+doing the sourcing needs no file on disk: `shellcheck -s bash -x -a - <<<
+'source ./.env'` prints the `.env` back. Nothing here lints with `-a`, so it
+is refused in every spelling ShellCheck accepts (see
+shellcheck_check_sourced()). And the environment
 rule reads the word rather than the command it belongs to, so a word that
 merely quotes the assignment is refused with one that makes it: search for
 a variable by its name alone (`grep -n SHELLCHECK_OPTS docs/SECURITY-AI.md`)
@@ -583,6 +590,19 @@ SHELLCHECK_VALUE_OPTIONS = frozenset(
         "--wiki-link-count",
     }
 )
+
+# The short options that consume the rest of their cluster as a value:
+# SHELLCHECK_VALUE_OPTIONS' single letters, plus `-C`, whose optional value
+# can only be attached. `-xa` is `-x -a`, but `-sa` is `-s a` and `-Ca` is
+# `-C a`, so a cluster is read a letter at a time until one of these.
+SHELLCHECK_CLUSTER_VALUE_LETTERS = frozenset("iefoPsSWC")
+
+# The long spelling of `-a`. ShellCheck accepts any unambiguous prefix of a
+# long option, and `--ch` is already unambiguous (the only other `--c` option
+# is `--color`), so every prefix from `--ch` up to the whole name is the same
+# option.
+SHELLCHECK_CHECK_SOURCED = "--check-sourced"
+
 
 # GNU env's own options this scan has to recognise in every spelling env
 # itself accepts: getopt clustering for the short forms (`-iC/etc` is `-i`
@@ -2005,7 +2025,10 @@ def reading_redirections(
     path. `<<` reads a here-document, `<<<` a here-string, and `<&` and `<>`
     duplicate or open read-write, which writing_redirection() already
     refuses. A here-string's word is content, not a path, and cannot name a
-    file without a substitution, which is refused before this runs.
+    file without a substitution, which is refused before this runs -- except
+    as the target of a `source` line in that content, which only
+    `shellcheck --check-sourced` prints, and that option is refused on its
+    own (see shellcheck_check_sourced()).
     """
     targets: list[tuple[str, str]] = []
     for index, token in enumerate(segment):
@@ -2050,6 +2073,10 @@ def shellcheck_refusal(
     as an option is treated as a path and checked, so an option this list
     forgets costs a refused lint run rather than an unwatched read.
 
+    `--check-sourced` (`-a`) is refused whatever the operands are: the file
+    it prints is the one a `source` directive names, which a here-string can
+    supply without any operand naming a file at all.
+
     A `-` operand makes ShellCheck read standard input, and `shellcheck - <
     .env` prints the file back exactly as `shellcheck ./.env` would, so the
     target of an input redirection is checked as an operand: it must stay
@@ -2085,6 +2112,20 @@ def shellcheck_refusal(
         if token in SHELLCHECK_VALUE_OPTIONS:
             skip_value = True
             continue
+        if shellcheck_check_sourced(token):
+            return (
+                f"{token} is shellcheck's --check-sourced (-a), which reports the "
+                "diagnostics it finds in a file a `source` or `.` directive of the "
+                "linted script pulls in, with the source line printed above each; "
+                "that file is never an operand, so the operand scan cannot see it, "
+                "and `shellcheck -s bash -x -a - <<< 'source ./.env'` prints every "
+                "NAME=value line of the .env back past the Read(./.env) deny rule in "
+                ".claude/settings.json with nothing but a here-string on the command "
+                "line. -x on its own follows a source directive only to resolve names "
+                "and reports nothing from the file it follows into, so it is "
+                "unaffected; drop --check-sourced (-a), and lint the sourced script "
+                "by name if its own diagnostics are wanted"
+            )
         if token == "-" or token.startswith("-"):
             continue
         candidates = [token]
@@ -2107,6 +2148,27 @@ def shellcheck_refusal(
                     "repository's own scripts instead"
                 )
     return None
+
+
+def shellcheck_check_sourced(token: str) -> bool:
+    """Does this shellcheck word turn on `--check-sourced` (`-a`)?
+
+    The long option in any prefix ShellCheck accepts for it (`--ch` and up),
+    or `a` as an option letter of a short cluster -- read a letter at a time,
+    stopping at a letter whose value takes the rest of the word, so `-xa` and
+    `-ax` count and `-sa` (`-s a`) does not.
+    """
+    if token.startswith("--"):
+        name = token.split("=", 1)[0]
+        return len(name) >= len("--ch") and SHELLCHECK_CHECK_SOURCED.startswith(name)
+    if not token.startswith("-") or token == "-":
+        return False
+    for letter in token[1:]:
+        if letter == "a":
+            return True
+        if letter in SHELLCHECK_CLUSTER_VALUE_LETTERS:
+            return False
+    return False
 
 
 # The options that tell `just` which file to parse. `--fmt --check` prints the

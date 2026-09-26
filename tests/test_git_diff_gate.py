@@ -202,6 +202,15 @@ REFUSED_COMMANDS = (
     ("shellcheck - < {contrib/aib,.env}", "brace-expands the redirection target"),
     ("shellcheck - < secrets/*.pem", "globs the redirection target onto a denied shape"),
     ("< .env shellcheck -", "redirects from the denied file before the command name"),
+    ("shellcheck -s bash -x -a - <<< 'source ./.env'", "prints a sourced file named in a here-string"),
+    ("shellcheck -s bash -xa - <<< 'source ./.env'", "prints a sourced file, -a clustered behind -x"),
+    ("shellcheck -ax contrib/aib", "prints the files contrib/aib sources, -a first in a cluster"),
+    ("shellcheck --check-sourced -x contrib/aib", "prints the files a linted script sources"),
+    ("shellcheck --check -x contrib/aib", "prints sourced files through a prefix of --check-sourced"),
+    ("shellcheck --ch -x contrib/aib", "prints sourced files through the shortest prefix ShellCheck accepts"),
+    ("shellcheck -sbash -xa contrib/aib", "prints sourced files, -a after an attached option value"),
+    ("timeout 5 shellcheck -x -a contrib/aib", "prints sourced files behind a wrapper"),
+    ("git status; shellcheck -xa contrib/aib", "prints sourced files behind an allowed prefix"),
     ("git log --stdin < .env", "prints the file's first line back as a bad revision"),
     ("git diff --stdin <./cosign.key", "feeds the signing key to git diff's revision list"),
     ("git log --stdin 0< secrets/.env", "feeds a denied shape through an explicit descriptor"),
@@ -360,6 +369,10 @@ ALLOWED_COMMANDS = (
     "shellcheck -C always contrib/aib",
     "shellcheck - <contrib/aib",
     "shellcheck -e SC2034 -x tests/e2e/lib.sh",
+    # `-s a` and `-C a`: the `a` is the value, not --check-sourced.
+    "shellcheck -sa contrib/aib",
+    "shellcheck -xCa contrib/aib",
+    "shellcheck --color=always contrib/aib",
     "shellcheck tests/e2e/*.sh",
     "shellcheck 'tests/e2e/lib.sh'",
     "cat ~/.bashrc; shellcheck contrib/aib",
@@ -1103,6 +1116,49 @@ class ReachTests(unittest.TestCase):
                         gate.refusal(command),
                         "the command just shown to print the file back is not refused",
                     )
+
+    def test_shellcheck_check_sourced_prints_a_file_no_operand_names(self) -> None:
+        # The primitive the --check-sourced refusal exists for: the script
+        # doing the sourcing arrives as a here-string, so no operand and no
+        # redirection names a file for the scans to check, and -a still prints
+        # the sourced file's lines back. -x alone -- the spelling the lint
+        # command needs -- is run too, to show it prints nothing from the file.
+        if shutil.which("shellcheck") is None:
+            self.skipTest("shellcheck is not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, ".env").write_text("SECRET_TOKEN=stand-in-not-a-secret\n")
+            for command, leaks in (
+                ("shellcheck -s bash -x -a - <<< 'source ./.env'", True),
+                ("shellcheck -s bash --check -x - <<< 'source ./.env'", True),
+                ("shellcheck -s bash -x - <<< 'source ./.env'", False),
+            ):
+                with self.subTest(command=command):
+                    result = subprocess.run(
+                        ["bash", "--norc", "--noprofile", "-c", command],
+                        cwd=tmp,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if leaks:
+                        self.assertIn(
+                            "SECRET_TOKEN=stand-in-not-a-secret",
+                            result.stdout,
+                            "shellcheck no longer prints a sourced file under "
+                            "--check-sourced; re-derive why shellcheck_check_sourced() exists",
+                        )
+                        self.assertIsNotNone(
+                            gate.refusal(command),
+                            "the command just shown to print the file back is not refused",
+                        )
+                    else:
+                        self.assertNotIn(
+                            "SECRET_TOKEN",
+                            result.stdout,
+                            "shellcheck -x alone now prints a sourced file; -x can no "
+                            "longer be let through",
+                        )
+                        self.assertIsNone(gate.refusal(command))
 
 
 class CorpusTests(unittest.TestCase):
