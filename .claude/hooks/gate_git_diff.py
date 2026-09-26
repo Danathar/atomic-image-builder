@@ -1446,23 +1446,24 @@ def git_arguments(invocation: Invocation) -> list[str] | None:
 
 
 def git_expanding_glob(invocation: Invocation) -> str | None:
-    """The first word after `git` that bash rewrites into file names before
-    git sees it -- one with an unquoted `*`, `?` or `[` -- or None.
+    """The first word of a git invocation that bash rewrites into file names
+    before it runs -- one with an unquoted `*`, `?` or `[` -- or None.
 
     Read off the masked twin, so `git diff -- 'tests/*.py'` -- a pathspec
     git globs itself -- is left alone while `git diff HEAD --outp*` is not:
     with a file named `--output=cosign.pub` in the working directory, bash
     hands git that name and refused_long(), which reads the word as typed,
-    never sees it (#479). Only git's own words are read; a glob in a
-    redirection target is unsafe_reading_redirection()'s, and one on another
-    command of the same string is not git's.
+    never sees it (#479). The wrapper words in front of `git` are read too,
+    because bash expands them first as well: beside a file named `-Sgit diff
+    --output=cosign.pub HEAD --`, `env -S* git diff HEAD` hands env that
+    name as its split string, and the git it runs carries `--output` (Codex
+    on #480). A glob in a redirection target is
+    unsafe_reading_redirection()'s, and one on another command of the same
+    string is not this invocation's.
     """
-    start = git_position(invocation)
-    if start is None:
+    if git_position(invocation) is None:
         return None
-    for word, twin in zip(
-        invocation.words[start + 1 :], invocation.twins[start + 1 :], strict=True
-    ):
+    for word, twin in zip(invocation.words, invocation.twins, strict=True):
         if any(char in twin for char in GLOB):
             return word
     return None

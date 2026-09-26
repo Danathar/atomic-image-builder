@@ -519,6 +519,9 @@ REACH_CORPUS = (
     ("word rewriting", "hadolint $F", REFUSED, "a word a gated command receives that bash builds at runtime"),
     ("word rewriting", "git diff HEAD@{1}", ALLOWED, "bash expands a brace only with a comma or a .. in it, and git's reflog syntax has neither"),
     ("word rewriting", "git diff HEAD --outp*", REFUSED, "a glob names a file, and a file can be named --output=cosign.pub"),
+    ("word rewriting", "env -S* git diff HEAD", REFUSED, "a glob in a wrapper's option becomes a split string that hands git --output"),
+    ("word rewriting", "nice -n* git log -1", REFUSED, "any wrapper word bash expands in front of git is refused the same way"),
+    ("word rewriting", "echo *; git diff HEAD", ALLOWED, "a glob on another command of the string is not git's"),
     ("word rewriting", "git diff .env*", REFUSED, "a glob names two untracked files while the word as typed names neither"),
     ("word rewriting", "git diff -- *", REFUSED, "the same rewrite past --, refused with the rest rather than modelled"),
     ("word rewriting", "git diff -- 'tests/*.py'", ALLOWED, "a quoted pattern is git's own pathspec globbing, not bash's"),
@@ -949,6 +952,44 @@ class ReachTests(unittest.TestCase):
             "diff --git",
             written,
             "cosign.pub was rewritten, but not with the diff --output writes",
+        )
+        self.assertIsNotNone(
+            gate.refusal(command),
+            "the command just shown to overwrite a file is not refused",
+        )
+
+    def test_a_glob_in_a_wrapper_option_is_expanded_before_the_wrapper_runs(self) -> None:
+        # The wrapper words in front of git are expanded by bash too. Beside a
+        # file named `-Sgit diff --output=cosign.pub HEAD --`, `env -S* git
+        # diff HEAD` hands env that file name as its -S split string, and env
+        # runs `git diff --output=cosign.pub HEAD -- git diff HEAD`, writing
+        # the diff over the key (Codex on #480). Shown in a throwaway repo.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            target = repo / "cosign.pub"
+            target.write_text("ORIGINAL-CONTENT\n")
+            subprocess.run(["git", "-C", str(repo), "add", "cosign.pub"], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-qm", "x"],
+                check=True,
+            )
+            (repo / "-Sgit diff --output=cosign.pub HEAD --").write_text("")
+            target.write_text("ORIGINAL-CONTENT\nchanged\n")
+            command = "env -S* git diff HEAD"
+            subprocess.run(
+                ["bash", "--norc", "--noprofile", "-c", command],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            written = target.read_text()
+        self.assertNotIn(
+            "ORIGINAL-CONTENT\nchanged",
+            written,
+            "bash no longer expands a wrapper's globbed option into a split string that "
+            "reaches git; re-derive why git_expanding_glob() reads the wrapper words",
         )
         self.assertIsNotNone(
             gate.refusal(command),
