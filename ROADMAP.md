@@ -62,6 +62,15 @@ asks:
   entry just records that homebrew-core submission is a candidate milestone
   for *after* the beta-exit criteria above are met, not a decision to pursue
   it now or a gap to close today.
+- **A ujust recipe as a discovery channel (#486).** Bazzite, Bluefin, and
+  Aurora — the same bases the README already leans on for shipping Homebrew —
+  also expose a ujust menu as their built-in way for users to find guided
+  recipes. Nothing here is listed there, so someone on exactly the bases this
+  tool targets still has to already know the project exists before the
+  Homebrew quick-start helps them. This entry records a ujust recipe
+  submission (e.g. via the ublue-os/bling repo or an image's own
+  custom-recipes convention) as a candidate post-beta-exit discovery
+  channel — not a decision to pursue it now.
 
 The last two entries here were closed: whether advanced BlueBuild module
 support belongs in the guided wizard was decided in #468 and is recorded
