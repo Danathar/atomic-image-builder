@@ -336,10 +336,11 @@ OPERATORS = frozenset({"&&", "||", ";", "|", "&", "(", ")", "{", "}", "\n"})
 # are absent on purpose: a redirection makes the string match none of them and
 # Claude Code prompts. tests/test_git_diff_gate.py derives this list from the
 # settings file rather than restating it, so a rule added there fails until it
-# is listed here. None of these commands takes a flag that names a file to
-# write (shellcheck and hadolint report to stdout, `just --fmt --check` only
-# checks, `maintenance_audit.py` has no output option), so the redirection is
-# the whole of the write primitive on this list.
+# is listed here. Of these commands only podman takes a flag that names a file
+# to write (shellcheck and hadolint report to stdout, `just --fmt --check` only
+# checks, `maintenance_audit.py` has no output option), and podman's two are
+# refused by PODMAN_PROFILE_OPTIONS below; otherwise the redirection is the
+# whole of the write primitive on this list.
 GATED_PREFIXES = (
     ("shellcheck",),
     ("hadolint",),
@@ -355,6 +356,27 @@ GATED_PREFIXES = (
     ("gh", "search", "issues"),
     ("gh", "search", "prs"),
 )
+
+# podman's persistent global options that open a path for writing and dump a
+# pprof profile into it. podman accepts a persistent option after the
+# subcommand too, so `podman images --cpu-profile cosign.pub` matches the
+# `podman images:*` allow row on its prefix while podman truncates the file --
+# the write refusal() refuses for `podman images >cosign.pub`, spelled as an
+# option. Both the detached (`--cpu-profile FILE`) and the attached
+# (`--cpu-profile=FILE`) spellings are refused anywhere in a podman command
+# that matched a GATED_PREFIXES row; podman's flag parser takes no
+# abbreviation of a long option, so these are the only spellings.
+PODMAN_PROFILE_OPTIONS = ("--cpu-profile", "--memory-profile")
+
+
+def podman_profile_option(words: list[str]) -> str | None:
+    """The first word in a podman invocation that names one of
+    PODMAN_PROFILE_OPTIONS, in either spelling, or None."""
+    for word in words:
+        if word.split("=", 1)[0] in PODMAN_PROFILE_OPTIONS:
+            return word
+    return None
+
 
 # Shell words that stand before the name of the command they run, which a
 # leading-words match has to step over the way it steps over an assignment:
@@ -2257,6 +2279,18 @@ def refusal(command: str) -> str | None:
                     "(2>&1, >&2, an input redirection, and a redirection on a command no "
                     "allow rule covers are not refused)"
                 )
+            if prefix[0] == "podman":
+                option = podman_profile_option(invocation.words)
+                if option is not None:
+                    return (
+                        f"{option} makes podman open the path it names for writing and "
+                        "dump a pprof profile into it, which truncates the file whatever "
+                        f"`{' '.join(prefix)}` then prints; podman takes --cpu-profile and "
+                        "--memory-profile after the subcommand, so the allow rule matches "
+                        "the prefix and nothing prompts -- it is the write this hook "
+                        f"refuses for `{' '.join(prefix)} >cosign.pub`, spelled as an "
+                        "option. Run the command without the profile option"
+                    )
             if invocation.assignments:
                 # Any name, not only a REFUSED_ENVIRONMENT one: a variable set
                 # on a gated command is nothing an ordinary lint or inspection

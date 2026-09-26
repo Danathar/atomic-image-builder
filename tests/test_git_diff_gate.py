@@ -580,6 +580,18 @@ REACH_CORPUS = (
     ("options", "env --split='FOO=x GIT_EXTERNAL_DIFF=./evil git diff HEAD'", REFUSED, "an unambiguous abbreviation of --split-string, carrying the same re-splitting"),
     ("options", "env -iS'FOO=x GIT_EXTERNAL_DIFF=./evil git diff HEAD'", REFUSED, "-S clustered behind env's own -i, attached to the rest of the word"),
     ("options", "env -i git diff HEAD", ALLOWED, "env's own -i carries neither letter wrapper_relocates() or env_split_string_value() reads"),
+    ("options", "podman images --cpu-profile cosign.pub", REFUSED, "podman opens the path and dumps a CPU profile over it"),
+    ("options", "podman images --cpu-profile=cosign.pub", REFUSED, "the attached spelling of the same option"),
+    ("options", "podman ps --memory-profile .claude/settings.json", REFUSED, "the memory profile writes the same way"),
+    ("options", "podman ps --memory-profile=cosign.pub", REFUSED, "the attached spelling of the memory profile"),
+    ("options", "podman inspect --memory-profile=.claude/hooks/gate_git_diff.py x", REFUSED, "overwrites this hook through another allow-listed verb"),
+    ("options", "podman image exists x --cpu-profile out", REFUSED, "the three-word prefix takes the option after its operand"),
+    ("options", "timeout 5 podman images --cpu-profile cosign.pub", REFUSED, "behind a wrapper"),
+    ("options", "git status; podman images '--cpu-profile' cosign.pub", REFUSED, "quoted, in a later command of the string"),
+    ("options", "podman images", ALLOWED, "the verb without a profile option writes nothing"),
+    ("options", "podman ps -a --no-trunc --format json", ALLOWED, "ordinary options on the same verb"),
+    ("options", "echo podman images --cpu-profile x", ALLOWED, "the flag words as operands of a command no rule covers"),
+    ("options", "git log --grep=cpu-profile -1", ALLOWED, "the flag's name as text outside a podman command"),
 )
 
 

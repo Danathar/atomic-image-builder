@@ -119,8 +119,13 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   Code asks before it runs any command that contains a subshell or a brace
   group, whatever the allow rows say, and `tests/test_git_diff_gate.py` fails
   if an allow row that could reach one is added.
-  None of the gated commands takes a flag that
-  names a file to write, so the redirection is the whole of the primitive on
+  Of the gated commands only podman takes a flag that names a file to write:
+  `--cpu-profile FILE` and `--memory-profile FILE` (and their `=FILE`
+  forms) are persistent options podman accepts after the subcommand, so
+  `podman images --cpu-profile cosign.pub` matched the allow row on its
+  prefix and dumped a pprof profile over the trust anchor with no prompt.
+  The hook refuses either option anywhere in a gated podman command, and
+  otherwise the redirection is the whole of the primitive on
   this list. `tests/test_git_diff_gate.py` derives the list from the
   settings file, so a `:*` row added there fails until the hook lists it, and
   shows the truncation in a throwaway directory first. Same fix as
