@@ -159,7 +159,14 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   option -- see below.) Two limits are stated in the
   hook rather than implied: the glob is expanded against the files that exist
   when the hook runs, and an `-x` run whose target names an outside file in a
-  `source` directive reads that file on the operands' behalf. The target of
+  `source` directive reads that file on the operands' behalf. `-x` alone
+  prints nothing from a file it follows into; `--check-sourced` (`-a`) prints
+  every diagnostic there with its source line, and a here-string can supply
+  the `source` line with no file named anywhere, so
+  `shellcheck -s bash -x -a - <<< 'source ./.env'` prints the `.env` back.
+  Nothing here lints with `-a`, so it is refused in the long form, any prefix
+  of it ShellCheck accepts (`--ch` and up), and a short cluster (`-xa`). The
+  target of
   an input redirection is checked the same way, since a `-` operand makes the
   linter read standard input and `shellcheck - < .env` prints the file back
   exactly as naming it would; only `/dev/null` is exempt. `shellcheck` is not
