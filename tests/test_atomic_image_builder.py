@@ -8802,7 +8802,15 @@ class BuilderTests(unittest.TestCase):
         app.test_build_locally()
 
         argv = [command for command, _cwd in commands]
-        self.assertEqual(argv[0], ["podman", "create", "--pull=newer", atomic_image_builder.BLUEBUILD_CLI_INSTALLER_IMAGE])
+        # By digest, with no --pull policy: the CLI runs on the host as the
+        # user, so podman is given the reviewed bytes, not a tag ghcr.io could
+        # repoint. The tag is kept beside it for the weekly audit.
+        self.assertEqual(argv[0], ["podman", "create", atomic_image_builder.BLUEBUILD_CLI_INSTALLER_IMAGE])
+        self.assertEqual(
+            atomic_image_builder.BLUEBUILD_CLI_INSTALLER_IMAGE,
+            f"ghcr.io/blue-build/cli@{atomic_image_builder.BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST}",
+        )
+        self.assertRegex(atomic_image_builder.BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST, r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(argv[1][:3], ["podman", "cp", "0123abcd:/out/bluebuild"])
         generate, generate_cwd = commands[2]
         self.assertEqual(generate[0], argv[1][3])

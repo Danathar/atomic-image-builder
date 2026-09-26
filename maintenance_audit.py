@@ -18,6 +18,9 @@ from pathlib import Path
 from atomic_image_builder import (
     ACTION_PINS,
     ACTION_REF_PINS,
+    BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST,
+    BLUEBUILD_CLI_INSTALLER_IMAGE_REPO,
+    BLUEBUILD_CLI_INSTALLER_IMAGE_TAG,
     BOOTC_IMAGE_BUILDER_IMAGE_DIGEST,
     BOOTC_IMAGE_BUILDER_IMAGE_REPO,
     BOOTC_IMAGE_BUILDER_IMAGE_TAG,
@@ -574,10 +577,11 @@ def run_audit(
         # callers (--skip-upstream, from nightly-compliance and ai-fix) get
         # the local checks only.
         advisories.extend(audit_container_trust_roots(repo_root))
-        # And the same gate again for the two image pins, which are registry
+        # And the same gate again for the three image pins, which are registry
         # reads rather than downloads but age the same way.
         advisories.extend(audit_brew_image_pin())
         advisories.extend(audit_disk_builder_image_pin())
+        advisories.extend(audit_bluebuild_cli_image_pin())
         # Same gate, different bucket: the release asset trailing contrib/aib
         # is the repo contradicting itself, so it fails rather than advises.
         wrapper_findings, wrapper_advisories = audit_wrapper_release(repo_root)
@@ -808,6 +812,29 @@ def audit_disk_builder_image_pin() -> list[str]:
         review=(
             "Confirm the new builder still handles the base images the wizard "
             "offers before re-pinning -- a disk build against each is the check."
+        ),
+    )
+
+
+def audit_bluebuild_cli_image_pin() -> list[str]:
+    """Advise when the BlueBuild CLI installer tag no longer resolves to the pin.
+
+    The CLI is copied out of this image and run on the host, as the user, to
+    render a recipe for a local test build; that is why it is pinned by
+    digest. Its pin ages into a parity gap rather than a stale payload: CI
+    installs the tag, so a moved tag means local builds render with a CLI a
+    step behind the one CI uses, and the review a re-pin needs is that the
+    wizard's recipe still renders with the new one.
+    """
+    return audit_image_pin(
+        repo=BLUEBUILD_CLI_INSTALLER_IMAGE_REPO,
+        tag=BLUEBUILD_CLI_INSTALLER_IMAGE_TAG,
+        digest=BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST,
+        constant="BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST",
+        review=(
+            "CI installs this tag, so local BlueBuild test builds now render with "
+            "an older CLI than CI's; confirm a local build of the wizard's recipe "
+            "still renders with the new one before re-pinning."
         ),
     )
 

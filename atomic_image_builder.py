@@ -309,12 +309,24 @@ ACTION_REF_PINS: dict[str, tuple[str, str]] = {
 # The BlueBuild CLI a local test build renders `recipes/recipe.yml` with. It
 # is fetched the way both blue-build/github-action and BlueBuild's own
 # install.sh fetch it: create a container from the installer image and copy
-# `/out/bluebuild` out of it. The tag is deliberately the floating one the
-# pinned action above installs by default (`CLI_VERSION_TAG` in its
-# "Determine Vars" step), not a digest: parity with CI means moving when CI
-# moves, and a digest here would test the recipe with a generator CI stopped
-# using. Check the tag again whenever the action pin changes.
-BLUEBUILD_CLI_INSTALLER_IMAGE = "ghcr.io/blue-build/cli:v0.9-installer"
+# `/out/bluebuild` out of it. The tag is the floating one the pinned action
+# above installs by default (`CLI_VERSION_TAG` in its "Determine Vars" step);
+# the digest is what podman is given. The binary runs on the host, as the
+# user, with the user's files and credentials in reach, so like the other two
+# third-party images above it is pinned to the bytes that were reviewed rather
+# than to a tag anyone with push access to the repository can repoint.
+#
+# The cost is the one every pin has, and here it is parity: CI pulls the tag
+# and moves when it moves, while this stays until re-pinned, so a local build
+# can render with a CLI a step behind CI's. maintenance_audit.py's weekly run
+# reports when the tag no longer resolves to this digest
+# (audit_bluebuild_cli_image_pin); re-pin after a local build against the
+# wizard's recipe still renders, and re-read the action's default tag whenever
+# the action pin changes.
+BLUEBUILD_CLI_INSTALLER_IMAGE_REPO = "ghcr.io/blue-build/cli"
+BLUEBUILD_CLI_INSTALLER_IMAGE_TAG = "v0.9-installer"
+BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST = "sha256:1a53a3a145068a38d1c20b00a6047dd2c5e8848f7cd6b6c89d49c793ebd76fd6"
+BLUEBUILD_CLI_INSTALLER_IMAGE = f"{BLUEBUILD_CLI_INSTALLER_IMAGE_REPO}@{BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST}"
 # Written into the local build context when no real key exists yet. The
 # recipe's signing module only copies `cosign.pub` into /etc/pki/containers
 # and names it in policy.json; nothing at build time parses it. A repo the
@@ -5027,11 +5039,12 @@ class App:
                 cosign_pub.write_text(LOCAL_BUILD_PLACEHOLDER_COSIGN_PUB)
         with tempfile.TemporaryDirectory(prefix=f"{TOOL_SLUG}-bluebuild-cli.") as tmp:
             cli = Path(tmp) / "bluebuild"
-            # --pull=newer keeps the floating tag current the way a fresh CI
-            # runner is; see BLUEBUILD_CLI_INSTALLER_IMAGE.
+            # By digest, so no --pull policy is needed: a digest either is in
+            # local storage or is fetched, and it names the same bytes either
+            # way. See BLUEBUILD_CLI_INSTALLER_IMAGE.
             created = self.gum.spinner_result(
                 "Fetching the BlueBuild CLI...",
-                ["podman", "create", "--pull=newer", BLUEBUILD_CLI_INSTALLER_IMAGE],
+                ["podman", "create", BLUEBUILD_CLI_INSTALLER_IMAGE],
             )
             container_id = (created.stdout or "").strip()
             if created.returncode != 0 or not container_id:
