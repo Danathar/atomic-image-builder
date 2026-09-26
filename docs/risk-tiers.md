@@ -10,7 +10,17 @@ checks; this is how much of it applies.
 
 ## Tier 1 — this repository only
 
-**Paths:** `*.md`, `docs/`, `maintainer_docs/`, `tests/`, `.editorconfig`
+**Paths:** `*.md`, `docs/`, `maintainer_docs/`, `tests/`, `.editorconfig`,
+`.cursor/rules/atomic-image-builder.mdc`, `.gitignore`, `LICENSE`,
+`maintenance_notes.txt`, `format_markdown_tables.py`; the lint and coverage
+configuration — `ruff.toml`, `.coveragerc`, `.coveragerc.e2e`,
+`.coveragerc.maintenance-audit`, `.simplecov`, `.coverage-thresholds.json`,
+`.github/auto-qa-tuning.json`; the issue forms in `.github/ISSUE_TEMPLATE/`;
+and the workflows whose token can only read the repository or write to its
+issue tracker — `.github/workflows/nightly-compliance.yml`,
+`.github/workflows/triage.yml`, `.github/workflows/ai-fix.yml`,
+`.github/workflows/maintenance-audit.yml` — with `snapshot_drift_issue.py`,
+which the audit workflow runs to open its issues
 
 **Reaches:** contributors and maintainers. Nothing users run.
 
@@ -20,6 +30,23 @@ describes.
 
 Note `tests/e2e/` is Tier 1 by content but triggers the container build, since
 a change to a suite that never runs the suite reads as covered.
+
+The lint and coverage configuration is here by reach: a lowered floor or a
+narrowed measurement is found by the next contributor, not by a user. It is
+still not a change to make quietly. `.coverage-thresholds.json` is the gate
+`ci.yml` enforces and `.github/auto-qa-tuning.json` is the standing record
+that no machine moves it, so a diff that lowers the number needs to say why in
+words, and a diff that shrinks what `.coveragerc` measures needs to say what
+it stopped measuring.
+
+The issue-tracker workflows are here by reach too: what `triage.yml`,
+`ai-fix.yml` and `maintenance-audit.yml` can touch with their `issues: write`
+token is this repository's issues and the labels the agents act on, and
+`nightly-compliance.yml` holds `contents: read`. Their permission blocks are
+pinned by `.github/policies/workflow-permissions.json`, so asking one of them
+for a broader token is a Tier 4 change whichever file the diff starts in. The
+same holds for `snapshot_drift_issue.py`, which runs under the audit
+workflow's token and can open issues and nothing else.
 
 ## Tier 2 — the tool users run
 
@@ -43,10 +70,13 @@ same applies to `container/entrypoint.sh` and `tests/test_entrypoint.sh`.
 ## Tier 3 — what every generated repository ships
 
 **Paths:** `template_snapshots/`, the `ACTION_PINS` / `ACTION_REF_PINS`
-tables, and the generated-output writers in `atomic_image_builder.py` — the
+tables, the generated-output writers in `atomic_image_builder.py` — the
 `patch_*_workflow` and `generate_*_workflow` functions and the project writers
-around them. Those live in the tool but their output is other people's CI, so
-they belong here rather than in Tier 2.
+around them — and `maintenance_audit.py`, the audit that is this tier's
+evidence. The writers live in the tool but their output is other people's CI,
+so they belong here rather than in Tier 2. The audit is here because a defect
+in it is what lets a stale pin or a drifted snapshot ship unnoticed: it fails
+towards silence, and silence in this tier reads as green.
 
 **Reaches:** every repository the tool has created or will create, including
 other people's. A stale pin becomes a Dependabot pull request in a stranger's
@@ -78,10 +108,23 @@ what the check then says.
 
 **Paths:** `.github/workflows/publish-image.yml`,
 `.github/workflows/publish-wrapper.yml`,
-`.github/workflows/update-homebrew-formula.yml`, `homebrew_formula.py`,
-`Formula/`, `.github/policies/workflow-permissions.json`,
-`.github/rulesets/**`, `.claude/settings.json`, `.claude/hooks/`, anything
-touching signing, `GH_TOKEN`, or cosign
+`.github/workflows/update-homebrew-formula.yml`, `.github/workflows/ci.yml`,
+`homebrew_formula.py`, `coverage_badge.py`, `Formula/`,
+`.github/policies/workflow-permissions.json`, `.github/rulesets/**`,
+`.claude/settings.json`, `.claude/hooks/`, anything touching signing or
+cosign, and any workflow token that can write to the repository or its
+packages
+
+`ci.yml` is here for one job. `publish-coverage` holds `contents: write` and,
+on every push to `main`, runs `coverage_badge.py` and pushes what it writes to
+the `coverage-data` branch. That token is not scoped to that branch: the
+ruleset keeps it off `main`, and nothing keeps it off `formula/<tag>` or any
+other branch. Pointing the push elsewhere, or giving the job anything more to
+do with the token, is a change in this tier, and so is `coverage_badge.py`,
+for the same reason `homebrew_formula.py` is: it is what the job runs. The
+`test` and `container-build` jobs in the same file hold `contents: read` and
+are the required gate; a change to them reaches contributors, but it shares
+a file with the job that does not, so it is reviewed here.
 
 `publish-wrapper.yml` is here because it attaches the release-bound `aib` and
 `aib.sha256` that the installation instructions download. The wrapper runs on
@@ -137,12 +180,12 @@ report the blocker. [docs/SECURITY-AI.md](SECURITY-AI.md) covers the rest.
 
 ## Quick classification
 
-| If the change touches                                                                                                           | Tier |
-| ------------------------------------------------------------------------------------------------------------------------------- | ---- |
-| only docs, tests, or editor config                                                                                              | 1    |
-| the tool, the local `contrib/aib` wrapper source, or the image                                                                  | 2    |
-| bundled snapshots, the pin tables, or the workflow patchers and generators                                                      | 3    |
-| publishing, signing, `homebrew_formula.py`, the formula, tokens, the `main` ruleset, or the agent permission table and its gate | 4    |
+| If the change touches                                                                                                                                                                             | Tier |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---- |
+| only docs, tests, editor or agent briefs, lint and coverage configuration, issue forms, or the issue-tracker workflows                                                                            | 1    |
+| the tool, the local `contrib/aib` wrapper source, or the image                                                                                                                                    | 2    |
+| bundled snapshots, the pin tables, the workflow patchers and generators, or the maintenance audit                                                                                                 | 3    |
+| publishing, signing, `homebrew_formula.py`, the formula, `ci.yml` and its coverage publisher, tokens that write to the repository, the `main` ruleset, or the agent permission table and its gate | 4    |
 
 A change spanning tiers takes the highest one it touches. When it is not
 obvious, the question that settles it is: *if this is wrong, who finds out,
