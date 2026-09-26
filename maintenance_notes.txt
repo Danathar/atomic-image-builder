@@ -288,6 +288,58 @@ user-facing setting, and is deliberately not documented in the README as a
 knob (its effect is described there as a limitation of running in a
 container).
 
+BlueBuild Local Test Build: BLUEBUILD_CLI_INSTALLER_IMAGE
+---------------------------------------------------------
+A BlueBuild local test build (render_bluebuild_containerfile) is the same two
+steps the BlueBuild GitHub action performs, with the same tooling:
+
+1. `podman create ghcr.io/blue-build/cli@<BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST>`,
+   then `podman cp <id>:/out/bluebuild` into a temporary directory of its
+   own (not the build context, where a COPY could pick it up). This is how
+   blue-build/github-action's "Install BlueBuild" step and BlueBuild's own
+   install.sh obtain the binary, by the `v0.9-installer` tag. It needs no
+   host bluebuild install and does not run the CLI inside the tool
+   container, which would be the nested build AIB_DISABLE_LOCAL_BUILD exists
+   to refuse.
+2. `bluebuild generate --output Containerfile --registry ghcr.io
+   --registry-namespace <owner> recipes/recipe.yml`, run in the build
+   context. This only reads the registry (base image digest and OS version)
+   and the recipe schema, and extracts the CLI's build scripts into
+   `.bluebuild-scripts_<sha>/` next to the Containerfile, which the rendered
+   Containerfile bind-mounts by relative path. The CLI's driver setup panics
+   without docker >= 23 or podman >= 4 on PATH even for `generate`; podman is
+   already this feature's prerequisite, so that is not a new one.
+
+The rest is the Containerfile path's `podman build -t <tag> <context>`.
+
+The image is pinned by digest (BLUEBUILD_CLI_INSTALLER_IMAGE_REPO / _TAG /
+_DIGEST, the same triplet as the Homebrew payload and bootc-image-builder),
+because the binary copied out of it runs on the host as the user, with the
+user's files and credentials in reach; a tag anyone with push access to
+ghcr.io/blue-build/cli can repoint is not something to execute on that basis.
+The tag kept beside the digest is the floating one the pinned
+blue-build/github-action installs by default (CLI_VERSION_TAG in its
+"Determine Vars" step, "v0.9" at v1.12). The cost of the pin is parity: CI
+pulls the tag and moves with it, the local build stays until re-pinned, so a
+local build can render with a CLI a step behind CI's. maintenance_audit.py's
+weekly run (audit_bluebuild_cli_image_pin) advises when the tag no longer
+resolves to the pinned digest. To re-pin: resolve the tag
+(`skopeo inspect --raw docker://ghcr.io/blue-build/cli:v0.9-installer | sha256sum`,
+or maintenance_audit.resolve_registry_tag_digest), run a local BlueBuild test
+build of the wizard's recipe with the new digest, then update
+BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST. When ACTION_PINS["blue-build/github-action"]
+changes, re-read the action's default and update
+BLUEBUILD_CLI_INSTALLER_IMAGE_TAG with it before re-pinning the digest.
+
+cosign.pub: the recipe's signing module exits 1 unless the CLI copied a public
+key into /etc/pki/containers, and the CLI copies it from `cosign.pub` at the
+context root (stage-keys in the rendered Containerfile). The update menu hands
+its repo clone to test_build_locally so the repo's real key is used; on the
+create path the key does not exist yet, so LOCAL_BUILD_PLACEHOLDER_COSIGN_PUB
+is written instead. Nothing at build time parses the key, so a marked
+placeholder builds the same image layers a real key would; the dryrun image
+is never pushed.
+
 Rechunk Step Naming (Chunkah)
 -----------------------------
 patch_container_rechunk_step() swaps the bundled workflow's rpm-ostree rechunk

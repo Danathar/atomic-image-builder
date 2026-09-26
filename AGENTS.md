@@ -174,10 +174,10 @@ For an interactive Atomic Image Builder test:
 - Do not delete the test repository, package, branch, or artifacts unless the
   user separately authorizes those exact deletions.
 
-Local Podman builds are Containerfile-only and can consume significant time and
-storage. Explain that side effect and obtain consent before starting one. Never
-attempt a nested Podman build when `AIB_DISABLE_LOCAL_BUILD` is set or from the
-published tool container.
+Local Podman builds can consume significant time and storage, and a BlueBuild
+one also pulls the BlueBuild CLI installer image. Explain that side effect and
+obtain consent before starting one. Never attempt a nested Podman build when
+`AIB_DISABLE_LOCAL_BUILD` is set or from the published tool container.
 
 ## Repository-specific correctness guardrails
 

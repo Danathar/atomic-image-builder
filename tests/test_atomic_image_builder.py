@@ -8671,14 +8671,17 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("Press Enter to return to the menu...", stub.prompts)
 
     def test_every_test_build_locally_early_exit_pauses_before_the_menu_redraws(self) -> None:
-        # The three early exits drifted apart: the AIB_DISABLE_LOCAL_BUILD one
-        # paused, the other two did not, so "podman is required" flashed and
+        # The early exits drifted apart: the AIB_DISABLE_LOCAL_BUILD one
+        # paused, the podman one did not, so "podman is required" flashed and
         # vanished under the caller's next header(). They are only correct
         # together, so assert them together (same defect as #64, other site).
+        # Both methods take both exits: the BlueBuild path has no exit of its
+        # own any more.
         cases = {
             "disabled by env": ({"AIB_DISABLE_LOCAL_BUILD": "1"}, "containerfile", True),
-            "not containerfile": ({}, "bluebuild", True),
+            "disabled by env, bluebuild": ({"AIB_DISABLE_LOCAL_BUILD": "1"}, "bluebuild", True),
             "podman missing": ({}, "containerfile", False),
+            "podman missing, bluebuild": ({}, "bluebuild", False),
         }
         for label, (env, method, podman_present) in cases.items():
             with self.subTest(case=label):
@@ -8737,19 +8740,211 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(containerfile_exists[0])
         self.assertTrue(any(level == "success" and "atomic-image-builder-local-test:dryrun" in message for level, message in stub.messages))
 
-    def test_test_build_locally_hints_when_method_is_not_containerfile(self) -> None:
+    def bluebuild_local_build_app(self) -> tuple[App, GumStub, list[tuple[list[str], Path | None]], list[list[str]]]:
+        """A BlueBuild app whose spinner records commands and fakes podman.
+
+        `podman create` answers with a container id, `podman cp` writes a
+        stand-in CLI where it was told to, and everything else succeeds with
+        no output. The recorded (command, cwd) pairs and the direct `run`
+        calls are returned for assertions.
+        """
         app = self.make_app()
         app.config.method = "bluebuild"
         stub = GumStub()
-        app.gum = stub
-        with patch.object(app, "seed_project_template") as seed_mock:
-            app.test_build_locally()
+        commands: list[tuple[list[str], Path | None]] = []
+        direct: list[list[str]] = []
 
-        seed_mock.assert_not_called()
-        self.assertTrue(
-            any(level == "hint" and "Containerfile-only" in message for level, message in stub.messages)
+        def fake_spinner_result(_title, command, *, cwd=None):
+            command = list(command)
+            commands.append((command, cwd))
+            if command[:2] == ["podman", "create"]:
+                return subprocess.CompletedProcess(command, 0, "", "Trying to pull...\n")
+            if command[:2] == ["podman", "cp"]:
+                Path(command[3]).write_text("#!/bin/sh\nexit 0\n")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        def fake_run(args, **_kwargs):
+            direct.append(list(args))
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        stub.spinner_result = fake_spinner_result
+        app.gum = stub
+        for patcher in (
+            patch("atomic_image_builder.command_exists", return_value=True),
+            patch("atomic_image_builder.run", side_effect=fake_run),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return app, stub, commands, direct
+
+    def test_test_build_locally_renders_a_bluebuild_recipe_the_way_ci_does_before_podman_builds_it(self) -> None:
+        # CI installs the CLI by copying it out of the installer image and
+        # renders the recipe with it before anything is built. The local build
+        # must do those same steps, in that order, on the rendered tree, and
+        # tell the CLI the registry the action tells it so the signing
+        # module's policy names the same image.
+        app, stub, commands, direct = self.bluebuild_local_build_app()
+        context_state: dict[str, object] = {}
+        real_spinner = stub.spinner_result
+
+        def spinner_with_context_check(title, command, *, cwd=None):
+            command = list(command)
+            if command[1:2] == ["generate"]:
+                context_state["recipe"] = (cwd / "recipes" / "recipe.yml").exists()
+                context_state["cosign_pub"] = (cwd / "cosign.pub").read_text()
+                context_state["cli_outside_context"] = not Path(command[0]).is_relative_to(cwd)
+                context_state["cli_present"] = Path(command[0]).exists()
+            if command[:2] == ["podman", "build"]:
+                context_state["build_context"] = Path(command[-1])
+            return real_spinner(title, command, cwd=cwd)
+
+        stub.spinner_result = spinner_with_context_check
+        app.test_build_locally()
+
+        argv = [command for command, _cwd in commands]
+        # By digest, with no --pull policy: the CLI runs on the host as the
+        # user, so podman is given the reviewed bytes, not a tag ghcr.io could
+        # repoint. The tag is kept beside it for the weekly audit. The
+        # container is named up front so an interrupted create still has a
+        # handle for the rm -f in the finally.
+        self.assertEqual(argv[0][:3], ["podman", "create", "--name"])
+        container_name = argv[0][3]
+        self.assertTrue(container_name.startswith("atomic-image-builder-bluebuild-installer-"))
+        self.assertEqual(argv[0][4], atomic_image_builder.BLUEBUILD_CLI_INSTALLER_IMAGE)
+        self.assertEqual(
+            atomic_image_builder.BLUEBUILD_CLI_INSTALLER_IMAGE,
+            f"ghcr.io/blue-build/cli@{atomic_image_builder.BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST}",
         )
-        self.assertIn("Press Enter to return to the menu...", stub.prompts)
+        self.assertRegex(atomic_image_builder.BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST, r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(argv[1][:3], ["podman", "cp", f"{container_name}:/out/bluebuild"])
+        generate, generate_cwd = commands[2]
+        self.assertEqual(generate[0], argv[1][3])
+        # --build-driver podman: the host build that follows uses podman, and
+        # without the flag the CLI prefers docker when a docker with buildx
+        # is on PATH, rendering a Containerfile whose scripts mount has no ,Z.
+        self.assertEqual(
+            generate[1:],
+            ["generate", "--build-driver", "podman", "--output", "Containerfile", "--registry", "ghcr.io", "--registry-namespace", "example", "recipes/recipe.yml"],
+        )
+        self.assertEqual(argv[3][:3], ["podman", "build", "-t"])
+        self.assertEqual(context_state["build_context"], generate_cwd)
+        self.assertTrue(context_state["recipe"])
+        self.assertTrue(context_state["cli_present"])
+        # The binary must not land in the build context, where COPY could
+        # pick it up; it lives in its own temporary directory.
+        self.assertTrue(context_state["cli_outside_context"])
+        # No repo and no generated key yet: the marked placeholder stands in
+        # so the recipe's signing module has a key to copy.
+        self.assertEqual(context_state["cosign_pub"], atomic_image_builder.LOCAL_BUILD_PLACEHOLDER_COSIGN_PUB)
+        self.assertIn(["podman", "rm", "-f", container_name], direct)
+        self.assertTrue(any(level == "success" and "atomic-image-builder-local-test:dryrun" in message for level, message in stub.messages))
+
+    def test_test_build_locally_removes_the_installer_container_when_the_create_is_interrupted(self) -> None:
+        # Ctrl+C during the create spinner can leave a container podman
+        # already made, and before the container had a name there was no
+        # handle to remove it by: the ID on stdout was never read. The rm -f
+        # by name in the finally covers the create step too.
+        app, stub, _commands, direct = self.bluebuild_local_build_app()
+        real_spinner = stub.spinner_result
+
+        def interrupted_create(title, command, *, cwd=None):
+            if list(command)[:2] == ["podman", "create"]:
+                raise KeyboardInterrupt
+            return real_spinner(title, command, cwd=cwd)
+
+        stub.spinner_result = interrupted_create
+        with self.assertRaises(KeyboardInterrupt):
+            app.test_build_locally()
+        removed = [args for args in direct if args[:3] == ["podman", "rm", "-f"]]
+        self.assertEqual(len(removed), 1)
+        self.assertTrue(removed[0][3].startswith("atomic-image-builder-bluebuild-installer-"))
+
+    def test_test_build_locally_uses_the_repos_cosign_pub_for_a_bluebuild_update(self) -> None:
+        # The update menu has a clone of the managed repo, whose cosign.pub is
+        # the key CI builds with. That key, not the placeholder, goes into the
+        # local build context.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / "cosign.pub").write_text("REAL PUBLIC KEY\n")
+            app, stub, _commands, _direct = self.bluebuild_local_build_app()
+            seen: dict[str, str] = {}
+            real_spinner = stub.spinner_result
+
+            def spinner_reading_key(title, command, *, cwd=None):
+                if list(command)[1:2] == ["generate"]:
+                    seen["cosign_pub"] = (cwd / "cosign.pub").read_text()
+                return real_spinner(title, command, cwd=cwd)
+
+            stub.spinner_result = spinner_reading_key
+            app.test_build_locally(repo_dir)
+        self.assertEqual(seen["cosign_pub"], "REAL PUBLIC KEY\n")
+
+    def test_test_build_locally_omits_the_registry_when_no_owner_is_known(self) -> None:
+        app, _stub, commands, _direct = self.bluebuild_local_build_app()
+        app.config.github_user = ""
+        app.github_user = ""
+        app.test_build_locally()
+        generate = next(command for command, _cwd in commands if command[1:2] == ["generate"])
+        self.assertNotIn("--registry", generate)
+        self.assertEqual(generate[-1], "recipes/recipe.yml")
+
+    def test_test_build_locally_reports_a_failed_bluebuild_generate_and_does_not_build(self) -> None:
+        # A recipe the CLI rejects must surface as a failure with the CLI's
+        # own last lines, and podman must not be asked to build the tree the
+        # CLI left without a Containerfile.
+        app, stub, commands, _direct = self.bluebuild_local_build_app()
+        real_spinner = stub.spinner_result
+
+        def failing_generate(title, command, *, cwd=None):
+            if list(command)[1:2] == ["generate"]:
+                commands.append((list(command), cwd))
+                return subprocess.CompletedProcess(list(command), 1, "", "line 1\nline 2\nrecipe invalid\n")
+            return real_spinner(title, command, cwd=cwd)
+
+        stub.spinner_result = failing_generate
+        app.test_build_locally()
+
+        self.assertFalse(any(command[:2] == ["podman", "build"] for command, _cwd in commands))
+        self.assertIn(("error", "bluebuild generate failed with exit status 1."), stub.messages)
+        self.assertIn(("hint", "line 1\nline 2\nrecipe invalid"), stub.messages)
+        self.assertFalse(any(level == "success" for level, _message in stub.messages))
+        self.assertEqual(stub.prompts, ["Press Enter to return to the menu..."])
+
+    def test_test_build_locally_reports_an_unfetchable_bluebuild_installer_image(self) -> None:
+        # Offline, or the tag gone: the failure names the image, nothing is
+        # copied or built. The rm -f by name still runs (check=False, the
+        # container may not exist), because podman can fail after creating.
+        app, stub, commands, direct = self.bluebuild_local_build_app()
+
+        def failing_create(_title, command, *, cwd=None):
+            command = list(command)
+            commands.append((command, cwd))
+            return subprocess.CompletedProcess(command, 125, "", "Error: initializing source: pinging container registry: dial tcp: no route to host\n")
+
+        stub.spinner_result = failing_create
+        app.test_build_locally()
+
+        self.assertEqual([command[:2] for command, _cwd in commands], [["podman", "create"]])
+        self.assertIn(("error", f"Fetching {atomic_image_builder.BLUEBUILD_CLI_INSTALLER_IMAGE} failed with exit status 125."), stub.messages)
+        self.assertEqual([args[:3] for args in direct], [["podman", "rm", "-f"]])
+        self.assertEqual(stub.prompts, ["Press Enter to return to the menu..."])
+
+    def test_test_build_locally_removes_the_installer_container_when_the_copy_fails(self) -> None:
+        app, stub, commands, direct = self.bluebuild_local_build_app()
+        real_spinner = stub.spinner_result
+
+        def failing_cp(title, command, *, cwd=None):
+            if list(command)[:2] == ["podman", "cp"]:
+                commands.append((list(command), cwd))
+                return subprocess.CompletedProcess(list(command), 1, "", "")
+            return real_spinner(title, command, cwd=cwd)
+
+        stub.spinner_result = failing_cp
+        app.test_build_locally()
+
+        self.assertEqual([args[:3] for args in direct], [["podman", "rm", "-f"]])
+        self.assertFalse(any(command[1:2] == ["generate"] or command[:2] == ["podman", "build"] for command, _cwd in commands))
+        self.assertTrue(any(level == "error" and "failed with exit status 1" in message for level, message in stub.messages))
 
     def test_test_build_locally_reports_failure_with_stderr_tail(self) -> None:
         # A non-zero podman exit must be reported as a failure, with only the
@@ -13882,22 +14077,6 @@ class BuilderTests(unittest.TestCase):
         local.assert_called_once()
         self.assertEqual(result, "build")
 
-    def test_review_new_image_hides_local_build_for_bluebuild(self) -> None:
-        app = self.make_app()
-        app.config.method = "bluebuild"
-        seen: list[list[str]] = []
-
-        def choose(options, **_kwargs):
-            seen.append(list(options))
-            return [next(option for option in options if "Cancel and return" in option)]
-
-        stub = GumStub()
-        stub.choose = choose
-        app.gum = stub
-        with redirect_stdout(io.StringIO()):
-            app.review_new_image(step=5, total_steps=5)
-        self.assertFalse(any("podman" in option for option in seen[0]))
-
     def scan_payload(self, packages: list[str], removals: list[str]) -> str:
         return json.dumps(
             {
@@ -14591,30 +14770,40 @@ class BuilderTests(unittest.TestCase):
             self.assertFalse(app.update_menu())
         summary_mock.assert_called_once()
 
-    def test_update_menu_runs_local_test_build(self) -> None:
-        app = self.make_app()
-        app.gum = self.menu_stub_choosing("Test build locally (podman)")
-        with patch.object(app, "test_build_locally") as build_mock:
-            self.assertFalse(app.update_menu())
-        build_mock.assert_called_once()
+    def test_update_menu_runs_local_test_build_on_the_repo_clone(self) -> None:
+        # The clone is where a BlueBuild local build finds the repo's real
+        # cosign.pub, so the menu has to hand it on rather than call bare.
+        for method in ("containerfile", "bluebuild"):
+            with self.subTest(method=method):
+                app = self.make_app()
+                app.config.method = method
+                app.gum = self.menu_stub_choosing("Test build locally (podman)")
+                with tempfile.TemporaryDirectory() as tmp:
+                    repo_dir = Path(tmp)
+                    with patch.object(app, "test_build_locally") as build_mock:
+                        self.assertFalse(app.update_menu(repo_dir))
+                build_mock.assert_called_once_with(repo_dir)
 
-    def test_update_menu_hides_local_build_for_bluebuild(self) -> None:
-        # The local test build is Containerfile-only, so the BlueBuild menu
-        # must not offer it at all.
+    def test_review_new_image_offers_local_build_for_bluebuild(self) -> None:
+        # Parity with the Containerfile path (#463): the review screen offers
+        # the local build for a BlueBuild repo too, in the same slot.
         app = self.make_app()
         app.config.method = "bluebuild"
         seen_options: list[str] = []
 
         def fake_choose(options, **_kwargs):
             seen_options.extend(options)
-            return ["Cancel and go back"]
+            return ["Cancel and return to the main menu"]
 
         stub = GumStub()
         stub.choose = fake_choose
         app.gum = stub
-        self.assertFalse(app.update_menu())
-        self.assertNotIn("Test build locally (podman)", seen_options)
-        self.assertIn("Rotate signing key (cosign)", seen_options)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(app.review_new_image(step=5, total_steps=5), "cancel")
+        self.assertEqual(
+            seen_options[-3:],
+            ["Test build locally (podman)", "Start GitHub build", "Cancel and return to the main menu"],
+        )
 
     def test_update_menu_rotates_signing_key_with_repo_dir(self) -> None:
         app = self.make_app()

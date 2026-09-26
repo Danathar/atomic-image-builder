@@ -60,7 +60,6 @@ README_GAP_SECTION = "What it does not do"
 # Each gap ROADMAP.md lists, by its bold lead, mapped to the start of the
 # README bullet it was "pulled directly" from. Closed in both directions.
 GAP_SOURCES = {
-    "Local test builds are Containerfile-only.": "Local test builds are Containerfile-only.",
     "Advanced BlueBuild modules beyond the guided wizard are out of scope.": (
         "Advanced BlueBuild modules beyond the guided wizard are out of scope, by design."
     ),

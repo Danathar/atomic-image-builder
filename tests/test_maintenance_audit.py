@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 from _local_http_server import closed_port_url, hanging_http_server, local_http_server
 from atomic_image_builder import (
+    BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST,
+    BLUEBUILD_CLI_INSTALLER_IMAGE_TAG,
     BOOTC_IMAGE_BUILDER_IMAGE_DIGEST,
     BOOTC_IMAGE_BUILDER_IMAGE_TAG,
     UNIVERSAL_BLUE_BREW_IMAGE_DIGEST,
@@ -27,6 +29,7 @@ from maintenance_audit import (
     TemplateSource,
     audit_action_pin_freshness,
     audit_action_update_availability,
+    audit_bluebuild_cli_image_pin,
     audit_brew_image_pin,
     audit_container_trust_roots,
     audit_disk_builder_image_pin,
@@ -595,15 +598,15 @@ class MaintenanceAuditTests(unittest.TestCase):
 
     def test_run_audit_returns_action_updates_as_advisories_not_failures(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
-        # The same gate also runs the trust-root downloads, the two image
+        # The same gate also runs the trust-root downloads, the three image
         # pin lookups and the release-asset comparison. Stub them: they read
         # the live registry and the live release, and this test went red the
         # day ghcr.io/ublue-os/brew:latest moved past its pin.
         with patch("maintenance_audit.audit_container_trust_roots", return_value=[]), patch(
             "maintenance_audit.audit_brew_image_pin", return_value=[]
         ), patch("maintenance_audit.audit_disk_builder_image_pin", return_value=[]), patch(
-            "maintenance_audit.audit_wrapper_release", return_value=([], [])
-        ):
+            "maintenance_audit.audit_bluebuild_cli_image_pin", return_value=[]
+        ), patch("maintenance_audit.audit_wrapper_release", return_value=([], [])):
             with patch(
                 "maintenance_audit.audit_action_update_availability", return_value=["stale pin"]
             ):
@@ -934,7 +937,9 @@ class ContainerTrustRootAuditTests(unittest.TestCase):
                 with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
                     with patch("maintenance_audit.audit_brew_image_pin", return_value=[]), patch(
                         "maintenance_audit.audit_disk_builder_image_pin", return_value=[]
-                    ), patch("maintenance_audit.audit_wrapper_release", return_value=([], [])):
+                    ), patch("maintenance_audit.audit_bluebuild_cli_image_pin", return_value=[]), patch(
+                        "maintenance_audit.audit_wrapper_release", return_value=([], [])
+                    ):
                         repo_root = Path(__file__).resolve().parents[1]
                         run_audit(repo_root, skip_upstream=True, check_action_updates=False)
                         self.assertEqual(checked.call_count, 0)
@@ -1151,8 +1156,8 @@ class BrewPayloadPinAuditTests(unittest.TestCase):
     def test_the_weekly_run_is_the_one_that_checks_the_payload_pin(self) -> None:
         with patch("maintenance_audit.audit_brew_image_pin", return_value=["moved"]) as checked:
             with patch("maintenance_audit.audit_disk_builder_image_pin", return_value=[]), patch(
-                "maintenance_audit.audit_wrapper_release", return_value=([], [])
-            ):
+                "maintenance_audit.audit_bluebuild_cli_image_pin", return_value=[]
+            ), patch("maintenance_audit.audit_wrapper_release", return_value=([], [])):
                 with patch("maintenance_audit.audit_container_trust_roots", return_value=[]):
                     with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
                         with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
@@ -1209,8 +1214,66 @@ class DiskBuilderPinAuditTests(unittest.TestCase):
     def test_the_weekly_run_is_the_one_that_checks_the_builder_pin(self) -> None:
         with patch("maintenance_audit.audit_disk_builder_image_pin", return_value=["moved"]) as checked:
             with patch("maintenance_audit.audit_brew_image_pin", return_value=[]), patch(
-                "maintenance_audit.audit_wrapper_release", return_value=([], [])
-            ):
+                "maintenance_audit.audit_bluebuild_cli_image_pin", return_value=[]
+            ), patch("maintenance_audit.audit_wrapper_release", return_value=([], [])):
+                with patch("maintenance_audit.audit_container_trust_roots", return_value=[]):
+                    with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
+                        with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
+                            repo_root = Path(__file__).resolve().parents[1]
+                            run_audit(repo_root, skip_upstream=True, check_action_updates=False)
+                            self.assertEqual(checked.call_count, 0)
+
+                            _findings, advisories = run_audit(
+                                repo_root, skip_upstream=True, check_action_updates=True
+                            )
+                            self.assertEqual(checked.call_count, 1)
+                            self.assertIn("moved", advisories)
+
+
+class BlueBuildCliPinAuditTests(unittest.TestCase):
+    """The BlueBuild CLI installer pin is checked against its tag once a week.
+
+    The CLI is copied out of the image and run on the host, as the user, so
+    it is pinned by digest like the payload and the disk builder. Its pin
+    ages into a parity gap: CI installs the tag, so the advisory has to say
+    that local builds are now rendering with an older CLI than CI's.
+    """
+
+    def test_a_tag_that_still_resolves_to_the_pin_says_nothing(self) -> None:
+        with patch(
+            "maintenance_audit.resolve_registry_tag_digest",
+            return_value=BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST,
+        ):
+            self.assertEqual(audit_bluebuild_cli_image_pin(), [])
+
+    def test_a_moved_tag_is_reported_with_both_digests_and_the_check_to_make(self) -> None:
+        moved = "sha256:" + "f" * 64
+        with patch("maintenance_audit.resolve_registry_tag_digest", return_value=moved):
+            (advisory,) = audit_bluebuild_cli_image_pin()
+        self.assertIn("BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST", advisory)
+        self.assertIn(BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST, advisory)
+        self.assertIn(moved, advisory)
+        self.assertIn("older CLI than CI's", advisory)
+
+    def test_a_registry_that_cannot_be_reached_is_said_so_not_passed(self) -> None:
+        with patch("maintenance_audit.resolve_registry_tag_digest", side_effect=RuntimeError("timed out")):
+            (advisory,) = audit_bluebuild_cli_image_pin()
+        self.assertIn("Unable to resolve ghcr.io/blue-build/cli:v0.9-installer", advisory)
+        self.assertIn("timed out", advisory)
+
+    def test_the_registry_host_is_split_off_the_image_reference(self) -> None:
+        with patch(
+            "maintenance_audit.resolve_registry_tag_digest",
+            return_value=BLUEBUILD_CLI_INSTALLER_IMAGE_DIGEST,
+        ) as resolve:
+            audit_bluebuild_cli_image_pin()
+        resolve.assert_called_once_with("ghcr.io", "blue-build/cli", BLUEBUILD_CLI_INSTALLER_IMAGE_TAG)
+
+    def test_the_weekly_run_is_the_one_that_checks_the_cli_pin(self) -> None:
+        with patch("maintenance_audit.audit_bluebuild_cli_image_pin", return_value=["moved"]) as checked:
+            with patch("maintenance_audit.audit_brew_image_pin", return_value=[]), patch(
+                "maintenance_audit.audit_disk_builder_image_pin", return_value=[]
+            ), patch("maintenance_audit.audit_wrapper_release", return_value=([], [])):
                 with patch("maintenance_audit.audit_container_trust_roots", return_value=[]):
                     with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
                         with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
@@ -1536,7 +1599,9 @@ class WrapperReleaseAuditTests(unittest.TestCase):
         # flatten the pair into advisories the way the other network checks
         # are collected.
         with patch("maintenance_audit.audit_wrapper_release", return_value=(["trailing"], ["unsure"])) as checked:
-            with patch("maintenance_audit.audit_disk_builder_image_pin", return_value=[]):
+            with patch("maintenance_audit.audit_disk_builder_image_pin", return_value=[]), patch(
+                "maintenance_audit.audit_bluebuild_cli_image_pin", return_value=[]
+            ):
                 with patch("maintenance_audit.audit_brew_image_pin", return_value=[]):
                     with patch("maintenance_audit.audit_container_trust_roots", return_value=[]):
                         with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
