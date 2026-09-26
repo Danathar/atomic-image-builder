@@ -154,7 +154,9 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   which is what keeps the lint command CONTRIBUTING.md and the pull-request
   template name -- it ends in a glob over the end-to-end suites -- working; a
   brace or an unquoted leading `~` is refused instead, because `{x,.env}` is
-  two words to bash and `~` is a home directory. Two limits are stated in the
+  two words to bash and `~` is a home directory. (A glob in a *git* word is
+  refused rather than expanded, since the file it names can be spelled as an
+  option -- see below.) Two limits are stated in the
   hook rather than implied: the glob is expanded against the files that exist
   when the hook runs, and an `-x` run whose target names an outside file in a
   `source` directive reads that file on the operands' behalf. The target of
@@ -225,14 +227,12 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   list.txt names while the string names no operand at all, and Claude Code
   matches `xargs git diff` to the `git diff` row, so nothing prompts. An
   `xargs` in front of a command no rule covers (`xargs echo`) is left alone,
-  since Claude Code prompts for it. Four shapes of that corpus are decided
+  since Claude Code prompts for it. Three shapes of that corpus are decided
   the other way and written down rather than left open:
   `GIT_PAGER=prog git log` runs nothing, because git spawns a pager
   only for a terminal and a tool-run command has a pipe (which is why
   `PAGER=cat git log` is unprompted); `GIT_SSH_COMMAND` and `GIT_EDITOR` reach
-  no subcommand the allow list covers; a glob in a git word is bash's to
-  expand, because a glob cannot leave the working directory without a `/`, a
-  `..` or a `~`, each already refused in the pattern; and an input redirection
+  no subcommand the allow list covers; and an input redirection
   is checked for the three commands that print a line of it back --
   `git`, whose `--stdin` reads revisions from it, `shellcheck`, whose `-`
   operand reads standard input, and
@@ -243,6 +243,19 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   row and a shape deliberately allowed is visibly a decision rather than an
   omission. Same corpus as
   [#428](https://github.com/Danathar/atomic-image-builder/issues/428).
+  A fourth shape was decided that way and was wrong: a glob in a git word
+  was bash's to expand, on the reasoning that a pattern cannot leave the
+  working directory without a `/`, a `..` or a `~`. It cannot, but it does
+  not need to -- a file can be named after an option, and the Write tool can
+  create one, so with `--output=cosign.pub` in the working directory `git
+  diff HEAD --outp*` reached git as `--output=cosign.pub` and overwrote the
+  trust anchor, while the word as typed spelled no option the hook reads;
+  `git diff .env*` handed git two untracked files the same way. An unquoted
+  `*`, `?` or `[` in any word after `git` is now refused, read off the
+  quote-masked copy so a quoted pathspec (`git diff -- 'tests/*.py'`, which
+  git globs itself) and a glob on another command of the same string are
+  left alone. Same finding as
+  [#479](https://github.com/Danathar/atomic-image-builder/issues/479).
 - `maintenance_audit.py` fails when a workflow action is not covered by the
   pin tables, or when a pinned SHA disagrees with them. That check is what
   stops an unpinned action reaching generated repositories.

@@ -135,7 +135,7 @@ merely quotes the assignment is refused with one that makes it: search for
 a variable by its name alone (`grep -n SHELLCHECK_OPTS docs/SECURITY-AI.md`)
 rather than with the `=` attached.
 
-Four shapes of the same corpus (#428) are decided the other way, and are
+Three shapes of the same corpus (#428) are decided the other way, and are
 written here rather than left undecided:
 
 * The pager. `GIT_PAGER=prog git log` runs nothing: git spawns a pager only
@@ -149,12 +149,22 @@ written here rather than left undecided:
   `PYTEST_ADDOPTS` by a pytest this repository's rules never start: the
   `python3` rows are `python3 -m unittest discover -s tests` and the
   `--skip-upstream` audit.
-* A glob in a git word is expanded by bash rather than refused here, because
-  a glob cannot name a file outside the working directory without a `/`, a
-  `..` or a `~` in the pattern, and unsafe_operand() refuses each of those in
-  the pattern as readily as in a plain operand. The shellcheck scan expands
-  its own globs because there the *result* can be a denied shape inside the
-  checkout; `git diff` reads nothing it is not already allowed to read.
+
+A fourth was decided that way and was wrong (#479). A glob in a git word was
+left to bash on the reasoning that a pattern cannot name a file outside the
+working directory without a `/`, a `..` or a `~` in it, each refused by
+unsafe_operand(). It cannot -- but it can name an *option*: with a file named
+`--output=cosign.pub` in the working directory (the Write tool can create
+one), `git diff HEAD --outp*` reaches git as `--output=cosign.pub` and
+overwrites the trust anchor, and `git diff .env*` hands git two untracked
+files as operands with the word as typed carrying neither. refused_long()
+reads the word as typed; bash rewrites it first. So an unquoted `*`, `?` or
+`[` in any word after `git` is refused, read off the masked twin the way the
+podman and shellcheck scans read theirs, which leaves a quoted pathspec (`git
+diff -- 'tests/*.py'`, git's own globbing) and a glob on another command of
+the same string alone. The shellcheck scan still expands its own globs,
+because there each file the pattern names is checked and a lint command
+this repository's own checks name ends in `tests/e2e/*.sh`.
 
 One wrapper is refused rather than stepped over. `xargs` adds words it
 reads from standard input, or from the file its `-a` names, to the command
@@ -619,13 +629,15 @@ DENIED_READ_SHAPES = (
     "id_ed25519",
 )
 
-# The characters that make bash expand a word into filenames. Unlike a brace
-# or a `~`, a glob is expanded here rather than refused: this repository's own
-# lint command ends in `tests/e2e/*.sh`, and refusing it would mean the check
-# CONTRIBUTING.md and the pull-request template both name could not be run.
-# Python's glob reads `*`, `?` and `[...]` the way bash does with its default
-# options -- no `dotglob`, no `globstar`, no `extglob` -- so the files it
-# names are the words bash would hand ShellCheck.
+# The characters that make bash expand a word into filenames. For a shellcheck
+# or just operand the glob is expanded here rather than refused: this
+# repository's own lint command ends in `tests/e2e/*.sh`, and refusing it
+# would mean the check CONTRIBUTING.md and the pull-request template both
+# name could not be run. For a git word it is refused (git_expanding_glob()),
+# since the file it names can be spelled as an option. Python's glob reads
+# `*`, `?` and `[...]` the way bash does with its default options -- no
+# `dotglob`, no `globstar`, no `extglob` -- so the files it names are the
+# words bash would hand ShellCheck.
 GLOB = frozenset("*?[")
 
 
@@ -1551,18 +1563,51 @@ def gated_prefix(invocation: Invocation) -> tuple[str, ...] | None:
     return None
 
 
-def git_arguments(invocation: Invocation) -> list[str] | None:
-    """The words a `git` invocation receives, or None when this is not one.
+def git_position(invocation: Invocation) -> int | None:
+    """The position in `words` of the word naming `git`, or None when this
+    is not a git invocation.
 
     The name is looked for exactly where gated_prefix() looks for one of
     its own, so `env git diff --no-index a b`, `nice git ...` and
-    `/usr/bin/git ...` are the git invocation they run as. A redirection and
-    its target are not in `words`, which is why `git diff HEAD </dev/null`
-    is not read as a `/dev/null` operand.
+    `/usr/bin/git ...` are the git invocation they run as.
     """
     for start in name_positions(invocation):
         if bare(invocation.words[start]).rsplit("/", 1)[-1] == "git":
-            return invocation.words[start + 1 :]
+            return start
+    return None
+
+
+def git_arguments(invocation: Invocation) -> list[str] | None:
+    """The words a `git` invocation receives, or None when this is not one.
+
+    A redirection and its target are not in `words`, which is why `git diff
+    HEAD </dev/null` is not read as a `/dev/null` operand.
+    """
+    start = git_position(invocation)
+    return None if start is None else invocation.words[start + 1 :]
+
+
+def git_expanding_glob(invocation: Invocation) -> str | None:
+    """The first word of a git invocation that bash rewrites into file names
+    before it runs -- one with an unquoted `*`, `?` or `[` -- or None.
+
+    Read off the masked twin, so `git diff -- 'tests/*.py'` -- a pathspec
+    git globs itself -- is left alone while `git diff HEAD --outp*` is not:
+    with a file named `--output=cosign.pub` in the working directory, bash
+    hands git that name and refused_long(), which reads the word as typed,
+    never sees it (#479). The wrapper words in front of `git` are read too,
+    because bash expands them first as well: beside a file named `-Sgit diff
+    --output=cosign.pub HEAD --`, `env -S* git diff HEAD` hands env that
+    name as its split string, and the git it runs carries `--output` (Codex
+    on #480). A glob in a redirection target is
+    unsafe_reading_redirection()'s, and one on another command of the same
+    string is not this invocation's.
+    """
+    if git_position(invocation) is None:
+        return None
+    for word, twin in zip(invocation.words, invocation.twins, strict=True):
+        if any(char in twin for char in GLOB):
+            return word
     return None
 
 
@@ -2490,6 +2535,17 @@ def refusal(command: str) -> str | None:
                     "between two reflog entries (HEAD@{2}..HEAD@{1}) is refused with "
                     "the rest, so write HEAD~2..HEAD~1 instead"
                 )
+        globbed = git_expanding_glob(invocation)
+        if globbed is not None:
+            return (
+                f"{globbed} carries an unquoted *, ? or [ that bash expands into file "
+                "names before git runs, and a file the session wrote can be named "
+                "--output=cosign.pub or .env: `git diff HEAD --outp*` then reaches git "
+                "as --output=cosign.pub and overwrites it, while the word as typed "
+                "spells no option the gate reads. Spell the file out, or quote the "
+                "pattern so git globs it itself (`git diff -- 'tests/*.py'` is not "
+                "refused, and neither is a glob on another command of the same string)"
+            )
         for index, token in enumerate(segment):
             if not REDIRECTION.match(token):
                 continue

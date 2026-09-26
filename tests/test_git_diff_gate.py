@@ -110,6 +110,12 @@ REFUSED_COMMANDS = (
     ("git diff `echo /dev/null` ./cosign.key", "builds a --no-index operand from a backtick"),
     ("git diff `printf -- --no-index` ./LICENSE ./cosign.key", "builds --no-index from a backtick"),
     ("git log --outpu$'\\x74'=cosign.pub -1", "builds --output from an ANSI-C escape"),
+    ("git diff HEAD --outp*", "builds --output from a glob over a file named for it"),
+    ("git diff .env*", "builds two untracked-file operands from a glob"),
+    ("git diff -- *", "globs every file in the working directory into an operand"),
+    ("env -i git log -1 *", "globs behind a wrapper"),
+    ("git log --format=%h?", "carries an unquoted ? bash would expand"),
+    ("git diff HEAD -- a[b]", "carries an unquoted [ bash would expand"),
     ("G=/dev/null; git diff $G ./cosign.key", "builds a --no-index operand from a variable"),
     ('git diff "$G" ./cosign.key', "builds an operand from a variable double quotes do not quote"),
     ('git diff "$(echo /dev/null)" ./cosign.key', "builds an operand from a quoted substitution"),
@@ -286,6 +292,13 @@ ALLOWED_COMMANDS = (
     "git diff --output-indicator-new=x",
     "PAGER=cat git log",
     "git diff --stat | head -20",
+    "git diff -- 'tests/*.py'",
+    'git log --oneline -- "docs/*.md"',
+    "git log -- \\*.py",
+    "git diff HEAD -- 'a[b]'",
+    "git log --format='%h?'",
+    "ls *.sh; git diff HEAD",
+    "git diff HEAD | grep -c '^+*'",
     "ruff check",
     "python3 -m unittest discover -s tests",
     "shellcheck contrib/aib 2>&1 | tail -5",
@@ -505,7 +518,14 @@ REACH_CORPUS = (
     ("word rewriting", "podman images >(cat >cosign.pub)", REFUSED, "the inner command of a substitution is held to no rule"),
     ("word rewriting", "hadolint $F", REFUSED, "a word a gated command receives that bash builds at runtime"),
     ("word rewriting", "git diff HEAD@{1}", ALLOWED, "bash expands a brace only with a comma or a .. in it, and git's reflog syntax has neither"),
-    ("word rewriting", "git diff -- *", ALLOWED, "a glob cannot name a file outside the working directory without a /, a .. or a ~, each refused in the pattern"),
+    ("word rewriting", "git diff HEAD --outp*", REFUSED, "a glob names a file, and a file can be named --output=cosign.pub"),
+    ("word rewriting", "env -S* git diff HEAD", REFUSED, "a glob in a wrapper's option becomes a split string that hands git --output"),
+    ("word rewriting", "nice -n* git log -1", REFUSED, "any wrapper word bash expands in front of git is refused the same way"),
+    ("word rewriting", "echo *; git diff HEAD", ALLOWED, "a glob on another command of the string is not git's"),
+    ("word rewriting", "git diff .env*", REFUSED, "a glob names two untracked files while the word as typed names neither"),
+    ("word rewriting", "git diff -- *", REFUSED, "the same rewrite past --, refused with the rest rather than modelled"),
+    ("word rewriting", "git diff -- 'tests/*.py'", ALLOWED, "a quoted pattern is git's own pathspec globbing, not bash's"),
+    ("word rewriting", "ls *.sh; git diff HEAD", ALLOWED, "a glob on another command of the same string is not git's word"),
     ("word rewriting", "shellcheck tests/e2e/*.sh", ALLOWED, "the one expansion the scan performs, because each file it names is then checked"),
     ("word rewriting", "git log --format='%h $x'", ALLOWED, "single quotes make the $ a literal"),
     # 4. The command name itself.
@@ -951,6 +971,93 @@ class ReachTests(unittest.TestCase):
             written,
             "bash no longer reads $'\\x74' as the letter t, or git log no longer "
             "writes through --output; re-derive why expands_at_runtime() exists",
+        )
+        self.assertIsNotNone(
+            gate.refusal(command),
+            "the command just shown to overwrite a file is not refused",
+        )
+
+    def test_git_runs_the_option_a_glob_names_not_the_pattern_typed(self) -> None:
+        # bash expands an unquoted glob into the file names it matches before
+        # git runs, and a file can be named after an option: with
+        # `--output=cosign.pub` in the working directory (the Write tool can
+        # create one), `git diff HEAD --outp*` is `git diff HEAD
+        # --output=cosign.pub` to git, and the diff is written over the
+        # public key -- with no `--output`, no `/`, no `..` and no `~` in
+        # the word as typed for refused_long() or unsafe_operand() to see.
+        # The reach that the earlier "a glob cannot leave the working
+        # directory" decision missed (#479): it cannot, but it does not need
+        # to. Shown in a throwaway repository with a stand-in key.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            target = repo / "cosign.pub"
+            target.write_text("ORIGINAL-CONTENT\n")
+            (repo / "--output=cosign.pub").write_text("")
+            subprocess.run(["git", "-C", str(repo), "add", "cosign.pub"], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-qm", "x"],
+                check=True,
+            )
+            target.write_text("ORIGINAL-CONTENT\nchanged\n")
+            command = "git diff HEAD --outp*"
+            subprocess.run(
+                ["bash", "--norc", "--noprofile", "-c", command],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            written = target.read_text()
+        self.assertNotIn(
+            "ORIGINAL-CONTENT\nchanged",
+            written,
+            "bash no longer expands --outp* to the file named --output=cosign.pub, or "
+            "git diff no longer writes through --output; re-derive why "
+            "git_expanding_glob() exists",
+        )
+        self.assertIn(
+            "diff --git",
+            written,
+            "cosign.pub was rewritten, but not with the diff --output writes",
+        )
+        self.assertIsNotNone(
+            gate.refusal(command),
+            "the command just shown to overwrite a file is not refused",
+        )
+
+    def test_a_glob_in_a_wrapper_option_is_expanded_before_the_wrapper_runs(self) -> None:
+        # The wrapper words in front of git are expanded by bash too. Beside a
+        # file named `-Sgit diff --output=cosign.pub HEAD --`, `env -S* git
+        # diff HEAD` hands env that file name as its -S split string, and env
+        # runs `git diff --output=cosign.pub HEAD -- git diff HEAD`, writing
+        # the diff over the key (Codex on #480). Shown in a throwaway repo.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            target = repo / "cosign.pub"
+            target.write_text("ORIGINAL-CONTENT\n")
+            subprocess.run(["git", "-C", str(repo), "add", "cosign.pub"], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-qm", "x"],
+                check=True,
+            )
+            (repo / "-Sgit diff --output=cosign.pub HEAD --").write_text("")
+            target.write_text("ORIGINAL-CONTENT\nchanged\n")
+            command = "env -S* git diff HEAD"
+            subprocess.run(
+                ["bash", "--norc", "--noprofile", "-c", command],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            written = target.read_text()
+        self.assertNotIn(
+            "ORIGINAL-CONTENT\nchanged",
+            written,
+            "bash no longer expands a wrapper's globbed option into a split string that "
+            "reaches git; re-derive why git_expanding_glob() reads the wrapper words",
         )
         self.assertIsNotNone(
             gate.refusal(command),
@@ -2391,6 +2498,34 @@ class RefusalTests(unittest.TestCase):
     def test_a_brace_outside_a_git_invocation_is_not_gated(self) -> None:
         # The gate is about git's arguments; a jq or awk program is not one.
         for command in ("jq '{a: .x, b: .y}' x.json", "awk '{print $1}' README.md"):
+            with self.subTest(command=command):
+                self.assertIsNone(gate.refusal(command))
+
+    def test_a_git_glob_is_refused_off_the_masked_twin(self) -> None:
+        # The rule is what bash would expand, not the character: shlex hands
+        # back the same `*.py` for `'*.py'`, `"*.py"` and `\*.py`, and only
+        # the bare spelling is rewritten before git runs. A quoted pattern
+        # is git's own pathspec globbing and stays an ordinary command.
+        for command in (
+            "git diff HEAD --outp*",
+            "git diff .env*",
+            "git log -1 -- tests/?",
+            "git diff HEAD -- a[b]",
+            "git diff HEAD -- 'quoted'*",
+            "nice git diff -- *",
+        ):
+            with self.subTest(command=command):
+                reason = gate.refusal(command) or ""
+                self.assertIn("bash expands into file names", reason)
+        for command in (
+            "git diff -- 'tests/*.py'",
+            'git diff -- "tests/*.py"',
+            "git diff -- tests/\\*.py",
+            "git log -1 -- 'tests/?'",
+            "git diff HEAD -- 'a[b]'",
+            "ls *.sh; git diff HEAD",
+            "git diff HEAD | grep '^+*'",
+        ):
             with self.subTest(command=command):
                 self.assertIsNone(gate.refusal(command))
 
