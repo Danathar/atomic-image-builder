@@ -55,11 +55,18 @@ asks:
 
 ## Longer-term / open questions
 
-Nothing is open here right now. The last two entries were closed: whether
-advanced BlueBuild module support belongs in the guided wizard was decided in
-#468 and is recorded under the gaps above, and BlueBuild local test builds
-reached parity with the Containerfile path in #463, so that gap is gone from
-the README.
+- **Homebrew distribution beyond the custom tap (#482).** The README's
+  fastest install path is `brew tap danathar/aib ...` — a personal tap, not
+  homebrew-core. That's the right fit for beta software; homebrew-core has
+  its own bar (stability, notability) this project doesn't clear yet. This
+  entry just records that homebrew-core submission is a candidate milestone
+  for *after* the beta-exit criteria above are met, not a decision to pursue
+  it now or a gap to close today.
+
+The last two entries here were closed: whether advanced BlueBuild module
+support belongs in the guided wizard was decided in #468 and is recorded
+under the gaps above, and BlueBuild local test builds reached parity with
+the Containerfile path in #463, so that gap is gone from the README.
 
 ---
 
