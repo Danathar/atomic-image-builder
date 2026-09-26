@@ -128,7 +128,10 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   refuses first any podman word bash would brace-expand into one
   (`--cpu-pro{f..f}ile` reaches podman as `--cpu-profile`); a quoted brace
   is not expanded and is not refused, which is what keeps `--format
-  '{{.Names}},{{.Status}}'` working. Otherwise the redirection is the whole
+  '{{.Names}},{{.Status}}'` working. It refuses an unquoted glob character
+  or leading `~` in a gated podman word too: beside a file named
+  `--cpu-profile=cosign.pub`, `podman images --cpu-profil*` reaches podman as
+  that option. Otherwise the redirection is the whole
   of the primitive on
   this list. `tests/test_git_diff_gate.py` derives the list from the
   settings file, so a `:*` row added there fails until the hook lists it, and

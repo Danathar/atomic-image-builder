@@ -598,6 +598,13 @@ REACH_CORPUS = (
     ("options", "podman inspect --format '{{.Names}},{{.Status}}' x", ALLOWED, "a quoted Go template is braces bash leaves alone; podman's --format is made of them"),
     ("options", "podman images --format {{.Repository}}:{{.Tag}}", ALLOWED, "unquoted, but no comma or .. inside a brace, so bash expands nothing"),
     ("options", "podman images --cpu-pro\"{f..f}\"ile cosign.pub", ALLOWED, "the brace is quoted, so podman gets the literal --cpu-pro{f..f}ile and fails on an unknown flag"),
+    ("options", "podman images --cpu-profil*", REFUSED, "bash expands the glob to --cpu-profile=cosign.pub once a file of that name exists; run for real, it overwrote cosign.pub"),
+    ("options", "podman ps [-]-memory-profile=cosign.pub", REFUSED, "a bracket glob that matches a file named --memory-profile=cosign.pub"),
+    ("options", "podman inspect ?-cpu-profile=cosign.pub x", REFUSED, "a ? in the first position builds the option from a file name"),
+    ("options", "podman images *", REFUSED, "a bare glob lists the directory, which can hold a file named --cpu-profile=cosign.pub"),
+    ("options", "podman images ~/x", REFUSED, "an unquoted leading ~ is also a word bash rewrites before podman runs"),
+    ("options", "podman images 'fedora*'", ALLOWED, "a quoted pattern reaches podman as typed and names no file"),
+    ("options", "podman images fedora\\*", ALLOWED, "an escaped * is a literal character, not a glob"),
 )
 
 

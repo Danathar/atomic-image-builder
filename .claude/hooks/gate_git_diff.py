@@ -369,7 +369,8 @@ GATED_PREFIXES = (
 # reads. Bash can still build either from a word that spells neither --
 # `--cpu-pro{f..f}ile`, `--{cpu,memory}-profile`, `--cpu-profile{,}=x` -- so a
 # word with a live brace expansion is refused first; see
-# podman_expanding_brace().
+# podman_expanding_brace(). A glob builds either one from a file of that name
+# in the working directory; see podman_expanding_path().
 PODMAN_PROFILE_OPTIONS = ("--cpu-profile", "--memory-profile")
 
 
@@ -409,6 +410,24 @@ def podman_expanding_brace(words: list[str], twins: list[str]) -> str | None:
     """
     for word, twin in zip(words, twins, strict=True):
         if EXPANDING_BRACE.search(twin) is not None:
+            return word
+    return None
+
+
+def podman_expanding_path(words: list[str], twins: list[str]) -> str | None:
+    """The first word of a podman invocation that bash rewrites as a pathname
+    before podman sees it -- an unquoted `*`, `?` or `[`, or an unquoted
+    leading `~` -- or None.
+
+    The same gap podman_expanding_brace() closes, by the other rewrite: with a
+    file named `--cpu-profile=cosign.pub` in the working directory (the Write
+    tool can create one), `podman images --cpu-profil*` reaches podman as
+    `--cpu-profile=cosign.pub`, and so does a bare `podman images *`. Run for
+    real, that overwrote cosign.pub with a profile. Read off the masked twin,
+    so a quoted pattern (`podman images 'fedora*'`) is left alone.
+    """
+    for word, twin in zip(words, twins, strict=True):
+        if any(ch in twin for ch in "*?[") or twin.startswith("~"):
             return word
     return None
 
@@ -2324,6 +2343,16 @@ def refusal(command: str) -> str | None:
                         "word as typed spells neither; write the word out, and quote a "
                         "--format template ('{{.Names}},{{.Status}}'), which bash then "
                         "leaves alone"
+                    )
+                globbed = podman_expanding_path(invocation.words, invocation.twins)
+                if globbed is not None:
+                    return (
+                        f"{globbed} is a word bash rewrites into file names before podman "
+                        "runs (an unquoted *, ? or [, or a leading ~), and a file named "
+                        "`--cpu-profile=cosign.pub` in the working directory turns "
+                        "`--cpu-profil*` -- or a bare `*` -- into the profile option that "
+                        "overwrites cosign.pub; write the word out, or quote a pattern "
+                        "podman should see literally ('fedora*')"
                     )
                 option = podman_profile_option(invocation.words)
                 if option is not None:
