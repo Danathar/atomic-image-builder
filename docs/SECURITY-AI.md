@@ -125,7 +125,11 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   `podman images --cpu-profile cosign.pub` matched the allow row on its
   prefix and dumped a pprof profile over the trust anchor with no prompt.
   The hook refuses either option anywhere in a gated podman command, and
-  otherwise the redirection is the whole of the primitive on
+  refuses first any podman word bash would brace-expand into one
+  (`--cpu-pro{f..f}ile` reaches podman as `--cpu-profile`); a quoted brace
+  is not expanded and is not refused, which is what keeps `--format
+  '{{.Names}},{{.Status}}'` working. Otherwise the redirection is the whole
+  of the primitive on
   this list. `tests/test_git_diff_gate.py` derives the list from the
   settings file, so a `:*` row added there fails until the hook lists it, and
   shows the truncation in a throwaway directory first. Same fix as

@@ -365,7 +365,11 @@ GATED_PREFIXES = (
 # option. Both the detached (`--cpu-profile FILE`) and the attached
 # (`--cpu-profile=FILE`) spellings are refused anywhere in a podman command
 # that matched a GATED_PREFIXES row; podman's flag parser takes no
-# abbreviation of a long option, so these are the only spellings.
+# abbreviation of a long option, so these are the only spellings podman
+# reads. Bash can still build either from a word that spells neither --
+# `--cpu-pro{f..f}ile`, `--{cpu,memory}-profile`, `--cpu-profile{,}=x` -- so a
+# word with a live brace expansion is refused first; see
+# podman_expanding_brace().
 PODMAN_PROFILE_OPTIONS = ("--cpu-profile", "--memory-profile")
 
 
@@ -374,6 +378,37 @@ def podman_profile_option(words: list[str]) -> str | None:
     PODMAN_PROFILE_OPTIONS, in either spelling, or None."""
     for word in words:
         if word.split("=", 1)[0] in PODMAN_PROFILE_OPTIONS:
+            return word
+    return None
+
+
+def podman_expanding_brace(words: list[str], twins: list[str]) -> str | None:
+    """The first word of a podman invocation that bash brace-expands before
+    podman sees it, or None.
+
+    podman_profile_option() reads each word as typed, and bash rewrites a
+    word with a brace expansion in it before podman gets it: `--cpu-pro{f..f}ile`
+    is `--cpu-profile` to podman, `--{cpu,memory}-profile` is both options,
+    `--cpu-profile{,}=x` is `--cpu-profile=x` twice. The allow rule matched
+    the prefix, the profile test saw no option, and podman truncated the
+    file all the same (review on #477). Such a word is refused rather than
+    expanded, for the reason brace_would_expand() gives: modelling bash's
+    expansion in full is where the next hole hides.
+
+    The shape is EXPANDING_BRACE's, read off the masked twin rather than the
+    word. Bash expands a brace only when the `{`, the `}` and the `,` or `..`
+    between them are all unquoted (`"{a,b}"`, `{a','b}`, `\\{a,b}` and
+    `{a\\,b}` all print as typed), and the twin has every quoted or escaped
+    character masked, so a brace that is live in the twin is one bash acts
+    on. brace_would_expand() reads the word instead and refuses a fully
+    quoted brace as its price; podman cannot pay that price, because its
+    `--format` takes a Go template that is nothing but braces, and
+    `--format '{{.Names}},{{.Status}}'` is an ordinary listing. A quoted
+    comma beside a live one (`{a",",b}`) is still refused: the live comma
+    stays in the twin. A `${` is refused earlier by expands_at_runtime().
+    """
+    for word, twin in zip(words, twins, strict=True):
+        if EXPANDING_BRACE.search(twin) is not None:
             return word
     return None
 
@@ -2280,6 +2315,16 @@ def refusal(command: str) -> str | None:
                     "allow rule covers are not refused)"
                 )
             if prefix[0] == "podman":
+                braced = podman_expanding_brace(invocation.words, invocation.twins)
+                if braced is not None:
+                    return (
+                        f"{braced} carries a brace that bash expands before podman runs, "
+                        "and the expansion can spell --cpu-profile or --memory-profile "
+                        "(`--cpu-pro{f..f}ile` is `--cpu-profile` to podman) while the "
+                        "word as typed spells neither; write the word out, and quote a "
+                        "--format template ('{{.Names}},{{.Status}}'), which bash then "
+                        "leaves alone"
+                    )
                 option = podman_profile_option(invocation.words)
                 if option is not None:
                     return (

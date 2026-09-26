@@ -592,6 +592,12 @@ REACH_CORPUS = (
     ("options", "podman ps -a --no-trunc --format json", ALLOWED, "ordinary options on the same verb"),
     ("options", "echo podman images --cpu-profile x", ALLOWED, "the flag words as operands of a command no rule covers"),
     ("options", "git log --grep=cpu-profile -1", ALLOWED, "the flag's name as text outside a podman command"),
+    ("options", "podman images --cpu-pro{f..f}ile cosign.pub", REFUSED, "bash expands the singleton range into --cpu-profile; the word as typed spells no option"),
+    ("options", "podman images --{cpu,memory}-profile cosign.pub", REFUSED, "one word to the scanner, both profile options to podman"),
+    ("options", "podman ps --memory-profile{,}=cosign.pub", REFUSED, "the attached spelling built by a brace behind the option name"),
+    ("options", "podman inspect --format '{{.Names}},{{.Status}}' x", ALLOWED, "a quoted Go template is braces bash leaves alone; podman's --format is made of them"),
+    ("options", "podman images --format {{.Repository}}:{{.Tag}}", ALLOWED, "unquoted, but no comma or .. inside a brace, so bash expands nothing"),
+    ("options", "podman images --cpu-pro\"{f..f}\"ile cosign.pub", ALLOWED, "the brace is quoted, so podman gets the literal --cpu-pro{f..f}ile and fails on an unknown flag"),
 )
 
 
