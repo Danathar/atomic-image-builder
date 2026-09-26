@@ -56,7 +56,7 @@ asks:
 ## Longer-term / open questions
 
 - **Homebrew distribution beyond the custom tap (#482).** The README's
-  fastest install path is `brew tap danathar/aib ...` — a personal tap, not
+  fastest install path is a personal Homebrew tap (danathar/aib), not
   homebrew-core. That's the right fit for beta software; homebrew-core has
   its own bar (stability, notability) this project doesn't clear yet. This
   entry just records that homebrew-core submission is a candidate milestone
