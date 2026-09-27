@@ -61,10 +61,7 @@ FAILURES = (
 # Exceptions homebrew_formula.check() still lets escape, with the issue that
 # tracks each. Asserted both ways: a listed one must still escape, and every
 # other failure must come back as a finding.
-HOMEBREW_CHECK_KNOWN_ESCAPES = {
-    http.client.IncompleteRead: "#496",
-    http.client.BadStatusLine: "#496",
-}
+HOMEBREW_CHECK_KNOWN_ESCAPES: dict[type[BaseException], str] = {}
 
 
 class FakeResponse:

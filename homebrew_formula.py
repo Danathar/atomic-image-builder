@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import re
 import urllib.error
 import urllib.request
@@ -103,7 +104,7 @@ def check(formula_path: Path, *, expected_version: str = VERSION) -> list[str]:
 
     try:
         actual = fetch_sha256(url)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, http.client.HTTPException) as exc:
         findings.append(f"Unable to fetch {url}: {exc}")
         return findings
     if actual != recorded:
