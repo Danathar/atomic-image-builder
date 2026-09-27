@@ -623,10 +623,12 @@ class MaintenanceAuditTests(unittest.TestCase):
     def test_run_audit_turns_a_read_timeout_into_advisories_and_exits_zero(self) -> None:
         # The shape of #350: one slow read from api.github.com or ghcr.io, and
         # the whole weekly run died with a traceback, every later check
-        # skipped. Every network helper the --check-action-updates gate runs
-        # goes through urlopen, so one timing-out urlopen exercises all of
-        # them at once: the tag lookups, the ref lookups, the trust-root
-        # downloads and both registry reads.
+        # skipped. One timing-out urlopen reaches every helper whose FIRST
+        # read is the one that fails: the tag lookups, the ref lookups, the
+        # trust-root downloads and the registry reads. It cannot reach a read
+        # that only happens after another succeeds -- the release-asset
+        # download behind query_latest_release was that gap (#489) -- so
+        # test_network_error_contract.py fails each helper at every read.
         repo_root = Path(__file__).resolve().parents[1]
         stdout = io.StringIO()
         with patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")):
