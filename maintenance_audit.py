@@ -614,16 +614,7 @@ def iter_pinned_downloads(text: str) -> list[tuple[str, str, str]]:
 
 
 def fetch_sha256(url: str) -> str:
-    request = urllib.request.Request(
-        url, headers={"User-Agent": "atomic-image-builder-maintenance-audit"}
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=NETWORK_TIMEOUT_SECONDS) as response:
-            return hashlib.sha256(response.read()).hexdigest()
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"HTTP {exc.code}") from exc
-    except NETWORK_ERRORS as exc:
-        raise RuntimeError(describe_network_error(exc)) from exc
+    return hashlib.sha256(fetch_bytes(url)).hexdigest()
 
 
 def audit_container_trust_roots(repo_root: Path) -> list[str]:
@@ -946,16 +937,18 @@ def audit_wrapper_release(repo_root: Path) -> tuple[list[str], list[str]]:
 
 
 def fetch_bytes(url: str) -> bytes:
-    request = urllib.request.Request(
-        url, headers={"User-Agent": "atomic-image-builder-maintenance-audit"}
-    )
+    # The one download helper: fetch_sha256() hashes what this returns. Two
+    # copies had drifted -- this one kept a literal timeout and caught
+    # URLError only, so a stalled release-asset read escaped
+    # audit_wrapper_release() as a traceback, the #350 failure (#489).
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(request, timeout=NETWORK_TIMEOUT_SECONDS) as response:
             return response.read()
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"HTTP {exc.code}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(str(exc.reason)) from exc
+    except NETWORK_ERRORS as exc:
+        raise RuntimeError(describe_network_error(exc)) from exc
 
 
 def parse_wrapper_checksum(text: str) -> str | None:

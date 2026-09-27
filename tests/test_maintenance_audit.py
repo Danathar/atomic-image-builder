@@ -1547,6 +1547,37 @@ class WrapperReleaseAuditTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             fetch_bytes(closed_port_url())
 
+    def test_fetch_bytes_reports_a_read_timeout_rather_than_raising_it(self) -> None:
+        # A release asset that connects and then goes quiet. fetch_bytes
+        # caught URLError only and ignored NETWORK_TIMEOUT_SECONDS, so this
+        # waited 20 s and raised a bare TimeoutError (#489).
+        with patch("maintenance_audit.NETWORK_TIMEOUT_SECONDS", 0.2):
+            with hanging_http_server() as url:
+                with self.assertRaisesRegex(RuntimeError, "timed out"):
+                    fetch_bytes(url)
+
+    def test_fetch_bytes_reports_a_response_cut_short(self) -> None:
+        cut_short = http.client.IncompleteRead(b"#!", 40)
+        with patch("maintenance_audit.urllib.request.urlopen", side_effect=cut_short):
+            with self.assertRaisesRegex(RuntimeError, "IncompleteRead"):
+                fetch_bytes("https://github.com/x")
+
+    def test_an_asset_download_that_stalls_is_an_advisory_not_a_traceback(self) -> None:
+        # The #350 run_audit test cannot reach this: with every urlopen timing
+        # out, query_latest_release fails first and no asset is downloaded.
+        # Here the release query answers and only the asset read stalls.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._checkout(tmp, b"x")
+            with patch("maintenance_audit.NETWORK_TIMEOUT_SECONDS", 0.2):
+                with hanging_http_server() as url:
+                    assets = {name: url for name in (WRAPPER_ASSET, WRAPPER_CHECKSUM_ASSET)}
+                    with patch("maintenance_audit.query_latest_release", return_value=("v0.9.6", assets)):
+                        findings, advisories = audit_wrapper_release(root)
+        self.assertEqual(findings, [])
+        (advisory,) = advisories
+        self.assertIn("Unable to download the `aib` release assets", advisory)
+        self.assertIn("timed out", advisory)
+
     def test_a_checkout_without_the_wrapper_is_said_so_before_any_network_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch("maintenance_audit.query_latest_release") as queried:
