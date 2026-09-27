@@ -750,8 +750,8 @@ trees, so a change to either half is exercised rather than pattern-matched.
 
 Managed-Repo Symlink Refusal
 -----------------------------
-managed_path() (atomic_image_builder.py:1862) is the choke point every read
-and write the tool performs inside a managed repo goes through. A managed
+managed_path() in atomic_image_builder.py is the choke point every read and
+write the tool performs inside a managed repo goes through. A managed
 repo is a clone of whatever is on GitHub, and git checks out symlinks as
 symlinks, so a file the tool believes it owns -- README.md, say -- can
 actually be a pointer at something outside the clone:
