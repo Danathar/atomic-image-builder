@@ -35,6 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from _workflow_steps import step_command, step_run_body  # noqa: E402
+from test_workflow_permissions_policy import declared, job_lines  # noqa: E402
 
 DOC = ROOT / "docs/risk-tiers.md"
 CI = ROOT / ".github/workflows/ci.yml"
@@ -42,6 +43,8 @@ TOOL = ROOT / "atomic_image_builder.py"
 AUDIT = ROOT / "maintenance_audit.py"
 WORKFLOWS = ROOT / ".github/workflows"
 SETTINGS = ROOT / ".claude/settings.json"
+RULESET = ROOT / ".github/rulesets/main.json"
+DRIFT_ISSUE = ROOT / "snapshot_drift_issue.py"
 
 BACKTICKED = re.compile(r"`([^`]+)`")
 TIER_HEADING = re.compile(r"^## Tier (\d+) [-—]")
@@ -703,6 +706,256 @@ class TierFourEvidenceTests(unittest.TestCase):
     def test_the_formula_the_tier_protects_is_tracked(self) -> None:
         formulae = {path for path in tracked_paths() if path.startswith("Formula/")}
         self.assertTrue(formulae, "Tier 4 protects Formula/, which holds nothing")
+
+
+def flatten(text: str) -> str:
+    """Prose with its hard wraps removed, so a needle can span a line break."""
+    return re.sub(r"\s+", " ", text)
+
+
+def tier_paragraph(tier: int, opening: str) -> str:
+    """The paragraph of a tier section that starts with *opening*, flattened.
+
+    Named by its opening words so a rewrite that drops the paragraph fails
+    here, instead of every assertion under it passing over nothing.
+    """
+    body = tier_sections()[tier]
+    for index, line in enumerate(body):
+        if line.startswith(opening):
+            collected = []
+            for rest in body[index:]:
+                if not rest.strip():
+                    break
+                collected.append(rest)
+            return flatten(" ".join(collected))
+    raise AssertionError(f"Tier {tier} no longer has the paragraph starting {opening!r}")
+
+
+def tiers_naming(path: str) -> set[int]:
+    """Every tier whose **Paths:** paragraph covers *path*."""
+    tiers = set()
+    for tier, body in tier_sections().items():
+        for literal in literals(paths_paragraph(body)):
+            kind = classify(literal)
+            if kind in {"tracked-glob", "tracked-dir", "tracked-file"} and path in resolve(literal, kind):
+                tiers.add(tier)
+    return tiers
+
+
+def scopes(block: object) -> dict[str, str]:
+    """A permissions value as {scope: access}.
+
+    `write-all` grants everything and `read-all`/`{}` nothing writable. No
+    block at all leaves the token at the repository default, which can be
+    write, so it is reported as a write the caller cannot rule out.
+    """
+    if block is None:
+        return {"(repository default)": "write"}
+    if isinstance(block, dict):
+        return dict(block)
+    if block == "write-all":
+        return {"(all)": "write"}
+    if block in {"read-all", "{}"}:
+        return {}
+    raise AssertionError(f"unrecognised permissions value {block!r}")
+
+
+def job_write_scopes(path: Path) -> dict[str, set[str]]:
+    """Each job's effective token, as the set of scopes it can write.
+
+    A job's own block replaces the workflow's, it is not merged with it, so a
+    job that declares nothing runs with the top-level block.
+    """
+    text = path.read_text()
+    blocks = declared(text)
+    bodies, _ = job_lines(text.splitlines())
+    return {
+        job: {
+            scope
+            for scope, access in scopes(blocks["jobs"].get(job, blocks["workflow"])).items()
+            if access == "write"
+        }
+        for job in bodies
+    }
+
+
+def job_access(path: Path, job: str) -> dict[str, str]:
+    blocks = declared(path.read_text())
+    return scopes(blocks["jobs"].get(job, blocks["workflow"]))
+
+
+def backticked_workflows(text: str) -> set[str]:
+    return {literal for literal in literals(text) if literal.endswith((".yml", ".yaml"))}
+
+
+def required_checks() -> set[str]:
+    rules = json.loads(RULESET.read_text())["rules"]
+    return {
+        check["context"]
+        for rule in rules
+        if rule["type"] == "required_status_checks"
+        for check in rule["parameters"]["required_status_checks"]
+    }
+
+
+class TokenReachParserTests(unittest.TestCase):
+    """`scopes()` decides which tier a workflow belongs in; each shape Actions
+    accepts has to come out as what the token can actually write."""
+
+    def test_a_block_is_read_as_written(self) -> None:
+        self.assertEqual(scopes({"contents": "read", "issues": "write"}), {"contents": "read", "issues": "write"})
+
+    def test_write_all_grants_a_write(self) -> None:
+        self.assertIn("write", scopes("write-all").values())
+
+    def test_read_all_and_empty_grant_nothing(self) -> None:
+        self.assertEqual(scopes("read-all"), {})
+        self.assertEqual(scopes("{}"), {})
+
+    def test_no_block_is_not_read_as_read_only(self) -> None:
+        # The repository default can be read-write; a workflow that declares
+        # nothing must not sort into Tier 1 as if it held `contents: read`.
+        self.assertIn("write", scopes(None).values())
+
+    def test_an_unknown_value_raises(self) -> None:
+        with self.assertRaises(AssertionError):
+            scopes("read-some")
+
+
+class TokenReachTests(unittest.TestCase):
+    """#469 sorted the workflows by what their token can write: Tier 1 is
+    "the workflows whose token can only read the repository or write to its
+    issue tracker", Tier 4 "any workflow token that can write to the
+    repository or its packages". The Paths paragraphs name the files, but
+    nothing joined a file's tier to the `permissions:` it declares, so a
+    workflow granted `contents: write` stayed in Tier 1 with every test
+    green."""
+
+    def test_every_workflow_sits_in_exactly_the_tier_its_token_reaches(self) -> None:
+        workflows = workflow_paths()
+        self.assertTrue(workflows)
+        for path in workflows:
+            name = str(path.relative_to(ROOT))
+            writes = set().union(*job_write_scopes(path).values())
+            expected = 4 if writes - {"issues"} else 1
+            with self.subTest(workflow=name, writes=sorted(writes)):
+                self.assertEqual(
+                    tiers_naming(name),
+                    {expected},
+                    f"{name} can write {sorted(writes) or 'nothing'}, so docs/risk-tiers.md "
+                    f"has to name it in Tier {expected} and no other",
+                )
+
+    def test_the_issue_tracker_paragraph_names_what_each_token_holds(self) -> None:
+        paragraph = tier_paragraph(1, "The issue-tracker workflows")
+        match = re.search(r"what (.*?) can touch with their `issues: write` token", paragraph)
+        self.assertIsNotNone(match, "Tier 1 no longer says which workflows hold `issues: write`")
+        issue_writers = {f".github/workflows/{name}" for name in backticked_workflows(match.group(1))}
+        read_only = {
+            f".github/workflows/{name}"
+            for name in re.findall(r"`([\w.-]+\.ya?ml)` holds `contents: read`", paragraph)
+        }
+        self.assertTrue(read_only, "Tier 1 no longer says which workflow holds `contents: read`")
+        tier_one = {
+            str(path.relative_to(ROOT)): set().union(*job_write_scopes(path).values())
+            for path in workflow_paths()
+            if tiers_naming(str(path.relative_to(ROOT))) == {1}
+        }
+        self.assertEqual(issue_writers, {name for name, writes in tier_one.items() if writes == {"issues"}})
+        self.assertEqual(read_only, {name for name, writes in tier_one.items() if not writes})
+
+    def test_the_audit_helper_can_only_touch_issues(self) -> None:
+        # "`snapshot_drift_issue.py`, which runs under the audit workflow's
+        # token and can open issues and nothing else" -- so the audit workflow
+        # has to run it, and every gh call it makes has to be `gh issue ...`.
+        self.assertIn("`snapshot_drift_issue.py`", tier_paragraph(1, "The issue-tracker workflows"))
+        self.assertIn("python3 snapshot_drift_issue.py", (WORKFLOWS / "maintenance-audit.yml").read_text())
+        tree = ast.parse(DRIFT_ISSUE.read_text())
+        calls: list[tuple[ast.Call, dict[str, ast.expr]]] = []
+        for function in ast.walk(tree):
+            if not isinstance(function, ast.FunctionDef):
+                continue
+            # A name is resolved inside the function that calls run_gh(), so
+            # `args` in find_tracking_issue() is not confused with main()'s.
+            bound = {
+                target.id: node.value
+                for node in ast.walk(function)
+                if isinstance(node, ast.Assign)
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            }
+            calls.extend(
+                (node, bound)
+                for node in ast.walk(function)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "run_gh"
+            )
+        self.assertTrue(calls, "snapshot_drift_issue.py makes no gh call; the sentence describes nothing")
+        for call, bound in calls:
+            argv = call.args[0]
+            if isinstance(argv, ast.Name):
+                argv = bound.get(argv.id, argv)
+            with self.subTest(line=call.lineno):
+                self.assertIsInstance(argv, ast.List, "a gh call whose argv this test cannot read")
+                first = argv.elts[0]
+                self.assertIsInstance(first, ast.Constant)
+                self.assertEqual(first.value, "issue")
+        spawners = {
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in {"subprocess", "os"}
+            and node.attr in {"run", "Popen", "call", "check_call", "check_output", "system", "execv", "execvp"}
+        }
+        run_gh = next(
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_gh"
+        )
+        self.assertTrue(spawners, "snapshot_drift_issue.py no longer spawns gh through subprocess")
+        self.assertEqual(
+            {line for line in spawners if not run_gh.lineno <= line <= run_gh.end_lineno},
+            set(),
+            "snapshot_drift_issue.py starts a process outside run_gh(), which this test cannot see into",
+        )
+
+    def test_the_ci_paragraph_states_each_jobs_token(self) -> None:
+        paragraph = tier_paragraph(4, "`ci.yml` is here for one job.")
+        writes = job_write_scopes(CI)
+        match = re.search(r"`([\w-]+)` holds `contents: write`", paragraph)
+        self.assertIsNotNone(match, "Tier 4 no longer names the ci.yml job that holds `contents: write`")
+        self.assertEqual({match.group(1)}, {job for job, scopes_ in writes.items() if "contents" in scopes_})
+        match = re.search(r"The ((?:`[\w-]+`(?:, | and )?)+) jobs in the same file hold `contents: read`", paragraph)
+        self.assertIsNotNone(match, "Tier 4 no longer names the ci.yml jobs that hold `contents: read`")
+        readers = set(literals(match.group(1)))
+        self.assertEqual(readers, {job for job, scopes_ in writes.items() if not scopes_})
+        for job in readers:
+            with self.subTest(job=job):
+                self.assertEqual(job_access(CI, job), {"contents": "read"})
+
+    def test_the_ci_paragraph_names_the_required_gate_and_nothing_else(self) -> None:
+        # The first version of this paragraph called `test` and
+        # `container-build` both "the required gate". The ruleset requires
+        # `test` alone, and docs/branch-protection.md says why
+        # `Build container image` is not required: it only builds when the
+        # image's files change, so requiring it would block every other PR.
+        paragraph = tier_paragraph(4, "`ci.yml` is here for one job.")
+        match = re.search(r"((?:`[\w-]+`(?:, | and )?)+) (?:is|are) the required gate", paragraph)
+        self.assertIsNotNone(match, "Tier 4 no longer says which ci.yml job is the required gate")
+        self.assertEqual(set(literals(match.group(1))), required_checks())
+
+    def test_the_contents_write_job_runs_the_script_tier_four_names_for_it(self) -> None:
+        # "on every push to `main`, runs `coverage_badge.py` and pushes what it
+        # writes to the `coverage-data` branch ... and so is
+        # `coverage_badge.py` ... it is what the job runs."
+        paragraph = tier_paragraph(4, "`ci.yml` is here for one job.")
+        self.assertIn("`coverage_badge.py`", paragraph)
+        self.assertIn("`coverage-data`", paragraph)
+        self.assertEqual(tiers_naming("coverage_badge.py"), {4})
+        bodies, _ = job_lines(CI.read_text().splitlines())
+        job = re.search(r"`([\w-]+)` holds `contents: write`", paragraph).group(1)
+        code = "\n".join(line for line in bodies[job] if not line.lstrip().startswith("#"))
+        self.assertIn("python3 coverage_badge.py", code)
+        self.assertIn("push origin HEAD:coverage-data", code)
+        self.assertIn("github.ref == 'refs/heads/main'", code)
 
 
 if __name__ == "__main__":

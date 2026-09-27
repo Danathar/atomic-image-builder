@@ -122,9 +122,9 @@ ruleset keeps it off `main`, and nothing keeps it off `formula/<tag>` or any
 other branch. Pointing the push elsewhere, or giving the job anything more to
 do with the token, is a change in this tier, and so is `coverage_badge.py`,
 for the same reason `homebrew_formula.py` is: it is what the job runs. The
-`test` and `container-build` jobs in the same file hold `contents: read` and
-are the required gate; a change to them reaches contributors, but it shares
-a file with the job that does not, so it is reviewed here.
+`test` and `container-build` jobs in the same file hold `contents: read`, and
+`test` is the required gate; a change to them reaches contributors, but it
+shares a file with the job that does not, so it is reviewed here.
 
 `publish-wrapper.yml` is here because it attaches the release-bound `aib` and
 `aib.sha256` that the installation instructions download. The wrapper runs on
