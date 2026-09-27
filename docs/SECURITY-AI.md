@@ -177,9 +177,15 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   file carrying a value rather than its header. The values of its `-f`,
   `--justfile`, `-d` and `--working-directory` options get the same scan the
   lint operands do, in each of the three spellings bash passes through (a
-  separate word, `--justfile=PATH`, `-fPATH` attached), and `-f -` and
-  `--justfile /dev/stdin` put an input redirection back in scope; a bare
-  `just --fmt --check` is untouched. Same finding as
+  separate word, `--justfile=PATH`, `-fPATH` attached), and at the end of a
+  short cluster (`-uf.env` is `-u -f .env` to just), and `-f -` and
+  `--justfile /dev/stdin` put an input redirection back in scope.
+  `--justfile-name NAME` is refused outright: just searches the working
+  directory and every directory above it for a file of that name, so
+  `--justfile-name .env` prints the `.env` line and a name like `.netrc`
+  reaches past the checkout; `JUST_JUSTFILE` and `JUST_JUSTFILE_NAME` are the
+  same two options spelled as environment variables and are refused with the
+  rest of that family below. A bare `just --fmt --check` is untouched. Same finding as
   [#431](https://github.com/Danathar/atomic-image-builder/issues/431). Not every operand
   arrives in the argv, either: `SHELLCHECK_OPTS` is not a list of options
   despite the name -- the linter splits it and prepends it to its own argument

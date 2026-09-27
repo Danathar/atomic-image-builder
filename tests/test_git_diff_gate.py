@@ -151,6 +151,13 @@ REFUSED_COMMANDS = (
     ("just --fmt --check -d /tmp/other -f /tmp/other/justfile", "formats a justfile in another tree"),
     ("just --fmt --check --justfile /dev/stdin < ./.env", "parses a denied file arriving on standard input"),
     ("just --fmt --check -f - < ./cosign.key", "parses a denied file through the - justfile"),
+    ("just --fmt --check --justfile-name .env", "searches for a justfile named after a denied file"),
+    ("just --fmt --check --justfile-name=.netrc", "searches every directory above the checkout for a home file"),
+    ("just --fmt --check -uf.env", "hides -f at the end of a short-option cluster"),
+    ("just --fmt --check -nf ./cosign.key", "hides a detached -f value behind a cluster"),
+    ("just --fmt --check -ud /tmp/other -f /tmp/other/justfile", "hides -d in a cluster"),
+    ("JUST_JUSTFILE=./.env just --fmt --check", "names the justfile through just's own environment variable"),
+    ("export JUST_JUSTFILE_NAME=.env; just --fmt --check", "exports the name search from a segment of its own"),
     ("skopeo inspect docker://x &>cosign.pub", "opens a path for both streams through skopeo"),
     ("podman image exists x >|cosign.pub", "opens a path past noclobber through a three-word prefix"),
     ("gh search prs --repo x <>cosign.pub", "opens a path read-write through gh"),
@@ -320,6 +327,7 @@ ALLOWED_COMMANDS = (
     "just --fmt --check",
     "just --fmt --check --justfile template_snapshots/containerfile/Justfile",
     "just --fmt --check -f template_snapshots/containerfile/Justfile < /dev/null",
+    "just --fmt --check -uf template_snapshots/containerfile/Justfile",
     "skopeo inspect docker://ghcr.io/x:latest | jq .Digest",
     "podman images --format '{{.Repository}}'",
     "gh search issues --repo Danathar/atomic-image-builder --json number",
@@ -520,6 +528,11 @@ REACH_CORPUS = (
     ("redirection", "hadolint Containerfile < contrib/aib", ALLOWED, "hadolint reports a position and the offending character, never the source line"),
     ("redirection", "ruff check >cosign.pub", ALLOWED, "its allow row carries no :*, so the redirection makes the string match no rule and Claude Code prompts"),
     ("options", "just --fmt --check --justfile ./.env", REFUSED, "an option that hands just a file it prints a line of back"),
+    ("options", "just --fmt --check -uf.env", REFUSED, "clap bundles short options, so -f at the end of a cluster is still -f"),
+    ("options", "just --fmt --check --justfile-name .env", REFUSED, "a name just searches the checkout and every directory above it for"),
+    ("options", "just --fmt --check -u", ALLOWED, "a cluster with no value-taking letter names no file"),
+    ("options", "just --fmt --check -sf", ALLOWED, "-s takes the rest of the word as its value, so the f is a recipe name, not -f"),
+    ("environment", "JUST_JUSTFILE=./.env just --fmt --check", REFUSED, "--justfile spelled as just's environment variable"),
     # 3. Word rewriting bash does before the tool sees the word.
     ("word rewriting", "git diff {a,.env}", REFUSED, "a brace is two words to bash and one to a scanner"),
     ("word rewriting", "shellcheck {contrib/aib,.env}", REFUSED, "the same in a lint run"),
@@ -1635,6 +1648,41 @@ class ReachCorpusTests(unittest.TestCase):
                 "just_refusal() is then belt and braces rather than the thing "
                 "that keeps a denied file out of the transcript",
             )
+
+    def test_just_reaches_a_file_through_its_name_search_and_a_cluster(self) -> None:
+        # Why --justfile-name, JUST_JUSTFILE* and a -f at the end of a short
+        # cluster are refused. The name search walks up from the working
+        # directory, so a name finds a file above it as readily as beside it,
+        # and clap reads `-uf.env` as `-u -f .env`. Each prints the stand-in's
+        # value back, the way `--justfile` does in the test above.
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            above = Path(tmp)
+            (above / "stand-in.env").write_text("SECRET_TOKEN=stand-in-not-a-secret\n")
+            below = above / "checkout"
+            below.mkdir()
+            (below / "justfile").write_text("build:\n    echo hi\n")
+            for argv, env in (
+                (["just", "--fmt", "--check", "--justfile-name", "stand-in.env"], {}),
+                (["just", "--fmt", "--check"], {"JUST_JUSTFILE_NAME": "stand-in.env"}),
+                (["just", "--fmt", "--check", "-uf../stand-in.env"], {}),
+            ):
+                with self.subTest(argv=argv, env=env):
+                    result = subprocess.run(
+                        argv,
+                        cwd=below,
+                        env={**os.environ, **env},
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertIn(
+                        "stand-in-not-a-secret",
+                        result.stdout + result.stderr,
+                        "just no longer reaches the file this way; the refusal "
+                        "is then belt and braces rather than what closes it",
+                    )
 
 
 # The reserved words that open a compound command, and the two (`time`, `!`)

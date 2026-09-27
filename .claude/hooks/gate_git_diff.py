@@ -325,6 +325,12 @@ REFUSED_ENVIRONMENT = (
         "replaces the token gh authenticates with",
     ),
     (
+        "JUST_JUSTFILE*",
+        "is `--justfile` and `--justfile-name` in just's own spelling, and "
+        "`just --fmt --check` prints the line of that file it could not parse "
+        "back -- JUST_JUSTFILE=./.env prints the .env's first NAME=value line",
+    ),
+    (
         "CONTAINERS_CONF",
         "re-points podman's and skopeo's configuration, runtime included",
     ),
@@ -2179,13 +2185,31 @@ def shellcheck_check_sourced(token: str) -> bool:
 # for a `justfile` of its own.
 JUST_PATH_OPTIONS = frozenset({"-f", "--justfile", "-d", "--working-directory"})
 
+# The two short options above, by letter, and every other short option of
+# just that takes a value. clap bundles short options into one word the way
+# git does, so `-uf.env` is `-u -f .env`: the walk in just_path_values()
+# reads letters as options until the first value-taking one, and the rest of
+# the word (or the next word) is that option's value. `-l` takes an optional
+# value, which clap reads out of the rest of the word just the same.
+JUST_PATH_LETTERS = frozenset("fd")
+JUST_VALUE_LETTERS = frozenset("fdFEcsl")
+
+# `--justfile-name NAME` has just search the working directory and then every
+# directory above it for a justfile called NAME, so the value is not a path
+# the checkout bounds: `--justfile-name .env` parses the `.env` and
+# `--justfile-name .netrc` reaches a home directory the checkout sits under.
+# Nothing here uses it, so it is refused in both spellings clap accepts; clap
+# takes no abbreviation of a long option (`--justf` is an error).
+JUST_NAME_OPTION = "--justfile-name"
+
 
 def just_path_values(invocation: Invocation) -> list[tuple[str, str]]:
     """The paths a `just --fmt --check` invocation would open, with their twins.
 
     Every spelling of `-f`/`--justfile`/`-d`/`--working-directory` bash passes
-    through: the value as a separate word, `--justfile=PATH`, and `-fPATH`
-    attached to the short form. Positional words are recipe arguments rather
+    through: the value as a separate word, `--justfile=PATH`, `-fPATH`
+    attached to the short form, and the short form at the end of a cluster
+    (`-uf PATH`, `-uf.env`) -- see JUST_VALUE_LETTERS. Positional words are recipe arguments rather
     than paths and are left alone -- `--fmt` runs no recipe.
     """
     values: list[tuple[str, str]] = []
@@ -2213,9 +2237,27 @@ def just_path_values(invocation: Invocation) -> list[tuple[str, str]]:
             index = token.index("=") + 1
             values.append((token.split("=", 1)[1], twin[index:]))
             continue
-        if len(token) > 2 and token[:2] in JUST_PATH_OPTIONS:
-            values.append((token[2:], twin[2:]))
+        if len(token) > 1 and token[0] == "-" and token[1] != "-":
+            for index in range(1, len(token)):
+                letter = token[index]
+                if letter not in JUST_VALUE_LETTERS:
+                    continue
+                if letter in JUST_PATH_LETTERS:
+                    if index + 1 < len(token):
+                        values.append((token[index + 1 :], twin[index + 1 :]))
+                    else:
+                        expect_value = True
+                break
     return values
+
+
+def just_name_option(invocation: Invocation) -> str | None:
+    """The first word of a `just` invocation that spells JUST_NAME_OPTION,
+    detached or with `=VALUE` attached, or None."""
+    for token in invocation.words:
+        if token.split("=", 1)[0] == JUST_NAME_OPTION:
+            return token
+    return None
 
 
 def just_refusal(
@@ -2231,6 +2273,16 @@ def just_refusal(
     `/dev/stdin` justfile reads standard input, so the target of an input
     redirection is checked the way shellcheck_refusal() checks one.
     """
+    name_option = just_name_option(invocation)
+    if name_option is not None:
+        return (
+            f"{name_option} has just search the working directory and every "
+            "directory above it for a justfile of that name, and `--fmt --check` "
+            "prints the line it could not parse back -- `--justfile-name .env` "
+            "prints the first NAME=value line of the .env past the Read(./.env) "
+            "deny rule, and a name like .netrc reaches files above the checkout; "
+            "format this repository's own justfiles, named with -f or --justfile"
+        )
     target = unsafe_reading_redirection(segment, twins)
     if target is not None:
         return (
