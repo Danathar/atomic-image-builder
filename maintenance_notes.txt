@@ -746,3 +746,39 @@ grown a fragment. Read it, and either add its path to BREW_LOGIN_FRAGMENTS or,
 if it turns out to be safe, exclude it explicitly in the sweep -- do not widen
 the grep. tests/test_brew_login_fragments.py executes the step against fixture
 trees, so a change to either half is exercised rather than pattern-matched.
+
+
+Managed-Repo Symlink Refusal
+-----------------------------
+managed_path() (atomic_image_builder.py:1862) is the choke point every read
+and write the tool performs inside a managed repo goes through. A managed
+repo is a clone of whatever is on GitHub, and git checks out symlinks as
+symlinks, so a file the tool believes it owns -- README.md, say -- can
+actually be a pointer at something outside the clone:
+
+    README.md -> /home/dan/.bashrc
+
+Python's open() follows that link. A write the tool believes lands in the
+generated repo would instead rewrite the user's shell profile, on a host
+where the tool's own promise is that it writes to GitHub and never to the
+running system. A directory link is worse: it redirects every generated file
+beneath it (".github -> elsewhere" moves ".github/workflows/build.yml" with
+it), and mkdir(parents=True, exist_ok=True) on a path under it succeeds
+quietly. It is also silent either way -- the symlink in the worktree is
+unchanged by a write through it, so `git status` reports nothing and the
+diff the update flow shows the user before pushing is empty.
+
+Getting there needs only a merged pull request to a user's own image repo,
+which is a repo whose contents this tool otherwise treats as its own output.
+
+managed_path() refuses rather than sanitizes: it walks every path component
+(not just the last -- a symlinked directory redirects everything under it)
+and raises CommandError the moment one is a symlink, rather than trying to
+resolve or reject only the unsafe target.
+
+Action required: none on a schedule. If a maintainer hits
+"... is a symbolic link, and this tool will not read or write through one",
+the fix is in the managed repo, not here -- replace the link with a regular
+file or directory and run the update again. There is no legitimate reason
+for a managed file to be a link; a repo that has one is telling us something
+has gone wrong with it.
