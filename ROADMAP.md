@@ -45,7 +45,7 @@ asks:
    condition, which makes it hard for adopters to judge how far out
    general-availability is.
 
-   **Candidate bar (proposal, not yet a maintainer decision — see #475):**
+   **Candidate bar (proposal, not yet a maintainer decision — see #501):**
    three consecutive tagged releases with no scan/carry/build regression
    reported against either build method, the coverage gate holding at or
    above its current threshold across those releases, and zero open
