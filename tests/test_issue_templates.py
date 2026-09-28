@@ -52,6 +52,7 @@ from atomic_image_builder import (  # noqa: E402
     METHOD_DISPLAY,
     TOOL_COMMAND,
     VERSION,
+    next_boot_deployment,
 )
 
 TEMPLATE_DIR = ROOT / ".github/ISSUE_TEMPLATE"
@@ -362,6 +363,22 @@ class SystemScanTests(unittest.TestCase):
     def test_the_suggested_base_image_is_one_the_tool_offers(self) -> None:
         placeholder = field(BUG, "base")["attributes"]["placeholder"]
         self.assertIn(placeholder, {image.image_uri for image in BASE_IMAGES})
+
+    def test_the_command_the_form_suggests_reads_what_the_scan_reads(self) -> None:
+        # The form tells a reporter to copy the first entry `rpm-ostree status`
+        # prints. That is only the deployment the scan read while the scan
+        # picks the first entry: the pending one when something is waiting
+        # for a reboot, the booted one otherwise. The form used to ask for
+        # `rpm-ostree status -b`, which names a different deployment on a
+        # pending host (#519).
+        description = field(BUG, "base")["attributes"]["description"]
+        self.assertIn("first entry `rpm-ostree status` prints", description)
+        booted = {"booted": True, "osname": "default", "container-image-reference": "booted"}
+        staged = {"staged": True, "osname": "default", "container-image-reference": "staged"}
+        rollback = {"osname": "default", "container-image-reference": "rollback"}
+        for status in ([staged, booted, rollback], [booted, rollback]):
+            with self.subTest(first=status[0]["container-image-reference"]):
+                self.assertEqual(next_boot_deployment(status)[0], status[0])
 
     def test_the_form_expects_no_scan_where_the_tool_requires_none(self) -> None:
         # "container, no host scan" is only a sensible answer while
