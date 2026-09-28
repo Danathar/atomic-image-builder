@@ -740,28 +740,26 @@ class BuilderTests(unittest.TestCase):
         condition of its own but such a script was taken as already guarded:
         no guard went in, and it signed on pull requests or with no key set.
         Modelled on the bundled snapshot with the Sign step's `if:` removed
-        and its script wrapped in such a line.
+        and its `cosign sign` command wrapped in a valid `if : ; then ... fi`.
         """
         app = self.make_app()
         snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
         branch_if = "github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
         original = f"        id: sign-image\n        if: {branch_if}\n"
         self.assertIn(original, snapshot)
-        unguarded = snapshot.replace(original, "        id: sign-image\n")
-        sign_line = "          cosign sign -y --new-bundle-format=false"
-        self.assertEqual(unguarded.count(sign_line), 1)
-        for script_line in ("if : ; then", '"if": placeholder'):
-            with self.subTest(script_line=script_line):
-                workflow = unguarded.replace(sign_line, f"          {script_line}\n{sign_line}")
-                patched = app.patch_container_workflow(workflow)
-                lines = patched.splitlines()
-                start = lines.index("      - name: Sign container image")
-                self.assertEqual(
-                    lines[start + 1 : start + 3],
-                    [f"        if: {branch_if} && env.SIGNING_ENABLED == 'true'", "        id: sign-image"],
-                )
-                self.assertIn(f"          {script_line}", lines)
-                self.assertEqual(app.patch_container_workflow(patched), patched)
+        [sign_line] = [line for line in snapshot.splitlines() if line.startswith("          cosign sign -y ")]
+        script = ["          if : ; then", f"  {sign_line}", "          fi"]
+        workflow = snapshot.replace(original, "        id: sign-image\n").replace(sign_line, "\n".join(script))
+        patched = app.patch_container_workflow(workflow)
+        lines = patched.splitlines()
+        start = lines.index("      - name: Sign container image")
+        self.assertEqual(
+            lines[start + 1 : start + 3],
+            [f"        if: {branch_if} && env.SIGNING_ENABLED == 'true'", "        id: sign-image"],
+        )
+        script_start = lines.index(script[0])
+        self.assertEqual(lines[script_start : script_start + 3], script)
+        self.assertEqual(app.patch_container_workflow(patched), patched)
 
     def test_patch_container_workflow_injects_job_env_even_when_step_env_matches(self) -> None:
         """A step-level entry must not prevent the job-level one being added.
