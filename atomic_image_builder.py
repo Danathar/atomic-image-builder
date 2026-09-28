@@ -259,7 +259,8 @@ INSTALLER_UNVERIFIED_SWITCH_COMMENT = (
 # dnf5 prints this when -C (cache-only) is used and no repository metadata has
 # been downloaded yet. Matched so package search and the exact-name check can
 # offer to fix it in place instead of naming a command the user may have no
-# shell to run.
+# shell to run. It and DNF5_MISSING_MARKERS are dnf5's English messages, which
+# is why dnf5_command() pins the locale for every dnf5 run the tool makes.
 DNF5_NO_CACHE_MARKER = "cache-only enabled but no cache"
 PACKAGE_SEARCH_NEEDS_METADATA = (
     "Package search needs local DNF metadata. "
@@ -4512,6 +4513,19 @@ class App:
             raise CommandError(f"refusing to use {state_dir}: owned by uid {st.st_uid}, not us")
         return state_dir
 
+    def dnf5_command(self, state_dir: Path, *args: str) -> list[str]:
+        # Every dnf5 run the tool makes goes through here, so that each one
+        # uses the scoped state directory and speaks English. The no-cache
+        # and "nothing matched" markers are matched as English text, and dnf5
+        # translates both: under a German or French locale neither matches,
+        # so a missing cache never gets the refresh offer and every name is
+        # left unchecked (#504). LC_ALL=C overrides LANG and every LC_*.
+        # LANGUAGE is removed too: it outranks the locale in gettext, so
+        # LANGUAGE=de alone gives German output. glibc happens to ignore it
+        # under the C locale, but dropping it does not lean on that. Same
+        # reasoning as the rpm -q pin in lookup_installed_host_packages().
+        return ["env", "-u", "LANGUAGE", "LC_ALL=C", f"XDG_STATE_HOME={state_dir}", "dnf5", *args]
+
     def refresh_package_metadata(self) -> bool:
         # Offered rather than run automatically: this is a real download over
         # whatever connection the user happens to be on.
@@ -4528,7 +4542,7 @@ class App:
             return False
         proc = self.gum.spinner_result(
             "Refreshing package metadata...",
-            ["env", f"XDG_STATE_HOME={self.dnf5_state_dir()}", "dnf5", "makecache"],
+            self.dnf5_command(self.dnf5_state_dir(), "makecache"),
         )
         if proc.returncode != 0:
             self.gum.error("Could not refresh package metadata.")
@@ -4639,10 +4653,8 @@ class App:
         # in every spelling of the matched package, one per line.
         proc = self.gum.spinner_result(
             title,
-            [
-                "env",
-                f"XDG_STATE_HOME={state_dir}",
-                "dnf5",
+            self.dnf5_command(
+                state_dir,
                 "-C",
                 "repoquery",
                 "--available",
@@ -4651,7 +4663,7 @@ class App:
                 "--latest-limit",
                 "1",
                 *args,
-            ],
+            ),
         )
         # %{name}\n means one result per line even when multiple packages are
         # queried at once; without the trailing newline in the format string,
@@ -4810,10 +4822,8 @@ class App:
             pattern = f"*{normalized.replace(' ', '*')}*"
             proc = self.gum.spinner_result(
                 f"Searching package names for: {normalized}",
-                [
-                    "env",
-                    f"XDG_STATE_HOME={state_dir}",
-                    "dnf5",
+                self.dnf5_command(
+                    state_dir,
                     "-C",
                     "repoquery",
                     "--available",
@@ -4822,7 +4832,7 @@ class App:
                     "--qf",
                     "%{name}\t%{summary}\n",
                     pattern,
-                ],
+                ),
             )
             detail = "\n".join(part for part in [proc.stdout, proc.stderr] if part).lower()
             if proc.returncode != 0:

@@ -5139,6 +5139,74 @@ class BuilderTests(unittest.TestCase):
         # Declining must not download anything.
         self.assertTrue(all("makecache" not in command for command in commands))
 
+    @contextlib.contextmanager
+    def run_dnf5_for_real_under_a_german_locale(self, stub: GumStub):
+        # Runs the argv the tool builds, env prefix and all, against a stand-in
+        # dnf5 on PATH, from a German desktop session. The stand-in answers the
+        # way gettext picks a language -- LANGUAGE first, then LC_ALL, then
+        # LANG -- without glibc's exception that ignores LANGUAGE under the C
+        # locale, so only a run with LANGUAGE gone *and* LC_ALL=C reads English.
+        # Asserting on the argv alone would pass a prefix env never applies.
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "dnf5"
+            fake.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/bin/sh
+                    if [ -n "${LANGUAGE:-}" ] || [ "${LC_ALL:-${LANG:-C}}" != C ]; then
+                        echo 'Cache-only ist aktiviert, aber kein Cache für Paketquelle „fedora“' >&2
+                    else
+                        echo 'Cache-only enabled but no cache for repository "fedora"' >&2
+                    fi
+                    exit 1
+                    """
+                )
+            )
+            fake.chmod(0o755)
+            stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.run(
+                list(command), capture_output=True, text=True, check=False
+            )
+            german = {
+                "PATH": f"{tmp}{os.pathsep}{os.environ.get('PATH', '')}",
+                "LANG": "de_DE.UTF-8",
+                "LC_ALL": "de_DE.UTF-8",
+                "LANGUAGE": "de",
+            }
+            with patch.dict(os.environ, german):
+                with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "dnf5"):
+                    yield
+
+    def test_lookup_host_packages_offers_metadata_refresh_on_a_german_host(self) -> None:
+        # #504: dnf5's no-cache message is translated, so on a German host it
+        # never matched and the names were silently left unchecked.
+        app = self.make_app()
+        stub = GumStub()
+        prompts: list[str] = []
+        stub.confirm = lambda prompt, **_kwargs: prompts.append(prompt) or False
+        app.gum = stub
+        with self.run_dnf5_for_real_under_a_german_locale(stub):
+            with redirect_stdout(io.StringIO()):
+                results = app.lookup_host_packages(["htop"])
+
+        self.assertEqual(prompts, ["Refresh package metadata now?"])
+        self.assertEqual(results, {"htop": None})
+
+    def test_search_host_packages_reports_missing_cache_on_a_german_host(self) -> None:
+        # #504: the untranslated marker is what tells a missing cache apart
+        # from dnf5 being broken; without it, search pointed the user at
+        # exact-name entry, which could not check names either.
+        app = self.make_app()
+        stub = GumStub()
+        prompts: list[str] = []
+        stub.confirm = lambda prompt, **_kwargs: prompts.append(prompt) or False
+        app.gum = stub
+        with self.run_dnf5_for_real_under_a_german_locale(stub):
+            with redirect_stdout(io.StringIO()):
+                results, truncated, message = app.search_host_packages("htop")
+
+        self.assertEqual(prompts, ["Refresh package metadata now?"])
+        self.assertEqual((results, truncated, message), ([], False, atomic_image_builder.PACKAGE_SEARCH_NEEDS_METADATA))
+
     def test_search_host_packages_refreshes_metadata_then_retries_the_search(self) -> None:
         app = self.make_app()
         stub = GumStub()
@@ -5290,9 +5358,9 @@ class BuilderTests(unittest.TestCase):
 
         self.assertEqual(len(commands), 1)
         command = commands[0]
-        self.assertEqual(command[0], "env")
-        self.assertTrue(command[1].startswith("XDG_STATE_HOME="))
-        self.assertEqual(command[2:], ["dnf5", "makecache"])
+        self.assertEqual(command[:4], ["env", "-u", "LANGUAGE", "LC_ALL=C"])
+        self.assertTrue(command[4].startswith("XDG_STATE_HOME="))
+        self.assertEqual(command[5:], ["dnf5", "makecache"])
         self.assertTrue(any(level == "success" for level, _message in stub.messages))
 
     def test_refresh_package_metadata_reports_a_bare_failure_without_detail(self) -> None:
