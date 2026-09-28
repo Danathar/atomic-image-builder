@@ -198,9 +198,15 @@ PACKAGE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+:-]*$")
 # (owner/project:custom:123). The "@" is allowed only as the first character
 # and the colons only after the slash, so this stays a repo spec and not a
 # shell or YAML surprise -- shell_quote and yaml_scalar quote it downstream
-# regardless.
-COPR_REPO_RE = re.compile(r"^@?[A-Za-z0-9._-]+/[A-Za-z0-9._:-]+$")
-SERVICE_TOKEN_RE = re.compile(r"^[A-Za-z0-9@._:+-]+$")
+# regardless. As with packages, the owner cannot start with "-": "-x/y" lands
+# on `dnf5 copr enable` as an option ("-x" is --exclude), and dnf5 has no "--"
+# to put in front of it.
+COPR_REPO_RE = re.compile(r"^@?[A-Za-z0-9._][A-Za-z0-9._-]*/[A-Za-z0-9._:-]+$")
+# A unit name cannot start with "-" either. "--now" otherwise passes as a
+# service and becomes a bare `systemctl enable --now` line in build.sh, which
+# fails under `set -e` on every build, and the BlueBuild systemd module passes
+# the same token to its own systemctl call, where no "--" can be added.
+SERVICE_TOKEN_RE = re.compile(r"^[A-Za-z0-9@._:+][A-Za-z0-9@._:+-]*$")
 # The repo name becomes the image name in ghcr.io/<owner>/<repo>, so it has to
 # satisfy the container-reference grammar as well as GitHub's naming rules.
 # This is distribution/reference's path-component production: alphanumeric runs
