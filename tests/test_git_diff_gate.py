@@ -527,6 +527,12 @@ REACH_CORPUS = (
     ("redirection", "just --fmt --check -f - < ./.env", REFUSED, "a - justfile makes just read standard input, and it prints the line it could not parse"),
     ("redirection", "hadolint Containerfile < contrib/aib", ALLOWED, "hadolint reports a position and the offending character, never the source line"),
     ("redirection", "ruff check >cosign.pub", ALLOWED, "its allow row carries no :*, so the redirection makes the string match no rule and Claude Code prompts"),
+    ("redirection", "git commit -F - <<'EOF'\nit's fine\nEOF", ALLOWED, "a quoted here-document's body is input data, not shell, so its apostrophe is not a parse failure (#537)"),
+    ("redirection", "cat <<'EOF'x\nbody\nEOFx\ngit diff --no-index /dev/null ./cosign.key\nEOF", REFUSED, "bash's delimiter is the whole word EOFx, so the git line after it runs"),
+    ("redirection", "cat <<\\EOF.x\nbody\nEOF.x\ngit diff --no-index /dev/null ./cosign.key\nEOF", REFUSED, "the backslash-quoted delimiter runs on to EOF.x"),
+    ("redirection", 'cat <<"EOF"x\nbody\nEOFx\ngit diff --no-index /dev/null ./cosign.key\nEOF', REFUSED, "the double-quoted delimiter runs on to EOFx"),
+    ("redirection", "cat <<-'EOF'x\nbody\nEOFx\ngit diff --no-index /dev/null ./cosign.key\nEOF", REFUSED, "the tab-stripping form runs on to EOFx the same way"),
+    ("redirection", "cat <<'EOF'-\nbody\nEOF-\ngit diff --no-index /dev/null ./cosign.key\nEOF", REFUSED, "a dash is a word character to bash, so the delimiter is EOF-"),
     ("options", "just --fmt --check --justfile ./.env", REFUSED, "an option that hands just a file it prints a line of back"),
     ("options", "just --fmt --check -uf.env", REFUSED, "clap bundles short options, so -f at the end of a cluster is still -f"),
     ("options", "just --fmt --check --justfile-name .env", REFUSED, "a name just searches the checkout and every directory above it for"),
@@ -2914,6 +2920,42 @@ class QuotedHeredocTests(unittest.TestCase):
         # the apostrophe sits inside the double quotes.)
         command = "echo \"$(cat <<'EOF'\ndon't\nEOF\n)\""
         self.assertEqual(gate.drop_quoted_heredoc_bodies(command), command)
+
+    def test_a_delimiter_word_that_runs_on_past_its_quote_is_not_cut(self) -> None:
+        # Bash's delimiter is the whole word, so `<<'EOF'x` ends at the line
+        # `EOFx`. Cutting to the first line reading `EOF` hid the lines in
+        # between, which bash runs as commands (review on #568). Shown
+        # against a stand-in `git` that prints its arguments.
+        hidden = "git diff --no-index /dev/null ./cosign.key"
+        shapes = (
+            ("<<'EOF'x", "EOFx"),
+            ("<<\\EOF.x", "EOF.x"),
+            ('<<"EOF"x', "EOFx"),
+            ("<<-'EOF'x", "EOFx"),
+            ("<<'EOF'-", "EOF-"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = Path(tmp) / "git"
+            stub.write_text('#!/bin/sh\necho "git $*"\n')
+            stub.chmod(0o755)
+            for operator, terminator in shapes:
+                command = f"cat {operator}\nbody\n{terminator}\n{hidden}\nEOF"
+                with self.subTest(command=command):
+                    ran = subprocess.run(
+                        ["bash", "--norc", "--noprofile", "-c", command],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        env={**os.environ, "PATH": f"{tmp}:{os.environ['PATH']}"},
+                    )
+                    self.assertIn(
+                        "git diff --no-index",
+                        ran.stdout,
+                        "bash no longer ends this here-document at the whole delimiter "
+                        "word; re-derive the post group of _QUOTED_HEREDOC_LINE",
+                    )
+                    self.assertEqual(gate.drop_quoted_heredoc_bodies(command), command)
+                    self.assertIsNotNone(gate.refusal(command))
 
     def test_only_the_body_and_its_terminator_are_cut(self) -> None:
         self.assertEqual(

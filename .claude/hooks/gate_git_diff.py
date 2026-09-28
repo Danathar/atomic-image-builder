@@ -1127,7 +1127,10 @@ _SIMPLE_LINE = re.compile(rf"{_SIMPLE_LINE_CHARS}*")
 _QUOTED_HEREDOC_LINE = re.compile(
     rf"(?P<pre>{_SIMPLE_LINE_CHARS}*?)<<(?P<strip_tabs>-?)[ \t]*"
     r"""(?:'(?P<single>\w+)'|"(?P<double>\w+)"|\\(?P<escaped>\w+))"""
-    rf"(?P<post>{_SIMPLE_LINE_CHARS}*)"
+    # The delimiter is the whole word, not its quoted part: bash reads
+    # `<<'EOF'x` as the delimiter `EOFx`. So the word must end right after
+    # the quote -- at the end of the line, a blank or an operator character.
+    rf"(?P<post>(?:[ \t;&|<>]{_SIMPLE_LINE_CHARS}*)?)"
 )
 
 
@@ -1152,7 +1155,9 @@ def drop_quoted_heredoc_bodies(command: str) -> str:
     and then run the lines this would cut; so on the first line that is not
     plain, cutting stops and the rest is lexed as before. An unquoted
     delimiter is never cut: bash expands `$(...)` in that body. Nor is a
-    body with no terminator line.
+    body with no terminator line, nor a delimiter with anything but a blank
+    or an operator after its quote: `<<'EOF'x` ends at the line `EOFx`, not
+    `EOF`, and cutting to `EOF` would hide the lines bash runs in between.
     """
     lines = command.split("\n")
     kept: list[str] = []
