@@ -2867,6 +2867,76 @@ class MainTests(unittest.TestCase):
         self.assertIn("--no-index", err)
 
 
+class QuotedHeredocTests(unittest.TestCase):
+    """drop_quoted_heredoc_bodies(): a quoted here-document's body is data (#537)."""
+
+    PARSE_FAILURE = "cannot be parsed"
+
+    def test_an_apostrophe_in_a_quoted_heredoc_body_is_not_refused(self) -> None:
+        for command in (
+            "cat <<'EOF' > /tmp/x.txt\ndon't\nEOF",
+            "git commit -F - <<'EOF'\nFix it, and don't break it\nEOF",
+            'cat <<"EOF"\nit\'s\nEOF',
+            "cat <<\\EOF\nit's\nEOF",
+            "cat <<-'EOF'\n\tit's\n\tEOF",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(gate.refusal(command))
+
+    def test_the_operator_line_is_still_checked(self) -> None:
+        self.assertIn(
+            "--no-index",
+            gate.refusal("git diff --no-index /dev/null ./cosign.key <<'EOF'\nit's\nEOF"),
+        )
+        self.assertIn("cosign.pub", gate.refusal("git diff HEAD >cosign.pub <<'EOF'\nit's\nEOF"))
+
+    def test_shapes_it_does_not_cut_are_lexed_as_before(self) -> None:
+        # Each of these either expands its body, is not a here-document at
+        # all, or sits after something that could change whether bash reads
+        # the `<<` as one -- so the body stays in, and its apostrophe keeps
+        # the command unparseable, exactly as before.
+        for command in (
+            "cat <<EOF\ndon't\nEOF",  # unquoted: bash expands $(...) in the body
+            "cat <<<'EOF'\ndon't\nEOF",  # a here-string, not a here-document
+            "cat <<'EOF'\ndon't\n",  # no terminator line
+            "# a note\ncat <<'EOF'\ndon't\nEOF",  # a comment line before it
+            "(( 1 <<'X' ))\ndon't\nX",  # arithmetic's shift, not a here-document
+            "cat <<'A' <<'B'\ndon't\nA\nB",  # two on one line
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(gate.refusal(command))
+                self.assertEqual(
+                    gate.drop_quoted_heredoc_bodies(command),
+                    command,
+                    "a shape outside the plain one was cut",
+                )
+        # Inside a substitution: not cut either. (It lexes as before because
+        # the apostrophe sits inside the double quotes.)
+        command = "echo \"$(cat <<'EOF'\ndon't\nEOF\n)\""
+        self.assertEqual(gate.drop_quoted_heredoc_bodies(command), command)
+
+    def test_only_the_body_and_its_terminator_are_cut(self) -> None:
+        self.assertEqual(
+            gate.drop_quoted_heredoc_bodies("cat <<'EOF' > out.txt\nline one\nit's\nEOF\ngit status"),
+            "cat <<'EOF' > out.txt\ngit status",
+        )
+        # A line that merely starts with the delimiter does not end the body.
+        self.assertEqual(
+            gate.drop_quoted_heredoc_bodies("cat <<'EOF'\nEOFX\nEOF"),
+            "cat <<'EOF'",
+        )
+
+    def test_a_long_quoted_argument_is_not_refused(self) -> None:
+        # raw_words() hid each quoted character behind a code point of its
+        # own, so the 131,073rd one ran out of private-use planes and the
+        # command was refused as unparseable, whatever it said.
+        self.assertIsNone(gate.refusal("echo '" + "a" * 140_000 + "'"))
+        # A private-use character in the command is not refused either,
+        # except the one stand-in raw_words() uses.
+        self.assertIsNone(gate.refusal("echo '\U000F0001'"))
+        self.assertIsNotNone(gate.refusal("echo '\U000F0000'"))
+
+
 class RegistrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.settings = json.loads(SETTINGS.read_text())
