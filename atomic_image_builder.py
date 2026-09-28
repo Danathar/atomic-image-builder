@@ -2741,8 +2741,12 @@ class Gum:
             )
             args = ["gum", "spin", "--spinner", "dot", "--title", title, "--", "bash", "-c", shell_command]
             self.require_spinner_success(run(args, cwd=cwd, capture=False, check=False), args)
-            stdout = Path(stdout_path).read_text()
-            stderr = Path(stderr_path).read_text()
+            # Decoded the way run() decodes (#372): podman, dnf5 and gh print
+            # whatever bytes they like, and a strict read of one that is not
+            # UTF-8 raised UnicodeDecodeError, which nothing up to main()
+            # catches, so the session died instead of reporting the failure.
+            stdout = Path(stdout_path).read_text(encoding="utf-8", errors="replace")
+            stderr = Path(stderr_path).read_text(encoding="utf-8", errors="replace")
             status_text = Path(status_path).read_text().strip()
             try:
                 returncode = int(status_text)
