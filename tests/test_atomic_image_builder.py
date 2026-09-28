@@ -10281,6 +10281,36 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual((owner, repo), ("example", "long-repo"))
         self.assertIn(expected_label, seen_options)
 
+    def test_select_repo_opens_a_repo_whose_description_has_stray_whitespace(self) -> None:
+        # gum filter returns the chosen line stripped. A description ending in
+        # a space (which GitHub keeps as typed) made that differ from the
+        # label, so choosing the repo raised ScreenBack instead (#514).
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        seen_options: list[str] = []
+
+        def fake_filter(options, **_kwargs):
+            seen_options.extend(options)
+            return next(option for option in options if option.startswith(want)).strip()
+
+        stub = GumStub()
+        stub.filter = fake_filter
+        app.gum = stub
+        repos = [
+            {"name": "trailing", "description": "My desktop "},
+            {"name": "blank", "description": "   "},
+            {"name": "multiline", "description": "first line\nsecond\tline"},
+        ]
+        for want in ("trailing", "blank", "multiline"):
+            with self.subTest(repo=want):
+                seen_options.clear()
+                with patch.object(app, "gh_json_with_spinner", return_value=repos):
+                    self.assertEqual(app.select_repo(), ("example", want))
+        self.assertIn(f"{'trailing':<30} My desktop", seen_options)
+        self.assertIn(f"{'blank':<30} (no description)", seen_options)
+        self.assertIn(f"{'multiline':<30} first line second line", seen_options)
+
     def test_select_repo_backs_out_when_github_is_not_available(self) -> None:
         # require_github() gates every entry into the picker; when it returns
         # False (e.g. gh missing or the user declines login) select_repo must
