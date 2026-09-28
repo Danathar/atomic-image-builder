@@ -44,6 +44,7 @@ from atomic_image_builder import (
     COMMON_SERVICES,
     CONTAINERFILE_TEMPLATE_DIR,
     CONTROLS_COLOR,
+    COPR_REPO_RE,
     DEFAULT_GITHUB_BUILD_CRON,
     DEFAULT_REPO_NAME,
     FEDORA_ATOMIC_DEFAULT_TAG,
@@ -57,6 +58,7 @@ from atomic_image_builder import (
     SCAN_OK,
     SCAN_UNAVAILABLE,
     SCAN_UNSUPPORTED_BASE,
+    SERVICE_TOKEN_RE,
     SIGNING_ENABLED_ENV,
     STATE_FILE,
     TOOL_NAME,
@@ -2527,6 +2529,29 @@ class BuilderTests(unittest.TestCase):
         app = self.make_app()
         app.config.removed_packages = ["firefox", "--version"]
         with self.assertRaisesRegex(CommandError, "Invalid removed package value.*--version"):
+            app.validate_config()
+
+    def test_service_and_copr_regexes_reject_a_leading_dash(self) -> None:
+        # #517: the same class as the package regex above. A leading "-" is
+        # read as an option by systemctl and dnf5; dashes elsewhere are normal.
+        for token in ("--now", "-", "-sshd.service", "--help"):
+            self.assertIsNone(SERVICE_TOKEN_RE.fullmatch(token), token)
+        for token in ("sshd.service", "getty@tty1.service", "tailscaled", "systemd-resolved.service", "trailing-"):
+            self.assertIsNotNone(SERVICE_TOKEN_RE.fullmatch(token), token)
+        for repo in ("-x/y", "--exclude/y", "@-x/y"):
+            self.assertIsNone(COPR_REPO_RE.fullmatch(repo), repo)
+        for repo in ("kwizart/fedy", "@caddy/caddy", "owner/project:custom:123", "some-owner/some-project"):
+            self.assertIsNotNone(COPR_REPO_RE.fullmatch(repo), repo)
+
+    def test_validate_config_rejects_service_and_copr_tokens_starting_with_dash(self) -> None:
+        app = self.make_app()
+        app.config.services = ["--now", "sshd.service"]
+        with self.assertRaisesRegex(CommandError, "Invalid systemd service value.*--now"):
+            app.validate_config()
+
+        app = self.make_app()
+        app.config.copr_repos = ["-x/y"]
+        with self.assertRaisesRegex(CommandError, "Invalid COPR repository value.*-x/y"):
             app.validate_config()
 
     def test_base_image_picker_includes_supported_universal_blue_and_fedora_atomic_images(self) -> None:
