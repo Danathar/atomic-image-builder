@@ -177,8 +177,11 @@ release](#cutting-a-release).
 | `ai-fix.yml`                  | `ai-fix-requested` label, dispatch | Posts the current gate result on the issue as context. Read-only: no code writes, no pull request, no model                                                                   |
 
 Only a build of `main` tags the image `latest` — a release published from an
-older commit must not drag `latest` backwards. All events that write image
-tags share one concurrency group so they cannot race.
+older commit must not drag `latest` backwards. Only a release (a tag ref)
+writes the version tag, so `:X.Y.Z` keeps naming the release after later
+merges. Each ref has a concurrency group of its own, so a release build
+waiting behind a merge cannot be cancelled by the next merge; merges to `main`
+share one group and settle on the newest commit.
 
 Expect a release to produce **two** image publishes: one from the release, one
 from merging the formula pull request into `main`. Same content, harmless.
@@ -249,6 +252,13 @@ for it. It exits 0 whatever GitHub does, so a rate limit or an auth blip
 cannot turn a green audit red — which would recreate the problem #129 was
 filed about.
 
+A run that could not compare every snapshot — an upstream `git ls-remote`
+failed, or a `.template-source` would not load — leaves the issue exactly as
+it is: it does not open one, rewrite the body, or close it. Being unable to
+check is neither drift nor proof that the drift cleared, and the next run that
+can compare both snapshots decides. The audit itself still reports the failure
+as an advisory (or, for unloadable metadata, a failure) in the job summary.
+
 ### Advisory: a pin no longer matches its tag or branch
 
 Read the **direction** before acting. The message states it:
@@ -292,11 +302,13 @@ affected for as long as it lasts, and the fix is entirely yours — cut a
 release. Being unable to reach the API stays an advisory, like every other
 network check.
 
-`Release v0.9.6 … carries no aib asset` (or no `aib.sha256`), and `The
+`Release v0.9.6 … carries no aib asset` (or no `aib.sha256`), `The
 aib.sha256 attached to release v0.9.6 records …, but the aib beside it hashes
-to …`, are the other shape: the release exists but the install cannot complete
-from it — the URL 404s, or `sha256sum -c` rejects the pair — because
-`publish-wrapper.yml` never ran for the tag, or one asset was replaced by hand.
+to …`, and `The aib.sha256 … also lists contrib/aib` are the other shape: the
+release exists but the install cannot complete from it — the URL 404s, or
+`sha256sum -c` rejects the pair, which it does when any one line of the
+checksum names another file or another digest — because `publish-wrapper.yml`
+never ran for the tag, or one asset was replaced by hand.
 The finding says which repair applies, and it depends on the tag. The
 workflow's dispatch fallback checks out the tag it is given and attaches
 *that* tag's `contrib/aib`, so it is the fix only while the tag's wrapper is

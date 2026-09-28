@@ -95,7 +95,10 @@ jobs:
           {
             echo "### Gate on \`main\` at $(git rev-parse --short HEAD)"
             echo
-            # Every check CI gates on, or the report contradicts CI. The
+            # Every check CI gates on, or the report contradicts CI. That
+            # includes the two shell harnesses: ci.yml runs them under bashcov
+            # in its gating `test` job, where a failing case fails the job
+            # whatever the coverage, so they run here without it. The
             # coverage entry carries its threshold so a below-gate run is a
             # FAIL here rather than a percentage printed without comment;
             # .coveragerc sets no fail_under, so a bare report always exits 0.
@@ -112,6 +115,8 @@ jobs:
                  tests/test_contrib_aib.sh tests/test_entrypoint.sh tests/e2e/*.sh" \
               "actionlint:actionlint" \
               "hadolint:hadolint Containerfile container/Containerfile.coverage" \
+              "contrib-aib:tests/test_contrib_aib.sh" \
+              "entrypoint:tests/test_entrypoint.sh" \
               "audit:python3 maintenance_audit.py --skip-upstream"
             do
               name="${check%%:*}"

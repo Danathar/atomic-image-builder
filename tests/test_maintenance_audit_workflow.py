@@ -393,6 +393,18 @@ class TrackSnapshotDriftStepTests(_StepHarness):
             body,
         )
 
+    def test_an_unreachable_upstream_is_not_filed_as_drift(self) -> None:
+        # #530: the real script against a real failing `git ls-remote`. Being
+        # unable to check must neither open the tracking issue nor, with one
+        # open, rewrite or close it -- so gh is not called at all.
+        for template in ("containerfile", "bluebuild"):
+            source = self.project / "template_snapshots" / template / ".template-source"
+            source.write_text(f"repo=file://{self.tmp / 'missing.git'}\nrevision={STALE_REVISION}\n")
+        proc = self.run_drift_step()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.gh_calls(), [])
+        self.assertIn("left the tracking issue as it is", self.audit_log())
+
     def test_the_drift_output_is_appended_to_the_audit_log(self) -> None:
         (self.project / "audit.log").write_text("Maintenance audit passed.\n")
         self.run_drift_step()

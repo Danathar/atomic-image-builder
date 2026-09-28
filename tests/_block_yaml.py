@@ -20,7 +20,8 @@ CI installs no third-party packages for the unit suite (``coverage`` and
 ``ruff``, pinned in CONTRIBUTING.md), so this parses the document instead of
 importing yaml. It handles only what the generators can produce -- block
 mappings, block sequences, flow sequences of scalars, plain, single- and
-double-quoted scalars, and ``|`` literal blocks -- and raises
+double-quoted scalars, ``|`` literal blocks, and a ``# comment`` after an
+inline value -- and raises
 :class:`BlockYamlError` on anything else, including the inconsistent
 indentation, duplicate keys, and flow mappings a real parser would reject or
 silently reinterpret. Being narrow is the point: an unsupported construct is
@@ -182,6 +183,12 @@ def _parse_sequence(lines: list[str], index: int, indent: int) -> tuple[list[obj
 
 def _parse_value(lines: list[str], index: int, indent: int, raw: str) -> tuple[object, int]:
     """Resolve a scalar written inline, a block scalar, or a nested block below."""
+    uncommented = _strip_comment(raw)
+    if uncommented != raw and uncommented[:1] in {"|", ">"}:
+        # _relevant_lines only recognises an indicator that ends its line, so
+        # the block below would have lost its blank and "#" lines already.
+        raise BlockYamlError(f"comment after a block scalar indicator: {raw!r}")
+    raw = uncommented
     if raw in _BLOCK_STYLES:
         return _parse_block_scalar(lines, index, indent, raw)
     if raw[:1] in {"|", ">"} and _BLOCK_INDICATOR_RE.match(raw) is not None:
@@ -257,6 +264,65 @@ def _fold(block: list[str], index: int) -> str:
     return "".join(folded)
 
 
+def _strip_comment(raw: str) -> str:
+    """Drop a trailing ``# comment`` the way YAML does, and nothing else.
+
+    A ``#`` opens a comment only at the start of the value or after
+    whitespace, and never inside a quoted scalar or a quoted flow item. In a
+    plain scalar there is no such protection: YAML ends the scalar at the
+    first `` #`` even between apostrophes, since those are ordinary characters
+    there. Whatever follows a quoted scalar has to be a comment or nothing.
+    """
+    if raw[:1] in {'"', "'"}:
+        end = _quoted_end(raw)
+        rest = raw[end:]
+        if rest.strip() and not re.match(r"\s+#", rest):
+            raise BlockYamlError(f"content after a quoted scalar: {raw!r}")
+        return raw[:end]
+    if raw[:1] == "[":
+        quote: str | None = None
+        for position, char in enumerate(raw):
+            if quote is not None:
+                if char == quote:
+                    quote = None
+            elif char in {'"', "'"}:
+                quote = char
+            elif char == "#" and raw[position - 1] in {" ", "\t"}:
+                return raw[:position].rstrip()
+        return raw
+    match = re.search(r"(?:^|[ \t])#", raw)
+    return raw if match is None else raw[: match.start()].rstrip()
+
+
+def _quoted_end(raw: str) -> int:
+    """Return the index just past the quoted scalar ``raw`` starts with."""
+    quote = raw[0]
+    position = 1
+    while position < len(raw):
+        char = raw[position]
+        if quote == '"' and char == "\\":
+            position += 2
+            continue
+        if char == quote:
+            if quote == "'" and raw[position + 1 : position + 2] == "'":
+                position += 2
+                continue
+            return position + 1
+        position += 1
+    raise BlockYamlError(f"unbalanced quoting: {raw!r}")
+
+
+# What a plain scalar may not start with, and may not contain, in YAML: an
+# indicator character that would have opened some other construct instead,
+# and ": " (or a trailing ":"), which would have made it a mapping entry.
+# "-", "?" and ":" start a plain scalar only when a non-space follows them,
+# which is why "-1" and "-foo" are still scalars. A tab inside the value is
+# refused too; the generators never write one and libyaml refuses it after
+# an indicator.
+_PLAIN_BAD_START_RE = re.compile(r"[,\]}#%@`]|[-?:](?:[ \t]|$)")
+_PLAIN_BAD_INSIDE_RE = re.compile(r": |:$|\t")
+
+
 def _scalar(raw: str) -> object:
     if raw[:1] == "[":
         return _flow_sequence(raw)
@@ -282,7 +348,7 @@ def _scalar(raw: str) -> object:
     # A quote only opens a quoted scalar at the start of the value. Inside a
     # plain scalar it is an ordinary character, which is what every Actions
     # `if:` expression relies on, so only a leading quote is checked above.
-    if raw.endswith(":"):
+    if _PLAIN_BAD_START_RE.match(raw) or _PLAIN_BAD_INSIDE_RE.search(raw):
         raise BlockYamlError(f"scalar needs quoting: {raw!r}")
     return _resolve_plain(raw)
 

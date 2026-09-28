@@ -1841,6 +1841,55 @@ class RefusalTests(unittest.TestCase):
                 self.assertIn(">cosign.pub", reason or "")
                 self.assertIn(prefix, reason or "")
 
+    def test_a_refused_git_form_on_a_later_line_is_refused(self) -> None:
+        # bash ends a command at an unquoted newline as it does at `;`, so
+        # the second line is a git command of its own. The lexer used to
+        # read the newline as a blank and hand the git words to the first
+        # line's command as arguments, where no git check looked (#569).
+        # Every allow row is a first line, since each is a command the
+        # session runs without a prompt and a multi-line string can open with.
+        allow = json.loads(SETTINGS.read_text(encoding="utf-8"))["permissions"]["allow"]
+        first_lines = [
+            rule[len("Bash(") : -len(")")].removesuffix(":*")
+            for rule in allow
+            if rule.startswith("Bash(") and rule.endswith(")")
+        ]
+        self.assertGreaterEqual(len(first_lines), 20, first_lines)
+        refused = (
+            "git diff --no-index /dev/null ./cosign.key",
+            "git log --output=/tmp/out -1",
+            "git diff --ext-diff",
+        )
+        for first in first_lines:
+            for form in refused:
+                for separator in ("\n", ";\n", "\n\n", " &&\n"):
+                    command = f"{first}{separator}{form}"
+                    with self.subTest(command=command):
+                        self.assertIsNotNone(gate.refusal(command), f"{command!r} was not refused")
+
+    def test_a_quoted_newline_stays_inside_its_word(self) -> None:
+        # Inside quotes bash keeps a newline as a character of the word, so
+        # what follows it is text handed to the command, not a command.
+        for command in (
+            "echo 'a\ngit diff --no-index /dev/null ./cosign.key'",
+            'echo "a\ngit diff --no-index /dev/null ./cosign.key"',
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    gate.tokenize(command), ["echo", "a\ngit diff --no-index /dev/null ./cosign.key"]
+                )
+                self.assertIsNone(gate.refusal(command))
+
+    def test_a_newline_glued_to_punctuation_is_a_separator_of_its_own(self) -> None:
+        for command, tokens in (
+            ("echo a;\ngit log", ["echo", "a", ";", "\n", "git", "log"]),
+            ("git log |\n\nhead", ["git", "log", "|", "\n", "\n", "head"]),
+            ("x=$(\ngit log\n);", ["x=$", "(", "\n", "git", "log", "\n", ")", ";"]),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(gate.tokenize(command), tokens)
+                self.assertEqual(gate.tokenize(gate.mask_quotes_stripped(command)), tokens)
+
     def test_no_allow_rule_runs_bash(self) -> None:
         # aurora-zfs-simple and arch-bootc allow `bash -n`, and their hooks
         # refuse what it prints there (aurora-zfs-simple#233,
@@ -2811,6 +2860,11 @@ class MainTests(unittest.TestCase):
 
     def test_a_bash_call_without_a_command_is_let_through(self) -> None:
         self.assertEqual(run_main(json.dumps({"tool_name": "Bash", "tool_input": {}}))[0], 0)
+
+    def test_a_refused_form_on_a_later_line_exits_two(self) -> None:
+        code, err = run_main(hook_input("podman ps\ngit diff --no-index /dev/null ./cosign.key"))
+        self.assertEqual(code, 2)
+        self.assertIn("--no-index", err)
 
 
 class RegistrationTests(unittest.TestCase):

@@ -24,10 +24,13 @@ on:
 permissions:
   contents: read
 
-# Serialized for the same reason update-homebrew-formula.yml is: two releases
-# in quick succession must not race to upload assets to the same tag.
+# Serialized per tag: two runs for the same release must not race to upload
+# its assets. Keyed by tag because GitHub keeps only one pending run per group
+# and cancels it when a newer one queues, so a single group let a burst of
+# releases drop an older release's upload before it started. Runs for
+# different tags touch different releases and need no ordering.
 concurrency:
-  group: publish-wrapper
+  group: publish-wrapper-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: false
 
 jobs:
