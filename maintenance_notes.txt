@@ -902,3 +902,35 @@ Action required: none on a schedule. If BuildKit's parser changes these rules
 (parser.go, directives.go), update containerfile_escape() and
 containerfile_from_indices() together; the render_containerfile tests in
 tests/test_atomic_image_builder.py cover each rule through the real patch path.
+
+Disk-Image Artifact Naming and Installer Switch Target
+-------------------------------------------------------
+patch_disk_artifact_names() (atomic_image_builder.py:6937) fixes a separate
+bug in the same bundled disk workflow the "Disk Workflow Architecture" note
+above covers. The disk job is a matrix over disk-type, and its
+actions/upload-artifact step names no artifact -- so every matrix branch
+uploads as the action's default name, "artifact", with overwrite enabled.
+Whichever branch finishes second deletes the other format's output before
+uploading its own, so a run meant to leave both qcow2 and ISO downloadable
+can leave only one. The patcher inserts a `name:` key into that step's
+`with:` block giving each disk-type its own artifact name, and no-ops if a
+`name:` is already present -- from upstream or from an earlier run of this
+same patcher -- so it never overwrites one.
+
+write_installer_configs() (atomic_image_builder.py:7335) keeps
+disk_config/iso-gnome.toml, iso-kde.toml, and iso.toml pointed at the image
+this run actually publishes. Bundled installer configs ship with a
+placeholder switch target; patch_installer_config() rewrites the line the
+generated ISO's first-boot switch command would run to the repo's real
+`ghcr.io/<user>/<repo>` reference (with the unverified-switch warning
+comment added first when signing is enabled), the same rewrite
+render_containerfile-adjacent patchers apply elsewhere. iso-gnome.toml and
+iso-kde.toml are patched unconditionally when present; iso.toml is instead
+written from whichever of the two matches installer_config_name() (which
+profile -- GNOME or KDE -- the config selected), falling back to the
+bundled template if the managed repo doesn't have that file yet. A managed
+repo without a disk_config/ directory at all is left untouched.
+
+Action required: none on a schedule. Both patchers only touch text this tool
+already generates or the BlueBuild image template ships, so there is nothing
+here for a user to configure by hand.
