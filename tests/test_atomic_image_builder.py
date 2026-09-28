@@ -5772,34 +5772,45 @@ class BuilderTests(unittest.TestCase):
         self.assertIn(("warn", MANAGED_REPO_WARNING), app.gum.messages)
 
     def test_do_build_shows_reset_hint_after_scanned_import(self) -> None:
-        app = self.make_app()
-        app.github_available = True
-        app.github_user = "example"
-        app.config.github_user = "example"
-        app.config.scanned_packages = ["tmux"]
-        app.config.packages = ["tmux"]
-        app.gum = GumStub()
+        # Both ways a scan leads to the reset: packages carried into the image,
+        # or only customizations the user agreed to leave behind.
+        for carried in (True, False):
+            with self.subTest(carried=carried):
+                app = self.make_app()
+                app.github_available = True
+                app.github_user = "example"
+                app.config.github_user = "example"
+                if carried:
+                    app.config.scanned_packages = ["tmux"]
+                    app.config.packages = ["tmux"]
+                else:
+                    app.config.scan_omitted_customizations = True
+                app.gum = GumStub()
 
-        def fake_run(args, **_kwargs):
-            if args[:3] == ["gh", "repo", "view"]:
-                return subprocess.CompletedProcess(list(args), 1, "", "")
-            return subprocess.CompletedProcess(list(args), 0, "", "")
+                def fake_run(args, **_kwargs):
+                    if args[:3] == ["gh", "repo", "view"]:
+                        return subprocess.CompletedProcess(list(args), 1, "", "")
+                    return subprocess.CompletedProcess(list(args), 0, "", "")
 
-        output = io.StringIO()
-        with redirect_stdout(output):
-            with patch("atomic_image_builder.command_exists", return_value=True):
-                with patch("atomic_image_builder.run", side_effect=fake_run):
-                    with patch.object(app, "ensure_signing_ready", return_value=True):
-                        with patch.object(app, "repo_default_branch", return_value="main"):
-                            with patch.object(app, "seed_project_template", return_value=None):
-                                with patch.object(app, "write_project_files", return_value=None):
-                                    self.assertTrue(app.do_build())
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    with patch("atomic_image_builder.command_exists", return_value=True):
+                        with patch("atomic_image_builder.run", side_effect=fake_run):
+                            with patch.object(app, "ensure_signing_ready", return_value=True):
+                                with patch.object(app, "repo_default_branch", return_value="main"):
+                                    with patch.object(app, "seed_project_template", return_value=None):
+                                        with patch.object(app, "write_project_files", return_value=None):
+                                            self.assertTrue(app.do_build())
 
-        self.assertIn("Scheduled rebuilds also run daily at about", output.getvalue())
-        self.assertIn("sudo rpm-ostree reset", output.getvalue())
-        # The panel is the first place the command is seen, so it carries the
-        # same qualification the README does rather than deferring to it.
-        self.assertIn("not only the ones this image reproduces", output.getvalue())
+                self.assertIn("Scheduled rebuilds also run daily at about", output.getvalue())
+                self.assertIn("sudo rpm-ostree reset", output.getvalue())
+                # The panel is the first place the command is seen, so it carries the
+                # same qualification the README does rather than deferring to it.
+                self.assertIn("not only the ones this image reproduces", output.getvalue())
+                self.assertIn(
+                    "This repo was created from a scan of your current system's rpm-ostree customizations.",
+                    output.getvalue(),
+                )
 
     def test_do_build_omits_reset_hint_for_normal_build(self) -> None:
         app = self.make_app()
@@ -5825,6 +5836,7 @@ class BuilderTests(unittest.TestCase):
 
         self.assertIn("Scheduled rebuilds also run daily at about", output.getvalue())
         self.assertNotIn("sudo rpm-ostree reset", output.getvalue())
+        self.assertNotIn("rpm-ostree customizations", output.getvalue())
         # The completion panel is where someone is told the build has started,
         # so it is where the step between a green build and a working switch
         # belongs -- there is no package to check yet at this point.
@@ -6954,6 +6966,9 @@ class BuilderTests(unittest.TestCase):
                         app.render_build_status("Example", "my-image")
         hints = " ".join(m for level, m in stub.messages if level == "hint")
         self.assertIn("sudo rpm-ostree reset", hints)
+        # The screen only has the state file's single flag, so the lead-in has
+        # to be true whether the scan carried packages or only omitted some.
+        self.assertIn("This repo was created from a scan of your current system's rpm-ostree customizations.", hints)
         # Built from the arguments, since the picker does not load the config.
         self.assertIn(
             "sudo bootc switch --enforce-container-sigpolicy ghcr.io/example/my-image:latest",
@@ -7039,6 +7054,7 @@ class BuilderTests(unittest.TestCase):
                 with redirect_stdout(io.StringIO()):
                     app.render_build_status("Example", "my-image")
         self.assertNotIn("rpm-ostree reset", " ".join(m for _l, m in stub.messages))
+        self.assertNotIn("rpm-ostree customizations", " ".join(m for _l, m in stub.messages))
 
     def test_build_status_stays_quiet_until_a_build_has_succeeded(self) -> None:
         # Switching to an image that has not been built yet is the mistake this
@@ -8203,8 +8219,17 @@ class BuilderTests(unittest.TestCase):
                 self.assertIs(payload["scan_customizations_carried"], expected)
                 # The state file keeps the single flag it has always had.
                 self.assertNotIn("scan_omitted_customizations", payload)
-                block = self.readme_doc(app).section("Using The Image").code_block()
+                section = self.readme_doc(app).section("Using The Image")
+                block = section.code_block()
                 self.assertEqual("sudo rpm-ostree reset" in block.lines, expected, block.lines)
+                # Nothing was carried into this image, so the lead-in may only
+                # say where the repo came from -- not that it carries changes.
+                lead_in = "This repo was created from a scan of your current system's rpm-ostree customizations."
+                paragraphs = [paragraph.lines for paragraph in section.paragraphs()]
+                if expected:
+                    self.assertEqual(paragraphs[0][0], lead_in)
+                else:
+                    self.assertNotIn(lead_in, [line for lines in paragraphs for line in lines])
                 # A later update loads the state file, not the scan.
                 reloaded = App()
                 reloaded.config = config_from_state_payload(payload)
@@ -12567,7 +12592,7 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(
             section.paragraphs()[0].lines,
             (
-                "This repo carries over package changes scanned from your current system.",
+                "This repo was created from a scan of your current system's rpm-ostree customizations.",
                 "Run these commands in the same session before rebooting:",
             ),
         )

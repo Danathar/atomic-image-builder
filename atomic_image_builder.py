@@ -172,6 +172,13 @@ MANAGED_REPO_HINT_CONTAINERFILE = (
 MANAGED_REPO_HINT_BLUEBUILD = (
     f"Future updates use {STATE_FILE} as the source of truth and rewrite managed files such as README.md and recipes/recipe.yml."
 )
+# Lead-in to the reset-then-switch instructions in the README, the creation
+# panel and the build-status screen. It must hold whether the scan carried
+# packages into the image or only found customizations the user agreed to
+# leave behind: the build-status screen reads the single state-file flag and
+# cannot tell the two apart, and an update regenerates the README from that
+# same flag. So it says where the repo came from, not what the image carries.
+SCAN_SWITCH_LEAD_IN = "This repo was created from a scan of your current system's rpm-ostree customizations."
 CONTAINERFILE_TEMPLATE_REPO = "ublue-os/image-template"
 BLUEBUILD_TEMPLATE_REPO = "blue-build/template"
 TEMPLATE_SNAPSHOT_DIR = Path(__file__).resolve().parent / "template_snapshots"
@@ -4958,7 +4965,7 @@ class App:
             summary_lines.extend(
                 [
                     "",
-                    "This repo carries over package changes from your current system.",
+                    SCAN_SWITCH_LEAD_IN,
                     "Before rebooting, run this first in the same session:",
                     "sudo rpm-ostree reset",
                     "Then run the bootc switch command above.",
@@ -5330,7 +5337,7 @@ class App:
             print()
             self.menu_section(
                 "Switching This Machine",
-                "This image carries package changes scanned from your system.",
+                SCAN_SWITCH_LEAD_IN,
                 *(
                     (
                         "First follow 'Trusting The Signing Key' in the repo README.",
@@ -7168,7 +7175,7 @@ class App:
                 *signing_policy_lines,
                 "## Using The Image",
                 "",
-                "This repo carries over package changes scanned from your current system.",
+                SCAN_SWITCH_LEAD_IN,
                 "Run these commands in the same session before rebooting:",
                 "",
                 "```bash",
