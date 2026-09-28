@@ -10434,6 +10434,26 @@ class BuilderTests(unittest.TestCase):
         with self.assertRaisesRegex(CommandError, "fatal: bad � path"):
             atomic_image_builder.run([sys.executable, "-c", emit])
 
+    def test_spinner_result_replaces_undecodable_output_instead_of_raising(self) -> None:
+        # The spinner path reads the command's output back from temp files,
+        # so it needs the same guarantee as run() (#512): a podman build log
+        # or a dnf5 message with a cp1252 byte must reach the caller as text,
+        # not end the session with UnicodeDecodeError.
+        real_run = atomic_image_builder.run
+
+        def run_without_gum(args, **kwargs):
+            # Stand in for `gum spin ... -- bash -c <command>` by running the
+            # part after "--" directly.
+            return real_run(list(args)[list(args).index("--") + 1 :], **kwargs)
+
+        emit = "import sys; sys.stdout.buffer.write(b'ok \\x92 done'); sys.stderr.buffer.write(b'caf\\x92 failed'); sys.exit(3)"
+        with patch("atomic_image_builder.run", side_effect=run_without_gum):
+            proc = Gum().spinner_result("Building", [sys.executable, "-c", emit])
+
+        self.assertEqual(proc.returncode, 3)
+        self.assertEqual(proc.stdout, "ok \ufffd done")
+        self.assertEqual(proc.stderr, "caf\ufffd failed")
+
     def test_contrib_wrapper_does_not_put_github_token_in_podman_argv(self) -> None:
         wrapper = (Path(__file__).resolve().parents[1] / "contrib/aib").read_text()
         self.assertIn("podman_args+=(-e GH_TOKEN)", wrapper)
