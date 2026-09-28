@@ -516,8 +516,10 @@ SCAN_UNSUPPORTED_BASE = "unsupported-base"
 
 # rpm-ostree records customizations in more fields than this tool reads.
 # `requested-packages` and `requested-base-removals` are the two it can carry,
-# because both are just names an image build can install or remove from a
-# repository. The rest are real customizations pinned to files on this host --
+# because both are names an image build can install or remove from a
+# repository -- except a `requested-packages` entry typed as a capability or
+# file path, which scan_os reports alongside these. The rest are real
+# customizations pinned to files on this host --
 # an RPM built somewhere else, a package replaced by a local build -- and no
 # generated image reproduces them. They were read as absent rather than as
 # unsupported, so a scan reported success and recommended `rpm-ostree reset`
@@ -3713,12 +3715,24 @@ class App:
                 self.gum.hint(f"Supported: {supported_base_image_names()}")
                 return SCAN_UNAVAILABLE
             base = mapped
-        self.config.scanned_packages = unique(string_list(booted.get("requested-packages")))
+        # rpm-ostree records what was typed, and `rpm-ostree install` resolves
+        # capabilities and file paths as well as names: 'pkgconfig(gtk4)' and
+        # /usr/bin/zsh both land in requested-packages verbatim. Neither is a
+        # value validate_config lets into a generated repo, so pre-selecting
+        # them sent the user through every step to an "Invalid package
+        # value(s)" refusal at the very end, with nothing pointing back here.
+        # Split them off now and name them with everything else this image
+        # cannot carry, where the user decides with them in view.
+        requested_packages = unique(string_list(booted.get("requested-packages")))
+        self.config.scanned_packages = [spec for spec in requested_packages if PACKAGE_TOKEN_RE.fullmatch(spec)]
+        unwritable_packages = [spec for spec in requested_packages if not PACKAGE_TOKEN_RE.fullmatch(spec)]
         self.config.scanned_removed = unique(string_list(booted.get("requested-base-removals")))
         self.config.removed_packages = list(self.config.scanned_removed)
         # Read alongside the two supported fields, not instead of them: a host
         # can have both, and the counts below have to be able to say so.
         omitted = self.unsupported_scan_customizations(booted)
+        if unwritable_packages:
+            omitted.insert(0, ("Packages layered by capability or file path, not by name", unwritable_packages))
 
         self.config.base_image_uri = base
         self.config.base_image_name = base

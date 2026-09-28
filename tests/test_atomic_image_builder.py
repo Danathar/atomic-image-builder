@@ -8122,6 +8122,62 @@ class BuilderTests(unittest.TestCase):
             stub.messages,
         )
 
+    def test_scan_os_does_not_preselect_a_capability_or_path_it_cannot_write(self) -> None:
+        # rpm-ostree records `rpm-ostree install 'pkgconfig(gtk4)'` and
+        # `/usr/bin/zsh` verbatim. Pre-selecting them let the user walk every
+        # step to an "Invalid package value(s)" refusal at the final gate, so
+        # the scan's output has to be something validate_config accepts, and
+        # the specs left behind have to be named on the omitted screen.
+        sections: list[tuple[str, tuple[str, ...]]] = []
+        rows: list[tuple[str, str]] = []
+        stub = self.accepting_gum()
+        stub.table = lambda table_rows, **_kwargs: rows.extend(table_rows)
+        with patch.object(App, "menu_section", lambda _self, title, *lines: sections.append((title, lines))):
+            result, app, stub = self.run_scan_with_status(
+                {
+                    "container-image-reference": self.BLUEFIN,
+                    "requested-packages": ["tmux", "pkgconfig(gtk4)", "/usr/bin/zsh"],
+                    "requested-base-removals": [],
+                },
+                gum=stub,
+            )
+        self.assertEqual(result, SCAN_OK)
+        self.assertEqual(app.config.scanned_packages, ["tmux"])
+        self.assertEqual(app.config.packages, ["tmux"])
+        self.assertIn(("Layered Packages", "1"), rows)
+        self.assertIn(("Cannot Be Carried Over", "2"), rows)
+        not_carried = " ".join(" ".join(lines) for title, lines in sections if title == "Not Carried Over")
+        self.assertIn("pkgconfig(gtk4)", not_carried)
+        self.assertIn("/usr/bin/zsh", not_carried)
+        app.config.method = "containerfile"
+        app.config.repo_name = "my-image"
+        app.validate_config()
+
+    def test_scan_os_asks_before_dropping_a_capability_or_path(self) -> None:
+        # The same default-no decision a local RPM gets: carrying on without
+        # a package the host has is the user's call, not the scan's.
+        result, _app, _stub = self.run_scan_with_status(
+            {
+                "container-image-reference": self.BLUEFIN,
+                "requested-packages": ["tmux", "pkgconfig(gtk4)"],
+                "requested-base-removals": [],
+            }
+        )
+        self.assertEqual(result, SCAN_CANCELLED)
+
+    def test_scan_os_with_only_capabilities_does_not_call_the_host_unlayered(self) -> None:
+        _result, app, stub = self.run_scan_with_status(
+            {
+                "container-image-reference": self.BLUEFIN,
+                "requested-packages": ["/usr/bin/zsh"],
+                "requested-base-removals": [],
+            },
+            gum=self.accepting_gum(),
+        )
+        self.assertEqual(app.config.packages, [])
+        warnings = [message for level, message in stub.messages if level == "warn"]
+        self.assertIn("No layered packages this tool can carry over were found.", warnings)
+
     def test_unsupported_scan_customizations_reads_every_category(self) -> None:
         # One assertion per field rpm-ostree documents, because each is a
         # separate way for a customization to go missing and the defect was
