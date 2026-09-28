@@ -277,6 +277,9 @@ DNF5_MISSING_MARKERS = (
 # lookup matches against -- see lookup_installed_host_packages for why the
 # printed %{name} cannot be.
 RPM_NOT_INSTALLED_RE = re.compile(r"^package (.+) is not installed$")
+# rpm exits with the number of specs it failed to find, clamped by rpm itself
+# at 254 so a large batch never wraps to 0 (RETVAL in rpm's tools/cliutils.hh).
+RPM_MAX_EXIT_STATUS = 254
 # GitHub Actions should be pinned to immutable SHAs instead of floating tags.
 # The human-readable tag is kept as a comment so maintainers can still tell what
 # upstream version the pin came from.
@@ -4696,7 +4699,7 @@ class App:
         #
         # Batched for the same reason as lookup_host_packages. Every spec
         # rpm does not find is named back on stdout as "package <spec> is not
-        # installed" (exit 1), and those lines are what the misses are read
+        # installed", and those lines are what the misses are read
         # from -- deliberately not the %{name} of the hits. rpm accepts
         # name.arch and name-version specs and prints the bare name for
         # them, so a hit for vim-enhanced.x86_64 would print vim-enhanced
@@ -4718,22 +4721,27 @@ class App:
             return results
         # Both the "not installed" line and the "error:" prefix are
         # translated strings, so a host locale other than English would hide
-        # every miss and every failure from the checks below -- and with an
-        # exit status of 1 that reads as "everything is installed". Pin the
+        # every miss and every failure from the checks below, and the lookup
+        # would answer nothing for a batch it could have answered. Pin the
         # locale so rpm speaks the English the parser expects.
         env = os.environ.copy()
         env["LC_ALL"] = "C"
         proc = run(["rpm", "-q", "--qf", "%{name}\n", *to_check], env=env, check=False)
-        # rpm exits 1 for "some of these are not installed" and, on a
-        # database it cannot open, *also* exits 1 and reports every spec as
-        # not installed. Only the "error:" line on stderr tells the two
-        # apart, so it is checked before the exit status is believed.
-        uncheckable = proc.returncode not in (0, 1) or "error:" in (proc.stderr or "").lower()
         not_installed: set[str] = set()
         for line in (proc.stdout or "").splitlines():
             match = RPM_NOT_INSTALLED_RE.match(line.strip())
             if match:
                 not_installed.add(match.group(1))
+        # rpm exits with the number of specs it did not find (capped at
+        # RPM_MAX_EXIT_STATUS), not 1: three misses exit 3. So the status is
+        # believed only when it matches the misses rpm named. On a database
+        # it cannot open, rpm reports every spec as not installed with a
+        # status that matches too; only the "error:" line on stderr tells
+        # that apart, so it is checked as well. Anything else -- a signal, a
+        # status no miss accounts for -- is a failure this parser does not
+        # understand, and every name is left unchecked rather than guessed.
+        expected_status = min(len(not_installed), RPM_MAX_EXIT_STATUS)
+        uncheckable = proc.returncode != expected_status or "error:" in (proc.stderr or "").lower()
         for package in to_check:
             if uncheckable:
                 outcome: bool | None = None

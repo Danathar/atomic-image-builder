@@ -677,11 +677,17 @@ misses are parsed off rpm's own "package <spec> is not installed" stdout
 lines rather than by matching the printed %{name} of the hits: rpm accepts
 name.arch and name-version specs and prints the bare name for them, so a
 hit for vim-enhanced.x86_64 prints "vim-enhanced" and would never match the
-spec that was asked. The miss line echoes the spec verbatim. A database rpm
-cannot open produces the same exit 1 *and* a "not installed" line per spec,
-distinguishable only by the "error:" line on stderr, so that is checked
-first and turns the whole batch into "could not check" rather than a
-confident typo verdict for every removal.
+spec that was asked. The miss line echoes the spec verbatim. rpm's exit
+status is the number of specs it did not find, clamped at 254 (RETVAL in
+rpm's tools/cliutils.hh), not a flat 1: three misses exit 3. Reading any
+status above 1 as a failure sent every name in a batch with two misses to
+the repo query, where uupd and the ublue-os-* set were refused as typos
+(#503). So the status is believed only when it equals the number of miss
+lines. A database rpm cannot open produces a matching status *and* a "not
+installed" line per spec, distinguishable only by the "error:" line on
+stderr, so that is checked too; either check failing turns the whole batch
+into "could not check" rather than a confident typo verdict for every
+removal.
 
 The rpm results are cached separately (installed_package_lookup_cache) from
 the repo results (package_lookup_cache). They answer different questions:
