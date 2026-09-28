@@ -2408,23 +2408,33 @@ class Gum:
 
     def enter_to_continue(self, placeholder: str = "Press Enter to continue...") -> None:
         self.instruction(placeholder)
-        self.require_interactive_success(
-            self.interactive_stdout(
-                [
-                    "gum",
-                    "input",
-                    "--no-show-help",
-                    "--prompt",
-                    "> ",
-                    "--prompt.foreground",
-                    str(ACCENT_COLOR),
-                    "--cursor.foreground",
-                    str(ACCENT_COLOR),
-                    "--width",
-                    "3",
-                ]
+        # A pause is an acknowledgement, not a screen: there is nothing to go
+        # back to, and every placeholder names where Enter goes next. So Esc
+        # means the same as Enter here. Left as ScreenBack it unwound past the
+        # screen the prompt promised -- through main_menu() to main(), which
+        # exits 0, discarding a filled-in wizard (#507). Only Esc is absorbed:
+        # gum exiting 1 with no terminal is still a CommandError (#367), and
+        # Ctrl+C still quits.
+        try:
+            self.require_interactive_success(
+                self.interactive_stdout(
+                    [
+                        "gum",
+                        "input",
+                        "--no-show-help",
+                        "--prompt",
+                        "> ",
+                        "--prompt.foreground",
+                        str(ACCENT_COLOR),
+                        "--cursor.foreground",
+                        str(ACCENT_COLOR),
+                        "--width",
+                        "3",
+                    ]
+                )
             )
-        )
+        except ScreenBack:
+            pass
 
 
 class App:
@@ -2661,15 +2671,10 @@ class App:
                     "This tool expects a supported rpm-ostree / bootc desktop image with dnf5 and rpm-ostree available.",
                 )
                 print()
-            try:
-                self.gum.enter_to_continue("Press Enter to exit to the terminal...")
-            except ScreenBack:
-                # Esc at this prompt means the same as Enter: leave. Left to
-                # propagate, it skipped the SystemExit(1) preflight() raises
-                # after this returns, and main() turned it into exit 0 -- a
-                # failed preflight that reported success to the wrapper,
-                # CI job or container entrypoint that ran it (#367).
-                pass
+            # Esc here leaves just as Enter does: enter_to_continue() reads
+            # Esc as acknowledgement, so preflight() still raises its
+            # SystemExit(1) and the wrapper sees the failure (#367).
+            self.gum.enter_to_continue("Press Enter to exit to the terminal...")
             return
 
         print()
@@ -2957,11 +2962,16 @@ class App:
                     self.update_existing_image()
                 elif selected == "View Build Status":
                     self.view_build_status()
+            except ScreenBack:
+                # Esc that a flow did not handle itself pops back one screen,
+                # and from inside any of these flows that screen is this menu.
+                # Left to propagate, main() read it as quitting and exited 0,
+                # dropping whatever the flow held (#507).
+                continue
             except CommandError as exc:
                 # A failure here means something in the flow broke, not that
-                # the user chose to leave (that is ScreenBack/SystemExit).
-                # Report it and return to the main menu instead of taking the
-                # whole app down.
+                # the user chose to leave (that is SystemExit). Report it and
+                # return to the main menu instead of taking the whole app down.
                 self.gum.error(str(exc))
                 self.gum.enter_to_continue("Press Enter to return to the main menu...")
 
@@ -3021,6 +3031,13 @@ class App:
         review_step = len(steps) + 1
         total_steps = review_step
         index = 0
+        # Set while the user is on a step they opened from the review screen
+        # (and the steps the wizard walks through after it). Esc there returns
+        # to review, which is where they came from: stepping back one index
+        # instead meant Esc on "Build method" -- index 0 -- hit the "leave the
+        # wizard" case meant for the first pass and discarded everything
+        # entered so far (#507). Review has its own explicit Cancel for that.
+        editing_from_review = False
         while True:
             try:
                 if index < len(steps):
@@ -3038,10 +3055,14 @@ class App:
                         self.select_packages(step=number, total_steps=total_steps)
                     index += 1
                     continue
+                editing_from_review = False
                 action = self.review_new_image(
                     step=review_step, total_steps=total_steps, allow_base_edit="base" in steps
                 )
             except ScreenBack:
+                if editing_from_review:
+                    index = len(steps)
+                    continue
                 if index == 0:
                     return
                 index -= 1
@@ -3058,6 +3079,10 @@ class App:
                 try:
                     if self.do_build():
                         return
+                except ScreenBack:
+                    # Esc on a screen inside the build returns to review with
+                    # the config intact, the same as declining does.
+                    pass
                 except CommandError as exc:
                     # Keep the wizard's in-memory state intact and return to
                     # the review screen instead of taking the whole app down.
@@ -3066,6 +3091,7 @@ class App:
                 continue
             if action in steps:
                 index = steps.index(action)
+                editing_from_review = True
             else:
                 return
 
