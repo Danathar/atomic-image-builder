@@ -1509,6 +1509,31 @@ class BuilderTests(unittest.TestCase):
         with self.assertRaisesRegex(CommandError, r"if: env\.COSIGN_PRIVATE_KEY != ''.*published unsigned"):
             app.patch_container_workflow(legacy)
 
+    def test_legacy_migration_allows_reads_the_strip_does_not_break(self) -> None:
+        # The refusal is for reads the removal breaks. A workflow-level env
+        # entry is left in place and still answers the read, and a job that
+        # never carried the key is not changed by removing it from another --
+        # refusing either would block an update over a reference that works.
+        app = self.make_app()
+        report = ["      - name: Report signing", "        if: env.COSIGN_PRIVATE_KEY != ''", "        run: echo signed"]
+        shapes = {
+            "workflow-level definition": self.LEGACY_SIGNING_JOB.replace(
+                "jobs:\n", "env:\n  COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}\njobs:\n", 1
+            )
+            + "\n".join([*report, ""]),
+            "read in another job": self.LEGACY_SIGNING_JOB
+            + "\n".join(["  notify:", "    runs-on: ubuntu-latest", "    steps:", *report, ""]),
+        }
+        for label, legacy in shapes.items():
+            with self.subTest(shape=label):
+                migrated = app.patch_container_workflow(legacy)
+                self.assertEqual(
+                    sorted(self.job_env_entries(migrated)),
+                    ["BUILD_FLAVOR: main", "SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}"],
+                )
+                self.assertEqual(migrated.count("&& env.SIGNING_ENABLED == 'true'"), 2)
+                self.assertIn("        if: env.COSIGN_PRIVATE_KEY != ''", migrated.splitlines())
+
     @staticmethod
     def job_env_entries_by_job(workflow: str) -> dict[str, list[str]]:
         """Job-level env entries keyed by job name, compared by whole line.

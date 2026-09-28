@@ -417,8 +417,9 @@ in ways that are quiet rather than loud:
   `steps: # build`, or items at +4 or +0, the walker once visited no step
   while the key was stripped regardless -- this exact silent outcome (#526).
   So the walker accepts a commented key and takes the item indent from the
-  first item, and the strip raises a CommandError rather than run while any
-  `env.COSIGN_PRIVATE_KEY` or `env.COSIGN_PASSWORD` reference survives.
+  first item, and the strip raises a CommandError rather than run while a
+  job that loses the key still reads it (a workflow-level `env:` definition,
+  which the strip leaves alone, still answers such a read and is allowed).
 
 test_existing_repository_migrates_off_the_job_level_key and
 test_legacy_migration_rewrites_steps_under_a_commented_key_or_at_any_item_indent

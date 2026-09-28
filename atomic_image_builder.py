@@ -1224,7 +1224,6 @@ SIGNING_ENABLED_ENV = ("SIGNING_ENABLED", "${{ secrets.SIGNING_SECRET != '' }}")
 # worse than signing that fails.
 LEGACY_SIGNING_ENV_KEYS = ("COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
 LEGACY_SIGN_CONDITION = " && env.COSIGN_PRIVATE_KEY != ''"
-LEGACY_SIGNING_ENV_READ_RE = re.compile(rf"\benv\.(?:{'|'.join(LEGACY_SIGNING_ENV_KEYS)})\b")
 
 
 def strip_job_env_entries(workflow_text: str, names: Sequence[str]) -> str:
@@ -1242,35 +1241,76 @@ def strip_job_env_entries(workflow_text: str, names: Sequence[str]) -> str:
     return ensure_trailing_newline("\n".join(kept))
 
 
+def workflow_level_env_keys(lines: Sequence[str]) -> set[str]:
+    """Return the names defined in the top-level `env:` block, if there is one."""
+    defined: set[str] = set()
+    inside = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not line[0].isspace():
+            inside = workflow_block_key(stripped) == "env"
+            continue
+        if inside and line.startswith("  ") and not line.startswith("   "):
+            key = workflow_key(stripped)
+            if key is not None:
+                defined.add(key)
+    return defined
+
+
 def strip_legacy_signing_job_env(workflow_text: str) -> str:
     """Remove the legacy job-level signing key and password, or refuse to.
 
-    Run after patch_workflow_signing_steps(). Removing the job-level
-    COSIGN_PRIVATE_KEY is only safe once nothing reads `env.COSIGN_PRIVATE_KEY`
-    any more: a step's own `env:` is not visible to its `if:`, so a condition
-    the step rewrite did not reach would test a variable that no longer exists,
-    be false forever, and publish every image unsigned on a green run (#526).
+    Run after patch_workflow_signing_steps(). Removing a job's COSIGN_PRIVATE_KEY
+    is only safe once nothing in that job reads `env.COSIGN_PRIVATE_KEY` any
+    more: a step's own `env:` is not visible to its `if:`, so a condition the
+    step rewrite did not reach would test a variable that no longer exists, be
+    false forever, and publish every image unsigned on a green run (#526).
     Keeping the keys instead would leave the signing key exposed to every
     action in the job, which is what the migration exists to end (#255). So a
     surviving reference fails closed, naming the line to fix by hand.
 
-    A workflow with no legacy job-level entry is returned as it is: there is
-    nothing to strip, so this update cannot be what breaks it.
+    Only a read the removal actually breaks counts: one inside a job whose
+    job-level entry for that name is removed, and not also defined in the
+    workflow-level `env:`, which this leaves alone and which would still
+    answer it. A removed entry outside every job the parser recognizes has no
+    scope it can judge, so there any read in the file counts. A workflow with
+    no legacy job-level entry is returned as it is: this update cannot be
+    what breaks it.
     """
     stripped = strip_job_env_entries(workflow_text, LEGACY_SIGNING_ENV_KEYS)
     if stripped == ensure_trailing_newline(workflow_text):
         return stripped
-    for line in stripped.splitlines():
-        if line.lstrip().startswith("#") or not LEGACY_SIGNING_ENV_READ_RE.search(line):
+    lines = workflow_text.splitlines()
+    still_defined = workflow_level_env_keys(lines)
+
+    def removed_names(scope: Sequence[str]) -> set[str]:
+        return {
+            name
+            for name in LEGACY_SIGNING_ENV_KEYS
+            if name not in still_defined and any(line.startswith(f"      {name}: ") for line in scope)
+        }
+
+    ranges = workflow_job_ranges(lines)
+    covered = {index for _, start, end in ranges for index in range(start, end)}
+    outside = removed_names([line for index, line in enumerate(lines) if index not in covered])
+    scopes = [(lines, outside)] + [(lines[start:end], removed_names(lines[start:end])) for _, start, end in ranges]
+    for scope, names in scopes:
+        if not names:
             continue
-        raise CommandError(
-            f"This workflow still reads a legacy job-level signing variable after its signing "
-            f"steps were migrated ({line.strip()!r}), and this update removes that variable from "
-            f"the job's 'env:'. Left as it is, that condition would be false forever and the image "
-            f"would be published unsigned. Make it test env.{SIGNING_ENABLED_ENV[0]} == 'true' "
-            f"instead -- in a signing step's 'if:', delete \"{LEGACY_SIGN_CONDITION.strip()}\" -- "
-            f"then run this update again."
-        )
+        reads = re.compile(rf"\benv\.(?:{'|'.join(sorted(names))})\b")
+        for line in scope:
+            if line.lstrip().startswith("#") or not reads.search(line):
+                continue
+            raise CommandError(
+                f"This workflow still reads a legacy job-level signing variable after its signing "
+                f"steps were migrated ({line.strip()!r}), and this update removes that variable from "
+                f"the job's 'env:'. Left as it is, that condition would be false forever and the "
+                f"image would be published unsigned. Make it test env.{SIGNING_ENABLED_ENV[0]} == "
+                f"'true' instead -- in a signing step's 'if:', delete "
+                f"\"{LEGACY_SIGN_CONDITION.strip()}\" -- then run this update again."
+            )
     return stripped
 
 
