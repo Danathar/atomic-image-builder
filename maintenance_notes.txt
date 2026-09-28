@@ -627,17 +627,24 @@ name `vim-enhanced`, not string-equal to the spec. The batch cannot say which
 argument printed which line, so _resolve_package_spec() re-asks per leftover
 spec, on the cache the batch just warmed: `--whatprovides <spec>` first (it is
 case-sensitive and every package provides its own name), then a positional
-`<spec>` query for NEVRA forms, accepted only when a printed name opens the
-spec verbatim. That last condition is what keeps `Vim-Enhanced` rejected:
-positional repoquery matches ignoring case (5.4.2.1 prints vim-enhanced for
-it), install does not ("No match for argument"). A spec with no ".", "-" or
-":" skips the positional query, since it can only be a plain name and
---whatprovides already answered that. Confirmed live against dnf5 5.4.2.1:
-vim, vim-enhanced.x86_64, htop-3.4.1 and the virtual `webserver` resolve;
-Vim-Enhanced, HTOP, nethock and python3-foo-typo do not. Binaries by bare name
-(`dnf5 install <name>` also matches /usr/bin/<name>) are not resolved here; a
-user who types one keeps the "not found" message and can enter the package
-name instead.
+`<spec>` query for NEVRA forms, accepted only when the spec is verbatim one
+of the spellings dnf5 prints for what it matched (DNF5_SPEC_SPELLINGS: name,
+name.arch, name-version, name-version-release, name-version-release.arch,
+and the epoch forms of the last three and of name-version). That condition is
+what keeps `Vim-Enhanced` and `htop.X86_64` rejected: positional repoquery
+matches ignoring case (5.4.2.1 prints vim-enhanced and htop for them),
+install does not ("No match for argument"), and neither does rpm -q
+(`rpm -q bash.X86_64` is "not installed"). The check used to be "a printed
+%{name} opens the spec", which guarded only the name part and let a
+wrong-case arch or version through (#505): the install then failed on
+GitHub, and a removal was silently skipped by the build's rpm -q gate. A
+spec with no ".", "-" or ":" skips the positional query, since it can only be
+a plain name and --whatprovides already answered that. Confirmed live against
+dnf5 5.4.2.1: vim, vim-enhanced.x86_64, htop-3.4.1 and the virtual
+`webserver` resolve; Vim-Enhanced, HTOP, nethock and python3-foo-typo do not.
+Binaries by bare name (`dnf5 install <name>` also matches /usr/bin/<name>)
+are not resolved here; a user who types one keeps the "not found" message and
+can enter the package name instead.
 
 The same lookup checks the Removed Base Packages screen, and there Provides
 must stay rejected. The generated build.sh only removes a package after
