@@ -303,6 +303,7 @@ ACTION_REF_PINS: dict[str, tuple[str, str]] = {
     "osbuild/bootc-image-builder-action@8661cd3832544ad68c12dcde8681b13ab0f56a8d": ("56d652d0afb02eb3e4b8fd35e7ca0391dbebab2a", "main"),
     "osbuild/bootc-image-builder-action@56d652d0afb02eb3e4b8fd35e7ca0391dbebab2a": ("56d652d0afb02eb3e4b8fd35e7ca0391dbebab2a", "main"),
     "actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f": ACTION_PINS["actions/upload-artifact"],
+    "blue-build/github-action@836161eb076426a451e6a0054f722b1153b8b3ad": ACTION_PINS["blue-build/github-action"],
     "sigstore/cosign-installer@v4.0.0": ("faadad0cce49287aee09b3a48701e75088a2c6ad", "v4.0.0"),
     "sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad": ("faadad0cce49287aee09b3a48701e75088a2c6ad", "v4.0.0"),
 }
