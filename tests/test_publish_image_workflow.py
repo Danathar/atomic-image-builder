@@ -8,11 +8,14 @@ tests/test_workflow_dependencies.py read it to compare action pins, and
 tests/test_atomic_image_builder.py matches its path inside the cosign identity
 regex, but neither runs a line of its shell.
 
-Two of its decisions are the kind that fail silently:
+Three of its decisions are the kind that fail silently:
 
 * Only a build of `main` may tag the image `latest`. A release is published
   from a tag ref, and one cut from an older commit must not drag `latest`
   backwards. Losing that guard republishes an old `latest` with a green run.
+* Only a build of a tag ref may tag the image with the version. VERSION keeps
+  the released value until the next bump, so a main build claiming it
+  re-points `:X.Y.Z` at unreleased code on every merge after a release.
 * The image reference is lowercased from the owner login, which is `Danathar`.
   GHCR rejects an uppercase reference, so a regression here fails the push --
   but the tags string and the signing reference are built from that value in
@@ -121,25 +124,27 @@ class MetaStepTests(unittest.TestCase):
         for variable in ("GITHUB_REF", "GITHUB_REPOSITORY_OWNER", "GITHUB_OUTPUT"):
             self.assertIn(variable, script)
 
-    def test_a_build_of_main_claims_latest(self) -> None:
+    def test_a_build_of_main_claims_latest_but_not_the_version(self) -> None:
+        # VERSION still holds the last release's value on every merge after
+        # it, so a main build tagging it would move :X.Y.Z off the release.
         proc, outputs, short_sha = run_meta_step(ref="refs/heads/main")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(outputs["tags"].split(), ["latest", outputs["version"], short_sha])
+        self.assertEqual(outputs["tags"].split(), ["latest", short_sha])
 
-    def test_a_release_tag_ref_does_not_claim_latest(self) -> None:
+    def test_a_release_tag_ref_claims_the_version_but_not_latest(self) -> None:
         # The release event's ref is refs/tags/<tag>. A release cut from an
-        # older commit still gets the version and SHA tags; it must not move
+        # older commit gets the version and SHA tags; it must not move
         # `latest` off the tip of main.
         proc, outputs, short_sha = run_meta_step(ref="refs/tags/v0.9.1")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertNotIn("latest", outputs["tags"].split())
         self.assertEqual(outputs["tags"].split(), [outputs["version"], short_sha])
 
-    def test_a_dispatch_from_another_branch_does_not_claim_latest(self) -> None:
-        # workflow_dispatch can be aimed at any branch, so the guard is not
+    def test_a_dispatch_from_another_branch_claims_only_its_sha(self) -> None:
+        # workflow_dispatch can be aimed at any branch, so neither guard is
         # only about releases.
-        _, outputs, _ = run_meta_step(ref="refs/heads/some-branch")
-        self.assertNotIn("latest", outputs["tags"].split())
+        proc, outputs, short_sha = run_meta_step(ref="refs/heads/some-branch")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(outputs["tags"].split(), [short_sha])
 
     def test_the_owner_is_lowercased_for_the_registry_path(self) -> None:
         # GHCR rejects an uppercase image reference and the owner login is
@@ -183,7 +188,8 @@ class MetaStepTests(unittest.TestCase):
         # else; they are published as separate outputs for the run's own
         # output view. Asserting that here keeps a later step that starts
         # reading one from looking like it was always covered.
-        self.assertEqual(outputs["tags"].split()[-2:], [outputs["version"], outputs["short_sha"]])
+        _, released, _ = run_meta_step(ref="refs/tags/v0.9.1")
+        self.assertEqual(released["tags"].split(), [released["version"], released["short_sha"]])
 
     def test_the_short_sha_is_the_commit_being_published(self) -> None:
         _, outputs, short_sha = run_meta_step()
@@ -282,12 +288,12 @@ class WorkflowShapeTests(unittest.TestCase):
     def test_the_tags_output_feeds_the_build_step(self) -> None:
         # The tags string is computed as a space-separated list because
         # buildah-build takes it that way; a comma-separated list would build
-        # one image tagged "latest,0.9.5,abc1234".
+        # one image tagged "latest,abc1234".
         workflow = PUBLISH_WORKFLOW.read_text()
         self.assertIn("tags: ${{ steps.meta.outputs.tags }}", workflow)
         _, outputs, _ = run_meta_step()
         self.assertNotIn(",", outputs["tags"])
-        self.assertEqual(len(outputs["tags"].split()), 3)
+        self.assertEqual(len(outputs["tags"].split()), 2)
 
     def test_the_push_registry_uses_the_lowercased_owner(self) -> None:
         workflow = PUBLISH_WORKFLOW.read_text()
