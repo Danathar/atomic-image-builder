@@ -364,14 +364,15 @@ class SystemScanTests(unittest.TestCase):
         self.assertIn(placeholder, {image.image_uri for image in BASE_IMAGES})
 
     def test_the_command_the_form_suggests_reads_what_the_scan_reads(self) -> None:
-        # The scan runs `rpm-ostree status --json --booted`; the form asks a
-        # reporter for the same deployment with the short spelling of the
-        # same flag. A scan that stopped scoping itself to the booted
-        # deployment would make the answer describe something else.
+        # The scan reads every deployment, so a staged one can be noticed,
+        # but takes its details from the booted one; the form asks a
+        # reporter for that same deployment. A scan that stopped scoping
+        # itself to the booted deployment would make the answer describe
+        # something else.
         description = field(BUG, "base")["attributes"]["description"]
         self.assertIn("`rpm-ostree status -b`", description)
         source = (ROOT / "atomic_image_builder.py").read_text()
-        self.assertIn('["rpm-ostree", "status", "--json", "--booted"]', source)
+        self.assertIn('booted = next((item for item in deployments if item.get("booted"))', source)
 
     def test_the_form_expects_no_scan_where_the_tool_requires_none(self) -> None:
         # "container, no host scan" is only a sensible answer while

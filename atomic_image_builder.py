@@ -3643,9 +3643,9 @@ class App:
                 self.gum.error("rpm-ostree not found. OS scanning is unavailable.")
                 return SCAN_UNAVAILABLE
 
-            proc = run(["rpm-ostree", "status", "--json", "--booted"], check=False)
-            if proc.returncode != 0 or not proc.stdout.strip():
-                proc = run(["rpm-ostree", "status", "--json"], check=False)
+            # Every deployment, not just --booted: the booted one is picked
+            # below, and a staged one has to be visible to be noticed.
+            proc = run(["rpm-ostree", "status", "--json"], check=False)
             if proc.returncode != 0 or not proc.stdout.strip():
                 self.gum.error("Failed to read rpm-ostree status.")
                 return SCAN_UNAVAILABLE
@@ -3668,6 +3668,9 @@ class App:
         if not booted:
             self.gum.error("No deployment information found.")
             return SCAN_UNAVAILABLE
+        staged = next((item for item in deployments if item.get("staged") and item is not booted), None)
+        if staged is not None and not self.confirm_scan_past_staged_deployment():
+            return SCAN_CANCELLED
 
         container_ref = (
             booted.get("container-image-reference")
@@ -3877,6 +3880,22 @@ class App:
             # A boolean rather than a list, and still something reset undoes.
             found.append(("A locally regenerated initramfs", []))
         return found
+
+    def confirm_scan_past_staged_deployment(self) -> bool:
+        # A deployment staged for the next boot holds whatever was layered or
+        # removed since the last one, and the scan reads the booted
+        # deployment, not it. The switch instructions' `rpm-ostree reset`
+        # acts on that pending state, so continuing would drop those changes
+        # without the user having seen them. Defaults to no.
+        self.gum.warn("A deployment is staged for the next boot, and this scan does not read it.")
+        self.menu_section(
+            "Pending Changes",
+            "Packages layered or removed since the last boot are only in the staged deployment.",
+            "The switch instructions end with `sudo rpm-ostree reset`, which discards them.",
+            "Reboot into the staged deployment first, then scan again, to carry them over.",
+        )
+        print()
+        return self.gum.confirm("Scan the running deployment anyway?", default=False)
 
     def confirm_omitted_scan_customizations(self, omitted: Sequence[tuple[str, list[str]]]) -> bool:
         # An explicit decision, defaulting to no. Reproducing an arbitrary
