@@ -27,8 +27,8 @@ Workflow Patcher Indentation Sensitivity
 patch_workflow_signing_steps, ensure_workflow_job_env_entries, and the per-line
 patch_container_workflow / patch_bluebuild_workflow helpers in
 atomic_image_builder.py all depend on the exact indentation used by the bundled
-template snapshots (2-space step items; 4-space env:/steps: anchors; 6-space
-job-env entries).  ensure_workflow_job_env_entries defines a variable in
+template snapshots (2-space step items; 4-space env:/steps: anchors).
+ensure_workflow_job_env_entries defines a variable in
 each job that reads it (a line referring to env.<NAME>), never in "the first
 job": job env does not cross jobs, and a guard in build_push testing a variable
 defined in an owner's earlier lint job is false forever -- the silent-unsigned
@@ -36,14 +36,20 @@ outcome (#344).  When the reading job has no env:/steps: anchor at the expected
 indentation it raises CommandError rather than returning the text unchanged,
 because that no-op is exactly the failure this section warns about.  When no
 job reads the variable it does nothing, which is the shape of a workflow whose
-owner removed the signing steps.  Indentation is the only thing it is strict
-about within a job: the presence check is by key name among the 6-space
-entries directly under the job's env: block, so an owner's differing value or
-trailing comment counts as defined and is left alone, and the env:/steps:
-anchors tolerate an inline comment.  The alternative was a duplicate mapping
-key, which GitHub refuses to parse (#345).  An env: that already carries an
-inline value (env: { FOO: bar }) cannot take nested entries; that shape raises
-CommandError rather than writing a second env: key into the same job.
+owner removed the signing steps.  Within a job the presence check is by key
+name among the entries directly under the job's env: block, at whatever indent
+that block's first entry uses, and a new entry is written at that indent too:
+an editor's reformat can put them at eight, and counting only six there wrote
+a second SIGNING_ENABLED at six, which does not parse (#524).  So an owner's
+differing value or trailing comment counts as defined and is left alone, and
+the env:/steps: anchors tolerate an inline comment.  The alternative was a
+duplicate mapping key, which GitHub refuses to parse (#345).  An env: that
+already carries an inline value (env: { FOO: bar }) cannot take nested
+entries; that shape raises CommandError rather than writing a second env: key
+into the same job.  strip_job_env_entries, which removes the legacy
+COSIGN_PRIVATE_KEY/COSIGN_PASSWORD, reads the same block at the same indent.
+Matched only at six, an update of a job env at eight would succeed and leave
+the signing key exposed to every step in the job.
 
 Key identity is the parsed key name, never its spelling (#525).  workflow_key
 and workflow_block_key read a key bare, single- or double-quoted, and with
@@ -59,20 +65,39 @@ cosign-release: value, and write the owner's quoting back.  Each missed
 spelling was a duplicate key GitHub rejects, a floating tag with nothing
 reported, or a Cosign 2.x install handed the 3.x signing flags.
 
-The paths-ignore state-file entry is the exception to "no match, no change":
-it is inserted as a new sequence item, so a shape mismatch corrupts the file
-rather than leaving it alone.  A managed repository may write the list inline
-("paths-ignore: ['**.md']"), where a block "- item" beneath it is a parse
-error and GitHub runs nothing from the workflow.  Both patchers therefore go
-through extend_flow_sequence_line first, which extends an inline list in place
-(keeping a trailing comment, and not doubling a trailing comma) and returns
-None for the block form — see #358.
+Any patcher that writes a new or rewritten line, rather than editing one in
+place, can corrupt the file instead of no-op'ing: a line at the wrong indent
+ends the mapping or sequence it was meant to join, and the owner's next line
+becomes a parse error.  Every such write takes its indent from the block it
+joins (#524):
 
-The one place a mismatch corrupts output rather than no-op'ing is the
-paths-ignore state-file entry: it is inserted as a new sequence item, and an
-item at the wrong indent makes the whole sequence unparseable.  Both patchers
-therefore copy the indent of the first existing entry (block_sequence_entry_indent)
-and only assume key indent plus two for an empty list — see #359.
+  - paths-ignore block entries copy the first existing entry
+    (block_sequence_entry_indent) and assume key indent plus two only for an
+    empty list (#359).
+  - The BlueBuild action's push/build_opts/chunkah inputs, and new job-env
+    entries, copy the first entry under with: or env:
+    (block_mapping_entry_indent), with the same plus-two fallback.
+  - IMAGE_DESC is rewritten at the indent it already has, so a job or step
+    env entry stays in its mapping; a value continued over deeper lines (>-,
+    a folded plain scalar) is dropped with it rather than orphaned.
+
+A line inside a block scalar (run: |) is the owner's script, not a key.
+block_scalar_body_indexes finds those lines, and the IMAGE_DESC rewrite and
+strip_permission_entries skip them.  strip_permission_entries also does not
+count a comment as a kept entry, and lets neither comments nor blank lines end
+a permissions: block, so removing its last real entry collapses it to
+permissions: {} rather than a bare, null permissions: key.
+
+A managed repository may write paths-ignore as a flow list rather than a
+block sequence, where a block "- item" is a parse error and GitHub runs
+nothing from the workflow.  add_paths_ignore_entry covers all three shapes.
+A one-line list ("paths-ignore: ['**.md']") is extended in place by
+extend_flow_sequence_line, which keeps a trailing comment and does not double
+a trailing comma (#358).  A list spread over lines -- prettier's
+"paths-ignore: [" or "[" on the next line, items, then "]" -- takes the entry
+straight after its "[", the one position whose syntax is known without
+finding the matching bracket (#524).  Any other value (a scalar, an alias) is
+left alone.
 
 patch_workflow_branch_filters has the same exposure and runs on every update
 of both workflow types: it replaces a trigger's branches: entries with the

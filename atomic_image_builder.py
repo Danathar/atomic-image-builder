@@ -1447,15 +1447,39 @@ LEGACY_SIGN_CONDITION = " && env.COSIGN_PRIVATE_KEY != ''"
 def strip_job_env_entries(workflow_text: str, names: Sequence[str]) -> str:
     """Drop job-level env entries by name, leaving step-level ones alone.
 
-    Six spaces is the job-level indent (four for the job, two for the key).
-    Matching on it is what keeps the signing step's own `COSIGN_PRIVATE_KEY:`,
-    at eight, from being removed with it.
+    Only the entries directly under a job's own `env:` count, at whatever
+    indent that block's first entry uses, which is the same block
+    ensure_workflow_job_env_entries() reads and extends. Matching six spaces
+    anywhere kept the signing step's own `COSIGN_PRIVATE_KEY:`, at eight,
+    from being removed with it, but it also missed a job env an editor had
+    put at eight. That update then succeeded and left the signing key
+    exposed to every step in the job (#524). A value continued on deeper
+    lines goes with its key.
     """
-    kept = [
-        line
-        for line in workflow_text.splitlines()
-        if not any(line.startswith(f"      {name}: ") for name in names)
-    ]
+    lines = workflow_text.splitlines()
+    drop: set[int] = set()
+    for _, start, end in workflow_job_ranges(lines):
+        job = lines[start:end]
+        env_at = workflow_job_level_key_index(job, "env")
+        if env_at is None:
+            continue
+        entry_indent = len(block_mapping_entry_indent(job, env_at))
+        dropping = False
+        for offset in range(env_at + 1, len(job)):
+            stripped = job[offset].strip()
+            if not stripped:
+                continue
+            indent = len(job[offset]) - len(job[offset].lstrip())
+            if indent <= 4 and not stripped.startswith("#"):
+                break
+            if indent > entry_indent:
+                if dropping:
+                    drop.add(start + offset)
+                continue
+            dropping = indent == entry_indent and workflow_key(stripped) in names
+            if dropping:
+                drop.add(start + offset)
+    kept = [line for index, line in enumerate(lines) if index not in drop]
     return ensure_trailing_newline("\n".join(kept))
 
 
@@ -1561,10 +1585,17 @@ def strip_permission_entries(workflow_text: str, names: Sequence[str]) -> str:
     Removing the last entry would leave a bare `permissions:` key, which YAML
     reads as null and Actions rejects. The block collapses to
     `permissions: {}` instead, which is the same thing the caller asked for --
-    a job granted nothing -- and is valid.
+    a job granted nothing -- and is valid. A comment is not an entry: a block
+    holding only `# OIDC for signing` and `id-token: write` collapses too
+    (#524). Comments and blank lines end nothing either, whatever their
+    indent, the way workflow_job_ranges() reads a job.
+
+    Lines of a block scalar are the owner's script, not keys, so a `run: |`
+    that happens to print `permissions:` is left as written.
     """
     entry_re = re.compile(r"^\s*([A-Za-z0-9_-]+):\s*\S")
     lines = workflow_text.splitlines()
+    scalar_body = block_scalar_body_indexes(lines)
     output: list[str] = []
     block_indent: int | None = None
     header_index = 0
@@ -1574,13 +1605,16 @@ def strip_permission_entries(workflow_text: str, names: Sequence[str]) -> str:
         if not kept_any:
             output[header_index] = f"{' ' * block_indent}permissions: {{}}"
 
-    for line in lines:
+    for index, line in enumerate(lines):
         stripped = line.strip()
         indent = len(line) - len(line.lstrip())
+        if index in scalar_body:
+            output.append(line)
+            continue
         if block_indent is not None:
-            # A blank line inside the block neither ends it nor is an entry;
-            # the next line with content decides.
-            if not stripped:
+            # A blank or comment line inside the block neither ends it nor
+            # is an entry; the next line with content decides.
+            if not stripped or stripped.startswith("#"):
                 output.append(line)
                 continue
             if indent > block_indent:
@@ -1894,6 +1928,129 @@ def extend_flow_sequence_line(line: str, item: str) -> str | None:
     return f"{prefix}[{items}, {item}]{suffix}" if items else f"{prefix}[{item}]{suffix}"
 
 
+def block_mapping_entry_indent(lines: Sequence[str], key_index: int) -> str:
+    """Indent for a new entry in the block mapping under ``lines[key_index]``.
+
+    The mapping twin of block_sequence_entry_indent(), and the same trap
+    (#524). YAML asks only that a mapping's keys agree with each other, so a
+    `with:` or `env:` whose entries an editor put four in from the key is
+    valid. A key written at plus two above them closes the mapping there,
+    and the owner's first entry after it is a parse error. So copy the
+    indent of the first entry below the key, and fall back to key indent
+    plus two only when the mapping is empty.
+    """
+    key_line = lines[key_index]
+    key_indent = len(key_line) - len(key_line.lstrip())
+    for line in lines[key_index + 1 :]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent > key_indent:
+            return line[:indent]
+        break
+    return key_line[:key_indent] + "  "
+
+
+# The line a block scalar opens on: a `key:` or a `- ` item, or both, whose
+# value is `|` or `>` with optional indentation and chomping indicators and
+# an optional comment. `node` ends where the scalar's parent starts: at the
+# key when there is one, after the last dash otherwise.
+BLOCK_SCALAR_HEADER_RE = re.compile(
+    r"^(?P<node>\s*(?:-\s+)*)(?P<key>[^\s#-][^#]*?:\s+|-\S[^#]*?:\s+)?[|>][1-9]?[-+]?[1-9]?\s*(?:#.*)?$"
+)
+
+
+def block_scalar_body_indexes(lines: Sequence[str]) -> set[int]:
+    """Return the indexes of every line that is the body of a block scalar.
+
+    A `run: |` script is text to YAML, whatever it looks like. A line in one
+    that reads `permissions:` or `IMAGE_DESC: x` is a line of the owner's
+    shell, and a patcher that takes it for a key rewrites their script
+    (#524). The body is every line deeper than the scalar's parent node,
+    blank lines included, up to the first line that is not.
+    """
+    body: set[int] = set()
+    parent: int | None = None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if parent is not None:
+            if not stripped or indent > parent:
+                body.add(index)
+                continue
+            parent = None
+        match = BLOCK_SCALAR_HEADER_RE.match(line)
+        if match is None:
+            continue
+        node = match.group("node")
+        if match.group("key") is not None:
+            parent = len(node)
+        elif "-" in node:
+            # A bare `- |` item: its parent is the sequence, at the dash.
+            parent = len(node.rstrip()) - 1
+    return body
+
+
+def add_paths_ignore_entry(lines: list[str], item: str, anchors: Iterable[str]) -> list[str]:
+    """Return ``lines`` with ``item`` added to the first `paths-ignore:` list.
+
+    The list may be written three ways, and a block "- item" is right for
+    only one of them. Under any flow list it is a parse error, and GitHub
+    then runs nothing from the file.
+
+    - A block sequence takes a new entry at the indent of its existing
+      entries (block_sequence_entry_indent, #359).
+    - A one-line flow list is extended in place (extend_flow_sequence_line,
+      #358).
+    - A flow list spread over lines, the way prettier writes a long one --
+      `paths-ignore: [` or a `[` on the next line, items, then `]` -- takes
+      the item straight after its `[` (#524). That is the one place in the
+      list whose syntax is known without finding the matching bracket: an
+      item and a comma, before whatever followed, and a trailing comma
+      before `]` is valid YAML.
+
+    Any other value -- a scalar, an alias, a tag -- is not a list this can
+    extend, so the lines come back unchanged, like any patcher's no-op. A
+    workflow with no `paths-ignore:` key gets the entry after the first
+    ``anchors`` line instead, the snapshot's own list item.
+    """
+    anchor_set = set(anchors)
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped in anchor_set:
+            indent = line[: len(line) - len(line.lstrip())]
+            return [*lines[: index + 1], f"{indent}- {item}", *lines[index + 1 :]]
+        if not stripped.startswith("paths-ignore:"):
+            continue
+        extended = extend_flow_sequence_line(line, item)
+        if extended is not None:
+            return [*lines[:index], extended, *lines[index + 1 :]]
+        value = stripped.removeprefix("paths-ignore:").lstrip()
+        opener = index
+        if not value or value.startswith("#"):
+            key_indent = len(line) - len(line.lstrip())
+            opener = next(
+                (
+                    at
+                    for at in range(index + 1, len(lines))
+                    if lines[at].strip() and not lines[at].strip().startswith("#")
+                ),
+                len(lines),
+            )
+            opened = lines[opener] if opener < len(lines) else ""
+            if not (opened.lstrip().startswith("[") and len(opened) - len(opened.lstrip()) > key_indent):
+                return [*lines[: index + 1], f"{block_sequence_entry_indent(lines, index)}- {item}", *lines[index + 1 :]]
+        elif not value.startswith("["):
+            return lines
+        opened = lines[opener]
+        bracket = opened.index("[")
+        rest = opened[bracket + 1 :].lstrip()
+        patched = f"{opened[: bracket + 1]}{item}," + (f" {rest}" if rest else "")
+        return [*lines[:opener], patched, *lines[opener + 1 :]]
+    return lines
+
+
 # The oldest Cosign release the generated signing step works with. Workflows
 # pinned below it are raised to it; anything at or above it is the owner's
 # choice and stays. The bundled snapshot pins this same version.
@@ -2083,20 +2240,25 @@ def workflow_job_env_keys(job: Sequence[str], env_at: int) -> set[str]:
     """Return the names of the keys directly under the job-level `env:` at `env_at`.
 
     The block runs until the first non-blank, non-comment line at the job's
-    own indentation or shallower; only its direct children count. Other keys
-    sit at six spaces too -- the job's `outputs:` entries, a step-level
-    `env:` -- and taking one of those for the job env entry leaves the real
-    block without it while every guard that tests the variable goes on
-    reading it undefined.
+    own indentation or shallower; only its direct children count. Those sit
+    at whatever indent the block's first entry uses -- six in every workflow
+    this tool writes, eight after an editor's reformat, and counting only
+    six there found nothing and wrote a duplicate key (#524). Other keys sit
+    at that depth too -- the job's `outputs:` entries, a step-level `env:`
+    -- and taking one of those for the job env entry leaves the real block
+    without it while every guard that tests the variable goes on reading it
+    undefined.
     """
+    entry_indent = len(block_mapping_entry_indent(job, env_at))
     defined: set[str] = set()
     for line in job[env_at + 1 :]:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        if len(line) - len(line.lstrip()) <= 4:
+        indent = len(line) - len(line.lstrip())
+        if indent <= 4:
             break
-        if line.startswith("      ") and not line.startswith("       "):
+        if indent == entry_indent:
             key = workflow_key(stripped)
             if key is not None:
                 defined.add(key)
@@ -2144,8 +2306,7 @@ def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[
     lines = workflow_text.splitlines()
     changed = False
     for name, value in entries:
-        # Job-level env is at 6 spaces (4 for job indent + 2 for key).
-        wanted = f"      {name}: {value}"
+        entry = f"{name}: {value}"
         reads = re.compile(rf"\benv\.{re.escape(name)}\b")
         ranges = workflow_job_ranges(lines)
         covered = {index for _, start, end in ranges for index in range(start, end)}
@@ -2181,7 +2342,7 @@ def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[
                         f"second 'env:' key would stop the workflow parsing. Rewrite that 'env:' as a "
                         f"block mapping with one entry per line, then run this update again."
                     )
-                lines.insert(start + env_at + 1, wanted)
+                lines.insert(start + env_at + 1, f"{block_mapping_entry_indent(job, env_at)}{entry}")
             else:
                 steps_at = workflow_job_level_key_index(job, "steps")
                 if steps_at is None:
@@ -2192,7 +2353,8 @@ def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[
                         f"it guards are skipped. Add '{name}: {value}' under that job's 'env:' by hand, "
                         f"then run this update again."
                     )
-                lines[start + steps_at:start + steps_at] = ["    env:", wanted]
+                # Job-level keys are at four, so a new env block's entries go at six.
+                lines[start + steps_at:start + steps_at] = ["    env:", f"      {entry}"]
             changed = True
     if not changed:
         return workflow_text
@@ -6534,33 +6696,36 @@ class App:
         branch_if = "github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
         sign_if = f"{branch_if} && env.{SIGNING_ENABLED_ENV[0]} == 'true'"
         lines = existing_text.splitlines()
+        if STATE_FILE not in existing_text:
+            lines = add_paths_ignore_entry(lines, f"'{STATE_FILE}'", ("- '**/README.md'", '- "**/README.md"'))
+        scalar_body = block_scalar_body_indexes(lines)
         output: list[str] = []
-        state_ignore_present = any(STATE_FILE in line for line in lines)
-        paths_ignore_inserted = False
+        resume_at = 0
         for index, line in enumerate(lines):
+            if index < resume_at:
+                continue
             line = pin_action_uses_line(line)
             stripped = line.strip()
             if stripped.startswith("- cron:"):
                 indent = line[: len(line) - len(line.lstrip())]
                 output.append(f"{indent}- cron: '{DEFAULT_GITHUB_BUILD_CRON}'")
                 continue
-            if stripped.startswith("paths-ignore:") and not state_ignore_present and not paths_ignore_inserted:
-                extended = extend_flow_sequence_line(line, f"'{STATE_FILE}'")
-                if extended is not None:
-                    output.append(extended)
-                    paths_ignore_inserted = True
-                    continue
-                output.append(line)
-                output.append(f"{block_sequence_entry_indent(lines, index)}- '{STATE_FILE}'")
-                paths_ignore_inserted = True
-                continue
-            if stripped in {"- '**/README.md'", '- "**/README.md"'} and not state_ignore_present and not paths_ignore_inserted:
-                output.append(line)
-                output.append(f"{line[: len(line) - len(line.lstrip())]}- '{STATE_FILE}'")
-                paths_ignore_inserted = True
-                continue
-            if stripped.startswith("IMAGE_DESC:"):
-                output.append(f"  IMAGE_DESC: {yaml_scalar(self.config.image_desc)}")
+            if stripped.startswith("IMAGE_DESC:") and index not in scalar_body:
+                # Rewritten where it stands. A top-level, job or step env
+                # entry is equally the key, and writing it at two spaces
+                # moved a nested one out of its mapping (#524). A value
+                # continued over deeper lines -- `>-` and a folded
+                # description -- goes with the line it belonged to, or
+                # its remains would be orphaned under the new one.
+                indent = line[: len(line) - len(line.lstrip())]
+                output.append(f"{indent}IMAGE_DESC: {yaml_scalar(self.config.image_desc)}")
+                resume_at = index + 1
+                for later in range(index + 1, len(lines)):
+                    if not lines[later].strip():
+                        continue
+                    if len(lines[later]) - len(lines[later].lstrip()) <= len(indent):
+                        break
+                    resume_at = later + 1
                 continue
             output.append(line)
         text = patch_workflow_signing_steps("\n".join(output), branch_if=branch_if, sign_if=sign_if)
@@ -6953,15 +7118,14 @@ class App:
                 return []
             if not any(re.search(r"uses:\s+blue-build/github-action@", line) for line in step_lines):
                 return step_lines
-            with_index: int | None = None
-            entry_prefix = ""
-            for idx, step_line in enumerate(step_lines):
-                if step_line.strip() == "with:":
-                    with_index = idx
-                    entry_prefix = step_line[: len(step_line) - len(step_line.lstrip())] + "  "
-                    break
+            with_index = next((idx for idx, step_line in enumerate(step_lines) if step_line.strip() == "with:"), None)
             if with_index is None:
                 return step_lines
+            # The inputs go at the indent the owner's own inputs use. Written
+            # at `with:` plus two beside inputs at plus four, they close the
+            # mapping early and the next old input is a parse error (#524).
+            # The same indent is what the drops below match keys at.
+            entry_prefix = block_mapping_entry_indent(step_lines, with_index)
             entry_indent = len(entry_prefix)
 
             def drop_entries(source: list[str], prefixes: tuple[str, ...]) -> list[str]:
@@ -7027,30 +7191,15 @@ class App:
         # monolithic action handles the build. We pin the action, update the
         # schedule, add state-file ignore, and fix branch filters.
         lines = existing_text.splitlines()
+        if STATE_FILE not in existing_text:
+            lines = add_paths_ignore_entry(lines, f"'{STATE_FILE}'", ('- "**.md"', "- '**.md'"))
         output: list[str] = []
-        state_ignore_present = any(STATE_FILE in line for line in lines)
-        paths_ignore_inserted = False
-        for index, line in enumerate(lines):
+        for line in lines:
             line = pin_action_uses_line(line)
             stripped = line.strip()
             if stripped.startswith("- cron:"):
                 indent = line[: len(line) - len(line.lstrip())]
                 output.append(f"{indent}- cron: '{DEFAULT_GITHUB_BUILD_CRON}'")
-                continue
-            if stripped.startswith("paths-ignore:") and not state_ignore_present and not paths_ignore_inserted:
-                extended = extend_flow_sequence_line(line, f"'{STATE_FILE}'")
-                if extended is not None:
-                    output.append(extended)
-                    paths_ignore_inserted = True
-                    continue
-                output.append(line)
-                output.append(f"{block_sequence_entry_indent(lines, index)}- '{STATE_FILE}'")
-                paths_ignore_inserted = True
-                continue
-            if stripped in {'- "**.md"', "- '**.md'"} and not state_ignore_present and not paths_ignore_inserted:
-                output.append(line)
-                output.append(f"{line[: len(line) - len(line.lstrip())]}- '{STATE_FILE}'")
-                paths_ignore_inserted = True
                 continue
             output.append(line)
         text = "\n".join(output)
