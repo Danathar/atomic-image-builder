@@ -177,8 +177,10 @@ release](#cutting-a-release).
 | `ai-fix.yml`                  | `ai-fix-requested` label, dispatch | Posts the current gate result on the issue as context. Read-only: no code writes, no pull request, no model                                                                   |
 
 Only a build of `main` tags the image `latest` — a release published from an
-older commit must not drag `latest` backwards. All events that write image
-tags share one concurrency group so they cannot race.
+older commit must not drag `latest` backwards. Each ref has a concurrency
+group of its own, so a release build waiting behind a merge cannot be
+cancelled by the next merge; merges to `main` share one group and settle on
+the newest commit.
 
 Expect a release to produce **two** image publishes: one from the release, one
 from merging the formula pull request into `main`. Same content, harmless.
