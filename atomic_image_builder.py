@@ -1229,15 +1229,39 @@ LEGACY_SIGN_CONDITION = " && env.COSIGN_PRIVATE_KEY != ''"
 def strip_job_env_entries(workflow_text: str, names: Sequence[str]) -> str:
     """Drop job-level env entries by name, leaving step-level ones alone.
 
-    Six spaces is the job-level indent (four for the job, two for the key).
-    Matching on it is what keeps the signing step's own `COSIGN_PRIVATE_KEY:`,
-    at eight, from being removed with it.
+    Only the entries directly under a job's own `env:` count, at whatever
+    indent that block's first entry uses, which is the same block
+    ensure_workflow_job_env_entries() reads and extends. Matching six spaces
+    anywhere kept the signing step's own `COSIGN_PRIVATE_KEY:`, at eight,
+    from being removed with it, but it also missed a job env an editor had
+    put at eight. That update then succeeded and left the signing key
+    exposed to every step in the job (#524). A value continued on deeper
+    lines goes with its key.
     """
-    kept = [
-        line
-        for line in workflow_text.splitlines()
-        if not any(line.startswith(f"      {name}: ") for name in names)
-    ]
+    lines = workflow_text.splitlines()
+    drop: set[int] = set()
+    for _, start, end in workflow_job_ranges(lines):
+        job = lines[start:end]
+        env_at = workflow_job_level_key_index(job, "env")
+        if env_at is None:
+            continue
+        entry_indent = len(block_mapping_entry_indent(job, env_at))
+        dropping = False
+        for offset in range(env_at + 1, len(job)):
+            stripped = job[offset].strip()
+            if not stripped:
+                continue
+            indent = len(job[offset]) - len(job[offset].lstrip())
+            if indent <= 4 and not stripped.startswith("#"):
+                break
+            if indent > entry_indent:
+                if dropping:
+                    drop.add(start + offset)
+                continue
+            dropping = indent == entry_indent and workflow_key(stripped) in names
+            if dropping:
+                drop.add(start + offset)
+    kept = [line for index, line in enumerate(lines) if index not in drop]
     return ensure_trailing_newline("\n".join(kept))
 
 

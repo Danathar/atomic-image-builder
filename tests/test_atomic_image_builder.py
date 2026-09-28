@@ -1613,6 +1613,33 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", lines)
         self.assertIn("      KEEP: yes", lines)
 
+    def test_patch_container_workflow_strips_legacy_signing_keys_from_a_job_env_at_eight(self) -> None:
+        # The job env ensure_workflow_job_env_entries() now reads at eight
+        # is the one the legacy keys have to leave too (#524). Matched only
+        # at six, the update succeeded and left the signing key handed to
+        # every step in the job, which is what #255 removed it to end.
+        app = self.make_app()
+        migrated = app.patch_container_workflow((CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text())
+        old_env = "    env:\n      SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}\n"
+        self.assertIn(old_env, migrated)
+        legacy = migrated.replace(
+            old_env,
+            "    env:\n"
+            "        COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}\n"
+            "        COSIGN_PASSWORD: >-\n"
+            "          ${{ secrets.COSIGN_PASSWORD }}\n"
+            "        KEEP: yes\n",
+        )
+        result = app.patch_container_workflow(legacy)
+        env_at = result.index("    env:\n")
+        self.assertEqual(
+            result[env_at : result.index("    steps:", env_at)].splitlines(),
+            ["    env:", "        SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}", "        KEEP: yes"],
+        )
+        # The signing step's own entries, deeper still, are the ones that stay.
+        self.assertIn("          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", result.splitlines())
+        self.assertEqual(app.patch_container_workflow(result), result)
+
     def test_both_workflow_paths_agree_on_the_signing_guard(self) -> None:
         """The patched and from-scratch workflows must protect the key alike.
 

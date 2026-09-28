@@ -46,7 +46,10 @@ the env:/steps: anchors tolerate an inline comment.  The alternative was a
 duplicate mapping key, which GitHub refuses to parse (#345).  An env: that
 already carries an inline value (env: { FOO: bar }) cannot take nested
 entries; that shape raises CommandError rather than writing a second env: key
-into the same job.
+into the same job.  strip_job_env_entries, which removes the legacy
+COSIGN_PRIVATE_KEY/COSIGN_PASSWORD, reads the same block at the same indent.
+Matched only at six, an update of a job env at eight would succeed and leave
+the signing key exposed to every step in the job.
 
 Any patcher that writes a new or rewritten line, rather than editing one in
 place, can corrupt the file instead of no-op'ing: a line at the wrong indent
