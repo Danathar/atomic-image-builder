@@ -1351,6 +1351,15 @@ def patch_signing_step_block(step_lines: Sequence[str], *, branch_if: str, sign_
     if is_cosign_sign:
         step_lines = add_signing_step_password(step_lines)
 
+    # The step's own keys sit at one column: just past the `- ` of its first
+    # line. Anything deeper is a value -- above all a `run: |` body, where a
+    # shell line such as `if : ; then` parses as an `if` key when read on its
+    # own. Counting that as the step's condition meant no guard was inserted,
+    # and the step signed on pull requests or with no key configured.
+    first_stripped = step_lines[0].lstrip()
+    dash = re.match(r"-\s+", first_stripped)
+    first_key_text = first_stripped[dash.end() :] if dash else first_stripped
+    key_column = len(step_lines[0]) - len(first_key_text)
     patched: list[str] = []
     has_if = False
     for index, line in enumerate(step_lines):
@@ -1359,8 +1368,13 @@ def patch_signing_step_block(step_lines: Sequence[str], *, branch_if: str, sign_
         # the first key of the step's own `- ` item: key-sorted YAML writes
         # `- if: ...` first, and missing it meant a second `if:` was inserted
         # into the same mapping, which Actions rejects (#525).
-        key_text = re.sub(r"^-\s+", "", stripped) if index == 0 else stripped
-        if workflow_key(key_text) == "if":
+        if index == 0:
+            key_text = first_key_text
+        elif len(line) - len(stripped) == key_column:
+            key_text = stripped
+        else:
+            key_text = ""
+        if key_text and workflow_key(key_text) == "if":
             has_if = True
             # Drop the legacy clause first. Rewriting around it would leave
             # "... && env.SIGNING_ENABLED == 'true' && env.COSIGN_PRIVATE_KEY != ''",

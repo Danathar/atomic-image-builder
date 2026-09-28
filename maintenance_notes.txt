@@ -50,7 +50,10 @@ and workflow_block_key read a key bare, single- or double-quoted, and with
 whitespace before the colon, so "SIGNING_ENABLED":, 'env': and env : are the
 keys they name; patch_signing_step_block also reads the first key of a step's
 own "- " item, so a key-sorted "- if: ..." step is rewritten rather than given
-a second if:.  Action pinning and the Cosign floor go through
+a second if:.  It reads only the step's own keys -- that first key and lines
+at its column -- so a run: | line such as "if : ; then", which parses as an if
+key on its own, is not taken for the step's condition and the guard still goes
+in.  Action pinning and the Cosign floor go through
 yaml_key_pattern and accept a quoted uses: value and a plain (unquoted)
 cosign-release: value, and write the owner's quoting back.  Each missed
 spelling was a duplicate key GitHub rejects, a floating tag with nothing
