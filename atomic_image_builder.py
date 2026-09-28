@@ -272,6 +272,23 @@ DNF5_MISSING_MARKERS = (
     "matched no packages",
     "no matching packages",
 )
+# Every spelling of a package that `dnf5 install` and `rpm -q` accept as a
+# NEVRA spec: libdnf5's NAME, NA, NEV, NEVR and NEVRA forms, each with and
+# without the epoch (dnf5 prints %{epoch} as 0 when the package has none,
+# and an explicit 0: still matches it). A positional repoquery matches a spec
+# ignoring case where install and rpm -q do not, so the exact-name check asks
+# dnf5 to print these for whatever it matched and requires the spec to be one
+# of them verbatim -- see _resolve_package_spec.
+DNF5_SPEC_SPELLINGS = (
+    "%{name}",
+    "%{name}.%{arch}",
+    "%{name}-%{version}",
+    "%{name}-%{version}-%{release}",
+    "%{name}-%{version}-%{release}.%{arch}",
+    "%{name}-%{epoch}:%{version}",
+    "%{name}-%{epoch}:%{version}-%{release}",
+    "%{name}-%{epoch}:%{version}-%{release}.%{arch}",
+)
 # What `rpm -q` prints, on stdout, for each spec it was asked about that is
 # not installed. The spec comes back verbatim, so it is the key the removal
 # lookup matches against -- see lookup_installed_host_packages for why the
@@ -4580,7 +4597,9 @@ class App:
             results[package] = outcome
         return results
 
-    def _dnf5_repoquery_names(self, title: str, state_dir: Path, args: Sequence[str]) -> tuple[set[str], bool, bool]:
+    def _dnf5_repoquery_names(
+        self, title: str, state_dir: Path, args: Sequence[str], *, query_format: str = "%{name}\n"
+    ) -> tuple[set[str], bool, bool]:
         # One `dnf5 repoquery` run, reduced to the package names it printed,
         # whether that answer can be trusted, and whether the reason it
         # cannot is dnf5 having no metadata cache to answer from. A nonzero
@@ -4590,6 +4609,8 @@ class App:
         # a typo. The no-cache case is singled out because the batch caller
         # can offer to fix it (#369); the per-spec follow-ups run on the cache
         # the batch just used, so for them it is just another failed query.
+        # query_format defaults to the bare name; the NEVRA follow-up swaps
+        # in every spelling of the matched package, one per line.
         proc = self.gum.spinner_result(
             title,
             [
@@ -4600,7 +4621,7 @@ class App:
                 "repoquery",
                 "--available",
                 "--qf",
-                "%{name}\n",
+                query_format,
                 "--latest-limit",
                 "1",
                 *args,
@@ -4646,13 +4667,19 @@ class App:
         # a name the user never typed.
         if not any(separator in spec for separator in ".-:"):
             return False
-        # NEVRA forms. dnf5 prints the bare %{name} for vim-enhanced.x86_64,
-        # and matches positional specs ignoring case where install does not
-        # (5.4.2.1: Vim-Enhanced prints vim-enhanced here but is "No match
-        # for argument" to install). So the printed name must open the spec
-        # verbatim; the rest is the arch or version dnf5 matched it against.
-        names, uncheckable, _no_cache = self._dnf5_repoquery_names(title, state_dir, [spec])
-        if any(spec.startswith(name) for name in names):
+        # NEVRA forms. dnf5 matches positional specs ignoring case where
+        # install and rpm -q do not: on 5.4.2.1 repoquery matches
+        # Vim-Enhanced and htop.X86_64, and install says "No match for
+        # argument" to both; `rpm -q bash.X86_64` is "not installed".
+        # Comparing only the printed %{name} against the start of the spec
+        # let a wrong-case arch or version through (#505), so dnf5 prints
+        # every spelling of what it matched and the spec must be one of them
+        # verbatim.
+        query_format = "".join(f"{spelling}\n" for spelling in DNF5_SPEC_SPELLINGS)
+        spellings, uncheckable, _no_cache = self._dnf5_repoquery_names(
+            title, state_dir, [spec], query_format=query_format
+        )
+        if spec in spellings:
             return True
         return None if uncheckable else False
 

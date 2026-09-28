@@ -4343,21 +4343,39 @@ class BuilderTests(unittest.TestCase):
             results = app.lookup_host_packages(["tmux"])
         self.assertEqual(results, {"tmux": None})
 
+    # Stand-ins for what dnf5 matched, rendered through whatever --qf the
+    # lookup passed. Epoch 0 is what dnf5 prints for a package without one.
+    HTOP_X86_64 = {"name": "htop", "epoch": "0", "version": "3.4.1", "release": "1.fc44", "arch": "x86_64"}
+    VIM_ENHANCED_X86_64 = {
+        "name": "vim-enhanced",
+        "epoch": "2",
+        "version": "9.1.1000",
+        "release": "1.fc44",
+        "arch": "x86_64",
+    }
+
     def _lookup_with_dnf5_stub(
-        self, app, packages: list[str], answers: dict[str, str], *, resolve_provides: bool = True
+        self, app, packages: list[str], answers: dict[str, str | dict[str, str]], *, resolve_provides: bool = True
     ) -> tuple[dict, list[list[str]]]:
         # `answers` maps the tail of a repoquery command (what follows
-        # --latest-limit 1) to the stdout dnf5 would print for it. The batch
-        # is keyed by its joined names; a follow-up by "--whatprovides <spec>"
-        # or "<spec>". Anything unlisted prints nothing with exit 0, which is
-        # what dnf5 5.4.2.1 does for a spec that matches no package.
+        # --latest-limit 1) to what dnf5 would print for it. The batch is
+        # keyed by its joined names; a follow-up by "--whatprovides <spec>"
+        # or "<spec>". A string is printed as is; a package dict is rendered
+        # through the command's --qf, the way dnf5 expands %{tag}. Anything
+        # unlisted prints nothing with exit 0, which is what dnf5 5.4.2.1
+        # does for a spec that matches no package.
         stub = GumStub()
         calls: list[list[str]] = []
 
         def fake_spinner_result(_title, command, *, cwd=None):
             calls.append(list(command))
             tail = " ".join(command[command.index("1") + 1 :])
-            return subprocess.CompletedProcess(list(command), 0, answers.get(tail, ""), "")
+            answer = answers.get(tail, "")
+            if isinstance(answer, dict):
+                package = answer
+                query_format = command[command.index("--qf") + 1]
+                answer = re.sub(r"%\{(\w+)\}", lambda match: package[match.group(1)], query_format)
+            return subprocess.CompletedProcess(list(command), 0, answer, "")
 
         stub.spinner_result = fake_spinner_result
         app.gum = stub
@@ -4381,14 +4399,15 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.package_lookup_cache["vim", True], True)
 
     def test_lookup_host_packages_accepts_a_name_dot_arch_spec(self) -> None:
-        # repoquery resolves vim-enhanced.x86_64 but prints the bare name,
-        # which is not string-equal to the spec. The printed name opening
-        # the spec is the accept condition.
+        # repoquery resolves vim-enhanced.x86_64, which is not string-equal
+        # to any printed name. The follow-up prints every spelling of the
+        # matched package, and the spec being one of them is the accept
+        # condition.
         app = self.make_app()
         results, calls = self._lookup_with_dnf5_stub(
             app,
             ["vim-enhanced.x86_64"],
-            {"vim-enhanced.x86_64": "vim-enhanced\n"},
+            {"vim-enhanced.x86_64": self.VIM_ENHANCED_X86_64},
         )
         self.assertEqual(results, {"vim-enhanced.x86_64": True})
         # Batch, then --whatprovides (a name.arch is not a Provides), then
@@ -4398,18 +4417,54 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(calls[2][-1], "vim-enhanced.x86_64")
         self.assertNotIn("--whatprovides", calls[2])
 
+    def test_lookup_host_packages_accepts_every_nevra_spelling_install_takes(self) -> None:
+        # libdnf5's NA, NEV, NEVR and NEVRA forms, with and without the
+        # epoch -- including an explicit 0: for a package that has none.
+        specs = [
+            "htop-3.4.1",
+            "htop-3.4.1-1.fc44",
+            "htop-3.4.1-1.fc44.x86_64",
+            "htop-0:3.4.1",
+            "htop-0:3.4.1-1.fc44",
+            "htop-0:3.4.1-1.fc44.x86_64",
+            "vim-enhanced-2:9.1.1000-1.fc44.x86_64",
+        ]
+        app = self.make_app()
+        answers: dict[str, str | dict[str, str]] = dict.fromkeys(specs, self.HTOP_X86_64)
+        answers["vim-enhanced-2:9.1.1000-1.fc44.x86_64"] = self.VIM_ENHANCED_X86_64
+        results, _calls = self._lookup_with_dnf5_stub(app, specs, answers)
+        self.assertEqual(results, dict.fromkeys(specs, True))
+
     def test_lookup_host_packages_still_rejects_a_wrong_case_name(self) -> None:
         # repoquery matches positional specs ignoring case, install does not:
-        # `dnf5 install Vim-Enhanced` is "No match for argument". Printed
-        # name vim-enhanced does not open the spec Vim-Enhanced, so the
-        # lookup must keep saying no, exactly as the issue expects.
+        # `dnf5 install Vim-Enhanced` is "No match for argument". No
+        # spelling of vim-enhanced is Vim-Enhanced, so the lookup must keep
+        # saying no, exactly as the issue expects.
         app = self.make_app()
         results, _calls = self._lookup_with_dnf5_stub(
             app,
             ["Vim-Enhanced"],
-            {"Vim-Enhanced": "vim-enhanced\n"},
+            {"Vim-Enhanced": self.VIM_ENHANCED_X86_64},
         )
         self.assertEqual(results, {"Vim-Enhanced": False})
+
+    def test_lookup_host_packages_rejects_a_wrong_case_arch_or_release(self) -> None:
+        # #505: repoquery matches htop.X86_64 ignoring case and prints htop,
+        # which opens the spec, but `dnf5 install htop.X86_64` is "No match
+        # for argument". Only the name used to be compared, so a wrong-case
+        # suffix passed and the GitHub build failed on it.
+        specs = ["htop.X86_64", "htop-3.4.1-1.FC44", "htop-3.4.1-1.fc44.X86_64", "htop.x86_64"]
+        app = self.make_app()
+        results, _calls = self._lookup_with_dnf5_stub(app, specs, dict.fromkeys(specs, self.HTOP_X86_64))
+        self.assertEqual(
+            results,
+            {
+                "htop.X86_64": False,
+                "htop-3.4.1-1.FC44": False,
+                "htop-3.4.1-1.fc44.X86_64": False,
+                "htop.x86_64": True,
+            },
+        )
 
     def test_lookup_host_packages_typo_without_separator_skips_the_nevra_query(self) -> None:
         # "nethock" has no ".", "-" or ":" so it cannot be a name.arch or
@@ -4508,7 +4563,7 @@ class BuilderTests(unittest.TestCase):
         results, calls = self._lookup_with_dnf5_stub(
             app,
             ["vim-enhanced.x86_64", "htop-3.4.1"],
-            {"vim-enhanced.x86_64": "vim-enhanced\n", "htop-3.4.1": "htop\n"},
+            {"vim-enhanced.x86_64": self.VIM_ENHANCED_X86_64, "htop-3.4.1": self.HTOP_X86_64},
             resolve_provides=False,
         )
         self.assertEqual(results, {"vim-enhanced.x86_64": True, "htop-3.4.1": True})
@@ -4518,17 +4573,22 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(calls[2][-1], "htop-3.4.1")
 
     def test_removal_lookup_keeps_the_wrong_case_and_typo_answers(self) -> None:
+        # htop.X86_64 is #505 on this screen: `rpm -q bash.X86_64` is "not
+        # installed", so the build's rpm -q gate would skip the removal and
+        # leave the package in the image.
         app = self.make_app()
         results, calls = self._lookup_with_dnf5_stub(
             app,
-            ["Vim-Enhanced", "HTOP", "python3-foo-typo"],
-            {"Vim-Enhanced": "vim-enhanced\n"},
+            ["Vim-Enhanced", "HTOP", "python3-foo-typo", "htop.X86_64"],
+            {"Vim-Enhanced": self.VIM_ENHANCED_X86_64, "htop.X86_64": self.HTOP_X86_64},
             resolve_provides=False,
         )
-        self.assertEqual(results, {"Vim-Enhanced": False, "HTOP": False, "python3-foo-typo": False})
+        self.assertEqual(
+            results, {"Vim-Enhanced": False, "HTOP": False, "python3-foo-typo": False, "htop.X86_64": False}
+        )
         # Batch, then one positional query for each spec with a separator;
         # HTOP has none and needs no follow-up.
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 4)
 
     def test_removal_lookup_nevra_follow_up_failure_is_unchecked_not_missing(self) -> None:
         # For a single spec the batch and the positional follow-up are the
