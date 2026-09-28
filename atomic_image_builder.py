@@ -674,6 +674,28 @@ def string_list(value: object) -> list[str]:
     return [item for item in value if isinstance(item, str)]
 
 
+def next_boot_deployment(deployments: Sequence[dict[str, object]]) -> tuple[dict[str, object], bool]:
+    # The deployment a scan has to read, and whether it is pending rather than
+    # running. rpm-ostree lists deployments in boot order. A deployment of the
+    # booted OS listed ahead of the booted one is pending: an `rpm-ostree
+    # install`, `uninstall`, `rebase` or `rollback` since the last boot put it
+    # there, and it is what the next boot runs. It is also what `rpm-ostree
+    # reset` and `bootc switch` start from -- rpm-ostree takes the pending
+    # deployment's origin, not the booted one's, as the base of a new one
+    # (ostree_sysroot_query_deployments_for). Reading the booted deployment
+    # instead dropped every package layered since the last boot, and carried
+    # over one uninstalled since, right before the reset the generated README
+    # recommends made those changes permanent (#519).
+    booted = next((item for item in deployments if item.get("booted")), None)
+    if booted is None:
+        # No deployment claims to be booted: the first is the default boot.
+        return (deployments[0] if deployments else {}), False
+    osname = booted.get("osname")
+    # Always found: booted itself matches its own osname.
+    first = next(item for item in deployments if item.get("osname") == osname)
+    return first, first is not booted
+
+
 def remote_replacement_list(value: object) -> list[str]:
     # requested-base-remote-replacements is the one scan field that is not a
     # flat list of names. rpm-ostree records each `override replace --from
@@ -4212,9 +4234,10 @@ class App:
                 self.gum.error("rpm-ostree not found. OS scanning is unavailable.")
                 return SCAN_UNAVAILABLE
 
-            proc = run(["rpm-ostree", "status", "--json", "--booted"], check=False)
-            if proc.returncode != 0 or not proc.stdout.strip():
-                proc = run(["rpm-ostree", "status", "--json"], check=False)
+            # Not `--booted`: that leaves out a deployment waiting for a
+            # reboot, which is the one this scan has to read. See
+            # next_boot_deployment().
+            proc = run(["rpm-ostree", "status", "--json"], check=False)
             if proc.returncode != 0 or not proc.stdout.strip():
                 self.gum.error("Failed to read rpm-ostree status.")
                 return SCAN_UNAVAILABLE
@@ -4233,18 +4256,21 @@ class App:
             return SCAN_UNAVAILABLE
         raw_deployments = status.get("deployments")
         deployments = [item for item in raw_deployments if isinstance(item, dict)] if isinstance(raw_deployments, list) else []
-        booted = next((item for item in deployments if item.get("booted")), deployments[0] if deployments else {})
-        if not booted:
+        deployment, pending = next_boot_deployment(deployments)
+        if not deployment:
             self.gum.error("No deployment information found.")
             return SCAN_UNAVAILABLE
+        # Every message below that names what the host runs has to say which
+        # of the two it read, or a pending rebase reads as the running image.
+        host_state = "set to boot" if pending else "running"
 
         container_ref = (
-            booted.get("container-image-reference")
-            or booted.get("origin")
+            deployment.get("container-image-reference")
+            or deployment.get("origin")
             or ""
         )
         if not isinstance(container_ref, str) or not container_ref.strip():
-            # A booted deployment without a container-image-reference or origin
+            # A deployment without a container-image-reference or origin
             # (e.g. a legacy ostree-commit deployment) cannot be carried into an
             # image repo. Bail instead of proceeding with an empty base image.
             self.gum.error(
@@ -4290,14 +4316,14 @@ class App:
         # value(s)" refusal at the very end, with nothing pointing back here.
         # Split them off now and name them with everything else this image
         # cannot carry, where the user decides with them in view.
-        requested_packages = unique(string_list(booted.get("requested-packages")))
+        requested_packages = unique(string_list(deployment.get("requested-packages")))
         self.config.scanned_packages = [spec for spec in requested_packages if PACKAGE_TOKEN_RE.fullmatch(spec)]
         unwritable_packages = [spec for spec in requested_packages if not PACKAGE_TOKEN_RE.fullmatch(spec)]
-        self.config.scanned_removed = unique(string_list(booted.get("requested-base-removals")))
+        self.config.scanned_removed = unique(string_list(deployment.get("requested-base-removals")))
         self.config.removed_packages = list(self.config.scanned_removed)
         # Read alongside the two supported fields, not instead of them: a host
         # can have both, and the counts below have to be able to say so.
-        omitted = self.unsupported_scan_customizations(booted)
+        omitted = self.unsupported_scan_customizations(deployment)
         if unwritable_packages:
             omitted.insert(0, ("Packages layered by capability or file path, not by name", unwritable_packages))
 
@@ -4314,7 +4340,7 @@ class App:
             # image cannot leak into a later step through the config.
             self.config.base_image_uri = ""
             self.config.base_image_name = ""
-            self.gum.warn(f"This system is running {base}, which is not one of the images this tool supports.")
+            self.gum.warn(f"This system is {host_state} {base}, which is not one of the images this tool supports.")
             self.gum.hint(f"Supported: {supported_base_image_names()}")
             print()
             managed = self.scanned_image_is_managed(base)
@@ -4349,7 +4375,7 @@ class App:
         if curated_tag and scanned_tag != curated_tag and (scanned_tag or scanned_digest):
             if scanned_tag:
                 self.gum.warn(
-                    f"Your system is running :{scanned_tag}, but this tool recommends :{curated_tag} for {matched.name}."
+                    f"Your system is {host_state} :{scanned_tag}, but this tool recommends :{curated_tag} for {matched.name}."
                 )
             else:
                 self.gum.warn(
@@ -4372,6 +4398,15 @@ class App:
             rows.append(("Cannot Be Carried Over", str(sum(len(values) or 1 for _label, values in omitted))))
         self.gum.table(rows, columns="Setting,Value")
         print()
+        if pending:
+            # The table reads as a description of the running system. On a
+            # host with a pending deployment it is not one, so say which
+            # deployment it came from and why that is the right one to read.
+            self.gum.warn(
+                "This system has changes waiting for a reboot. The scan read those, not the deployment running now: "
+                "they are what your next boot, `rpm-ostree reset` and `bootc switch` all start from."
+            )
+            print()
         if omitted:
             if not self.confirm_omitted_scan_customizations(omitted):
                 return SCAN_CANCELLED
@@ -4385,7 +4420,7 @@ class App:
         # asked about again.
         self.menu_section(
             "What Happens Next",
-            f"Your image will be built on {self.config.base_image_name} - the base this system already runs.",
+            f"Your image will be built on {self.config.base_image_name} - the base this system {'boots next' if pending else 'already runs'}.",
             "Next you choose which of these packages to carry over, then name the repo and review.",
             "Nothing is created on GitHub until you confirm at the end.",
         )
@@ -4447,7 +4482,7 @@ class App:
         self.config.normalize()
         return SCAN_OK
 
-    def unsupported_scan_customizations(self, booted: dict[str, object]) -> list[tuple[str, list[str]]]:
+    def unsupported_scan_customizations(self, deployment: dict[str, object]) -> list[tuple[str, list[str]]]:
         # Every customization on this deployment that a generated image will
         # not reproduce, labelled for display. Values come back with it so the
         # user can see which packages are at stake rather than only a count --
@@ -4456,10 +4491,10 @@ class App:
         for status_key, label in UNSUPPORTED_SCAN_FIELDS + INITRAMFS_SCAN_FIELDS:
             # Every field but one is a list of names; see remote_replacement_list.
             reader = remote_replacement_list if status_key == "requested-base-remote-replacements" else string_list
-            values = unique(reader(booted.get(status_key)))
+            values = unique(reader(deployment.get(status_key)))
             if values:
                 found.append((label, values))
-        if booted.get("regenerate-initramfs"):
+        if deployment.get("regenerate-initramfs"):
             # A boolean rather than a list, and still something reset undoes.
             found.append(("A locally regenerated initramfs", []))
         return found
