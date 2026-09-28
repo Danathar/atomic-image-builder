@@ -6610,7 +6610,11 @@ class App:
         if self.config.copr_repos or self.config.packages or self.config.removed_packages:
             lines.extend(["", "  - type: dnf"])
             if self.config.copr_repos:
-                lines.extend(["    repos:", "      copr:"])
+                # BlueBuild's dnf module leaves the COPRs it enabled in place
+                # unless cleanup is set, and it defaults to false. Without it
+                # the image ships with every COPR still enabled, where the
+                # Containerfile method disables each one in build.sh.
+                lines.extend(["    repos:", "      cleanup: true", "      copr:"])
                 for repo in self.config.copr_repos:
                     lines.append(f"        - {yaml_scalar(repo)}")
             if self.config.packages:

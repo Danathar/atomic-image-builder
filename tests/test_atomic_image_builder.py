@@ -12902,6 +12902,22 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("copr:", recipe)
         self.assertIn('        - "kylegospo/bazzite"', recipe)
 
+    def test_generate_recipe_disables_its_coprs_after_the_install(self) -> None:
+        # BlueBuild's dnf module disables the COPRs it enabled only when
+        # repos.cleanup is true, and it defaults to false. build.sh disables
+        # each one, so both methods must leave none enabled in the image.
+        app = self.make_bluebuild_app()
+        app.config.copr_repos = ["@caddy/caddy", "owner/proj:custom:1"]
+        app.config.packages = ["caddy"]
+        dnf = self.recipe_module(self.recipe_document(app), "dnf")
+        self.assertEqual(dnf["repos"], {"cleanup": True, "copr": ["@caddy/caddy", "owner/proj:custom:1"]})
+
+    def test_generate_recipe_writes_no_repos_block_without_coprs(self) -> None:
+        app = self.make_bluebuild_app()
+        app.config.packages = ["htop"]
+        dnf = self.recipe_module(self.recipe_document(app), "dnf")
+        self.assertNotIn("repos", dnf)
+
     def test_generate_recipe_includes_removed_packages(self) -> None:
         app = self.make_bluebuild_app()
         app.config.removed_packages = ["firefox"]
@@ -13045,7 +13061,7 @@ class BuilderTests(unittest.TestCase):
         dnf = self.recipe_module(self.recipe_document(app), "dnf")
         self.assertEqual(dnf["install"], {"packages": ["htop", "tmux"]})
         self.assertEqual(dnf["remove"], {"packages": ["firefox"]})
-        self.assertEqual(dnf["repos"], {"copr": ["kylegospo/bazzite"]})
+        self.assertEqual(dnf["repos"], {"cleanup": True, "copr": ["kylegospo/bazzite"]})
 
     def test_generate_recipe_enables_services_rather_than_masking_them(self) -> None:
         # "- type: systemd" plus the quoted unit name matches whichever key
