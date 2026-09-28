@@ -277,9 +277,6 @@ DNF5_MISSING_MARKERS = (
 # lookup matches against -- see lookup_installed_host_packages for why the
 # printed %{name} cannot be.
 RPM_NOT_INSTALLED_RE = re.compile(r"^package (.+) is not installed$")
-# rpm exits with the number of specs it failed to find, clamped by rpm itself
-# at 254 so a large batch never wraps to 0 (RETVAL in rpm's tools/cliutils.hh).
-RPM_MAX_EXIT_STATUS = 254
 # GitHub Actions should be pinned to immutable SHAs instead of floating tags.
 # The human-readable tag is kept as a comment so maintainers can still tell what
 # upstream version the pin came from.
@@ -4721,8 +4718,8 @@ class App:
             return results
         # Both the "not installed" line and the "error:" prefix are
         # translated strings, so a host locale other than English would hide
-        # every miss and every failure from the checks below, and the lookup
-        # would answer nothing for a batch it could have answered. Pin the
+        # every miss and every failure from the checks below, and the batch
+        # would read as "everything is installed". Pin the
         # locale so rpm speaks the English the parser expects.
         env = os.environ.copy()
         env["LC_ALL"] = "C"
@@ -4732,16 +4729,14 @@ class App:
             match = RPM_NOT_INSTALLED_RE.match(line.strip())
             if match:
                 not_installed.add(match.group(1))
-        # rpm exits with the number of specs it did not find (capped at
-        # RPM_MAX_EXIT_STATUS), not 1: three misses exit 3. So the status is
-        # believed only when it matches the misses rpm named. On a database
-        # it cannot open, rpm reports every spec as not installed with a
-        # status that matches too; only the "error:" line on stderr tells
-        # that apart, so it is checked as well. Anything else -- a signal, a
-        # status no miss accounts for -- is a failure this parser does not
-        # understand, and every name is left unchecked rather than guessed.
-        expected_status = min(len(not_installed), RPM_MAX_EXIT_STATUS)
-        uncheckable = proc.returncode != expected_status or "error:" in (proc.stderr or "").lower()
+        # rpm exits with the number of specs it did not find, not 1: three
+        # misses exit 3. Any exit status is therefore an ordinary answer,
+        # and the misses are the "not installed" lines above. On a database
+        # it cannot open, rpm also reports every spec as not installed; only
+        # the "error:" line on stderr tells that apart, so it is checked
+        # before the stdout is believed. A negative status is a signal, not
+        # an exit, and rpm's output is incomplete.
+        uncheckable = proc.returncode < 0 or "error:" in (proc.stderr or "").lower()
         for package in to_check:
             if uncheckable:
                 outcome: bool | None = None

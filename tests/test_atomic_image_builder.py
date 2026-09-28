@@ -4878,7 +4878,7 @@ class BuilderTests(unittest.TestCase):
         # rpm translates both "package <spec> is not installed" and the
         # "error:" prefix, so on a German or Japanese desktop the misses and
         # failures would slip past the English-only parser and a batch with
-        # a miss would go unanswered. The call has to pin the locale
+        # misses would read as "everything is installed". The call has to pin the locale
         # while keeping the rest of the environment (PATH, RPM_CONFIGDIR).
         app = self.make_app()
         completed = subprocess.CompletedProcess(["rpm"], 1, "package nethock is not installed\n", "")
@@ -4913,29 +4913,6 @@ class BuilderTests(unittest.TestCase):
                 results = app.lookup_installed_host_packages(["bash", "nosuch1", "nosuch2", "nosuch3"])
         self.assertEqual(results, {"bash": True, "nosuch1": False, "nosuch2": False, "nosuch3": False})
 
-    def test_lookup_installed_host_packages_accepts_rpms_capped_exit_status(self) -> None:
-        # rpm clamps the count at 254 so it cannot wrap to 0 past 255.
-        app = self.make_app()
-        misses = [f"nosuch{index}" for index in range(300)]
-        completed = subprocess.CompletedProcess(
-            ["rpm"], 254, "bash\n" + "".join(f"package {name} is not installed\n" for name in misses), ""
-        )
-        with patch("atomic_image_builder.command_exists", return_value=True):
-            with patch("atomic_image_builder.run", return_value=completed):
-                results = app.lookup_installed_host_packages(["bash", *misses])
-        self.assertIs(results["bash"], True)
-        self.assertTrue(all(results[name] is False for name in misses))
-
-    def test_lookup_installed_host_packages_returns_none_when_status_disagrees_with_misses(self) -> None:
-        # One miss named but exit 2: something besides "not installed" failed,
-        # and the parser cannot tell which name it was.
-        app = self.make_app()
-        completed = subprocess.CompletedProcess(["rpm"], 2, "bash\npackage nethock is not installed\n", "")
-        with patch("atomic_image_builder.command_exists", return_value=True):
-            with patch("atomic_image_builder.run", return_value=completed):
-                results = app.lookup_installed_host_packages(["bash", "nethock"])
-        self.assertEqual(results, {"bash": None, "nethock": None})
-
     def test_lookup_installed_host_packages_returns_none_when_rpmdb_is_unreadable(self) -> None:
         # Same exit status as an honest miss, and rpm still reports the spec
         # as not installed; only the stderr line says the database never
@@ -4950,9 +4927,11 @@ class BuilderTests(unittest.TestCase):
                 results = app.lookup_installed_host_packages(["bash"])
         self.assertEqual(results, {"bash": None})
 
-    def test_lookup_installed_host_packages_returns_none_on_unexpected_exit_status(self) -> None:
+    def test_lookup_installed_host_packages_returns_none_when_rpm_is_killed(self) -> None:
+        # A negative status is a signal, not rpm's miss count: the output
+        # stopped partway, so a name with no miss line was never answered.
         app = self.make_app()
-        completed = subprocess.CompletedProcess(["rpm"], 2, "", "")
+        completed = subprocess.CompletedProcess(["rpm"], -9, "bash\n", "")
         with patch("atomic_image_builder.command_exists", return_value=True):
             with patch("atomic_image_builder.run", return_value=completed):
                 results = app.lookup_installed_host_packages(["bash"])
