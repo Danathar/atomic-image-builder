@@ -4657,6 +4657,27 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(app.last_manual_removed_package_check_had_missing)
         self.assertTrue(any(level == "error" and "not found: vim" in message for level, message in stub.messages))
 
+    def test_manual_removal_entry_keeps_an_installed_name_beside_two_typos(self) -> None:
+        # #503: rpm exits with the number of misses, so two typos exit 2.
+        # Read as an unreadable rpmdb, that sent uupd -- installed here, in
+        # no enabled repo -- to the repo query, which called it a typo too.
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.CompletedProcess(list(command), 0, "", "")
+        app.gum = stub
+        rpm = subprocess.CompletedProcess(
+            ["rpm"], 2, "uupd\npackage typoone is not installed\npackage typotwo is not installed\n", ""
+        )
+        with (
+            patch("atomic_image_builder.command_exists", return_value=True),
+            patch("atomic_image_builder.run", return_value=rpm),
+        ):
+            kept = app.filter_available_manual_removed_packages(["uupd", "typoone", "typotwo"])
+        self.assertEqual(kept, ["uupd"])
+        errors = [message for level, message in stub.messages if level == "error"]
+        self.assertTrue(any("not found: typoone, typotwo" in message for message in errors), errors)
+        self.assertFalse(any("uupd" in message for message in errors), errors)
+
     def test_filter_modes_ask_the_lookup_for_their_own_build_step(self) -> None:
         app = self.make_app()
         app.gum = GumStub()
@@ -4916,8 +4937,8 @@ class BuilderTests(unittest.TestCase):
     def test_lookup_installed_host_packages_pins_rpm_to_the_c_locale(self) -> None:
         # rpm translates both "package <spec> is not installed" and the
         # "error:" prefix, so on a German or Japanese desktop the misses and
-        # failures would slip past the English-only parser and exit 1 would
-        # read as "everything is installed". The call has to pin the locale
+        # failures would slip past the English-only parser and a batch with
+        # misses would read as "everything is installed". The call has to pin the locale
         # while keeping the rest of the environment (PATH, RPM_CONFIGDIR).
         app = self.make_app()
         completed = subprocess.CompletedProcess(["rpm"], 1, "package nethock is not installed\n", "")
@@ -4937,6 +4958,21 @@ class BuilderTests(unittest.TestCase):
                 results = app.lookup_installed_host_packages(["bash", "coreutils"])
         self.assertEqual(results, {"bash": True, "coreutils": True})
 
+    def test_lookup_installed_host_packages_reads_an_exit_status_counting_several_misses(self) -> None:
+        # rpm 6.0.2 exits with the number of specs it did not find, so three
+        # misses exit 3. That is an ordinary answer, not a broken rpmdb.
+        app = self.make_app()
+        completed = subprocess.CompletedProcess(
+            ["rpm"],
+            3,
+            "bash\npackage nosuch1 is not installed\npackage nosuch2 is not installed\npackage nosuch3 is not installed\n",
+            "",
+        )
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", return_value=completed):
+                results = app.lookup_installed_host_packages(["bash", "nosuch1", "nosuch2", "nosuch3"])
+        self.assertEqual(results, {"bash": True, "nosuch1": False, "nosuch2": False, "nosuch3": False})
+
     def test_lookup_installed_host_packages_returns_none_when_rpmdb_is_unreadable(self) -> None:
         # Same exit status as an honest miss, and rpm still reports the spec
         # as not installed; only the stderr line says the database never
@@ -4951,9 +4987,11 @@ class BuilderTests(unittest.TestCase):
                 results = app.lookup_installed_host_packages(["bash"])
         self.assertEqual(results, {"bash": None})
 
-    def test_lookup_installed_host_packages_returns_none_on_unexpected_exit_status(self) -> None:
+    def test_lookup_installed_host_packages_returns_none_when_rpm_is_killed(self) -> None:
+        # A negative status is a signal, not rpm's miss count: the output
+        # stopped partway, so a name with no miss line was never answered.
         app = self.make_app()
-        completed = subprocess.CompletedProcess(["rpm"], 2, "", "")
+        completed = subprocess.CompletedProcess(["rpm"], -9, "bash\n", "")
         with patch("atomic_image_builder.command_exists", return_value=True):
             with patch("atomic_image_builder.run", return_value=completed):
                 results = app.lookup_installed_host_packages(["bash"])
