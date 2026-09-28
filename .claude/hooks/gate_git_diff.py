@@ -202,10 +202,14 @@ from __future__ import annotations
 
 import fnmatch
 import glob
+import importlib.machinery
 import json
+import os
 import re
 import shlex
+import subprocess
 import sys
+from pathlib import Path
 from typing import NamedTuple
 
 # Long options that reach outside the index, by the name git knows them by.
@@ -2830,6 +2834,178 @@ def refusal(command: str) -> str | None:
     return None
 
 
+# The allow rows that start the interpreter, by the words each one opens
+# with. Python puts a directory ahead of the standard library on sys.path
+# before the first line of any of them runs: the working directory for `-m`,
+# the script's own directory for `maintenance_audit.py` and
+# `format_markdown_tables.py`, and `tests/` too once `unittest discover -s
+# tests` starts importing. A module file there named after one the command
+# imports -- `unittest.py`, `json.py`, `__future__.py` -- is imported in its
+# place, and discover imports every `test*.py` in `tests/` whatever git
+# thinks of it. So a file the session wrote itself runs as Python under a
+# command the settings file allows unprompted, where no `deny` row is ever
+# consulted: `Read(./cosign.key)` binds the Read tool, not an `open()`.
+# PYTHONPATH is refused in REFUSED_ENVIRONMENT for the same reach; this is
+# that reach with no variable at all. untracked_import_refusal() holds these
+# rows to modules the index holds, which is what a reviewer can see in the
+# diff. tests/test_git_diff_gate.py checks that every allow row starting
+# `python3` begins with one of these.
+PYTHON_ROWS = (
+    ("python3", "-m", "unittest"),
+    ("python3", "-m", "coverage"),
+    ("python3", "maintenance_audit.py"),
+    ("python3", "format_markdown_tables.py"),
+)
+
+# The directories, relative to where the command runs, that those rows put
+# on sys.path.
+IMPORT_DIRECTORIES = (".", "tests")
+
+# Commands that move the shell before a later command of the same string
+# runs, so the directory untracked_import_refusal() reads would not be the
+# one the interpreter starts in.
+DIRECTORY_CHANGERS = frozenset({"cd", "pushd", "popd"})
+
+
+def python_row(invocation: Invocation) -> tuple[int, tuple[str, ...]] | None:
+    """Where in `words` a PYTHON_ROWS entry starts and the entry, or None."""
+    for start in name_positions(invocation):
+        candidates = [
+            bare(invocation.words[start]).rsplit("/", 1)[-1],
+            *invocation.words[start + 1 :],
+        ]
+        for row in PYTHON_ROWS:
+            if tuple(candidates[: len(row)]) == row:
+                return start, row
+    return None
+
+
+def relocated_before(invocation: Invocation, start: int) -> str | None:
+    """The wrapper option ahead of position `start` that moves the command
+    to another directory (`env -C tests`, `env --chdir=tests`), or None.
+    Read from `invocation.name` at position 0 for the reason
+    wrapper_chdir() gives."""
+    for index in range(start):
+        token = invocation.name if index == 0 else invocation.words[index]
+        if wrapper_relocates(token):
+            return token
+    return None
+
+
+def importable_names(directory: Path) -> list[Path]:
+    """The entries of `directory` an `import` could load from it: a module
+    file whose name is an identifier followed by one of the interpreter's
+    import suffixes (`.py`, `.pyc`, an extension module), and a package's
+    `__init__` file under a subdirectory named as an identifier. A directory
+    with no `__init__` is only a namespace portion, which a module or package
+    of the same name anywhere later on sys.path outranks, so it is left
+    out."""
+    suffixes = importlib.machinery.all_suffixes()
+    found: list[Path] = []
+    try:
+        entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+    except OSError:
+        return found
+    for entry in entries:
+        if entry.is_dir():
+            if entry.name.isidentifier():
+                found.extend(
+                    Path(entry.path) / f"__init__{suffix}"
+                    for suffix in suffixes
+                    if (Path(entry.path) / f"__init__{suffix}").is_file()
+                )
+        elif any(
+            entry.name.endswith(suffix) and entry.name[: -len(suffix)].isidentifier()
+            for suffix in suffixes
+        ):
+            found.append(Path(entry.path))
+    return found
+
+
+def untracked_imports(cwd: Path) -> list[str] | None:
+    """The importable files in IMPORT_DIRECTORIES under `cwd` that the index
+    does not hold, as paths relative to `cwd`; None when git cannot list the
+    index there. A staged file is in the index, so `git add` -- which
+    prompts -- is how a new test module is shown to a person first."""
+    listed = subprocess.run(
+        ["git", "ls-files", "-z", "--", *IMPORT_DIRECTORIES],
+        cwd=cwd,
+        capture_output=True,
+        check=False,
+    )
+    if listed.returncode != 0:
+        return None
+    tracked = {os.fsdecode(path) for path in listed.stdout.split(b"\0") if path}
+    untracked: list[str] = []
+    for directory in IMPORT_DIRECTORIES:
+        for path in importable_names(cwd / directory):
+            relative = path.relative_to(cwd).as_posix()
+            if relative not in tracked:
+                untracked.append(relative)
+    return untracked
+
+
+def untracked_import_refusal(command: str, cwd: Path) -> str | None:
+    """Why a PYTHON_ROWS command is blocked by the files around it, or None.
+
+    refusal() reads the command as typed. What these rows run also depends on
+    the files in the directory they start in, so this reads that directory:
+    a row is refused while any file it could import from IMPORT_DIRECTORIES is
+    missing from the index, and wherever the string moves the shell first,
+    since the directory read here would not be the one Python starts in.
+    """
+    try:
+        command = strip_comments(join_continuations(drop_quoted_heredoc_bodies(command)))
+        tokens = tokenize(command)
+        masked = tokenize(mask_quotes_stripped(command))
+        raws = raw_words(command)
+    except ValueError:
+        return None  # refusal() has refused it already
+    if len(tokens) != len(masked) or len(tokens) != len(raws):
+        return None
+    invocations = [
+        command_words(
+            [tokens[index] for index in positions],
+            [masked[index] for index in positions],
+            [raws[index] for index in positions],
+        )
+        for positions in segment_positions(tokens, masked)
+    ]
+    rows = [(invocation, python_row(invocation)) for invocation in invocations]
+    started = [found[1] for _, found in rows if found is not None]
+    if not started:
+        return None
+    shown = " ".join(started[0])
+    for invocation, found in rows:
+        moved = bool(invocation.words) and invocation.words[0] in DIRECTORY_CHANGERS
+        if moved or (found is not None and relocated_before(invocation, found[0])):
+            return (
+                f"`{shown}` runs in a directory this string changes first, and what "
+                "that command imports depends on the files in the directory it starts "
+                "in, which this hook reads from the directory the session is in; run "
+                "it on its own, from the directory it is written for"
+            )
+    untracked = untracked_imports(cwd)
+    if untracked is None:
+        return (
+            f"`{shown}` imports from the directory it starts in, and git cannot list "
+            f"the index at {cwd}, so which of its modules the index holds cannot be "
+            "checked"
+        )
+    if untracked:
+        return (
+            f"`{shown}` would import from {', '.join(untracked)}, which the index does "
+            "not hold. Python puts the working directory, the script's directory and "
+            "`tests/` ahead of the standard library, so a module file there named "
+            "`unittest.py`, `json.py` or `__future__.py` runs in place of the real one, "
+            "and `unittest discover` imports every `test*.py` it finds -- a file the "
+            "session wrote runs under a command allowed with no prompt, where no deny "
+            "rule is consulted. Stage the file with `git add` (which asks first), or "
+            "remove it, and run the command again"
+        )
+    return None
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -2843,6 +3019,11 @@ def main() -> int:
         print("gate_git_diff: Bash command is not a string", file=sys.stderr)
         return 2
     reason = refusal(command)
+    if reason is None:
+        where = payload.get("cwd")
+        reason = untracked_import_refusal(
+            command, Path(where) if isinstance(where, str) and where else Path.cwd()
+        )
     if reason is None:
         return 0
     print(f"Refused: {reason}.", file=sys.stderr)

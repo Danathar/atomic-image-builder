@@ -269,6 +269,19 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   git globs itself) and a glob on another command of the same string are
   left alone. Same finding as
   [#479](https://github.com/Danathar/atomic-image-builder/issues/479).
+  The allow rows that start Python are held to the files beside them as well
+  as to their words. Python puts the working directory (under `-m`), the
+  script's own directory and, once `unittest discover -s tests` starts,
+  `tests/` ahead of the standard library, so a `json.py`, `unittest.py` or
+  `__future__.py` the session wrote there is imported in place of the real
+  module, and discover imports every `test*.py` in `tests/`. That is
+  `PYTHONPATH` with no variable, under a command allowed with no prompt. The
+  hook refuses those rows while any file Python could import from the
+  working directory or `tests/` is missing from the index, and wherever the
+  same string moves the shell first (`cd`, `pushd`, `env -C`). Staging the
+  file with `git add`, which asks, is how a new test module reaches a person
+  before it runs. Same finding as
+  [#580](https://github.com/Danathar/atomic-image-builder/issues/580).
 - `maintenance_audit.py` fails when a workflow action is not covered by the
   pin tables, or when a pinned SHA disagrees with them. That check is what
   stops an unpinned action reaching generated repositories.
