@@ -346,7 +346,7 @@ user's files and credentials in reach; a tag anyone with push access to
 ghcr.io/blue-build/cli can repoint is not something to execute on that basis.
 The tag kept beside the digest is the floating one the pinned
 blue-build/github-action installs by default (CLI_VERSION_TAG in its
-"Determine Vars" step, "v0.9" at v1.12). The cost of the pin is parity: CI
+"Determine Vars" step, "v0.9" at v1.13). The cost of the pin is parity: CI
 pulls the tag and moves with it, the local build stays until re-pinned, so a
 local build can render with a CLI a step behind CI's. maintenance_audit.py's
 weekly run (audit_bluebuild_cli_image_pin) advises when the tag no longer
