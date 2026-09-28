@@ -6191,6 +6191,38 @@ class BuilderTests(unittest.TestCase):
             ["Finished checking package names. Press Enter to return to the package menu..."],
         )
 
+    def test_manual_packages_counts_only_names_not_already_selected(self) -> None:
+        # A name already in the list is dropped before the dnf5 lookup, so
+        # the success line and the pause prompt agree on what was added.
+        app = self.make_app()
+        app.config.packages = ["tmux"]
+        stub = GumStub()
+        stub.write = lambda **_kwargs: "tmux htop"
+        app.gum = stub
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: True for p in pkgs}) as lookup:
+            app.manual_packages()
+        lookup.assert_called_once_with(["htop"], resolve_provides=True)
+        self.assertEqual(app.config.packages, ["tmux", "htop"])
+        self.assertIn(("success", "Added 1 package(s) from manual entry"), stub.messages)
+        self.assertEqual(stub.prompts, ["Added 1 package(s). Press Enter to return to the package menu..."])
+
+    def test_manual_packages_adds_nothing_when_every_name_is_already_selected(self) -> None:
+        app = self.make_app()
+        app.config.packages = ["tmux"]
+        stub = GumStub()
+        stub.write = lambda **_kwargs: "tmux"
+        app.gum = stub
+        with (
+            patch.object(app, "validate_token_list") as validate,
+            patch.object(app, "lookup_host_packages") as lookup,
+        ):
+            app.manual_packages()
+        validate.assert_not_called()
+        lookup.assert_not_called()
+        self.assertEqual(app.config.packages, ["tmux"])
+        self.assertFalse(any(level in {"success", "error", "warn"} for level, _message in stub.messages))
+        self.assertEqual(stub.prompts, ["No packages were added. Press Enter to return to the package menu..."])
+
     def test_select_common_services_replaces_curated_selection_only(self) -> None:
         app = self.make_app()
         app.config.services = ["custom.service", COMMON_SERVICES[0][1]]
@@ -15408,6 +15440,29 @@ class BuilderTests(unittest.TestCase):
         app.add_copr()
         self.assertEqual(app.config.copr_repos, [])
         self.assertEqual(app.config.packages, [])
+
+    def test_add_copr_keeps_the_repo_and_counts_only_new_packages(self) -> None:
+        # An already-selected name adds nothing, so it must neither inflate
+        # the "Added N" count nor, when it is the only name typed, make
+        # add_copr treat the empty remainder as a rejection and drop the repo.
+        for typed, expected_packages, expected_successes in (
+            ("tmux htop", ["tmux", "htop"], ["Added 1 package(s) from COPR kwizart/fedy", "Added COPR: kwizart/fedy"]),
+            ("tmux", ["tmux"], ["Added COPR: kwizart/fedy"]),
+        ):
+            with self.subTest(typed=typed):
+                app = self.make_app()
+                app.config.packages = ["tmux"]
+                stub = GumStub()
+
+                def fake_input(*, prompt, typed=typed, **_kwargs):
+                    return "kwizart/fedy" if prompt == "COPR repo: " else typed
+
+                stub.input = fake_input
+                app.gum = stub
+                app.add_copr()
+                self.assertEqual(app.config.copr_repos, ["kwizart/fedy"])
+                self.assertEqual(app.config.packages, expected_packages)
+                self.assertEqual([message for level, message in stub.messages if level == "success"], expected_successes)
 
     def test_manage_copr_repos_add_delegates_to_add_copr(self) -> None:
         app = self.make_app()

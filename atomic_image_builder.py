@@ -3751,7 +3751,10 @@ class App:
             placeholder="package1 package2",
             width=self.gum.form_width(max_width=80),
         )
-        packages = pkgs.replace(",", " ").split()
+        # Names already selected are skipped rather than handed on: with
+        # nothing new, add_packages_to_config returns False, which here would
+        # otherwise read as a rejected name and drop the repo as well.
+        packages = [package for package in pkgs.replace(",", " ").split() if package not in self.config.packages]
         if packages and not self.add_packages_to_config(packages, source_label=f"COPR {repo}"):
             return
         self.config.copr_repos = proposed_copr_repos
@@ -4681,7 +4684,10 @@ class App:
         *,
         source_label: str,
     ) -> bool:
-        packages = unique(candidates)
+        # A name already in the list adds nothing: drop it before validation,
+        # the dnf5 lookup (and any metadata-refresh offer) and every message,
+        # so "Added N" counts only names the config actually gains.
+        packages = [package for package in unique(candidates) if package not in self.config.packages]
         if not packages:
             return False
         try:
