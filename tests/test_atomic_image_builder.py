@@ -3193,6 +3193,9 @@ class BuilderTests(unittest.TestCase):
 
         self.assertTrue(any(level == "warn" and "half-complete" in message for level, message in app.gum.messages))
         self.assertFalse(any(call[:2] == ["git", "push"] for call in calls))
+        # The update menu's header clears the screen next, so the warning
+        # has to wait for the user (#508).
+        self.assertEqual(app.gum.prompts, ["Press Enter to return to the update menu..."])
 
     def test_rotate_signing_key_warns_when_cosign_pub_copy_fails(self) -> None:
         app = self.make_app()
@@ -3294,6 +3297,7 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(
             any(level == "warn" and "half-complete" in message for level, message in stub.messages)
         )
+        self.assertEqual(stub.prompts, ["Press Enter to return to the update menu..."])
 
     def test_rotate_signing_key_reports_keypair_failure_without_raising(self) -> None:
         app = self.make_app()
@@ -3315,6 +3319,7 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(
             any(level == "error" and "cosign keypair" in message for level, message in stub.messages)
         )
+        self.assertEqual(stub.prompts, ["Press Enter to return to the update menu..."])
 
     def test_rotate_signing_key_warns_when_repo_cannot_be_identified(self) -> None:
         # Without an owner/repo there is nothing safe to rotate against.
@@ -3330,6 +3335,7 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(
             any(level == "warn" and "configured image repo" in message for level, message in stub.messages)
         )
+        self.assertEqual(stub.prompts, ["Press Enter to return to the update menu..."])
 
     def test_rotate_signing_key_returns_when_confirm_is_declined(self) -> None:
         # Rotation overwrites real key material; declining the confirm must
@@ -3353,6 +3359,8 @@ class BuilderTests(unittest.TestCase):
         exists_mock.assert_not_called()
         self.assertEqual(len(prompts), 1)
         self.assertIn("Rotate the cosign signing key?", prompts[0])
+        # Nothing was reported, so there is nothing to pause for.
+        self.assertEqual(stub.prompts, [])
 
     def test_rotate_signing_key_warns_when_one_tool_is_missing(self) -> None:
         app = self.make_app()
@@ -3365,6 +3373,7 @@ class BuilderTests(unittest.TestCase):
 
         generate_mock.assert_not_called()
         self.assertIn(("warn", "cosign is required to rotate the signing key."), stub.messages)
+        self.assertEqual(stub.prompts, ["Press Enter to return to the update menu..."])
 
     def test_rotate_signing_key_warns_when_both_tools_are_missing(self) -> None:
         app = self.make_app()
@@ -6251,6 +6260,8 @@ class BuilderTests(unittest.TestCase):
                             app.push_update("example", "test-image", repo_dir)
 
         self.assertIn(("warn", "No changes detected."), stub.messages)
+        # main_menu's header clears the screen next (#508).
+        self.assertEqual(stub.prompts, ["Press Enter to return to the main menu..."])
         self.assertEqual(confirm_prompts, [])
         ensure_mock.assert_not_called()
         self.assertTrue(all(call[:2] not in (["git", "add"], ["git", "push"]) for call in run_calls))
@@ -6317,7 +6328,82 @@ class BuilderTests(unittest.TestCase):
                             app.push_update("example", "test-image", repo_dir)
 
         self.assertIn(("warn", "No changes detected."), stub.messages)
+        self.assertEqual(stub.prompts, ["Press Enter to return to the main menu..."])
         self.assertTrue(all(call[:2] not in (["git", "add"], ["git", "push"]) for call in run_calls))
+
+    def _push_update_after_new_signing_secrets(
+        self, confirms: list[bool], *, push_rc: int = 0, generated: bool = True
+    ) -> tuple[GumStub, list[list[str]]]:
+        # ensure_signing_ready() generated and uploaded a keypair (it leaves
+        # the public key in generated_cosign_pub), which changes the diff.
+        app = self.make_app()
+        app.github_user = "example"
+        app.config.github_user = "example"
+        confirm_results = iter(confirms)
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: next(confirm_results)
+        app.gum = stub
+        diff_calls = {"count": 0}
+        run_calls: list[list[str]] = []
+
+        def fake_run(args, **_kwargs):
+            run_calls.append(list(args))
+            if list(args) == ["git", "diff", "--stat"]:
+                diff_calls["count"] += 1
+                if diff_calls["count"] == 1:
+                    return subprocess.CompletedProcess(list(args), 0, " build_files/build.sh | 1 +\n", "")
+                return subprocess.CompletedProcess(list(args), 0, " build_files/build.sh | 1 +\n cosign.pub | 1 +\n", "")
+            if list(args)[:2] == ["git", "push"] and push_rc:
+                raise CommandError("git push failed: rejected")
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        def fake_ensure(*_args, **_kwargs):
+            app.generated_cosign_pub = "NEW PUBLIC KEY\n" if generated else None
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with patch.object(app, "repo_default_branch", return_value="main"):
+                    with patch.object(app, "ensure_signing_ready", side_effect=fake_ensure):
+                        with patch.object(app, "write_project_files", return_value=None):
+                            app.push_update("example", "test-image", repo_dir)
+        return stub, run_calls
+
+    def test_push_update_declining_after_new_signing_secrets_warns_of_the_split(self) -> None:
+        # #509: the secrets are already on GitHub when the final confirm is
+        # asked, so declining leaves GitHub's key and cosign.pub mismatched.
+        stub, run_calls = self._push_update_after_new_signing_secrets([False, True, False, False])
+
+        split = [message for level, message in stub.messages if level == "warn" and "cosign.pub was not pushed" in message]
+        self.assertEqual(len(split), 1)
+        self.assertIn("Rotate signing key (cosign)", split[0])
+        self.assertEqual(stub.prompts, ["Press Enter to return to the main menu..."])
+        self.assertTrue(all(call[:2] != ["git", "push"] for call in run_calls))
+
+    def test_push_update_declining_without_new_signing_secrets_stays_quiet(self) -> None:
+        # With an existing key nothing was uploaded, so declining changes nothing.
+        stub, _run_calls = self._push_update_after_new_signing_secrets(
+            [False, True, False, False], generated=False
+        )
+
+        self.assertFalse(any("cosign.pub was not pushed" in message for _level, message in stub.messages))
+        self.assertEqual(stub.prompts, [])
+
+    def test_push_update_failed_push_after_new_signing_secrets_reports_the_split(self) -> None:
+        # #509: a failed push after the upload must say signing is now split,
+        # as rotate_signing_key does, not just "git push failed".
+        with self.assertRaises(CommandError) as caught:
+            self._push_update_after_new_signing_secrets([False, True, False, True], push_rc=1)
+
+        self.assertIn("git push failed: rejected", str(caught.exception))
+        self.assertIn("cosign.pub was not pushed", str(caught.exception))
+
+    def test_push_update_failed_push_without_new_signing_secrets_is_unchanged(self) -> None:
+        with self.assertRaises(CommandError) as caught:
+            self._push_update_after_new_signing_secrets([False, True, False, True], push_rc=1, generated=False)
+
+        self.assertEqual(str(caught.exception), "git push failed: rejected")
 
     def test_push_update_shows_final_full_diff_before_reconfirming(self) -> None:
         # When signing changes the diff, asking to view the final full diff
@@ -14192,6 +14278,8 @@ class BuilderTests(unittest.TestCase):
         app.gum = stub
         self.assertEqual(app.choose_to_remove([], "Remove Packages"), [])
         self.assertTrue(any(level == "warn" and "Nothing to remove" in msg for level, msg in stub.messages))
+        # The manage screen redraws with a clearing header next (#508).
+        self.assertEqual(stub.prompts, ["Press Enter to go back..."])
 
     def test_choose_to_remove_drops_selection_preserving_order(self) -> None:
         app = self.make_app()

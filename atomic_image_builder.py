@@ -4192,8 +4192,14 @@ class App:
         repo_dir = Path.cwd() if repo_dir is None else repo_dir
         owner = self.config.github_user or self.github_user
         repo = self.config.repo_name
+        # Every exit below that reports something pauses before returning: the
+        # update menu redraws with a clearing header straight away, and
+        # run_screen_action only pauses for a CommandError that escapes. The
+        # half-complete warnings are the ones that must not be wiped unread.
+        return_hint = "Press Enter to return to the update menu..."
         if not owner or not repo:
             self.gum.warn("Run this from a configured image repo so the GitHub repository can be identified.")
+            self.gum.enter_to_continue(return_hint)
             return
         if not self.gum.confirm(
             "Rotate the cosign signing key? Old signatures remain valid in the registry; re-pull or re-verify after rotation.",
@@ -4205,6 +4211,7 @@ class App:
             verb = "is" if len(missing) == 1 else "are"
             self.gum.warn(f"{', '.join(missing)} {verb} required to rotate the signing key.")
             self.gum.hint("Install the missing tool, then try this again.")
+            self.gum.enter_to_continue(return_hint)
             return
 
         bluebuild_signing = self.config.method == "bluebuild"
@@ -4220,6 +4227,7 @@ class App:
             )
         except CommandError as exc:
             self.gum.error(str(exc))
+            self.gum.enter_to_continue(return_hint)
             return
         if pub_text is None:
             if not bluebuild_signing:
@@ -4229,6 +4237,7 @@ class App:
                     "Aborting with rotation half-complete. Re-run 'Rotate signing key (cosign)' "
                     "before pushing new commits, or your GitHub Actions signing step will fail."
                 )
+            self.gum.enter_to_continue(return_hint)
             return
         try:
             managed_path(repo_dir, "cosign.pub").write_text(pub_text)
@@ -4247,10 +4256,11 @@ class App:
                 "Rotation is half-complete — GitHub secrets and the repo's cosign.pub are out of sync. "
                 "Re-run 'Rotate signing key (cosign)' before pushing new commits."
             )
+            self.gum.enter_to_continue(return_hint)
             return
         self.gum.success(f"Rotated cosign signing key in commit {commit_sha}. GitHub secrets were updated.")
         self.gum.warn("Pre-rotation signatures remain valid in the registry; re-pull or re-verify after rotation.")
-        self.gum.enter_to_continue("Press Enter to return to the update menu...")
+        self.gum.enter_to_continue(return_hint)
 
     def clone_repo(self, owner: str, repo: str, target: Path) -> None:
         self.gum.spinner(f"Cloning {owner}/{repo}...", ["gh", "repo", "clone", f"{owner}/{repo}", str(target)])
@@ -5498,6 +5508,8 @@ class App:
     def choose_to_remove(self, values: list[str], header: str) -> list[str]:
         if not values:
             self.gum.warn("Nothing to remove.")
+            # The calling screen redraws with a clearing header next.
+            self.gum.enter_to_continue("Press Enter to go back...")
             return values
         self.gum.header(header)
         self.gum.controls("Up/Down move", "x select", "Enter save", "Esc back", "Ctrl+C quit")
@@ -5592,6 +5604,8 @@ class App:
         diff = self.repo_diff_summary(repo_dir)
         if not diff:
             self.gum.warn("No changes detected.")
+            # main_menu redraws with a clearing header next.
+            self.gum.enter_to_continue("Press Enter to return to the main menu...")
             return
         print(diff)
         print()
@@ -5603,10 +5617,24 @@ class App:
         if not self.gum.confirm(f"Push changes to {owner}/{repo}?", default=True):
             return
         self.config.signing_enabled = self.ensure_signing_ready(owner, repo, repo_dir=repo_dir)
+        # Set when ensure_signing_ready() just generated a keypair and uploaded
+        # its secrets. From here until the push lands, GitHub holds a private
+        # key whose public half is not in the repo. The workflow signs whenever
+        # SIGNING_SECRET is set, and a later session cannot tell the two apart
+        # (secrets are write-only), so every way out below says so.
+        new_signing_secrets = self.generated_cosign_pub is not None
+        split_note = (
+            "New signing secrets were already uploaded to GitHub, but the matching cosign.pub was not pushed, "
+            "so images will be signed with a key the repo's cosign.pub cannot verify. "
+            "Use 'Rotate signing key (cosign)' from the update menu before the next build."
+        )
         self.write_project_files(repo_dir, include_workflow=True, default_branch=default_branch)
         final_diff = self.repo_diff_summary(repo_dir)
         if not final_diff:
             self.gum.warn("No changes detected.")
+            if new_signing_secrets:
+                self.gum.warn(split_note)
+            self.gum.enter_to_continue("Press Enter to return to the main menu...")
             return
         if final_diff != diff:
             self.gum.warn("The final update changed after signing was prepared.")
@@ -5616,11 +5644,21 @@ class App:
                 final_full_diff = self.repo_full_diff(repo_dir)
                 self.gum.pager(self.pager_text_with_hint(final_full_diff))
             if not self.gum.confirm(f"Push final changes to {owner}/{repo}?", default=True):
+                if new_signing_secrets:
+                    self.gum.warn(split_note)
+                    self.gum.enter_to_continue("Press Enter to return to the main menu...")
                 return
         self.configure_temp_repo_git_identity(repo_dir)
-        run(["git", "add", "-A"], cwd=repo_dir)
-        run(["git", "commit", "-m", f"Update image configuration via {TOOL_SLUG} v{VERSION}"], cwd=repo_dir)
-        run(["git", "push", "origin", "HEAD"], cwd=repo_dir, capture=False)
+        try:
+            run(["git", "add", "-A"], cwd=repo_dir)
+            run(["git", "commit", "-m", f"Update image configuration via {TOOL_SLUG} v{VERSION}"], cwd=repo_dir)
+            run(["git", "push", "origin", "HEAD"], cwd=repo_dir, capture=False)
+        except CommandError as exc:
+            if not new_signing_secrets:
+                raise
+            # main_menu reports a CommandError and pauses, so the split state
+            # rides along with the push failure itself.
+            raise CommandError(f"{exc}\n{split_note}") from exc
         self.gum.success(f"Pushed changes to {owner}/{repo}.")
         self.gum.enter_to_continue("Press Enter to return to the main menu...")
 
