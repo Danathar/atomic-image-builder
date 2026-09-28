@@ -942,6 +942,48 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(push["paths-ignore"], [STATE_FILE, "**/README.md"])
         self.assertEqual(app.patch_container_workflow(patched), patched)
 
+    def test_patch_container_workflow_extends_a_multi_line_flow_paths_ignore(self) -> None:
+        # prettier spreads a long flow list over lines, with its `[` on the
+        # key's line or the next. A block "- entry" written inside either is
+        # a parse error and GitHub runs nothing from the file (#524), so the
+        # entry goes straight after the `[`, where an item and a comma are
+        # valid whatever follows -- a trailing comma before `]` included.
+        app = self.make_app()
+        for value, expected in (
+            (
+                "    paths-ignore: [\n      '**/README.md'\n    ]\n",
+                f"    paths-ignore: ['{STATE_FILE}',\n      '**/README.md'\n    ]\n",
+            ),
+            (
+                "    paths-ignore:\n      [ # docs only\n        '**/README.md',\n      ]\n",
+                f"    paths-ignore:\n      ['{STATE_FILE}', # docs only\n        '**/README.md',\n      ]\n",
+            ),
+            ("    paths-ignore: [\n      ]\n", f"    paths-ignore: ['{STATE_FILE}',\n      ]\n"),
+        ):
+            with self.subTest(value=value):
+                workflow = (
+                    "name: Build container image\non:\n  push:\n"
+                    + value
+                    + "jobs:\n  build_push:\n    steps:\n      - name: Checkout\n        uses: actions/checkout@v4\n"
+                )
+                patched = app.patch_container_workflow(workflow)
+                self.assertIn(expected, patched)
+                self.assertEqual(patched.count(STATE_FILE), 1)
+                self.assertEqual(app.patch_container_workflow(patched), patched)
+                # tests/_block_yaml.py has no multi-line flow support. PyYAML
+                # reads the bare `on` key as YAML 1.1's True.
+                document = parse_with_libyaml(patched)
+                if document is not None:
+                    self.assertIn(STATE_FILE, document[True]["push"]["paths-ignore"])
+
+    def test_patch_container_workflow_leaves_a_scalar_paths_ignore_alone(self) -> None:
+        # A value that is not a list has no place a new item can go. A block
+        # "- entry" under it was a parse error; leaving it is the no-op every
+        # other patcher falls back to.
+        app = self.make_app()
+        workflow = "on:\n  push:\n    paths-ignore: '**/README.md'\njobs:\n  build_push:\n    steps: []\n"
+        self.assertNotIn(STATE_FILE, app.patch_container_workflow(workflow))
+
     def test_patch_container_workflow_rewrites_image_desc_env_key(self) -> None:
         # The bundled snapshot carries IMAGE_DESC in image-template.env, but a
         # workflow that declares it as a YAML env key must still be rewritten
@@ -990,6 +1032,42 @@ class BuilderTests(unittest.TestCase):
         self.assertIn('  IMAGE_DESC: "My 🚀 image"', patched)
         self.assertNotIn("\\u", patched)
         self.assertEqual(parse_block_yaml(patched)["env"]["IMAGE_DESC"], "My 🚀 image")
+
+    def test_patch_container_workflow_rewrites_a_nested_image_desc_where_it_stands(self) -> None:
+        # A job or step env entry is the same key, and writing it back at two
+        # spaces moved it out of its mapping, which then stopped parsing
+        # (#524). A value continued over deeper lines goes with the line it
+        # belonged to, and a `run: |` line that merely looks like the key is
+        # the owner's script, not an env entry.
+        app = self.make_app()
+        app.config.image_desc = "Test image"
+        workflow = textwrap.dedent(
+            """\
+            name: Build container image
+            jobs:
+              build_push:
+                env:
+                    IMAGE_DESC: >-
+                      Old description
+                      over two lines
+                    OTHER: kept
+                steps:
+                  - name: Describe
+                    env:
+                      IMAGE_DESC: old
+                    run: |
+                      cat <<EOF
+                      IMAGE_DESC: literal
+                      EOF
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertNotIn("Old description", patched)
+        job = parse_block_yaml(patched)["jobs"]["build_push"]
+        self.assertEqual(job["env"], {"IMAGE_DESC": "Test image", "OTHER": "kept"})
+        self.assertEqual(job["steps"][0]["env"], {"IMAGE_DESC": "Test image"})
+        self.assertEqual(job["steps"][0]["run"].splitlines(), ["cat <<EOF", "IMAGE_DESC: literal", "EOF"])
+        self.assertEqual(app.patch_container_workflow(patched), patched)
 
     def test_patch_container_workflow_adds_state_ignore_only_once(self) -> None:
         # Both the key branch and the README anchor can match the same
@@ -1684,6 +1762,31 @@ class BuilderTests(unittest.TestCase):
 
         self.assertEqual(atomic_image_builder.strip_permission_entries(workflow, ["id-token"]), workflow)
 
+    def test_strip_permission_entries_does_not_count_a_comment_as_a_kept_entry(self) -> None:
+        # A comment is not a scope. Counted as one, removing the only real
+        # entry left a bare `permissions:`, which is null and Actions rejects
+        # (#524). A comment at the key's own indent ends nothing either:
+        # taken for the end of the block, it left `id-token` under `{}`.
+        workflow = (
+            "jobs:\n  build:\n    permissions:\n      # OIDC for signing\n"
+            "    # scopes below\n      id-token: write\n    steps: []\n"
+        )
+
+        self.assertEqual(
+            atomic_image_builder.strip_permission_entries(workflow, ["id-token"]),
+            "jobs:\n  build:\n    permissions: {}\n      # OIDC for signing\n    # scopes below\n    steps: []\n",
+        )
+
+    def test_strip_permission_entries_leaves_a_block_scalar_alone(self) -> None:
+        # A `run: |` script that prints a permissions block is text, and the
+        # step would run a different script if it were rewritten.
+        workflow = (
+            "jobs:\n  build:\n    steps:\n      - run: |\n          cat <<EOF\n"
+            "          permissions:\n            id-token: write\n          EOF\n        shell: bash\n"
+        )
+
+        self.assertEqual(atomic_image_builder.strip_permission_entries(workflow, ["id-token"]), workflow)
+
     def test_patch_container_workflow_golden(self) -> None:
         expected_path = Path(__file__).parent / "fixtures/workflows/container_expected.yml"
         input_path = Path(__file__).parent / "fixtures/workflows/container_input.yml"
@@ -2351,6 +2454,19 @@ class BuilderTests(unittest.TestCase):
     def test_ensure_workflow_job_env_entries_counts_a_commented_key_as_defined(self) -> None:
         workflow_text = "jobs:\n  build:\n    env:\n      FOO: ours # why\n    steps:\n" + self.READER
         self.assertEqual(ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")]), workflow_text)
+
+    def test_ensure_workflow_job_env_entries_reads_and_writes_at_the_env_blocks_own_indent(self) -> None:
+        # An editor's reformat can put job env entries at eight. Counting keys
+        # only at six found nothing there and wrote a second one at six --
+        # a duplicate key and a parse error on every update (#524).
+        defined = "jobs:\n  build:\n    env:\n        FOO: ours\n    steps:\n" + self.READER
+        self.assertEqual(ensure_workflow_job_env_entries(defined, [("FOO", "ours")]), defined)
+
+        missing = "jobs:\n  build:\n    env:\n        # kept\n        OTHER: x\n    steps:\n" + self.READER
+        result = ensure_workflow_job_env_entries(missing, [("FOO", "ours")])
+        self.assertEqual(result.splitlines()[2:6], ["    env:", "        FOO: ours", "        # kept", "        OTHER: x"])
+        self.assertEqual(parse_block_yaml(result)["jobs"]["build"]["env"], {"FOO": "ours", "OTHER": "x"})
+        self.assertEqual(ensure_workflow_job_env_entries(result, [("FOO", "ours")]), result)
 
     def test_ensure_workflow_job_env_entries_does_not_take_a_prefixed_key_for_the_wanted_one(self) -> None:
         # `FOO_BAR:` is not `FOO:`, and `FOO:bar` is a scalar, not a key --
@@ -13172,6 +13288,25 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(push["paths-ignore"], [STATE_FILE, "**.md"])
         self.assertEqual(app.patch_bluebuild_workflow(patched), patched)
 
+    def test_patch_bluebuild_workflow_extends_a_multi_line_flow_paths_ignore(self) -> None:
+        # The BlueBuild side of the prettier shape (#524): the entry joins
+        # the list after its `[`, and the comment there stays.
+        app = self.make_bluebuild_app()
+        template = self.bluebuild_snapshot_with_inline_paths_ignore(
+            "    paths-ignore: [ # don't rebuild if only documentation has changed\n      \"**.md\",\n    ]\n"
+        )
+        patched = app.patch_bluebuild_workflow(template)
+        self.assertIn(
+            f"    paths-ignore: ['{STATE_FILE}', # don't rebuild if only documentation has changed\n"
+            '      "**.md",\n    ]\n',
+            patched,
+        )
+        self.assertEqual(patched.count(STATE_FILE), 1)
+        self.assertEqual(app.patch_bluebuild_workflow(patched), patched)
+        document = parse_with_libyaml(patched)
+        if document is not None:
+            self.assertEqual(document[True]["push"]["paths-ignore"], [STATE_FILE, "**.md"])
+
     def test_patch_bluebuild_workflow_keeps_empty_paths_ignore_at_two_spaces(self) -> None:
         # With no entry to copy, key indent plus two is the only sensible
         # choice, and it matches the indent the bundled snapshots use.
@@ -13468,6 +13603,29 @@ class BuilderTests(unittest.TestCase):
         for key in ("push", "build_opts", "chunkah"):
             self.assertIn(key, keys)
         self.assertEqual(app.patch_bluebuild_action_inputs(result), result)
+
+    def test_patch_bluebuild_action_inputs_matches_four_space_with_entries(self) -> None:
+        # An editor can put the action's inputs four in from `with:`. Ours,
+        # written at plus two, closed the mapping above them and the next old
+        # input was a parse error (#524). A conflicting input at that indent
+        # still has to be found and dropped.
+        # The inline paths-ignore only keeps the whole file inside what
+        # tests/_block_yaml.py can read; it has no bearing on the inputs.
+        snapshot = self.bluebuild_snapshot_with_inline_paths_ignore('    paths-ignore: ["**.md"]\n')
+        with_at = snapshot.index("        with:\n")
+        template = (
+            snapshot[:with_at]
+            + re.sub(r"(?m)^          (?=\S)", "            ", snapshot[with_at:])
+            + "            rechunk: true\n"
+        )
+        app = self.make_bluebuild_app()
+        patched = app.patch_bluebuild_workflow(template)
+        self.assertIn("            chunkah: 'true'\n", patched)
+        inputs = parse_block_yaml(patched)["jobs"]["bluebuild"]["steps"][0]["with"]
+        self.assertEqual(inputs["chunkah"], "true")
+        self.assertEqual(inputs["recipe"], "${{ matrix.recipe }}")
+        self.assertNotIn("rechunk", inputs)
+        self.assertEqual(app.patch_bluebuild_workflow(patched), patched)
 
     def test_patch_bluebuild_action_inputs_leaves_unrelated_steps_untouched(self) -> None:
         # Only the blue-build action step owns these inputs; a checkout step
