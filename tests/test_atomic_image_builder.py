@@ -168,9 +168,6 @@ class GumStub:
     def table(self, *_args, **_kwargs) -> None:
         pass
 
-    def table_widths(self, *_args, **_kwargs) -> str:
-        return "20,40"
-
     def form_width(self, **_kwargs) -> int:
         return 80
 
@@ -10905,7 +10902,7 @@ class BuilderTests(unittest.TestCase):
         gum = Gum()
         completed = subprocess.CompletedProcess(["gum", "table"], 0, "", "")
         with patch("atomic_image_builder.run", return_value=completed) as run_mock:
-            gum.table([["a", "1"], ["b", "2"]], columns="Name,Count", widths="10,5")
+            gum.table([["a", "1"], ["b", "2"]], columns="Name,Count")
         args, kwargs = run_mock.call_args
         call_args = args[0]
         # --print matters: without it `gum table` is an interactive row picker
@@ -10913,7 +10910,7 @@ class BuilderTests(unittest.TestCase):
         # so every screen with a table stopped there and nothing after it ran.
         self.assertEqual(
             call_args,
-            ["gum", "table", "--print", "--separator", "\t", "--columns", "Name,Count", "--widths", "10,5"],
+            ["gum", "table", "--print", "--separator", "\t", "--columns", "Name,Count"],
         )
         self.assertEqual(kwargs["capture"], False)
         self.assertEqual(kwargs["stdin"], "a\t1\nb\t2\n")
@@ -17640,11 +17637,56 @@ class BuilderTests(unittest.TestCase):
         with patch.object(Gum, "terminal_width", return_value=10):
             self.assertEqual(gum.form_width(max_width=96, min_width=40, reserve=6), 40)
 
-    def test_table_widths_reserves_left_column_and_floors_right_column(self) -> None:
+    # A digest-pinned host's scan row: 111 characters of value on its own (#515).
+    PINNED_IMAGE_URI = "ghcr.io/ublue-os/bazzite-dx-gnome:stable@sha256:" + "0123456789abcdef" * 4
+
+    def test_fit_table_rows_wraps_last_column_into_continuation_rows(self) -> None:
+        # gum --print ignores --widths and sizes each column to its widest
+        # cell, so the only way to keep the box on screen is to hand it cells
+        # that already fit: widest label + widest value + 3 per column + 1.
         gum = Gum()
-        with patch.object(Gum, "content_width", return_value=80):
-            self.assertEqual(gum.table_widths(50, min_right=24), "50,26")
-            self.assertEqual(gum.table_widths(70, min_right=24), "70,24")
+        rows = [("Base Image", "Bazzite DX"), ("Image URI", self.PINNED_IMAGE_URI), ("Layered Packages", "3")]
+        with patch.object(Gum, "content_width", return_value=60):
+            fitted = gum.fit_table_rows(rows, headers=["Setting", "Value"])
+        value_width = max(len(value) for _label, value in fitted)
+        self.assertLessEqual(len("Layered Packages") + value_width + 3 * 2 + 1, 60)
+        self.assertEqual(fitted[1][0], "Image URI")
+        continuation = fitted[2:-1]
+        self.assertGreater(len(continuation), 0)
+        self.assertTrue(all(label == "" for label, _value in continuation))
+        # Wrapped, not truncated: the full reference is still all there.
+        self.assertEqual("".join(value for _label, value in fitted[1:-1]), self.PINNED_IMAGE_URI)
+        self.assertEqual(fitted[0], ["Base Image", "Bazzite DX"])
+        self.assertEqual(fitted[-1], ["Layered Packages", "3"])
+
+    def test_fit_table_rows_never_wraps_narrower_than_the_header(self) -> None:
+        gum = Gum()
+        with patch.object(Gum, "content_width", return_value=40):
+            fitted = gum.fit_table_rows([("A" * 38, "abcdefghijkl")], headers=["Setting", "Value"])
+        self.assertEqual(fitted, [["A" * 38, "abcde"], ["", "fghij"], ["", "kl"]])
+
+    def test_table_rendered_by_real_gum_fits_the_content_width(self) -> None:
+        # The point of #515 is what gum actually draws, so measure its output.
+        if shutil.which("gum") is None:
+            self.skipTest("gum is not installed")
+        rendered: list[str] = []
+
+        def run_capturing(args, *, capture, stdin):
+            proc = subprocess.run(list(args), input=stdin, text=True, capture_output=True, check=True)
+            rendered.append(proc.stdout)
+            return proc
+
+        rows = [
+            ("Base Image", "Bazzite DX"),
+            ("Image URI", self.PINNED_IMAGE_URI),
+            ("Removed Base Packages", "0"),
+        ]
+        with patch.object(Gum, "content_width", return_value=96), patch("atomic_image_builder.run", run_capturing):
+            Gum().table(rows, columns="Setting,Value")
+        lines = rendered[0].splitlines()
+        self.assertLessEqual(max(len(line) for line in lines), 96)
+        # Every line is a box line; a terminal-wrapped border would not be.
+        self.assertTrue(all(line[0] in "╭│├╰" and line[-1] in "╮│┤╯" for line in lines))
 
     def test_clear_runs_clear_command_only_when_interactive_tty(self) -> None:
         gum = Gum()

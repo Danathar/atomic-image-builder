@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -2293,10 +2294,6 @@ class Gum:
     def form_width(self, *, max_width: int = 96, min_width: int = 40, reserve: int = 6) -> int:
         return max(min_width, min(max_width, self.terminal_width() - reserve))
 
-    def table_widths(self, left: int, *, max_width: int = MAX_UI_WIDTH, min_right: int = 24) -> str:
-        right = max(min_right, self.content_width(max_width=max_width, reserve=0) - left - 4)
-        return f"{left},{right}"
-
     def terminal_available(self, *, stdin_inherited: bool = True) -> bool:
         # Mirrors how gum (bubbletea) finds its keyboard: the widget's own
         # stdin when that is a terminal, otherwise /dev/tty. Which of the two
@@ -2634,19 +2631,49 @@ class Gum:
         if proc.returncode != 0:
             raise CommandError("command failed: gum pager")
 
-    def table(self, rows: Sequence[Sequence[str]], *, columns: str, widths: str) -> None:
+    def table(self, rows: Sequence[Sequence[str]], *, columns: str) -> None:
         # --print is what makes this a display widget. Without it `gum table` is
         # an interactive row picker: it draws the rows, highlights one, shows a
         # "1/4 navigate / enter select" footer and blocks. Every screen that
         # showed a table therefore stopped there, and everything meant to follow
         # it -- hints, controls, the package chooser -- never ran, so the screen
         # looked like a table floating above an empty page.
-        text = "\n".join("\t".join(row) for row in rows) + "\n"
+        #
+        # --print also means gum sizes every column to its widest cell and
+        # ignores --widths (v0.17.0), so fitting the terminal is done here. One
+        # long value -- a digest-pinned image reference is over 110 characters
+        # -- otherwise pushed the box past the edge, and the terminal wrapped
+        # its border into a broken mess (#515).
+        fitted = self.fit_table_rows(rows, headers=columns.split(","))
+        text = "\n".join("\t".join(row) for row in fitted) + "\n"
         run(
-            ["gum", "table", "--print", "--separator", "\t", "--columns", columns, "--widths", widths],
+            ["gum", "table", "--print", "--separator", "\t", "--columns", columns],
             capture=False,
             stdin=text,
         )
+
+    def fit_table_rows(self, rows: Sequence[Sequence[str]], *, headers: Sequence[str]) -> list[list[str]]:
+        # Wraps the last column so the rendered table is no wider than
+        # content_width(). gum draws each column as its widest cell (header
+        # included) plus a space either side, with a border before, between and
+        # after the columns: 3 per column plus 1. The other columns keep their
+        # width; they hold labels, and the long values sit in the last one.
+        #
+        # Each wrapped line past the first becomes a row of its own with the
+        # other cells blank. --print draws no rule between rows, so it reads as
+        # one cell over several lines, and it keeps the input free of CSV
+        # quoting, which a newline inside a cell would need.
+        leading = [max(len(cell) for cell in column) for column in zip(headers, *rows)][:-1]
+        # Never narrower than the header: gum would draw the column that wide
+        # anyway, and it keeps the width positive on the narrowest terminal.
+        budget = max(len(headers[-1]), self.content_width() - sum(leading) - 3 * len(headers) - 1)
+        fitted: list[list[str]] = []
+        for row in rows:
+            *first, last = row
+            lines = [last] if len(last) <= budget else textwrap.wrap(last, budget, break_on_hyphens=False) or [""]
+            fitted.append([*first, lines[0]])
+            fitted.extend([*([""] * len(first)), line] for line in lines[1:])
+        return fitted
 
     def require_spinner_success(
         self, proc: subprocess.CompletedProcess[str], args: Sequence[str]
@@ -4163,7 +4190,7 @@ class App:
             # boolean, not a list -- still counts for one, or the row reads
             # "Cannot Be Carried Over: 0" directly above the warning naming it.
             rows.append(("Cannot Be Carried Over", str(sum(len(values) or 1 for _label, values in omitted))))
-        self.gum.table(rows, columns="Setting,Value", widths=self.gum.table_widths(22))
+        self.gum.table(rows, columns="Setting,Value")
         print()
         if omitted:
             if not self.confirm_omitted_scan_customizations(omitted):
