@@ -3404,7 +3404,10 @@ class App:
             placeholder="package1 package2",
             width=self.gum.form_width(max_width=80),
         )
-        packages = pkgs.replace(",", " ").split()
+        # Names already selected are skipped rather than handed on: with
+        # nothing new, add_packages_to_config returns False, which here would
+        # otherwise read as a rejected name and drop the repo as well.
+        packages = [package for package in pkgs.replace(",", " ").split() if package not in self.config.packages]
         if packages and not self.add_packages_to_config(packages, source_label=f"COPR {repo}"):
             return
         self.config.copr_repos = proposed_copr_repos
@@ -4341,6 +4344,12 @@ class App:
             self.validate_token_list(packages, PACKAGE_TOKEN_RE, "package")
         except CommandError as exc:
             self.gum.error(str(exc))
+            return False
+        # A name already in the list adds nothing: drop it before the dnf5
+        # lookup (and any metadata-refresh offer) and before the count is
+        # reported, so "Added N" counts only names the config actually gains.
+        packages = [package for package in packages if package not in self.config.packages]
+        if not packages:
             return False
         if source_label == "manual entry":
             packages = self.filter_available_manual_packages(packages)
