@@ -8178,6 +8178,41 @@ class BuilderTests(unittest.TestCase):
         warnings = [message for level, message in stub.messages if level == "warn"]
         self.assertIn("No layered packages this tool can carry over were found.", warnings)
 
+    def test_scan_os_with_only_omitted_customizations_keeps_the_reset_instructions(self) -> None:
+        # The omission screen promises the switch instructions end with
+        # `rpm-ostree reset`. A host whose only layering is a capability or
+        # path spec leaves both scan lists empty, and the README and the
+        # build-status screen (which reads the pushed state file) both dropped
+        # the reset. A scan with nothing layered must still not gain one.
+        import base64
+        for requested, expected in ((["/usr/bin/zsh", "pkgconfig(gtk4)"], True), ([], False)):
+            with self.subTest(requested=requested):
+                result, app, _stub = self.run_scan_with_status(
+                    {
+                        "container-image-reference": self.BLUEFIN,
+                        "requested-packages": requested,
+                        "requested-base-removals": [],
+                    },
+                    gum=self.accepting_gum(),
+                )
+                self.assertEqual(result, SCAN_OK)
+                self.assertEqual(app.config.packages, [])
+                app.config.method = "containerfile"
+                app.config.repo_name = "my-image"
+                payload = app.state_payload()
+                self.assertIs(payload["scan_customizations_carried"], expected)
+                # The state file keeps the single flag it has always had.
+                self.assertNotIn("scan_omitted_customizations", payload)
+                block = self.readme_doc(app).section("Using The Image").code_block()
+                self.assertEqual("sudo rpm-ostree reset" in block.lines, expected, block.lines)
+                # A later update loads the state file, not the scan.
+                reloaded = App()
+                reloaded.config = config_from_state_payload(payload)
+                self.assertIs(reloaded.carried_scan_customizations(), expected)
+                encoded = base64.b64encode(json.dumps(payload).encode()).decode()
+                with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, encoded, "")):
+                    self.assertIs(App().repo_carried_scan_customizations("example", "my-image"), expected)
+
     def test_unsupported_scan_customizations_reads_every_category(self) -> None:
         # One assertion per field rpm-ostree documents, because each is a
         # separate way for a customization to go missing and the defect was

@@ -567,9 +567,12 @@ class Config:
     # The scan lists hold the running host's complete layered-package and
     # base-removal inventory. They stay in memory to drive the selection screens
     # and are deliberately NOT written to the state file - see state_payload().
+    # scan_omitted_customizations is in-memory too: the scan found something the
+    # user agreed to leave behind, which reset still has to clear on switch.
     # scan_customizations_carried is the one bit anything downstream needs.
     scanned_packages: list[str] = field(default_factory=list)
     scanned_removed: list[str] = field(default_factory=list)
+    scan_omitted_customizations: bool = False
     scan_customizations_carried: bool = False
 
     def normalize(self) -> None:
@@ -3805,8 +3808,13 @@ class App:
             rows.append(("Cannot Be Carried Over", str(sum(len(values) or 1 for _label, values in omitted))))
         self.gum.table(rows, columns="Setting,Value", widths=self.gum.table_widths(22))
         print()
-        if omitted and not self.confirm_omitted_scan_customizations(omitted):
-            return SCAN_CANCELLED
+        if omitted:
+            if not self.confirm_omitted_scan_customizations(omitted):
+                return SCAN_CANCELLED
+            # That screen promised the switch instructions end with a reset.
+            # A host whose only layering is omitted leaves both scan lists
+            # empty, so without this nothing downstream would know to say it.
+            self.config.scan_omitted_customizations = True
         # The table states facts and nothing else. Without this a user is left
         # looking at their own system's details with no idea what the tool is
         # about to do with them, or that the base is settled and will not be
@@ -3953,6 +3961,11 @@ class App:
         return None
 
     def carried_scan_customizations(self) -> bool:
+        # True when the switch has to start with `rpm-ostree reset`: something
+        # scanned was carried into the image, or something scanned was left out
+        # on the user's say-so and the omission screen promised the reset.
+        if self.config.scan_omitted_customizations:
+            return True
         scanned_packages = set(self.config.scanned_packages)
         scanned_removed = set(self.config.scanned_removed)
         if scanned_packages or scanned_removed:
@@ -5748,6 +5761,9 @@ class App:
         payload["scan_customizations_carried"] = self.carried_scan_customizations()
         payload.pop("scanned_packages", None)
         payload.pop("scanned_removed", None)
+        # Already folded into scan_customizations_carried above; the state
+        # file keeps the one flag it has always had.
+        payload.pop("scan_omitted_customizations", None)
         payload["tool_version"] = VERSION
         payload["state_version"] = 1
         return payload
