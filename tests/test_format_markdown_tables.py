@@ -56,6 +56,23 @@ class SplitRowTests(unittest.TestCase):
     def test_pipe_inside_a_code_span_is_content_not_a_separator(self) -> None:
         self.assertEqual(split_row("| `a | b` | c |"), ["`a | b`", "c"])
 
+    def test_a_double_backtick_span_holding_a_backtick_is_one_cell(self) -> None:
+        # CommonMark closes a span only on a run of the opening length. Toggling
+        # on each backtick left this span open and swallowed the next pipe.
+        self.assertEqual(
+            split_row("| `` ` `` | a literal backtick |"),
+            ["`` ` ``", "a literal backtick"],
+        )
+
+    def test_a_shorter_run_inside_a_span_does_not_close_it(self) -> None:
+        self.assertEqual(split_row("| `` a ` | b `` | c |"), ["`` a ` | b ``", "c"])
+
+    def test_an_unmatched_backtick_is_literal_and_does_not_hide_pipes(self) -> None:
+        self.assertEqual(split_row("| a ` b | c |"), ["a ` b", "c"])
+
+    def test_a_backslash_inside_a_code_span_does_not_escape_the_closer(self) -> None:
+        self.assertEqual(split_row(r"| `a\` | b |"), [r"`a\`", "b"])
+
     def test_a_row_of_only_empty_edge_cells_is_not_a_row(self) -> None:
         self.assertIsNone(split_row("|"))
 
@@ -208,6 +225,21 @@ class FormatTextTests(unittest.TestCase):
 
     def test_formatting_is_idempotent(self) -> None:
         once = format_text("| a | bb |\n| :-- | --: |\n| cccc | d |\n")
+        self.assertEqual(format_text(once), once)
+
+    def test_a_literal_backtick_span_formats_once_and_then_settles(self) -> None:
+        text = (
+            "| Key | Meaning |\n|---|---|\n"
+            "| `` ` `` | a literal backtick |\n| a ` b | y |\n"
+        )
+        once = format_text(text)
+        self.assertEqual(
+            once,
+            "| Key     | Meaning            |\n"
+            "| ------- | ------------------ |\n"
+            "| `` ` `` | a literal backtick |\n"
+            "| a ` b   | y                  |\n",
+        )
         self.assertEqual(format_text(once), once)
 
     def test_a_table_in_a_longer_fence_is_left_verbatim(self) -> None:

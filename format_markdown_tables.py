@@ -25,19 +25,52 @@ FENCE_CHARS = ("`", "~")
 CODE_INDENT = 4
 
 
+def backtick_run(text: str, start: int) -> int:
+    """The length of the backtick run beginning at ``text[start]``."""
+    end = start
+    while end < len(text) and text[end] == "`":
+        end += 1
+    return end - start
+
+
+def code_span_end(text: str, start: int, length: int) -> int | None:
+    """Where a code span opened by ``length`` backticks ends, or None.
+
+    ``start`` is the first character after the opening run. CommonMark closes
+    a code span only on a backtick run of exactly the opening length, so a
+    shorter or longer run inside it is content -- that is how ``` `` ` `` ```
+    spells a literal backtick. Backslashes are literal inside a code span, so
+    they are not skipped as escapes here.
+    """
+    index = start
+    while index < len(text):
+        if text[index] != "`":
+            index += 1
+            continue
+        run = backtick_run(text, index)
+        if run == length:
+            return index + run
+        index += run
+    return None
+
+
 def split_row(line: str) -> list[str] | None:
     """Split a table row into cells, or None if it is not a table row.
 
     Pipes inside backtick code spans and pipes escaped as ``\\|`` are cell
     content, not separators -- getting either wrong would corrupt the text
     rather than merely misalign it.
+
+    A code span runs between backtick runs of equal length, and a run with no
+    match is literal text. Toggling on every single backtick instead read
+    ``` `` ` `` ``` as an open span that swallowed the next separator, so each
+    pass merged two cells and appended another empty column.
     """
     stripped = line.strip()
     if "|" not in stripped:
         return None
     cells: list[str] = []
     current: list[str] = []
-    in_code = False
     index = 0
     while index < len(stripped):
         char = stripped[index]
@@ -46,8 +79,13 @@ def split_row(line: str) -> list[str] | None:
             index += 2
             continue
         if char == "`":
-            in_code = not in_code
-        if char == "|" and not in_code:
+            run = backtick_run(stripped, index)
+            end = code_span_end(stripped, index + run, run)
+            stop = index + run if end is None else end
+            current.append(stripped[index:stop])
+            index = stop
+            continue
+        if char == "|":
             cells.append("".join(current))
             current = []
         else:
