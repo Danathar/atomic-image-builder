@@ -6786,6 +6786,118 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(resumed_steps, ["method", "base", "repo", "software"])
         self.assertEqual(events[-1], "review")
 
+    def run_wizard_with_esc(self, review_actions: list[str | None], esc_on: dict[str, int]) -> tuple[App, list[str]]:
+        """Run create_new_image() with each step recording itself.
+
+        ``esc_on`` maps a step name to the call number (1-based) on which
+        that step raises ScreenBack, as Esc on its screen does. Every other
+        call succeeds. A None in ``review_actions`` is Esc on the review
+        screen itself. configure_repo() fills in a repo name so the test can
+        see whether the wizard's state survived.
+        """
+        app = self.make_app()
+        app.gum = GumStub()
+        events: list[str] = []
+        calls: dict[str, int] = {}
+        actions = iter(review_actions)
+
+        def step(name: str):
+            def run_step(**_kwargs) -> None:
+                calls[name] = calls.get(name, 0) + 1
+                events.append(name)
+                if esc_on.get(name) == calls[name]:
+                    raise ScreenBack()
+                if name == "repo":
+                    app.config.repo_name = "sentinel-repo"
+
+            return run_step
+
+        def review(**_kwargs) -> str:
+            events.append("review")
+            action = next(actions)
+            if action is None:
+                raise ScreenBack()
+            return action
+
+        with patch.object(app, "choose_method", side_effect=step("method")):
+            with patch.object(app, "choose_base_image", side_effect=step("base")):
+                with patch.object(app, "configure_repo", side_effect=step("repo")):
+                    with patch.object(app, "select_packages", side_effect=step("software")):
+                        with patch.object(app, "review_new_image", side_effect=review):
+                            app.create_new_image()
+        return app, events
+
+    def test_esc_on_build_method_opened_from_review_returns_to_review(self) -> None:
+        # Build method is step index 0, so Esc there hit the "leave the
+        # wizard" case meant for the first pass: create_new_image() returned
+        # and the next Create Image started from a fresh config (#507).
+        app, events = self.run_wizard_with_esc(["method", "cancel"], {"method": 2})
+        self.assertEqual(events, ["method", "base", "repo", "software", "review", "method", "review"])
+        self.assertEqual(app.config.repo_name, "sentinel-repo")
+
+    def test_esc_on_a_later_step_opened_from_review_returns_to_review(self) -> None:
+        # Not to the step before it: the user came from review, and review
+        # is where Esc takes them back to.
+        _app, events = self.run_wizard_with_esc(["repo", "cancel"], {"repo": 2})
+        self.assertEqual(events, ["method", "base", "repo", "software", "review", "repo", "review"])
+
+    def test_esc_while_walking_forward_from_a_review_edit_returns_to_review(self) -> None:
+        # Editing Build method walks on through the steps after it. Esc on
+        # one of those still belongs to the edit, so it returns to review
+        # rather than stepping back to method -- where one more Esc would
+        # have left the wizard.
+        _app, events = self.run_wizard_with_esc(["method", "cancel"], {"base": 2})
+        self.assertEqual(events, ["method", "base", "repo", "software", "review", "method", "base", "review"])
+
+    def test_esc_back_from_review_still_steps_back_through_the_wizard(self) -> None:
+        # Esc on the review screen itself is ordinary back navigation: it
+        # goes to the last step, and Esc there steps back again. Only a step
+        # opened *from* review returns to it.
+        _app, events = self.run_wizard_with_esc([None, "cancel"], {"software": 2})
+        self.assertEqual(
+            events,
+            ["method", "base", "repo", "software", "review", "software", "repo", "software", "review"],
+        )
+
+    def test_esc_inside_the_build_returns_to_review_with_the_config_intact(self) -> None:
+        # The build branch sat outside the wizard's ScreenBack handler, so
+        # Esc on any screen do_build() showed unwound through main_menu()
+        # to main(), which exited 0 (#507).
+        app = self.make_app()
+        app.gum = GumStub()
+        review_actions = iter(["build", "cancel"])
+
+        def fake_configure_repo(**_kwargs):
+            app.config.repo_name = "sentinel-repo"
+
+        with patch.object(app, "choose_method", return_value=None):
+            with patch.object(app, "choose_base_image", return_value=None):
+                with patch.object(app, "configure_repo", side_effect=fake_configure_repo):
+                    with patch.object(app, "select_packages", return_value=None):
+                        with patch.object(app, "review_new_image", side_effect=lambda **_k: next(review_actions)) as review:
+                            with patch.object(app, "do_build", side_effect=ScreenBack()):
+                                app.create_new_image()
+
+        self.assertEqual(review.call_count, 2)
+        self.assertEqual(app.config.repo_name, "sentinel-repo")
+
+    def test_main_menu_returns_to_itself_when_a_flow_lets_esc_through(self) -> None:
+        # main() reads a ScreenBack that reaches it as quitting and exits 0,
+        # so one leaking out of a flow ended the whole app (#507). It pops
+        # back one screen, and from a flow that screen is the main menu.
+        app = self.make_app()
+        stub = GumStub()
+        choices = ["View Build Status", "Quit"]
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "view_build_status", side_effect=ScreenBack()) as flow:
+            with self.assertRaises(SystemExit) as raised:
+                app.main_menu()
+
+        flow.assert_called_once()
+        self.assertEqual(choices, [])
+        self.assertEqual(raised.exception.code, 0)
+
     def test_main_menu_recovers_from_command_error(self) -> None:
         # A CommandError raised by any dispatched action must be reported and
         # return to the main menu instead of propagating out of the app.
@@ -9796,7 +9908,9 @@ class BuilderTests(unittest.TestCase):
     def test_piped_widgets_say_so_and_inherited_widgets_do_not(self) -> None:
         # Each widget is run twice: once succeeding, to show which of the
         # two stdin arrangements it actually uses; once exiting 1, to show
-        # that the terminal probe is asked about that same arrangement.
+        # that the terminal probe is asked about that same arrangement. The
+        # probe answers "no terminal", the one outcome every widget shares:
+        # with a terminal, exit 1 is Esc, which enter_to_continue() absorbs.
         gum = Gum()
         widgets = {
             "choose": (lambda: gum.choose(["alpha", "beta"]), False),
@@ -9811,10 +9925,10 @@ class BuilderTests(unittest.TestCase):
                 with patch.object(Gum, "interactive_stdout", return_value=ok) as run_mock:
                     call()
                 self.assertEqual(run_mock.call_args.kwargs.get("stdin") is None, inherited)
-                esc = subprocess.CompletedProcess(["gum", name], 1, "", "")
-                with patch.object(Gum, "interactive_stdout", return_value=esc):
-                    with patch.object(Gum, "terminal_available", return_value=True) as probe:
-                        with self.assertRaises(ScreenBack):
+                no_tty = subprocess.CompletedProcess(["gum", name], 1, "", "")
+                with patch.object(Gum, "interactive_stdout", return_value=no_tty):
+                    with patch.object(Gum, "terminal_available", return_value=False) as probe:
+                        with self.assertRaises(CommandError):
                             call()
                 probe.assert_called_once_with(stdin_inherited=inherited)
 
@@ -10127,6 +10241,20 @@ class BuilderTests(unittest.TestCase):
             with patch.object(Gum, "interactive_stdout", return_value=completed):
                 with self.assertRaises(KeyboardInterrupt):
                     gum.enter_to_continue()
+
+    def test_gum_enter_to_continue_treats_esc_as_enter(self) -> None:
+        # A pause names where Enter goes next. Esc raising ScreenBack instead
+        # unwound past that screen to main(), which exited 0 (#507). gum
+        # exiting 1 with no terminal behind it is still a failure (#367).
+        gum = Gum()
+        esc = subprocess.CompletedProcess(["gum", "input"], 1, "", "")
+        with patch.object(Gum, "instruction"):
+            with patch.object(Gum, "interactive_stdout", return_value=esc):
+                with patch.object(Gum, "terminal_available", return_value=True):
+                    self.assertIsNone(gum.enter_to_continue("Press Enter to return to the main menu..."))
+                with patch.object(Gum, "terminal_available", return_value=False):
+                    with self.assertRaises(CommandError):
+                        gum.enter_to_continue("Press Enter to return to the main menu...")
 
     # ── gum flag-injection guards ───────────────────────────────────────
     # gum parses any leading-dash positional as a flag and exits 80. Captured
@@ -14271,23 +14399,29 @@ class BuilderTests(unittest.TestCase):
         # of render_preflight_failure(), so preflight() never reached its
         # SystemExit(1) and main() exited 0: a missing tool reported success
         # to the wrapper that ran it (#367). Esc and Enter mean the same
-        # thing here -- leave -- and the exit status is the point.
+        # thing here -- leave -- and the exit status is the point. The pause
+        # runs through the real Gum.enter_to_continue(), which is what now
+        # absorbs Esc (#507), with gum exiting 1 as Esc makes it.
         app = self.make_app()
         stub = GumStub()
         stub.ensure_available = lambda: None
+        real_gum = Gum()
 
-        def esc(placeholder: str = "Press Enter to continue...") -> None:
+        def pause(placeholder: str = "Press Enter to continue...") -> None:
             stub.prompts.append(placeholder)
-            raise ScreenBack()
+            real_gum.enter_to_continue(placeholder)
 
-        stub.enter_to_continue = esc
+        stub.enter_to_continue = pause
         app.gum = stub
-        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name != "cosign"):
-            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gh"], 0, "", "")):
-                with patch.object(app, "github_login_name", return_value="octocat"):
-                    with redirect_stdout(io.StringIO()):
-                        with self.assertRaises(SystemExit) as raised:
-                            app.preflight()
+        esc = subprocess.CompletedProcess(["gum", "input"], 1, "", "")
+        with patch.object(Gum, "interactive_stdout", return_value=esc), patch.object(Gum, "instruction"):
+            with patch.object(Gum, "terminal_available", return_value=True):
+                with patch("atomic_image_builder.command_exists", side_effect=lambda name: name != "cosign"):
+                    with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gh"], 0, "", "")):
+                        with patch.object(app, "github_login_name", return_value="octocat"):
+                            with redirect_stdout(io.StringIO()):
+                                with self.assertRaises(SystemExit) as raised:
+                                    app.preflight()
         self.assertEqual(raised.exception.code, 1)
         self.assertEqual(stub.prompts, ["Press Enter to exit to the terminal..."])
 
@@ -16610,6 +16744,25 @@ class BuilderTests(unittest.TestCase):
     def test_write_esc_raises_screen_back_with_real_gum(self) -> None:
         with self.assertRaises(ScreenBack):
             self.write_with_real_gum([b"sshd.service", b"\x1b"])
+
+    def test_esc_at_a_pause_returns_like_enter_with_real_gum(self) -> None:
+        # The reproduction from #507: gum exits 1 on Esc, and the pause after
+        # a failed `gh run list` let that out of render_build_status() as
+        # ScreenBack, which main() turned into a quiet exit 0.
+        if shutil.which("gum") is None:
+            self.skipTest("gum is not installed")
+        app = self.make_app()
+        gum = Gum()
+        gum.interactive_stdout = lambda args, *, stdin=None: drive_real_gum(args, stdin=stdin, keys=[b"\x1b"])
+        app.gum = gum
+        failing = subprocess.CompletedProcess(["gh"], 1, "", "boom")
+        # See write_with_real_gum() for why the terminal probe is answered.
+        with patch.object(Gum, "terminal_available", return_value=True):
+            with patch.object(Gum, "instruction") as instruction:
+                with patch("atomic_image_builder.run", return_value=failing):
+                    with redirect_stdout(io.StringIO()):
+                        app.render_build_status("owner", "repo")
+        instruction.assert_called_once_with("Press Enter to return to the main menu...")
 
     def test_input_passes_value_placeholder_and_width_flags_through(self) -> None:
         gum = Gum()
