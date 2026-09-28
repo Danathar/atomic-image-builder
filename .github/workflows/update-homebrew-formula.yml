@@ -37,8 +37,10 @@ permissions:
   issues: write
 
 # Serialized: two releases in quick succession must not race to rewrite the
-# same file. Not cancel-in-progress -- an interrupted run could leave the
-# formula updated locally but unpushed, which looks like success and is not.
+# same file. A queued run is replaced by a newer one; that is intended here,
+# as the newest release's formula is the one to land. Not cancel-in-progress
+# -- an interrupted run could leave the formula updated locally but unpushed,
+# which looks like success and is not.
 concurrency:
   group: update-homebrew-formula
   cancel-in-progress: false

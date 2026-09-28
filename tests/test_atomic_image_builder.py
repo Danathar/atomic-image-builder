@@ -70,6 +70,7 @@ from atomic_image_builder import (
     ScreenBack,
     classic_ostree_origin,
     config_from_state_payload,
+    containerfile_escape,
     determine_fedora_atomic_default_tag,
     ensure_trailing_newline,
     ensure_workflow_job_env_entries,
@@ -166,9 +167,6 @@ class GumStub:
 
     def table(self, *_args, **_kwargs) -> None:
         pass
-
-    def table_widths(self, *_args, **_kwargs) -> str:
-        return "20,40"
 
     def form_width(self, **_kwargs) -> int:
         return 80
@@ -2491,6 +2489,144 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("  push:\n    branches:\n      - master\n  workflow_dispatch:", patched)
         self.assertNotIn("[main, dev]", patched)
         self.assertEqual(app.patch_workflow_branch_filters(patched, "master"), patched)
+
+    @staticmethod
+    def workflow_triggers(workflow: str) -> dict:
+        """Parse just the `on:` block of ``workflow`` -- the snapshots' other
+        blocks carry shapes the strict test parser deliberately refuses."""
+        lines = workflow.splitlines()
+        start = lines.index("on:")
+        end = next(
+            (index for index in range(start + 1, len(lines)) if lines[index] and not lines[index][0].isspace()),
+            len(lines),
+        )
+        return parse_block_yaml("\n".join(lines[start:end]) + "\n")["on"]
+
+    def test_patch_container_workflow_keeps_an_indentless_branches_list_parseable(self) -> None:
+        # PyYAML and ruamel write a sequence at its key's own indent. The new
+        # entry went in at key indent plus two beside it, and the bundled
+        # workflow stopped parsing (#523).
+        app = self.make_app()
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github" / "workflows" / "build.yml").read_text()
+        indentless = snapshot.replace("    branches:\n      - main\n", "    branches:\n    - main\n")
+        self.assertEqual(indentless.count("    branches:\n    - main\n"), 2)
+        patched = app.patch_container_workflow(indentless, default_branch="master")
+        triggers = self.workflow_triggers(patched)
+        self.assertEqual(triggers["pull_request"], {"branches": ["master"]})
+        self.assertEqual(triggers["push"]["branches"], ["master"])
+        self.assertEqual(app.patch_container_workflow(patched, default_branch="master"), patched)
+
+    def test_patch_workflow_branch_filters_replaces_deeper_entries_and_entries_behind_a_comment(self) -> None:
+        # Only entries at exactly six spaces were removed: a new entry at six
+        # above old ones at eight folded into one scalar, "main - main", and
+        # a comment line ended the removal early, keeping a stale branch.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            on:
+              push:
+                branches:
+                    - main
+              pull_request:
+                branches:
+                  - trunk
+                  # the release line
+                  - dev
+                paths:
+                  - Containerfile
+            """
+        )
+        patched = app.patch_workflow_branch_filters(workflow, "master")
+        self.assertEqual(
+            parse_block_yaml(patched),
+            {
+                "on": {
+                    "push": {"branches": ["master"]},
+                    "pull_request": {"branches": ["master"], "paths": ["Containerfile"]},
+                }
+            },
+        )
+        self.assertIn("    branches:\n        - master\n", patched)
+        self.assertIn("      # the release line\n", patched)
+        self.assertEqual(app.patch_workflow_branch_filters(patched, "master"), patched)
+
+    def test_patch_workflow_branch_filters_leaves_a_job_named_push_alone(self) -> None:
+        # `push` and `pull_request` are only triggers under `on:`. A job with
+        # that ID was given a branches: key, which Actions rejects.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            on:
+              pull_request:
+            jobs:
+              push:
+                runs-on: ubuntu-latest
+            """
+        )
+        patched = app.patch_workflow_branch_filters(workflow, "master")
+        self.assertEqual(
+            parse_block_yaml(patched),
+            {"on": {"pull_request": {"branches": ["master"]}}, "jobs": {"push": {"runs-on": "ubuntu-latest"}}},
+        )
+
+    def test_patch_workflow_branch_filters_leaves_a_branches_ignore_trigger_alone(self) -> None:
+        # Actions refuses `branches` beside `branches-ignore` on one event.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            on:
+              push:
+                branches-ignore:
+                  - 'dependabot/**'
+              pull_request:
+            """
+        )
+        patched = app.patch_workflow_branch_filters(workflow, "master")
+        self.assertEqual(
+            parse_block_yaml(patched),
+            {"on": {"push": {"branches-ignore": ["dependabot/**"]}, "pull_request": {"branches": ["master"]}}},
+        )
+
+    def test_branch_filters_find_the_triggers_under_a_quoted_on_key(self) -> None:
+        # `"on":`, `'on':` and `on :` are the same key to YAML and to Actions.
+        # Scoping the patch to a literal `on:` skipped every trigger under
+        # them, so a default-branch switch left both workflow types building
+        # the old branch, and reported nothing.
+        cases = (
+            (self.make_app(), CONTAINERFILE_TEMPLATE_DIR, "patch_container_workflow"),
+            (self.make_bluebuild_app(), BLUEBUILD_TEMPLATE_DIR, "patch_bluebuild_workflow"),
+        )
+        for app, template_dir, method in cases:
+            patch = getattr(app, method)
+            # The workflow a repository generated on `main` carries.
+            snapshot = (template_dir / ".github" / "workflows" / "build.yml").read_text()
+            generated = patch(snapshot, default_branch="main")
+            self.assertEqual(generated.count("\non:\n"), 1)
+            self.assertEqual(generated.count("    branches:\n      - main\n"), 2)
+            for spelling in ('"on":', "'on':", "on :", '"on" : # triggers'):
+                with self.subTest(method=method, spelling=spelling):
+                    quoted = generated.replace("\non:\n", f"\n{spelling}\n")
+                    patched = patch(quoted, default_branch="master")
+                    self.assertIn(f"\n{spelling}\n", patched)
+                    self.assertIn("  pull_request:\n    branches:\n      - master\n", patched)
+                    self.assertIn("  push:\n    branches:\n      - master\n", patched)
+                    self.assertNotIn("      - main\n", patched)
+                    self.assertEqual(patch(patched, default_branch="master"), patched)
+
+    def test_branch_filters_quote_a_default_branch_yaml_would_misread(self) -> None:
+        # `#main` is a comment and `null` is not a string when written bare;
+        # both are legal branch names. An ordinary name stays unquoted.
+        app = self.make_app()
+        workflow = "on:\n  push:\n    branches:\n      - main\n  pull_request:\n"
+        for branch in ("#main", "null", "@dev", "1.0"):
+            with self.subTest(branch=branch):
+                patched = app.patch_workflow_branch_filters(workflow, branch)
+                expected = {"branches": [branch]}
+                self.assertEqual(parse_block_yaml(patched), {"on": {"push": expected, "pull_request": expected}})
+                generated = self.workflow_triggers(app.generate_container_workflow(default_branch=branch))
+                self.assertEqual(generated["pull_request"], expected)
+                self.assertEqual(generated["push"]["branches"], [branch])
+        self.assertIn("      - master\n", app.patch_workflow_branch_filters(workflow, "master"))
 
     def test_validate_config_rejects_unsafe_package_token(self) -> None:
         app = self.make_app()
@@ -6195,6 +6331,38 @@ class BuilderTests(unittest.TestCase):
             ["Finished checking package names. Press Enter to return to the package menu..."],
         )
 
+    def test_manual_packages_counts_only_names_not_already_selected(self) -> None:
+        # A name already in the list is dropped before the dnf5 lookup, so
+        # the success line and the pause prompt agree on what was added.
+        app = self.make_app()
+        app.config.packages = ["tmux"]
+        stub = GumStub()
+        stub.write = lambda **_kwargs: "tmux htop"
+        app.gum = stub
+        with patch.object(app, "lookup_host_packages", side_effect=lambda pkgs, **_kwargs: {p: True for p in pkgs}) as lookup:
+            app.manual_packages()
+        lookup.assert_called_once_with(["htop"], resolve_provides=True)
+        self.assertEqual(app.config.packages, ["tmux", "htop"])
+        self.assertIn(("success", "Added 1 package(s) from manual entry"), stub.messages)
+        self.assertEqual(stub.prompts, ["Added 1 package(s). Press Enter to return to the package menu..."])
+
+    def test_manual_packages_adds_nothing_when_every_name_is_already_selected(self) -> None:
+        app = self.make_app()
+        app.config.packages = ["tmux"]
+        stub = GumStub()
+        stub.write = lambda **_kwargs: "tmux"
+        app.gum = stub
+        with (
+            patch.object(app, "validate_token_list") as validate,
+            patch.object(app, "lookup_host_packages") as lookup,
+        ):
+            app.manual_packages()
+        validate.assert_not_called()
+        lookup.assert_not_called()
+        self.assertEqual(app.config.packages, ["tmux"])
+        self.assertFalse(any(level in {"success", "error", "warn"} for level, _message in stub.messages))
+        self.assertEqual(stub.prompts, ["No packages were added. Press Enter to return to the package menu..."])
+
     def test_select_common_services_replaces_curated_selection_only(self) -> None:
         app = self.make_app()
         app.config.services = ["custom.service", COMMON_SERVICES[0][1]]
@@ -6386,34 +6554,45 @@ class BuilderTests(unittest.TestCase):
         self.assertIn(("warn", MANAGED_REPO_WARNING), app.gum.messages)
 
     def test_do_build_shows_reset_hint_after_scanned_import(self) -> None:
-        app = self.make_app()
-        app.github_available = True
-        app.github_user = "example"
-        app.config.github_user = "example"
-        app.config.scanned_packages = ["tmux"]
-        app.config.packages = ["tmux"]
-        app.gum = GumStub()
+        # Both ways a scan leads to the reset: packages carried into the image,
+        # or only customizations the user agreed to leave behind.
+        for carried in (True, False):
+            with self.subTest(carried=carried):
+                app = self.make_app()
+                app.github_available = True
+                app.github_user = "example"
+                app.config.github_user = "example"
+                if carried:
+                    app.config.scanned_packages = ["tmux"]
+                    app.config.packages = ["tmux"]
+                else:
+                    app.config.scan_omitted_customizations = True
+                app.gum = GumStub()
 
-        def fake_run(args, **_kwargs):
-            if args[:3] == ["gh", "repo", "view"]:
-                return subprocess.CompletedProcess(list(args), 1, "", "")
-            return subprocess.CompletedProcess(list(args), 0, "", "")
+                def fake_run(args, **_kwargs):
+                    if args[:3] == ["gh", "repo", "view"]:
+                        return subprocess.CompletedProcess(list(args), 1, "", "")
+                    return subprocess.CompletedProcess(list(args), 0, "", "")
 
-        output = io.StringIO()
-        with redirect_stdout(output):
-            with patch("atomic_image_builder.command_exists", return_value=True):
-                with patch("atomic_image_builder.run", side_effect=fake_run):
-                    with patch.object(app, "ensure_signing_ready", return_value=True):
-                        with patch.object(app, "repo_default_branch", return_value="main"):
-                            with patch.object(app, "seed_project_template", return_value=None):
-                                with patch.object(app, "write_project_files", return_value=None):
-                                    self.assertTrue(app.do_build())
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    with patch("atomic_image_builder.command_exists", return_value=True):
+                        with patch("atomic_image_builder.run", side_effect=fake_run):
+                            with patch.object(app, "ensure_signing_ready", return_value=True):
+                                with patch.object(app, "repo_default_branch", return_value="main"):
+                                    with patch.object(app, "seed_project_template", return_value=None):
+                                        with patch.object(app, "write_project_files", return_value=None):
+                                            self.assertTrue(app.do_build())
 
-        self.assertIn("Scheduled rebuilds also run daily at about", output.getvalue())
-        self.assertIn("sudo rpm-ostree reset", output.getvalue())
-        # The panel is the first place the command is seen, so it carries the
-        # same qualification the README does rather than deferring to it.
-        self.assertIn("not only the ones this image reproduces", output.getvalue())
+                self.assertIn("Scheduled rebuilds also run daily at about", output.getvalue())
+                self.assertIn("sudo rpm-ostree reset", output.getvalue())
+                # The panel is the first place the command is seen, so it carries the
+                # same qualification the README does rather than deferring to it.
+                self.assertIn("not only the ones this image reproduces", output.getvalue())
+                self.assertIn(
+                    "This repo was created from a scan of your current system's rpm-ostree customizations.",
+                    output.getvalue(),
+                )
 
     def test_do_build_omits_reset_hint_for_normal_build(self) -> None:
         app = self.make_app()
@@ -6439,6 +6618,7 @@ class BuilderTests(unittest.TestCase):
 
         self.assertIn("Scheduled rebuilds also run daily at about", output.getvalue())
         self.assertNotIn("sudo rpm-ostree reset", output.getvalue())
+        self.assertNotIn("rpm-ostree customizations", output.getvalue())
         # The completion panel is where someone is told the build has started,
         # so it is where the step between a green build and a working switch
         # belongs -- there is no package to check yet at this point.
@@ -7680,6 +7860,9 @@ class BuilderTests(unittest.TestCase):
                         app.render_build_status("Example", "my-image")
         hints = " ".join(m for level, m in stub.messages if level == "hint")
         self.assertIn("sudo rpm-ostree reset", hints)
+        # The screen only has the state file's single flag, so the lead-in has
+        # to be true whether the scan carried packages or only omitted some.
+        self.assertIn("This repo was created from a scan of your current system's rpm-ostree customizations.", hints)
         # Built from the arguments, since the picker does not load the config.
         self.assertIn(
             "sudo bootc switch --enforce-container-sigpolicy ghcr.io/example/my-image:latest",
@@ -7765,6 +7948,7 @@ class BuilderTests(unittest.TestCase):
                 with redirect_stdout(io.StringIO()):
                     app.render_build_status("Example", "my-image")
         self.assertNotIn("rpm-ostree reset", " ".join(m for _l, m in stub.messages))
+        self.assertNotIn("rpm-ostree customizations", " ".join(m for _l, m in stub.messages))
 
     def test_build_status_stays_quiet_until_a_build_has_succeeded(self) -> None:
         # Switching to an image that has not been built yet is the mistake this
@@ -8847,6 +9031,106 @@ class BuilderTests(unittest.TestCase):
             [m for level, m in stub.messages if level == "warn" and "cannot be carried" in m],
             stub.messages,
         )
+
+    def test_scan_os_does_not_preselect_a_capability_or_path_it_cannot_write(self) -> None:
+        # rpm-ostree records `rpm-ostree install 'pkgconfig(gtk4)'` and
+        # `/usr/bin/zsh` verbatim. Pre-selecting them let the user walk every
+        # step to an "Invalid package value(s)" refusal at the final gate, so
+        # the scan's output has to be something validate_config accepts, and
+        # the specs left behind have to be named on the omitted screen.
+        sections: list[tuple[str, tuple[str, ...]]] = []
+        rows: list[tuple[str, str]] = []
+        stub = self.accepting_gum()
+        stub.table = lambda table_rows, **_kwargs: rows.extend(table_rows)
+        with patch.object(App, "menu_section", lambda _self, title, *lines: sections.append((title, lines))):
+            result, app, stub = self.run_scan_with_status(
+                {
+                    "container-image-reference": self.BLUEFIN,
+                    "requested-packages": ["tmux", "pkgconfig(gtk4)", "/usr/bin/zsh"],
+                    "requested-base-removals": [],
+                },
+                gum=stub,
+            )
+        self.assertEqual(result, SCAN_OK)
+        self.assertEqual(app.config.scanned_packages, ["tmux"])
+        self.assertEqual(app.config.packages, ["tmux"])
+        self.assertIn(("Layered Packages", "1"), rows)
+        self.assertIn(("Cannot Be Carried Over", "2"), rows)
+        not_carried = " ".join(" ".join(lines) for title, lines in sections if title == "Not Carried Over")
+        self.assertIn("pkgconfig(gtk4)", not_carried)
+        self.assertIn("/usr/bin/zsh", not_carried)
+        app.config.method = "containerfile"
+        app.config.repo_name = "my-image"
+        app.validate_config()
+
+    def test_scan_os_asks_before_dropping_a_capability_or_path(self) -> None:
+        # The same default-no decision a local RPM gets: carrying on without
+        # a package the host has is the user's call, not the scan's.
+        result, _app, _stub = self.run_scan_with_status(
+            {
+                "container-image-reference": self.BLUEFIN,
+                "requested-packages": ["tmux", "pkgconfig(gtk4)"],
+                "requested-base-removals": [],
+            }
+        )
+        self.assertEqual(result, SCAN_CANCELLED)
+
+    def test_scan_os_with_only_capabilities_does_not_call_the_host_unlayered(self) -> None:
+        _result, app, stub = self.run_scan_with_status(
+            {
+                "container-image-reference": self.BLUEFIN,
+                "requested-packages": ["/usr/bin/zsh"],
+                "requested-base-removals": [],
+            },
+            gum=self.accepting_gum(),
+        )
+        self.assertEqual(app.config.packages, [])
+        warnings = [message for level, message in stub.messages if level == "warn"]
+        self.assertIn("No layered packages this tool can carry over were found.", warnings)
+
+    def test_scan_os_with_only_omitted_customizations_keeps_the_reset_instructions(self) -> None:
+        # The omission screen promises the switch instructions end with
+        # `rpm-ostree reset`. A host whose only layering is a capability or
+        # path spec leaves both scan lists empty, and the README and the
+        # build-status screen (which reads the pushed state file) both dropped
+        # the reset. A scan with nothing layered must still not gain one.
+        import base64
+        for requested, expected in ((["/usr/bin/zsh", "pkgconfig(gtk4)"], True), ([], False)):
+            with self.subTest(requested=requested):
+                result, app, _stub = self.run_scan_with_status(
+                    {
+                        "container-image-reference": self.BLUEFIN,
+                        "requested-packages": requested,
+                        "requested-base-removals": [],
+                    },
+                    gum=self.accepting_gum(),
+                )
+                self.assertEqual(result, SCAN_OK)
+                self.assertEqual(app.config.packages, [])
+                app.config.method = "containerfile"
+                app.config.repo_name = "my-image"
+                payload = app.state_payload()
+                self.assertIs(payload["scan_customizations_carried"], expected)
+                # The state file keeps the single flag it has always had.
+                self.assertNotIn("scan_omitted_customizations", payload)
+                section = self.readme_doc(app).section("Using The Image")
+                block = section.code_block()
+                self.assertEqual("sudo rpm-ostree reset" in block.lines, expected, block.lines)
+                # Nothing was carried into this image, so the lead-in may only
+                # say where the repo came from -- not that it carries changes.
+                lead_in = "This repo was created from a scan of your current system's rpm-ostree customizations."
+                paragraphs = [paragraph.lines for paragraph in section.paragraphs()]
+                if expected:
+                    self.assertEqual(paragraphs[0][0], lead_in)
+                else:
+                    self.assertNotIn(lead_in, [line for lines in paragraphs for line in lines])
+                # A later update loads the state file, not the scan.
+                reloaded = App()
+                reloaded.config = config_from_state_payload(payload)
+                self.assertIs(reloaded.carried_scan_customizations(), expected)
+                encoded = base64.b64encode(json.dumps(payload).encode()).decode()
+                with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, encoded, "")):
+                    self.assertIs(App().repo_carried_scan_customizations("example", "my-image"), expected)
 
     def test_unsupported_scan_customizations_reads_every_category(self) -> None:
         # One assertion per field rpm-ostree documents, because each is a
@@ -10761,7 +11045,7 @@ class BuilderTests(unittest.TestCase):
         gum = Gum()
         completed = subprocess.CompletedProcess(["gum", "table"], 0, "", "")
         with patch("atomic_image_builder.run", return_value=completed) as run_mock:
-            gum.table([["a", "1"], ["b", "2"]], columns="Name,Count", widths="10,5")
+            gum.table([["a", "1"], ["b", "2"]], columns="Name,Count")
         args, kwargs = run_mock.call_args
         call_args = args[0]
         # --print matters: without it `gum table` is an interactive row picker
@@ -10769,7 +11053,7 @@ class BuilderTests(unittest.TestCase):
         # so every screen with a table stopped there and nothing after it ran.
         self.assertEqual(
             call_args,
-            ["gum", "table", "--print", "--separator", "\t", "--columns", "Name,Count", "--widths", "10,5"],
+            ["gum", "table", "--print", "--separator", "\t", "--columns", "Name,Count"],
         )
         self.assertEqual(kwargs["capture"], False)
         self.assertEqual(kwargs["stdin"], "a\t1\nb\t2\n")
@@ -12768,6 +13052,220 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("RUN /ctx/build.sh", result)
         self.assertLess(result.index("system_files"), result.index("/ctx/build.sh"))
 
+    def snapshot_containerfile_with_builder_stage(self) -> str:
+        # The bundled snapshot with a builder stage added ahead of the stage
+        # that gets published, the way a user might extend a managed repo.
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / "Containerfile").read_text()
+        self.assertEqual(snapshot.count("\n# Base Image\n"), 1)
+        return snapshot.replace(
+            "\n# Base Image\n",
+            "\nFROM docker.io/library/golang:1.24 AS builder\nRUN go install example.com/tool@latest\n\n# Base Image\n",
+        )
+
+    def test_update_rebases_the_final_stage_not_a_builder_stage_ahead_of_it(self) -> None:
+        # #522: the first non-scratch FROM was rewritten, so the builder was
+        # rebased onto the chosen image and given Homebrew while the image
+        # that gets published kept its old base and had none.
+        app = self.make_app()
+        app.config.base_image_uri = "ghcr.io/ublue-os/aurora:stable"
+        app.config.brew_enabled = True
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / "Containerfile").write_text(self.snapshot_containerfile_with_builder_stage())
+            app.write_project_files(repo_dir, include_workflow=False)
+            result = (repo_dir / "Containerfile").read_text()
+        instructions = parse_containerfile(result)
+        froms = [(i.image, i.stage) for i in instructions if i.keyword == "FROM"]
+        self.assertEqual(
+            froms,
+            [("scratch", "ctx"), ("docker.io/library/golang:1.24", "builder"), ("ghcr.io/ublue-os/aurora:stable", None)],
+        )
+        final_from = max(n for n, i in enumerate(instructions) if i.keyword == "FROM")
+        brew_copies = [
+            n for n, i in enumerate(instructions) if i.keyword == "COPY" and i.flags == (f"--from={UNIVERSAL_BLUE_BREW_IMAGE}",)
+        ]
+        self.assertEqual(brew_copies, [final_from + 1])
+        build_run = next(n for n, i in enumerate(instructions) if i.keyword == "RUN" and i.argument.endswith("/ctx/build.sh"))
+        self.assertLess(brew_copies[0], build_run)
+        self.assertEqual(app.render_containerfile(result), result)
+
+    def test_render_containerfile_disabling_brew_removes_the_final_stage_block(self) -> None:
+        app = self.make_app()
+        app.config.brew_enabled = True
+        with_brew = app.render_containerfile(self.snapshot_containerfile_with_builder_stage())
+        app.config.brew_enabled = False
+        without = app.render_containerfile(with_brew)
+        self.assertNotIn("brew", without.lower())
+        self.assertIn("FROM docker.io/library/golang:1.24 AS builder", without)
+
+    def test_render_containerfile_gives_the_final_stage_brew_when_only_an_earlier_stage_has_it(self) -> None:
+        # A repo already updated by the #522 bug carries the brew block in its
+        # builder stage. Enabling Homebrew must put a block in the published
+        # stage, not refresh the one in a stage that is never published.
+        app = self.make_app()
+        app.config.brew_enabled = True
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable AS builder
+            COPY --from=ghcr.io/ublue-os/brew:old-tag /system_files /
+
+            FROM ghcr.io/ublue-os/bazzite:stable
+            RUN /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        final_stage = result[result.index("FROM ghcr.io/ublue-os/bazzite:stable\n") :]
+        self.assertIn(f"COPY --from={UNIVERSAL_BLUE_BREW_IMAGE} /system_files /", final_stage)
+        self.assertLess(final_stage.index("system_files"), final_stage.index("/ctx/build.sh"))
+
+    def test_render_containerfile_fails_closed_when_the_final_stage_has_no_registry_base(self) -> None:
+        # Rewriting a final "FROM scratch" or "FROM <earlier stage>" would
+        # throw away what it builds on; rewriting any other FROM would not
+        # change the published image. Either way the update must stop.
+        app = self.make_app()
+        app.config.brew_enabled = True
+        cases = {
+            "scratch": "FROM ghcr.io/ublue-os/bazzite:stable AS base\nRUN /ctx/build.sh\n\nFROM scratch\nCOPY --from=base / /\n",
+            "stage": "FROM ghcr.io/ublue-os/bazzite:stable AS Base\nRUN /ctx/build.sh\n\nFROM base\nRUN bootc container lint\n",
+        }
+        for name, existing in cases.items():
+            with self.subTest(name), self.assertRaisesRegex(CommandError, r"final stage \(line 4: FROM "):
+                app.render_containerfile(existing)
+
+    def test_render_containerfile_ignores_from_lookalikes_in_continuations_and_heredocs(self) -> None:
+        # Only a FROM instruction starts a stage. A continuation line or a
+        # heredoc body that happens to begin with "from" is part of a RUN.
+        # "<<EOF" as a quoted or escaped shell argument, a bare "<<" word and
+        # a <<< here-string open no heredoc for BuildKit: treating one as open
+        # would skip ahead to the later EOF line and hide the real final FROM.
+        app = self.make_app()
+        app.config.base_image_uri = "ghcr.io/ublue-os/aurora:stable"
+        existing = textwrap.dedent("""\
+            FROM docker.io/library/golang:1.24 AS builder
+            RUN cat <<<"hello"
+            RUN echo "<<EOF" '<<EOF' \\<<EOF << EOF
+
+            FROM ghcr.io/ublue-os/bazzite:stable
+            RUN echo \\
+                from here
+            RUN <<EOF
+            from os import path
+            EOF
+            RUN python3 - \\
+                # a comment does not end the instruction
+                <<-'PY'
+            \tfrom sys import argv
+            \tPY
+        """)
+        result = app.render_containerfile(existing)
+        self.assertEqual(
+            result,
+            existing.replace("FROM ghcr.io/ublue-os/bazzite:stable", "FROM ghcr.io/ublue-os/aurora:stable"),
+        )
+
+    def test_render_containerfile_does_not_let_a_comment_line_continue_into_the_final_from(self) -> None:
+        # BuildKit drops comment lines before it joins continuations, so a
+        # comment ending in a backslash continues nothing, and one inside a
+        # continued RUN neither ends it nor continues it past its last line.
+        # Reading either as a continuation hides the real final FROM.
+        app = self.make_app()
+        app.config.base_image_uri = "ghcr.io/ublue-os/aurora:stable"
+        existing = textwrap.dedent("""\
+            FROM docker.io/library/golang:1.24 AS builder
+            RUN go build \\
+                # ends in a backslash too \\
+                ./...
+            # the published stage follows \\
+            FROM ghcr.io/ublue-os/bazzite:stable
+            RUN /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertEqual(
+            result,
+            existing.replace("FROM ghcr.io/ublue-os/bazzite:stable", "FROM ghcr.io/ublue-os/aurora:stable"),
+        )
+        self.assertEqual(app.render_containerfile(result), result)
+
+    def test_render_containerfile_continues_lines_with_the_escape_directive_character(self) -> None:
+        # "# escape=`" makes the backtick the continuation character, so the
+        # FROM-shaped line after "RUN ... `" is part of that RUN, and a line
+        # ending in a backslash (a Windows path here) continues nothing. A
+        # backslash-only scanner reads it the other way round and rewrites
+        # the continuation instead of the stage that gets published. Without
+        # the directive, an escaped backslash at the end of a line is also a
+        # literal, not a continuation.
+        app = self.make_app()
+        app.config.base_image_uri = "ghcr.io/ublue-os/aurora:stable"
+        cases = {
+            "backtick": textwrap.dedent("""\
+                # escape=`
+
+                FROM ghcr.io/ublue-os/bazzite:stable AS base
+                RUN echo copying `
+                    FROM the base stage
+                RUN echo C:\\
+                FROM ghcr.io/ublue-os/bazzite:stable
+                RUN /ctx/build.sh
+            """),
+            "escaped backslash": textwrap.dedent("""\
+                FROM ghcr.io/ublue-os/bazzite:stable AS base
+                RUN echo C:\\\\
+                FROM ghcr.io/ublue-os/bazzite:stable
+                RUN /ctx/build.sh
+            """),
+        }
+        for name, existing in cases.items():
+            with self.subTest(name):
+                result = app.render_containerfile(existing)
+                final = existing.rindex("FROM ghcr.io/ublue-os/bazzite:stable\n")
+                self.assertEqual(
+                    result,
+                    existing[:final] + "FROM ghcr.io/ublue-os/aurora:stable\n" + existing[final:].split("\n", 1)[1],
+                )
+                self.assertEqual(app.render_containerfile(result), result)
+
+    def test_containerfile_escape_reads_only_the_leading_parser_directives(self) -> None:
+        # A directive counts only in the unbroken run of "# key=value" lines
+        # at the very top; a blank line, any other comment, an unknown key or
+        # an instruction ends the run, and a later "# escape=" is a comment.
+        cases = {
+            "first line": (["# escape=`", "FROM x"], "`"),
+            "spacing, case and a byte-order mark": (["\ufeff  #  ESCAPE = `  ", "FROM x"], "`"),
+            "after other directives": (["# syntax=docker/dockerfile:1", "# check=skip=all", "# escape=`"], "`"),
+            "explicit backslash": (["# escape=\\", "FROM x"], "\\"),
+            "none": (["FROM x"], "\\"),
+            "after a blank line": (["", "# escape=`"], "\\"),
+            "after a comment": (["# a comment", "# escape=`"], "\\"),
+            "after an unknown key": (["# owner=me", "# escape=`"], "\\"),
+            "after an instruction": (["FROM x", "# escape=`"], "\\"),
+        }
+        for name, (lines, expected) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(containerfile_escape(lines), expected)
+
+    def test_render_containerfile_removes_a_backtick_continued_brew_block_whole(self) -> None:
+        # Turning Homebrew off must take the preset RUN with the COPY. Its
+        # "brew" is on the backtick-continued line, so a scan that only knows
+        # backslash stops at the RUN line and strands the preset.
+        app = self.make_app()
+        existing = textwrap.dedent("""\
+            # escape=`
+            FROM ghcr.io/ublue-os/bazzite:stable
+            COPY --from=ghcr.io/ublue-os/brew:latest /system_files /
+            RUN --mount=type=tmpfs,dst=/tmp `
+                /usr/bin/systemctl preset brew-setup.service
+            RUN /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertEqual(result, "# escape=`\nFROM ghcr.io/ublue-os/bazzite:stable\nRUN /ctx/build.sh\n")
+        self.assertEqual(app.render_containerfile(result), result)
+
+    def test_render_containerfile_fails_closed_adding_brew_under_a_backtick_escape(self) -> None:
+        # The injected block continues its RUNs with backslashes, which a
+        # backtick-escaped Containerfile reads as separate instructions.
+        app = self.make_app()
+        app.config.brew_enabled = True
+        with self.assertRaisesRegex(CommandError, r"escape character to ` with an '# escape=' parser directive"):
+            app.render_containerfile("# escape=`\nFROM ghcr.io/ublue-os/bazzite:stable\nRUN /ctx/build.sh\n")
+
     # ── state file must not publish the host inventory ──────────────────
 
     def scanned_app(self) -> App:
@@ -13197,7 +13695,7 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(
             section.paragraphs()[0].lines,
             (
-                "This repo carries over package changes scanned from your current system.",
+                "This repo was created from a scan of your current system's rpm-ostree customizations.",
                 "Run these commands in the same session before rebooting:",
             ),
         )
@@ -15241,6 +15739,29 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.config.copr_repos, [])
         self.assertEqual(app.config.packages, [])
 
+    def test_add_copr_keeps_the_repo_and_counts_only_new_packages(self) -> None:
+        # An already-selected name adds nothing, so it must neither inflate
+        # the "Added N" count nor, when it is the only name typed, make
+        # add_copr treat the empty remainder as a rejection and drop the repo.
+        for typed, expected_packages, expected_successes in (
+            ("tmux htop", ["tmux", "htop"], ["Added 1 package(s) from COPR kwizart/fedy", "Added COPR: kwizart/fedy"]),
+            ("tmux", ["tmux"], ["Added COPR: kwizart/fedy"]),
+        ):
+            with self.subTest(typed=typed):
+                app = self.make_app()
+                app.config.packages = ["tmux"]
+                stub = GumStub()
+
+                def fake_input(*, prompt, typed=typed, **_kwargs):
+                    return "kwizart/fedy" if prompt == "COPR repo: " else typed
+
+                stub.input = fake_input
+                app.gum = stub
+                app.add_copr()
+                self.assertEqual(app.config.copr_repos, ["kwizart/fedy"])
+                self.assertEqual(app.config.packages, expected_packages)
+                self.assertEqual([message for level, message in stub.messages if level == "success"], expected_successes)
+
     def test_manage_copr_repos_add_delegates_to_add_copr(self) -> None:
         app = self.make_app()
         call_count = [0]
@@ -16533,6 +17054,19 @@ class BuilderTests(unittest.TestCase):
         )
         self.assertIn("      - 'README.md'\n", result)
 
+    def test_patch_workflow_path_filters_finds_a_quoted_on_block(self) -> None:
+        # `"on":` is the same trigger block as `on:`; matching only the bare
+        # spelling left its invalid './' filters in place.
+        app = self.make_app()
+        for spelling in ('"on":', "'on':", "on :"):
+            with self.subTest(spelling=spelling):
+                workflow_text = f"{spelling}\n  pull_request:\n    paths:\n      - './disk_config/disk.toml'\n"
+                result = app.patch_workflow_path_filters(workflow_text)
+                self.assertIn(f"{spelling}\n", result)
+                self.assertIn("      - 'disk_config/disk.toml'\n", result)
+                self.assertNotIn("'./", result)
+                self.assertEqual(app.patch_workflow_path_filters(result), result)
+
     def test_generated_disk_workflow_filters_name_files_that_exist(self) -> None:
         # The filters are only worth fixing if they point at something. Every
         # non-glob entry must name a file the generator actually writes --
@@ -17288,11 +17822,56 @@ class BuilderTests(unittest.TestCase):
         with patch.object(Gum, "terminal_width", return_value=10):
             self.assertEqual(gum.form_width(max_width=96, min_width=40, reserve=6), 40)
 
-    def test_table_widths_reserves_left_column_and_floors_right_column(self) -> None:
+    # A digest-pinned host's scan row: 111 characters of value on its own (#515).
+    PINNED_IMAGE_URI = "ghcr.io/ublue-os/bazzite-dx-gnome:stable@sha256:" + "0123456789abcdef" * 4
+
+    def test_fit_table_rows_wraps_last_column_into_continuation_rows(self) -> None:
+        # gum --print ignores --widths and sizes each column to its widest
+        # cell, so the only way to keep the box on screen is to hand it cells
+        # that already fit: widest label + widest value + 3 per column + 1.
         gum = Gum()
-        with patch.object(Gum, "content_width", return_value=80):
-            self.assertEqual(gum.table_widths(50, min_right=24), "50,26")
-            self.assertEqual(gum.table_widths(70, min_right=24), "70,24")
+        rows = [("Base Image", "Bazzite DX"), ("Image URI", self.PINNED_IMAGE_URI), ("Layered Packages", "3")]
+        with patch.object(Gum, "content_width", return_value=60):
+            fitted = gum.fit_table_rows(rows, headers=["Setting", "Value"])
+        value_width = max(len(value) for _label, value in fitted)
+        self.assertLessEqual(len("Layered Packages") + value_width + 3 * 2 + 1, 60)
+        self.assertEqual(fitted[1][0], "Image URI")
+        continuation = fitted[2:-1]
+        self.assertGreater(len(continuation), 0)
+        self.assertTrue(all(label == "" for label, _value in continuation))
+        # Wrapped, not truncated: the full reference is still all there.
+        self.assertEqual("".join(value for _label, value in fitted[1:-1]), self.PINNED_IMAGE_URI)
+        self.assertEqual(fitted[0], ["Base Image", "Bazzite DX"])
+        self.assertEqual(fitted[-1], ["Layered Packages", "3"])
+
+    def test_fit_table_rows_never_wraps_narrower_than_the_header(self) -> None:
+        gum = Gum()
+        with patch.object(Gum, "content_width", return_value=40):
+            fitted = gum.fit_table_rows([("A" * 38, "abcdefghijkl")], headers=["Setting", "Value"])
+        self.assertEqual(fitted, [["A" * 38, "abcde"], ["", "fghij"], ["", "kl"]])
+
+    def test_table_rendered_by_real_gum_fits_the_content_width(self) -> None:
+        # The point of #515 is what gum actually draws, so measure its output.
+        if shutil.which("gum") is None:
+            self.skipTest("gum is not installed")
+        rendered: list[str] = []
+
+        def run_capturing(args, *, capture, stdin):
+            proc = subprocess.run(list(args), input=stdin, text=True, capture_output=True, check=True)
+            rendered.append(proc.stdout)
+            return proc
+
+        rows = [
+            ("Base Image", "Bazzite DX"),
+            ("Image URI", self.PINNED_IMAGE_URI),
+            ("Removed Base Packages", "0"),
+        ]
+        with patch.object(Gum, "content_width", return_value=96), patch("atomic_image_builder.run", run_capturing):
+            Gum().table(rows, columns="Setting,Value")
+        lines = rendered[0].splitlines()
+        self.assertLessEqual(max(len(line) for line in lines), 96)
+        # Every line is a box line; a terminal-wrapped border would not be.
+        self.assertTrue(all(line[0] in "╭│├╰" and line[-1] in "╮│┤╯" for line in lines))
 
     def test_clear_runs_clear_command_only_when_interactive_tty(self) -> None:
         gum = Gum()

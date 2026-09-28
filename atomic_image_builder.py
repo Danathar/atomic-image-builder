@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -172,6 +173,13 @@ MANAGED_REPO_HINT_CONTAINERFILE = (
 MANAGED_REPO_HINT_BLUEBUILD = (
     f"Future updates use {STATE_FILE} as the source of truth and rewrite managed files such as README.md and recipes/recipe.yml."
 )
+# Lead-in to the reset-then-switch instructions in the README, the creation
+# panel and the build-status screen. It must hold whether the scan carried
+# packages into the image or only found customizations the user agreed to
+# leave behind: the build-status screen reads the single state-file flag and
+# cannot tell the two apart, and an update regenerates the README from that
+# same flag. So it says where the repo came from, not what the image carries.
+SCAN_SWITCH_LEAD_IN = "This repo was created from a scan of your current system's rpm-ostree customizations."
 CONTAINERFILE_TEMPLATE_REPO = "ublue-os/image-template"
 BLUEBUILD_TEMPLATE_REPO = "blue-build/template"
 TEMPLATE_SNAPSHOT_DIR = Path(__file__).resolve().parent / "template_snapshots"
@@ -249,6 +257,22 @@ SPAWN_VM_REBUILD_FIXED = (
     '    [ "{{ rebuild }}" -eq 1 ] && echo "Rebuilding the {{ type }} image" && just rebuild-{{ type }}'
 )
 FROM_LINE_RE = re.compile(r"^(\s*FROM(?:\s+--platform=\S+)?\s+)(\S+)(.*)$", flags=re.IGNORECASE)
+FROM_STAGE_NAME_RE = re.compile(r"^\s+AS\s+(\S+)", flags=re.IGNORECASE)
+# BuildKit (frontend/dockerfile/parser) reads heredocs only from RUN, COPY and
+# ADD, and only from a whole shell word -- split with quotes kept -- shaped
+# <<[-]WORD. So "<<EOF" in quotes, cat<<EOF and a <<< here-string open none.
+CONTAINERFILE_HEREDOC_INSTRUCTION_RE = re.compile(r"^\s*(?:ONBUILD\s+)?(?:RUN|COPY|ADD)\s", flags=re.IGNORECASE)
+CONTAINERFILE_HEREDOC_WORD_RE = re.compile(r"^\d*<<(-?)\s*([^<]*)$")
+# A parser directive (escape, syntax, check) is honoured only in the run of
+# "# key=value" lines at the very top of the file; any other line -- a blank
+# one, another comment or an instruction -- ends that run for good.
+CONTAINERFILE_DIRECTIVE_RE = re.compile(r"^#\s*([a-zA-Z][a-zA-Z0-9]*)\s*=\s*(.+?)\s*$")
+CONTAINERFILE_DIRECTIVE_NAMES = frozenset({"escape", "syntax", "check"})
+# BuildKit's line-continuation test for each allowed escape character: the
+# character, not itself escaped, then only spaces and tabs to the end.
+CONTAINERFILE_CONTINUATION_RE = {
+    escape: re.compile(rf"(?:(?<=[^{re.escape(escape)}])|^){re.escape(escape)}[ \t]*$") for escape in ("\\", "`")
+}
 INSTALLER_SWITCH_RE = re.compile(r"^(\s*bootc switch --mutate-in-place --transport registry )(\S+)(.*)$")
 INSTALLER_UNVERIFIED_SWITCH_COMMENT = (
     "# Signature enforcement is deliberately omitted for this installer switch:",
@@ -308,7 +332,7 @@ ACTION_PINS: dict[str, tuple[str, str]] = {
     "redhat-actions/push-to-registry": ("94ade333c38ecc0e60e94785125d9a52ca423b37", "v3.0.0"),
     "sigstore/cosign-installer": ("6f9f17788090df1f26f669e9d70d6ae9567deba6", "v4.1.2"),
     "actions/upload-artifact": ("043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "v7.0.1"),
-    "blue-build/github-action": ("836161eb076426a451e6a0054f722b1153b8b3ad", "v1.12"),
+    "blue-build/github-action": ("c295af864f2802fc6aea227507af43d35823db81", "v1.13"),
     "extractions/setup-just": ("53165ef7e734c5c07cb06b3c8e7b647c5aa16db3", "v4.0.0"),
 }
 ACTION_REF_PINS: dict[str, tuple[str, str]] = {
@@ -321,6 +345,7 @@ ACTION_REF_PINS: dict[str, tuple[str, str]] = {
     "osbuild/bootc-image-builder-action@8661cd3832544ad68c12dcde8681b13ab0f56a8d": ("56d652d0afb02eb3e4b8fd35e7ca0391dbebab2a", "main"),
     "osbuild/bootc-image-builder-action@56d652d0afb02eb3e4b8fd35e7ca0391dbebab2a": ("56d652d0afb02eb3e4b8fd35e7ca0391dbebab2a", "main"),
     "actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f": ACTION_PINS["actions/upload-artifact"],
+    "blue-build/github-action@836161eb076426a451e6a0054f722b1153b8b3ad": ACTION_PINS["blue-build/github-action"],
     "sigstore/cosign-installer@v4.0.0": ("faadad0cce49287aee09b3a48701e75088a2c6ad", "v4.0.0"),
     "sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad": ("faadad0cce49287aee09b3a48701e75088a2c6ad", "v4.0.0"),
 }
@@ -534,8 +559,10 @@ SCAN_UNSUPPORTED_BASE = "unsupported-base"
 
 # rpm-ostree records customizations in more fields than this tool reads.
 # `requested-packages` and `requested-base-removals` are the two it can carry,
-# because both are just names an image build can install or remove from a
-# repository. The rest are real customizations pinned to files on this host --
+# because both are names an image build can install or remove from a
+# repository -- except a `requested-packages` entry typed as a capability or
+# file path, which scan_os reports alongside these. The rest are real
+# customizations pinned to files on this host --
 # an RPM built somewhere else, a package replaced by a local build -- and no
 # generated image reproduces them. They were read as absent rather than as
 # unsupported, so a scan reported success and recommended `rpm-ostree reset`
@@ -583,9 +610,12 @@ class Config:
     # The scan lists hold the running host's complete layered-package and
     # base-removal inventory. They stay in memory to drive the selection screens
     # and are deliberately NOT written to the state file - see state_payload().
+    # scan_omitted_customizations is in-memory too: the scan found something the
+    # user agreed to leave behind, which reset still has to clear on switch.
     # scan_customizations_carried is the one bit anything downstream needs.
     scanned_packages: list[str] = field(default_factory=list)
     scanned_removed: list[str] = field(default_factory=list)
+    scan_omitted_customizations: bool = False
     scan_customizations_carried: bool = False
 
     def normalize(self) -> None:
@@ -717,8 +747,132 @@ def yaml_scalar(value: str) -> str:
     return _YAML_UNPRINTABLE_RE.sub(lambda m: f"\\u{ord(m.group()):04x}", json.dumps(value, ensure_ascii=False))
 
 
+# A plain scalar that every YAML reader Actions and BlueBuild use resolves to
+# the string it spells: letters, digits and the separators a branch name
+# usually carries, not starting with a digit or an indicator character.
+_YAML_SAFE_PLAIN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_./-]*")
+# ...minus the words YAML 1.1 resolves to a boolean or null when unquoted.
+_YAML_RESERVED_PLAIN_WORDS = frozenset({"y", "n", "yes", "no", "on", "off", "true", "false", "null"})
+
+
+def yaml_plain_or_scalar(value: str) -> str:
+    """``value`` bare when YAML reads it back as that string, else yaml_scalar().
+
+    For hand-shaped lines such as a branch filter entry, where the ordinary
+    value -- ``main`` -- is expected to stay bare, but a legal branch name
+    such as ``#main`` (a comment), ``@dev`` (a reserved indicator) or
+    ``null`` (not a string at all) must not be written unquoted.
+    """
+    if _YAML_SAFE_PLAIN_RE.fullmatch(value) and value.lower() not in _YAML_RESERVED_PLAIN_WORDS:
+        return value
+    return yaml_scalar(value)
+
+
 def ensure_trailing_newline(text: str) -> str:
     return text.rstrip("\n") + "\n"
+
+
+def containerfile_shell_words(text: str) -> list[str]:
+    """Split ``text`` into shell words with their quotes and escapes kept."""
+    words: list[str] = []
+    word: list[str] = []
+    quote = ""
+    escaped = False
+    for char in text:
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        elif char.isspace():
+            if word:
+                words.append("".join(word))
+                word = []
+            continue
+        word.append(char)
+    if word:
+        words.append("".join(word))
+    return words
+
+
+def containerfile_heredocs(instruction: str) -> list[tuple[str, bool]]:
+    """(terminator, strips-leading-tabs) for each heredoc ``instruction`` opens."""
+    if "<<" not in instruction or not CONTAINERFILE_HEREDOC_INSTRUCTION_RE.match(instruction):
+        return []
+    heredocs: list[tuple[str, bool]] = []
+    for word in containerfile_shell_words(instruction):
+        match = CONTAINERFILE_HEREDOC_WORD_RE.match(word)
+        if not match:
+            continue
+        try:
+            # The terminator is the word with its quoting removed: <<"EOF"
+            # ends at a line reading EOF.
+            name = shlex.split(match.group(2))
+        except ValueError:
+            continue
+        if len(name) == 1:
+            heredocs.append((name[0], match.group(1) == "-"))
+    return heredocs
+
+
+def containerfile_escape(lines: list[str]) -> str:
+    """The escape character BuildKit reads ``lines`` with.
+
+    It is a backslash unless an ``# escape=`` parser directive in the
+    leading run of directives sets it to a backtick. The escape character is
+    also the line-continuation character, so a scanner that assumed the
+    backslash would miss every continuation in a backtick-escaped file.
+    """
+    for index, line in enumerate(lines):
+        # BuildKit drops a byte-order mark and leading whitespace first.
+        match = CONTAINERFILE_DIRECTIVE_RE.match((line.removeprefix("\ufeff") if index == 0 else line).lstrip())
+        if not match or match.group(1).lower() not in CONTAINERFILE_DIRECTIVE_NAMES:
+            break
+        if match.group(1).lower() == "escape":
+            # BuildKit rejects any other value, so that build fails anyway.
+            return match.group(2) if match.group(2) in CONTAINERFILE_CONTINUATION_RE else "\\"
+    return "\\"
+
+
+def containerfile_from_indices(lines: list[str]) -> list[int]:
+    """Indices of the lines that are FROM instructions, in order.
+
+    A line that merely looks like one is skipped when it is the continuation
+    of the instruction above it or part of a heredoc body -- a Python
+    "from x import y" written by a RUN heredoc matches FROM_LINE_RE, and the
+    last FROM decides which stage is published, so it must not count. The
+    walk follows BuildKit's parser: the continuation character is the file's
+    escape character (see containerfile_escape), a comment line neither
+    starts nor ends a continued instruction, a blank line never ends one,
+    and heredoc bodies start after the whole instruction has been read.
+    """
+    continuation = CONTAINERFILE_CONTINUATION_RE[containerfile_escape(lines)]
+    indices: list[int] = []
+    heredocs: list[tuple[str, bool]] = []
+    instruction: str | None = None
+    for index, line in enumerate(lines):
+        if heredocs:
+            name, strip_tabs = heredocs[0]
+            if (line.lstrip("\t") if strip_tabs else line) == name:
+                heredocs.pop(0)
+            continue
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if instruction is None:
+            if FROM_LINE_RE.match(line):
+                indices.append(index)
+            instruction = ""
+        if continuation.search(line):
+            instruction += continuation.sub("", line)
+            continue
+        heredocs = containerfile_heredocs(instruction + line)
+        instruction = None
+    return indices
 
 
 def normalize_container_image_reference(container_ref: str) -> str:
@@ -1687,6 +1841,21 @@ def workflow_block_key(stripped_line: str) -> str | None:
     return workflow_key_name(WORKFLOW_BLOCK_KEY_RE.match(stripped_line))
 
 
+# The top-level `on:` key opening the trigger block, in every spelling YAML
+# and Actions read as that one key: `on:`, `"on":`, `'on':` and `on :`.
+WORKFLOW_ON_BLOCK_RE = re.compile(r"""^(?:on|"on"|'on')\s*:\s*(?:#.*)?$""")
+
+
+def is_workflow_on_block(stripped_line: str) -> bool:
+    """Whether a top-level line opens the workflow's trigger block.
+
+    workflow_block_key() knows only the bare spelling, and a patcher scoped to
+    the `on:` block through it silently skips every trigger under `"on":`,
+    which an owner's editor or YAML dumper may well write.
+    """
+    return WORKFLOW_ON_BLOCK_RE.match(stripped_line) is not None
+
+
 def block_sequence_entry_indent(lines: list[str], key_index: int) -> str:
     """Indent for a new entry in the block sequence under ``lines[key_index]``.
 
@@ -2288,10 +2457,6 @@ class Gum:
     def form_width(self, *, max_width: int = 96, min_width: int = 40, reserve: int = 6) -> int:
         return max(min_width, min(max_width, self.terminal_width() - reserve))
 
-    def table_widths(self, left: int, *, max_width: int = MAX_UI_WIDTH, min_right: int = 24) -> str:
-        right = max(min_right, self.content_width(max_width=max_width, reserve=0) - left - 4)
-        return f"{left},{right}"
-
     def terminal_available(self, *, stdin_inherited: bool = True) -> bool:
         # Mirrors how gum (bubbletea) finds its keyboard: the widget's own
         # stdin when that is a terminal, otherwise /dev/tty. Which of the two
@@ -2629,19 +2794,49 @@ class Gum:
         if proc.returncode != 0:
             raise CommandError("command failed: gum pager")
 
-    def table(self, rows: Sequence[Sequence[str]], *, columns: str, widths: str) -> None:
+    def table(self, rows: Sequence[Sequence[str]], *, columns: str) -> None:
         # --print is what makes this a display widget. Without it `gum table` is
         # an interactive row picker: it draws the rows, highlights one, shows a
         # "1/4 navigate / enter select" footer and blocks. Every screen that
         # showed a table therefore stopped there, and everything meant to follow
         # it -- hints, controls, the package chooser -- never ran, so the screen
         # looked like a table floating above an empty page.
-        text = "\n".join("\t".join(row) for row in rows) + "\n"
+        #
+        # --print also means gum sizes every column to its widest cell and
+        # ignores --widths (v0.17.0), so fitting the terminal is done here. One
+        # long value -- a digest-pinned image reference is over 110 characters
+        # -- otherwise pushed the box past the edge, and the terminal wrapped
+        # its border into a broken mess (#515).
+        fitted = self.fit_table_rows(rows, headers=columns.split(","))
+        text = "\n".join("\t".join(row) for row in fitted) + "\n"
         run(
-            ["gum", "table", "--print", "--separator", "\t", "--columns", columns, "--widths", widths],
+            ["gum", "table", "--print", "--separator", "\t", "--columns", columns],
             capture=False,
             stdin=text,
         )
+
+    def fit_table_rows(self, rows: Sequence[Sequence[str]], *, headers: Sequence[str]) -> list[list[str]]:
+        # Wraps the last column so the rendered table is no wider than
+        # content_width(). gum draws each column as its widest cell (header
+        # included) plus a space either side, with a border before, between and
+        # after the columns: 3 per column plus 1. The other columns keep their
+        # width; they hold labels, and the long values sit in the last one.
+        #
+        # Each wrapped line past the first becomes a row of its own with the
+        # other cells blank. --print draws no rule between rows, so it reads as
+        # one cell over several lines, and it keeps the input free of CSV
+        # quoting, which a newline inside a cell would need.
+        leading = [max(len(cell) for cell in column) for column in zip(headers, *rows)][:-1]
+        # Never narrower than the header: gum would draw the column that wide
+        # anyway, and it keeps the width positive on the narrowest terminal.
+        budget = max(len(headers[-1]), self.content_width() - sum(leading) - 3 * len(headers) - 1)
+        fitted: list[list[str]] = []
+        for row in rows:
+            *first, last = row
+            lines = [last] if len(last) <= budget else textwrap.wrap(last, budget, break_on_hyphens=False) or [""]
+            fitted.append([*first, lines[0]])
+            fitted.extend([*([""] * len(first)), line] for line in lines[1:])
+        return fitted
 
     def require_spinner_success(
         self, proc: subprocess.CompletedProcess[str], args: Sequence[str]
@@ -3758,7 +3953,10 @@ class App:
             placeholder="package1 package2",
             width=self.gum.form_width(max_width=80),
         )
-        packages = pkgs.replace(",", " ").split()
+        # Names already selected are skipped rather than handed on: with
+        # nothing new, add_packages_to_config returns False, which here would
+        # otherwise read as a rejected name and drop the repo as well.
+        packages = [package for package in pkgs.replace(",", " ").split() if package not in self.config.packages]
         if packages and not self.add_packages_to_config(packages, source_label=f"COPR {repo}"):
             return
         self.config.copr_repos = proposed_copr_repos
@@ -4067,12 +4265,24 @@ class App:
                 self.gum.hint(f"Supported: {supported_base_image_names()}")
                 return SCAN_UNAVAILABLE
             base = mapped
-        self.config.scanned_packages = unique(string_list(booted.get("requested-packages")))
+        # rpm-ostree records what was typed, and `rpm-ostree install` resolves
+        # capabilities and file paths as well as names: 'pkgconfig(gtk4)' and
+        # /usr/bin/zsh both land in requested-packages verbatim. Neither is a
+        # value validate_config lets into a generated repo, so pre-selecting
+        # them sent the user through every step to an "Invalid package
+        # value(s)" refusal at the very end, with nothing pointing back here.
+        # Split them off now and name them with everything else this image
+        # cannot carry, where the user decides with them in view.
+        requested_packages = unique(string_list(booted.get("requested-packages")))
+        self.config.scanned_packages = [spec for spec in requested_packages if PACKAGE_TOKEN_RE.fullmatch(spec)]
+        unwritable_packages = [spec for spec in requested_packages if not PACKAGE_TOKEN_RE.fullmatch(spec)]
         self.config.scanned_removed = unique(string_list(booted.get("requested-base-removals")))
         self.config.removed_packages = list(self.config.scanned_removed)
         # Read alongside the two supported fields, not instead of them: a host
         # can have both, and the counts below have to be able to say so.
         omitted = self.unsupported_scan_customizations(booted)
+        if unwritable_packages:
+            omitted.insert(0, ("Packages layered by capability or file path, not by name", unwritable_packages))
 
         self.config.base_image_uri = base
         self.config.base_image_name = base
@@ -4143,10 +4353,15 @@ class App:
             # boolean, not a list -- still counts for one, or the row reads
             # "Cannot Be Carried Over: 0" directly above the warning naming it.
             rows.append(("Cannot Be Carried Over", str(sum(len(values) or 1 for _label, values in omitted))))
-        self.gum.table(rows, columns="Setting,Value", widths=self.gum.table_widths(22))
+        self.gum.table(rows, columns="Setting,Value")
         print()
-        if omitted and not self.confirm_omitted_scan_customizations(omitted):
-            return SCAN_CANCELLED
+        if omitted:
+            if not self.confirm_omitted_scan_customizations(omitted):
+                return SCAN_CANCELLED
+            # That screen promised the switch instructions end with a reset.
+            # A host whose only layering is omitted leaves both scan lists
+            # empty, so without this nothing downstream would know to say it.
+            self.config.scan_omitted_customizations = True
         # The table states facts and nothing else. Without this a user is left
         # looking at their own system's details with no idea what the tool is
         # about to do with them, or that the base is settled and will not be
@@ -4293,6 +4508,11 @@ class App:
         return None
 
     def carried_scan_customizations(self) -> bool:
+        # True when the switch has to start with `rpm-ostree reset`: something
+        # scanned was carried into the image, or something scanned was left out
+        # on the user's say-so and the omission screen promised the reset.
+        if self.config.scan_omitted_customizations:
+            return True
         scanned_packages = set(self.config.scanned_packages)
         scanned_removed = set(self.config.scanned_removed)
         if scanned_packages or scanned_removed:
@@ -4688,7 +4908,10 @@ class App:
         *,
         source_label: str,
     ) -> bool:
-        packages = unique(candidates)
+        # A name already in the list adds nothing: drop it before validation,
+        # the dnf5 lookup (and any metadata-refresh offer) and every message,
+        # so "Added N" counts only names the config actually gains.
+        packages = [package for package in unique(candidates) if package not in self.config.packages]
         if not packages:
             return False
         try:
@@ -5313,7 +5536,7 @@ class App:
             summary_lines.extend(
                 [
                     "",
-                    "This repo carries over package changes from your current system.",
+                    SCAN_SWITCH_LEAD_IN,
                     "Before rebooting, run this first in the same session:",
                     "sudo rpm-ostree reset",
                     "Then run the bootc switch command above.",
@@ -5685,7 +5908,7 @@ class App:
             print()
             self.menu_section(
                 "Switching This Machine",
-                "This image carries package changes scanned from your system.",
+                SCAN_SWITCH_LEAD_IN,
                 *(
                     (
                         "First follow 'Trusting The Signing Key' in the repo README.",
@@ -6116,6 +6339,9 @@ class App:
         payload["scan_customizations_carried"] = self.carried_scan_customizations()
         payload.pop("scanned_packages", None)
         payload.pop("scanned_removed", None)
+        # Already folded into scan_customizations_carried above; the state
+        # file keeps the one flag it has always had.
+        payload.pop("scan_omitted_customizations", None)
         payload["tool_version"] = VERSION
         payload["state_version"] = 1
         return payload
@@ -6124,26 +6350,54 @@ class App:
         # If the template already has a Containerfile, replace the FROM line and
         # inject or remove the brew block so we preserve upstream formatting and
         # comments where possible.
-        if existing_text:
-            lines = existing_text.splitlines()
-            for index, line in enumerate(lines):
-                match = FROM_LINE_RE.match(line)
-                if not match:
-                    continue
-                prefix, image, suffix = match.groups()
-                if image.lower() == "scratch":
-                    continue
-                lines[index] = f"{prefix}{self.config.base_image_uri}{suffix}"
-                lines = self._patch_brew_block(lines, from_index=index)
-                return ensure_trailing_newline("\n".join(lines))
+        if not existing_text:
+            return self.generate_containerfile()
+        lines = existing_text.splitlines()
+        from_indices = containerfile_from_indices(lines)
+        if not from_indices:
             return ensure_trailing_newline(existing_text)
-        return self.generate_containerfile()
+        # The last stage is the image that gets built and published. Patching
+        # the first non-scratch FROM instead rebased a builder stage added
+        # ahead of it and gave it Homebrew, while the published stage kept its
+        # old base -- a change that looks like a normal edit in the diff (#522).
+        stage_names: set[str] = set()
+        for index in from_indices[:-1]:
+            stage = FROM_STAGE_NAME_RE.match(FROM_LINE_RE.match(lines[index]).group(3))
+            if stage:
+                stage_names.add(stage.group(1).lower())
+        index = from_indices[-1]
+        prefix, image, suffix = FROM_LINE_RE.match(lines[index]).groups()
+        if image.lower() == "scratch" or image.lower() in stage_names:
+            # Rewriting this FROM would discard the stage it builds on, and
+            # rewriting any other would not change the published image. Stop
+            # before anything is diffed or pushed.
+            raise CommandError(
+                f"The Containerfile's final stage (line {index + 1}: {lines[index].strip()}) does not "
+                "start from a registry image, so the chosen base image and Homebrew setting cannot be "
+                "applied to the image that gets published. Make the last FROM name the base image directly."
+            )
+        escape = containerfile_escape(lines)
+        if self.config.brew_enabled and escape != "\\":
+            # The brew block continues its RUNs with backslashes; under a
+            # backtick escape each of those lines would parse as its own
+            # instruction and the build would break after the push.
+            raise CommandError(
+                f"The Containerfile sets its escape character to {escape} with an '# escape=' parser "
+                "directive, and the Homebrew block this tool adds is written for the default backslash. "
+                "Remove the directive or turn Homebrew off for this image."
+            )
+        lines[index] = f"{prefix}{self.config.base_image_uri}{suffix}"
+        lines = self._patch_brew_block(lines, from_index=index, continuation=CONTAINERFILE_CONTINUATION_RE[escape])
+        return ensure_trailing_newline("\n".join(lines))
 
-    def _patch_brew_block(self, lines: list[str], *, from_index: int) -> list[str]:
+    def _patch_brew_block(self, lines: list[str], *, from_index: int, continuation: re.Pattern[str]) -> list[str]:
         # Find existing brew COPY line if present.
         brew_start: int | None = None
         brew_end: int | None = None
-        for i, line in enumerate(lines):
+        # Only the stage that FROM opens is searched: a block in an earlier
+        # stage is not in the published image, so it is not the one to update.
+        for i in range(from_index + 1, len(lines)):
+            line = lines[i]
             if line.strip().startswith("COPY --from=") and "brew" in line.lower() and "/system_files" in line:
                 brew_start = i
                 # The block is the COPY plus the RUNs that depend on what it
@@ -6165,7 +6419,7 @@ class App:
                     if probe >= len(lines) or not lines[probe].strip().startswith("RUN"):
                         break
                     run_end = probe
-                    while run_end < len(lines) and lines[run_end].rstrip().endswith("\\"):
+                    while run_end < len(lines) and continuation.search(lines[run_end]):
                         run_end += 1
                     # Only absorb a RUN that belongs to the block - for the
                     # preset, "brew" appears on the continuation lines rather
@@ -6506,7 +6760,7 @@ class App:
             stripped = line.strip()
             indent = len(line) - len(line.lstrip())
             if stripped and indent == 0:
-                in_triggers = workflow_block_key(stripped) == "on"
+                in_triggers = is_workflow_on_block(stripped)
                 filter_indent = None
                 output.append(line)
                 continue
@@ -6681,82 +6935,116 @@ class App:
         return ensure_trailing_newline("\n".join(output))
 
     def patch_workflow_branch_filters(self, workflow_text: str, default_branch: str) -> str:
+        # Points every pull_request and push trigger at the default branch.
+        # It runs over owner-edited text on every update, so it reads the
+        # shape the file already has rather than assuming the snapshot's
+        # (#523): an entry written at a different indent from the entries
+        # beside it either mixes indentation inside one sequence -- a parse
+        # error -- or folds into the entry above as one scalar, "main - main",
+        # which matches no branch. Both leave a repository that builds nothing.
+        #
+        # Scoped to the `on:` block, the way patch_workflow_path_filters is:
+        # a job may be called `push` too, and a `branches:` key inserted into
+        # a job is a key Actions rejects.
+        entry = yaml_plain_or_scalar(default_branch)
+
+        def patch_trigger(block: list[str], trigger_indent: int) -> list[str]:
+            content = [
+                (index, len(line) - len(line.lstrip()), line.strip())
+                for index, line in enumerate(block)
+                if line.strip() and not line.strip().startswith("#")
+            ]
+            filter_indent = content[0][1] if content else trigger_indent + 2
+            filter_keys: dict[str, int] = {}
+            for index, indent, stripped in content:
+                key = workflow_key(stripped) if indent == filter_indent else None
+                if key is not None:
+                    filter_keys.setdefault(key, index)
+            # Actions refuses `branches` and `branches-ignore` on one event.
+            # A trigger filtered by exclusion is the owner's choice, and
+            # rewriting it into an inclusion list would be guessing at intent.
+            if "branches-ignore" in filter_keys:
+                return block
+            prefix = " " * filter_indent
+            key_index = filter_keys.get("branches")
+            if key_index is None:
+                return [f"{prefix}branches:", f"{prefix}  - {entry}", *block]
+            key_line = block[key_index]
+            is_block_key = workflow_block_key(key_line.strip()) is not None
+            # The key's value is every deeper line, plus -- for a block key --
+            # the entries of an indentless sequence at the key's own indent,
+            # which is how PyYAML and ruamel write one. Comments inside it are
+            # the owner's and stay; every entry goes, so no stale branch
+            # survives behind a comment line.
+            value_end = key_index + 1
+            for index, indent, stripped in content:
+                if index <= key_index:
+                    continue
+                is_entry = stripped == "-" or stripped.startswith("- ")
+                if indent > filter_indent or (is_block_key and indent == filter_indent and is_entry):
+                    value_end = index + 1
+                    continue
+                break
+            if is_block_key:
+                # Where the existing entries sit, so the new one joins the
+                # same sequence -- key indent plus two only for an empty list.
+                entry_indent = block_sequence_entry_indent(block, key_index)
+            else:
+                # An inline value, "branches: [main]", cannot take a block
+                # entry beneath it; rewrite it to the block form.
+                key_line = f"{prefix}branches:"
+                entry_indent = prefix + "  "
+            kept = [
+                line for line in block[key_index + 1 : value_end] if not line.strip() or line.strip().startswith("#")
+            ]
+            return [*block[:key_index], key_line, f"{entry_indent}- {entry}", *kept, *block[value_end:]]
+
         lines = workflow_text.splitlines()
         output: list[str] = []
+        in_triggers = False
+        trigger_indent: int | None = None
         index = 0
         while index < len(lines):
             line = lines[index]
             stripped = line.strip()
             indent = len(line) - len(line.lstrip())
-            # Only block-style triggers can take an appended branches: block.
-            # An inline flow mapping such as "push: { branches: [main] }"
-            # already owns its filter inline; nesting another one under it is a
-            # parse error, so it is left exactly as written.
-            if indent == 2 and workflow_block_key(stripped) in {"pull_request", "push"}:
-                output.append(line)
-                index += 1
-                block_start = index
-                while index < len(lines):
-                    block_line = lines[index]
-                    block_stripped = block_line.strip()
-                    block_indent = len(block_line) - len(block_line.lstrip())
-                    # A sibling trigger ends the block. Testing for a trailing
-                    # colon missed any key carrying an inline comment - the
-                    # bundled BlueBuild snapshot literally ships
-                    # "  workflow_dispatch: # allow manually triggering builds"
-                    # - so the sibling was absorbed into the previous block. If
-                    # that sibling owns a branches: key, branches_found flips on
-                    # the wrong trigger, the filter is written there instead,
-                    # and the block we were actually patching never gets one:
-                    # PR builds then fire from every branch.
-                    if block_indent <= 2 and workflow_key(block_stripped) is not None:
-                        break
-                    index += 1
-                block = lines[block_start:index]
-                branch_block = ["    branches:", f"      - {default_branch}"]
-                patched_block: list[str] = []
-                branches_found = False
-                block_index = 0
-                while block_index < len(block):
-                    block_line = block[block_index]
-                    block_stripped = block_line.strip()
-                    block_indent = len(block_line) - len(block_line.lstrip())
-                    if block_indent == 4 and workflow_key(block_stripped) == "branches":
-                        prefix = block_line[: len(block_line) - len(block_line.lstrip())]
-                        if workflow_block_key(block_stripped) is None:
-                            # Inline flow form: "branches: [main]". Appending
-                            # "- <branch>" beneath it is a parse error, so
-                            # rewrite it to the same block form the other
-                            # branch writes - which also replaces the existing
-                            # entries with the default branch, exactly as the
-                            # block path below does.
-                            patched_block.append(f"{prefix}branches:")
-                            patched_block.append(f"{prefix}  - {default_branch}")
-                            branches_found = True
-                            block_index += 1
-                            continue
-                        patched_block.append(block_line)
-                        patched_block.append(f"{prefix}  - {default_branch}")
-                        branches_found = True
-                        block_index += 1
-                        while block_index < len(block):
-                            branch_line = block[block_index]
-                            branch_stripped = branch_line.strip()
-                            branch_indent = len(branch_line) - len(branch_line.lstrip())
-                            if branch_indent == 6 and branch_stripped.startswith("- "):
-                                block_index += 1
-                                continue
-                            break
-                        continue
-                    patched_block.append(block_line)
-                    block_index += 1
-                if branches_found:
-                    output.extend(patched_block)
-                else:
-                    output.extend(branch_block + block)
-                continue
-            output.append(line)
             index += 1
+            if not stripped or stripped.startswith("#"):
+                output.append(line)
+                continue
+            if indent == 0:
+                in_triggers = is_workflow_on_block(stripped)
+                trigger_indent = None
+                output.append(line)
+                continue
+            if not in_triggers:
+                output.append(line)
+                continue
+            if trigger_indent is None:
+                trigger_indent = indent
+            output.append(line)
+            # Only block-style triggers can take a branches: key. An inline
+            # flow mapping such as "push: { branches: [main] }" already owns
+            # its filter inline; nesting another one under it is a parse
+            # error, so it is left exactly as written.
+            if indent != trigger_indent or workflow_block_key(stripped) not in {"pull_request", "push"}:
+                continue
+            # The trigger's block runs to the next line at or above its own
+            # indent that is not a comment: a sibling trigger or the next
+            # top-level key. That sibling is recognised by position, not by
+            # a trailing colon -- the bundled BlueBuild snapshot ships
+            # "  workflow_dispatch: # allow manually triggering builds", and
+            # absorbing it into pull_request once wrote the filter onto the
+            # wrong trigger and let PR builds fire from every branch.
+            block_start = index
+            while index < len(lines):
+                block_line = lines[index]
+                block_stripped = block_line.strip()
+                block_indent = len(block_line) - len(block_line.lstrip())
+                if block_stripped and not block_stripped.startswith("#") and block_indent <= trigger_indent:
+                    break
+                index += 1
+            output.extend(patch_trigger(lines[block_start:index], trigger_indent))
         return ensure_trailing_newline("\n".join(output))
 
     def patch_bluebuild_action_inputs(self, workflow_text: str) -> str:
@@ -7229,12 +7517,12 @@ class App:
             "on:",
             "  pull_request:",
             "    branches:",
-            f"      - {default_branch}",
+            f"      - {yaml_plain_or_scalar(default_branch)}",
             "  schedule:",
             f"    - cron: '{DEFAULT_GITHUB_BUILD_CRON}'",
             "  push:",
             "    branches:",
-            f"      - {default_branch}",
+            f"      - {yaml_plain_or_scalar(default_branch)}",
             f"    paths-ignore: ['**/README.md', '{STATE_FILE}']",
             "  workflow_dispatch:",
             "",
@@ -7511,7 +7799,7 @@ class App:
                 *signing_policy_lines,
                 "## Using The Image",
                 "",
-                "This repo carries over package changes scanned from your current system.",
+                SCAN_SWITCH_LEAD_IN,
                 "Run these commands in the same session before rebooting:",
                 "",
                 "```bash",

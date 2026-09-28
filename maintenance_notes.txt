@@ -99,6 +99,19 @@ straight after its "[", the one position whose syntax is known without
 finding the matching bracket (#524).  Any other value (a scalar, an alias) is
 left alone.
 
+patch_workflow_branch_filters has the same exposure and runs on every update
+of both workflow types: it replaces a trigger's branches: entries with the
+default branch.  It writes the new entry at the indent of the existing ones
+(an indentless list stays indentless), removes every old entry however deep
+and whatever comments sit between them, only touches push/pull_request keys
+inside the on: block (a job may be called push), and leaves a trigger with
+branches-ignore: alone, since Actions refuses both filters on one event.  The
+on: block is recognised in every spelling YAML reads as that key -- on:,
+"on":, 'on': and on : (is_workflow_on_block, shared with
+patch_workflow_path_filters) -- because a bare-only match made a quoted key a
+silent no-op that left the old branch in place.  The branch name is quoted
+when YAML would misread it bare (#main, null, 1.0) — see #523.
+
 maintenance_audit.py currently validates action pin coverage but does not run
 the patchers against the snapshots.  When refreshing a template snapshot, run
 the test suite — the golden-file patcher tests in
@@ -358,7 +371,7 @@ user's files and credentials in reach; a tag anyone with push access to
 ghcr.io/blue-build/cli can repoint is not something to execute on that basis.
 The tag kept beside the digest is the floating one the pinned
 blue-build/github-action installs by default (CLI_VERSION_TAG in its
-"Determine Vars" step, "v0.9" at v1.12). The cost of the pin is parity: CI
+"Determine Vars" step, "v0.9" at v1.13). The cost of the pin is parity: CI
 pulls the tag and moves with it, the local build stays until re-pinned, so a
 local build can render with a CLI a step behind CI's. maintenance_audit.py's
 weekly run (audit_bluebuild_cli_image_pin) advises when the tag no longer
@@ -846,3 +859,46 @@ the fix is in the managed repo, not here -- replace the link with a regular
 file or directory and run the update again. There is no legitimate reason
 for a managed file to be a link; a repo that has one is telling us something
 has gone wrong with it.
+
+
+Containerfile Patcher: Which FROM Is the Published Stage
+--------------------------------------------------------
+render_containerfile() rewrites the base image of, and adds or removes the
+Homebrew block in, the last stage of an existing Containerfile, because that
+is the stage that gets built and published (#522). Which physical line is the
+last FROM is decided by containerfile_from_indices(), and it has to read the
+file the way BuildKit's frontend/dockerfile/parser does: a line that merely
+starts with "FROM" -- a continuation line, a heredoc body such as a Python
+`from x import y` -- is not a stage, and counting one rewrites the wrong line
+while the published image keeps its old base.
+
+The rules it follows, all from BuildKit's parser:
+
+  - The line-continuation character is the escape character: a backslash,
+    or a backtick when the file opens with an "# escape=`" parser
+    directive. containerfile_escape() reads it. Directives count only in the
+    unbroken run of `# key=value` lines (escape, syntax, check; key case
+    insensitive) at the very top -- a blank line, any other comment, an
+    unknown key or an instruction ends the run, and a later `# escape=` is an
+    ordinary comment.
+  - A line continues only when it ends in an unescaped escape character
+    followed by spaces or tabs; `C:\\` ends the instruction.
+  - Comment lines are dropped before continuations are joined: a comment
+    ending in the escape character continues nothing, and a comment inside a
+    continued instruction neither ends it nor extends it. Blank lines inside
+    one do not end it either.
+  - Heredocs open only in RUN, COPY and ADD, from a whole unquoted
+    `<<[-]WORD` shell word, after the whole instruction has been read. The
+    heredoc lexer always uses backslash, whatever the escape directive says.
+
+The Homebrew block this tool injects continues its RUNs with backslashes, so
+under a backtick escape it would split into separate (invalid) instructions.
+render_containerfile() therefore raises CommandError when brew_enabled is on
+and the file sets "# escape=`", before anything is diffed or pushed. With
+Homebrew off, an existing block is still found and removed using the file's
+own continuation character.
+
+Action required: none on a schedule. If BuildKit's parser changes these rules
+(parser.go, directives.go), update containerfile_escape() and
+containerfile_from_indices() together; the render_containerfile tests in
+tests/test_atomic_image_builder.py cover each rule through the real patch path.
