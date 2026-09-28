@@ -20,7 +20,7 @@ from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
 from dataclasses import fields as dataclass_fields
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path, PurePosixPath
 
 if sys.version_info < (3, 10):  # noqa: UP036
@@ -5707,7 +5707,11 @@ class App:
                         # raises TypeError. GitHub reports UTC, so read it as UTC
                         # rather than dropping the column to "unknown".
                         created = created.replace(tzinfo=timezone.utc)
-                    delta = now - created
+                    # A run created moments ago can carry a createdAt a few
+                    # seconds ahead of this machine's clock. A negative delta
+                    # has days == -1, which read as "-1d ago" on the screen
+                    # people open right after pushing, so treat it as now.
+                    delta = max(now - created, timedelta(0))
                     if delta.days:
                         when = f"{delta.days}d ago"
                     else:
