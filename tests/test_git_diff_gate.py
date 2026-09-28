@@ -2979,6 +2979,148 @@ class QuotedHeredocTests(unittest.TestCase):
         self.assertIsNotNone(gate.refusal("echo '\U000F0000'"))
 
 
+class UntrackedImportTests(unittest.TestCase):
+    """The allow rows that start the interpreter import from directories the
+    session can write to. untracked_import_refusal() holds them to modules
+    the index holds; these tests show the reach and the refusal on a
+    throwaway repository, so no file is ever dropped into this checkout."""
+
+    def repository(self, tmp: str) -> Path:
+        top = Path(tmp)
+        (top / "tests").mkdir()
+        (top / "tests/__init__.py").write_text("")
+        (top / "tests/test_tracked.py").write_text("")
+        (top / "maintenance_audit.py").write_text("")
+        for command in (
+            ["git", "init", "-q"],
+            ["git", "add", "."],
+        ):
+            subprocess.run(command, cwd=top, check=True, capture_output=True)
+        return top
+
+    def test_python_imports_a_module_file_from_the_directories_the_rows_start_in(self) -> None:
+        # Why the directory is read at all: the script's own directory and,
+        # under -m, the working directory, stand ahead of the standard library.
+        with tempfile.TemporaryDirectory() as tmp:
+            top = Path(tmp)
+            marker = top / "ran"
+            (top / "json.py").write_text(f"open({str(marker)!r}, 'w').close()\n")
+            (top / "script.py").write_text("import json\n")
+            subprocess.run([sys.executable, "script.py"], cwd=top, check=False, capture_output=True)
+            self.assertTrue(marker.exists(), "a json.py beside the script was not imported")
+            marker.unlink()
+            (top / "unittest.py").write_text(f"open({str(marker)!r}, 'w').close()\n")
+            subprocess.run(
+                [sys.executable, "-m", "unittest"], cwd=top, check=False, capture_output=True
+            )
+            self.assertTrue(marker.exists(), "an unittest.py in the working directory was not run")
+
+    def test_an_untracked_module_on_the_path_refuses_every_python_row(self) -> None:
+        commands = (
+            "python3 -m unittest discover -s tests",
+            "python3 -m coverage run -m unittest discover -s tests",
+            "python3 -m coverage report",
+            "python3 maintenance_audit.py --skip-upstream",
+            "python3 format_markdown_tables.py --check",
+            "time python3 -m unittest discover -s tests",
+        )
+        planted = (
+            "json.py",
+            "__future__.py",
+            "unittest.py",
+            "tests/test_new.py",
+            "tests/argparse.py",
+            "argparse/__init__.py",
+            "tests/helpers/__init__.py",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            top = self.repository(tmp)
+            for command in commands:
+                with self.subTest(command=command):
+                    self.assertIsNone(gate.untracked_import_refusal(command, top))
+            for name in planted:
+                path = top / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("")
+                for command in commands:
+                    with self.subTest(planted=name, command=command):
+                        reason = gate.untracked_import_refusal(command, top)
+                        self.assertIsNotNone(reason, f"{command!r} runs beside an untracked {name}")
+                        self.assertIn(name, reason)
+                subprocess.run(["git", "add", name], cwd=top, check=True, capture_output=True)
+                for command in commands:
+                    with self.subTest(staged=name, command=command):
+                        self.assertIsNone(
+                            gate.untracked_import_refusal(command, top),
+                            "a staged file is in the index and is what a reviewer sees",
+                        )
+
+    def test_what_python_cannot_import_is_left_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            top = self.repository(tmp)
+            for name in ("notes.txt", "my-script.py", "fixtures/data.py", ".env", "tests/e2e/lib.sh"):
+                path = top / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("")
+            self.assertIsNone(
+                gate.untracked_import_refusal("python3 -m unittest discover -s tests", top)
+            )
+
+    def test_only_the_python_rows_are_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            top = self.repository(tmp)
+            (top / "json.py").write_text("")
+            for command in ("git status", "python3 -m venv .venv", "shellcheck tests/e2e/lib.sh"):
+                with self.subTest(command=command):
+                    self.assertIsNone(gate.untracked_import_refusal(command, top))
+
+    def test_a_row_moved_to_another_directory_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            top = self.repository(tmp)
+            for command in (
+                "cd tests && python3 -m unittest discover -s tests",
+                "pushd tests; python3 maintenance_audit.py --skip-upstream",
+                "env -C tests python3 -m unittest discover -s tests",
+                "env --chdir=tests python3 -m coverage report",
+            ):
+                with self.subTest(command=command):
+                    self.assertIsNotNone(gate.untracked_import_refusal(command, top))
+
+    def test_a_directory_git_cannot_list_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNotNone(
+                gate.untracked_import_refusal("python3 -m coverage report", Path(tmp))
+            )
+
+    def test_main_reads_the_directory_the_session_is_in(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            top = self.repository(tmp)
+            payload = {
+                "tool_name": "Bash",
+                "tool_input": {"command": "python3 -m unittest discover -s tests"},
+                "cwd": str(top),
+            }
+            self.assertEqual(run_main(json.dumps(payload))[0], 0)
+            (top / "tests/test_new.py").write_text("")
+            code, err = run_main(json.dumps(payload))
+            self.assertEqual(code, 2)
+            self.assertIn("tests/test_new.py", err)
+
+    def test_every_python_allow_row_is_read(self) -> None:
+        # A new allow row that starts the interpreter fails here until
+        # PYTHON_ROWS names it.
+        allow = json.loads(SETTINGS.read_text(encoding="utf-8"))["permissions"]["allow"]
+        for rule in allow:
+            words = rule.removeprefix("Bash(").removesuffix(")").removesuffix(":*").split()
+            if not words or not re.fullmatch(r"python[\d.]*", words[0]):
+                continue
+            with self.subTest(rule=rule):
+                self.assertTrue(
+                    any(tuple(words[: len(row)]) == row for row in gate.PYTHON_ROWS),
+                    f"{rule} starts the interpreter and PYTHON_ROWS does not name it",
+                )
+
+
 class RegistrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.settings = json.loads(SETTINGS.read_text())
