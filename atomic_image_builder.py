@@ -290,7 +290,7 @@ ACTION_PINS: dict[str, tuple[str, str]] = {
     "redhat-actions/push-to-registry": ("94ade333c38ecc0e60e94785125d9a52ca423b37", "v3.0.0"),
     "sigstore/cosign-installer": ("6f9f17788090df1f26f669e9d70d6ae9567deba6", "v4.1.2"),
     "actions/upload-artifact": ("043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "v7.0.1"),
-    "blue-build/github-action": ("836161eb076426a451e6a0054f722b1153b8b3ad", "v1.12"),
+    "blue-build/github-action": ("c295af864f2802fc6aea227507af43d35823db81", "v1.13"),
     "extractions/setup-just": ("53165ef7e734c5c07cb06b3c8e7b647c5aa16db3", "v4.0.0"),
 }
 ACTION_REF_PINS: dict[str, tuple[str, str]] = {
