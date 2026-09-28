@@ -527,6 +527,12 @@ REACH_CORPUS = (
     ("redirection", "just --fmt --check -f - < ./.env", REFUSED, "a - justfile makes just read standard input, and it prints the line it could not parse"),
     ("redirection", "hadolint Containerfile < contrib/aib", ALLOWED, "hadolint reports a position and the offending character, never the source line"),
     ("redirection", "ruff check >cosign.pub", ALLOWED, "its allow row carries no :*, so the redirection makes the string match no rule and Claude Code prompts"),
+    ("redirection", "git commit -F - <<'EOF'\nit's fine\nEOF", ALLOWED, "a quoted here-document's body is input data, not shell, so its apostrophe is not a parse failure (#537)"),
+    ("redirection", "cat <<'EOF'x\nbody\nEOFx\ngit diff --no-index /dev/null ./cosign.key\nEOF", REFUSED, "bash's delimiter is the whole word EOFx, so the git line after it runs"),
+    ("redirection", "cat <<\\EOF.x\nbody\nEOF.x\ngit diff --no-index /dev/null ./cosign.key\nEOF", REFUSED, "the backslash-quoted delimiter runs on to EOF.x"),
+    ("redirection", 'cat <<"EOF"x\nbody\nEOFx\ngit diff --no-index /dev/null ./cosign.key\nEOF', REFUSED, "the double-quoted delimiter runs on to EOFx"),
+    ("redirection", "cat <<-'EOF'x\nbody\nEOFx\ngit diff --no-index /dev/null ./cosign.key\nEOF", REFUSED, "the tab-stripping form runs on to EOFx the same way"),
+    ("redirection", "cat <<'EOF'-\nbody\nEOF-\ngit diff --no-index /dev/null ./cosign.key\nEOF", REFUSED, "a dash is a word character to bash, so the delimiter is EOF-"),
     ("options", "just --fmt --check --justfile ./.env", REFUSED, "an option that hands just a file it prints a line of back"),
     ("options", "just --fmt --check -uf.env", REFUSED, "clap bundles short options, so -f at the end of a cluster is still -f"),
     ("options", "just --fmt --check --justfile-name .env", REFUSED, "a name just searches the checkout and every directory above it for"),
@@ -2865,6 +2871,112 @@ class MainTests(unittest.TestCase):
         code, err = run_main(hook_input("podman ps\ngit diff --no-index /dev/null ./cosign.key"))
         self.assertEqual(code, 2)
         self.assertIn("--no-index", err)
+
+
+class QuotedHeredocTests(unittest.TestCase):
+    """drop_quoted_heredoc_bodies(): a quoted here-document's body is data (#537)."""
+
+    PARSE_FAILURE = "cannot be parsed"
+
+    def test_an_apostrophe_in_a_quoted_heredoc_body_is_not_refused(self) -> None:
+        for command in (
+            "cat <<'EOF' > /tmp/x.txt\ndon't\nEOF",
+            "git commit -F - <<'EOF'\nFix it, and don't break it\nEOF",
+            'cat <<"EOF"\nit\'s\nEOF',
+            "cat <<\\EOF\nit's\nEOF",
+            "cat <<-'EOF'\n\tit's\n\tEOF",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(gate.refusal(command))
+
+    def test_the_operator_line_is_still_checked(self) -> None:
+        self.assertIn(
+            "--no-index",
+            gate.refusal("git diff --no-index /dev/null ./cosign.key <<'EOF'\nit's\nEOF"),
+        )
+        self.assertIn("cosign.pub", gate.refusal("git diff HEAD >cosign.pub <<'EOF'\nit's\nEOF"))
+
+    def test_shapes_it_does_not_cut_are_lexed_as_before(self) -> None:
+        # Each of these either expands its body, is not a here-document at
+        # all, or sits after something that could change whether bash reads
+        # the `<<` as one -- so the body stays in, and its apostrophe keeps
+        # the command unparseable, exactly as before.
+        for command in (
+            "cat <<EOF\ndon't\nEOF",  # unquoted: bash expands $(...) in the body
+            "cat <<<'EOF'\ndon't\nEOF",  # a here-string, not a here-document
+            "cat <<'EOF'\ndon't\n",  # no terminator line
+            "# a note\ncat <<'EOF'\ndon't\nEOF",  # a comment line before it
+            "(( 1 <<'X' ))\ndon't\nX",  # arithmetic's shift, not a here-document
+            "cat <<'A' <<'B'\ndon't\nA\nB",  # two on one line
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(gate.refusal(command))
+                self.assertEqual(
+                    gate.drop_quoted_heredoc_bodies(command),
+                    command,
+                    "a shape outside the plain one was cut",
+                )
+        # Inside a substitution: not cut either. (It lexes as before because
+        # the apostrophe sits inside the double quotes.)
+        command = "echo \"$(cat <<'EOF'\ndon't\nEOF\n)\""
+        self.assertEqual(gate.drop_quoted_heredoc_bodies(command), command)
+
+    def test_a_delimiter_word_that_runs_on_past_its_quote_is_not_cut(self) -> None:
+        # Bash's delimiter is the whole word, so `<<'EOF'x` ends at the line
+        # `EOFx`. Cutting to the first line reading `EOF` hid the lines in
+        # between, which bash runs as commands (review on #568). Shown
+        # against a stand-in `git` that prints its arguments.
+        hidden = "git diff --no-index /dev/null ./cosign.key"
+        shapes = (
+            ("<<'EOF'x", "EOFx"),
+            ("<<\\EOF.x", "EOF.x"),
+            ('<<"EOF"x', "EOFx"),
+            ("<<-'EOF'x", "EOFx"),
+            ("<<'EOF'-", "EOF-"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = Path(tmp) / "git"
+            stub.write_text('#!/bin/sh\necho "git $*"\n')
+            stub.chmod(0o755)
+            for operator, terminator in shapes:
+                command = f"cat {operator}\nbody\n{terminator}\n{hidden}\nEOF"
+                with self.subTest(command=command):
+                    ran = subprocess.run(
+                        ["bash", "--norc", "--noprofile", "-c", command],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        env={**os.environ, "PATH": f"{tmp}:{os.environ['PATH']}"},
+                    )
+                    self.assertIn(
+                        "git diff --no-index",
+                        ran.stdout,
+                        "bash no longer ends this here-document at the whole delimiter "
+                        "word; re-derive the post group of _QUOTED_HEREDOC_LINE",
+                    )
+                    self.assertEqual(gate.drop_quoted_heredoc_bodies(command), command)
+                    self.assertIsNotNone(gate.refusal(command))
+
+    def test_only_the_body_and_its_terminator_are_cut(self) -> None:
+        self.assertEqual(
+            gate.drop_quoted_heredoc_bodies("cat <<'EOF' > out.txt\nline one\nit's\nEOF\ngit status"),
+            "cat <<'EOF' > out.txt\ngit status",
+        )
+        # A line that merely starts with the delimiter does not end the body.
+        self.assertEqual(
+            gate.drop_quoted_heredoc_bodies("cat <<'EOF'\nEOFX\nEOF"),
+            "cat <<'EOF'",
+        )
+
+    def test_a_long_quoted_argument_is_not_refused(self) -> None:
+        # raw_words() hid each quoted character behind a code point of its
+        # own, so the 131,073rd one ran out of private-use planes and the
+        # command was refused as unparseable, whatever it said.
+        self.assertIsNone(gate.refusal("echo '" + "a" * 140_000 + "'"))
+        # A private-use character in the command is not refused either,
+        # except the one stand-in raw_words() uses.
+        self.assertIsNone(gate.refusal("echo '\U000F0001'"))
+        self.assertIsNotNone(gate.refusal("echo '\U000F0000'"))
 
 
 class RegistrationTests(unittest.TestCase):

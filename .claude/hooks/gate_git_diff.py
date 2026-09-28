@@ -110,10 +110,16 @@ result, so the git half and the redirection half of this hook see the same
 command.
 
 It runs on `PreToolUse` for `Bash` and exits 2 -- the blocking code, whose
-stderr goes back to the model as the reason -- when a `git` invocation in the
-command carries one of those arguments. Anything else exits 0 and is left
-alone, so `git diff`, `git diff -- path`, `git log -p` and range arguments
-such as `HEAD..main` are unaffected.
+stderr goes back to the model as the reason -- when a command carries one of
+the reaches described here: a refused `git` argument, a writing redirection on
+a gated command, a refused environment assignment, a shellcheck operand
+outside the checkout, and the rest of the scans below. It also exits 2 when
+it cannot check the command at all: hook input that is not JSON, a command
+that is not a string, and a command whose shell words cannot be read (see
+refusal()). Anything else exits 0 and is left alone, so `git diff`, `git diff
+-- path`, `git log -p` and range arguments such as `HEAD..main` are
+unaffected. The body of a quoted-delimiter here-document is data rather than
+shell and is not read as words (see drop_quoted_heredoc_bodies()).
 
 Operands are judged lexically: absolute, or carrying a `..` path component.
 Resolving them with `realpath` and comparing against the checkout root reads
@@ -1111,6 +1117,80 @@ def mask_quotes_stripped(command: str) -> str:
     return "".join(masked)
 
 
+# A line drop_quoted_heredoc_bodies() can read without a quote tracker: plain
+# words, single `<`/`>` redirections and separators, and nothing bash could
+# read as the start of a quote, an expansion, a comment, a grouping or an
+# arithmetic context -- each of which can change whether a later `<<` opens a
+# here-document at all.
+_SIMPLE_LINE_CHARS = r"[A-Za-z0-9_./:=@%+,~ \t<>|&;-]"
+_SIMPLE_LINE = re.compile(rf"{_SIMPLE_LINE_CHARS}*")
+_QUOTED_HEREDOC_LINE = re.compile(
+    rf"(?P<pre>{_SIMPLE_LINE_CHARS}*?)<<(?P<strip_tabs>-?)[ \t]*"
+    r"""(?:'(?P<single>\w+)'|"(?P<double>\w+)"|\\(?P<escaped>\w+))"""
+    # The delimiter is the whole word, not its quoted part: bash reads
+    # `<<'EOF'x` as the delimiter `EOFx`. So the word must end right after
+    # the quote -- at the end of the line, a blank or an operator character.
+    rf"(?P<post>(?:[ \t;&|<>]{_SIMPLE_LINE_CHARS}*)?)"
+)
+
+
+def drop_quoted_heredoc_bodies(command: str) -> str:
+    """The command with the body of each quoted-delimiter here-document cut.
+
+    A here-document whose delimiter is quoted (`<<'EOF'`, `<<"EOF"`,
+    `<<\\EOF`) is inert to bash: no expansion, no substitution, no word
+    splitting -- the body is bytes on the command's standard input. shlex
+    has no idea of here-documents and lexes the body as more shell, so an
+    apostrophe in the prose of a commit message or a note left the whole
+    command unparseable and refused (#537). Cutting the body, with its
+    terminator line, leaves the `<<'EOF'` operator and delimiter for the
+    lexer, which reads them as the input redirection they are.
+
+    Only the plainest shape is cut. Every line up to and including the
+    operator's must be _SIMPLE_LINE, apart from the operator itself, and the
+    operator line must hold exactly one `<<` that is not a here-string's
+    `<<<`. A quote, `$`, backtick, backslash, `#`, paren, brace or bracket
+    before it is where bash could read that `<<` as something else -- inside
+    a string, after a comment, as arithmetic's shift in `(( 1 <<'X' ))` --
+    and then run the lines this would cut; so on the first line that is not
+    plain, cutting stops and the rest is lexed as before. An unquoted
+    delimiter is never cut: bash expands `$(...)` in that body. Nor is a
+    body with no terminator line, nor a delimiter with anything but a blank
+    or an operator after its quote: `<<'EOF'x` ends at the line `EOFx`, not
+    `EOF`, and cutting to `EOF` would hide the lines bash runs in between.
+    """
+    lines = command.split("\n")
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match = _QUOTED_HEREDOC_LINE.fullmatch(line)
+        if (
+            match is not None
+            and "<<" not in match.group("pre") + match.group("post")
+            and not match.group("pre").endswith(("<", ">"))
+        ):
+            delimiter = match.group("single") or match.group("double") or match.group("escaped")
+            end = next(
+                (
+                    later
+                    for later in range(index + 1, len(lines))
+                    if (lines[later].lstrip("\t") if match.group("strip_tabs") else lines[later]) == delimiter
+                ),
+                None,
+            )
+            if end is not None:
+                kept.append(line)
+                index = end + 1
+                continue
+        if "<<" in line or not _SIMPLE_LINE.fullmatch(line):
+            kept.extend(lines[index:])
+            break
+        kept.append(line)
+        index += 1
+    return "\n".join(kept)
+
+
 def join_continuations(command: str) -> str:
     """The command with every backslash-newline removed the way bash removes
     it, before any word is read.
@@ -1249,10 +1329,14 @@ def punctuation_pieces(run: str) -> list[str]:
     return pieces
 
 
-# Where raw_words() hides a quoted or escaped character from the lexer: the
-# two supplementary private-use planes, whose code points no shell word needs
-# and shlex reads as ordinary word characters.
+# The stand-in raw_words() hides a quoted or escaped character behind from the
+# lexer: a supplementary private-use code point, which no shell word needs and
+# shlex reads as an ordinary word character. One code point serves for every
+# hidden character, since the lexer keeps each stand-in, in order, so they are
+# restored in the order they were hidden. A code point per character would cap
+# a command at the 131,072 the two private-use planes hold.
 HIDDEN = 0xF0000
+STAND_IN = chr(HIDDEN)
 
 
 def raw_words(command: str) -> list[str]:
@@ -1270,13 +1354,13 @@ def raw_words(command: str) -> list[str]:
     with its stand-ins restored. The quoting rules are shlex's own, the ones
     tokenize() lexes by, since lining up with its words is the point.
     """
-    if any(ord(char) >= HIDDEN for char in command):
-        raise ValueError("the command holds a private-use character raw_words() uses")
+    if STAND_IN in command:
+        raise ValueError("the command holds the private-use character raw_words() uses")
     hidden: list[str] = []
 
     def hide(char: str) -> str:
         hidden.append(char)
-        return chr(HIDDEN + len(hidden) - 1)
+        return STAND_IN
 
     encoded: list[str] = []
     quote = ""
@@ -1302,10 +1386,16 @@ def raw_words(command: str) -> list[str]:
         else:
             encoded.append(char)
         index += 1
-    return [
-        "".join(hidden[ord(char) - HIDDEN] if ord(char) >= HIDDEN else char for char in word)
+    restored = iter(hidden)
+    words = [
+        "".join(next(restored) if char == STAND_IN else char for char in word)
         for word in tokenize("".join(encoded))
     ]
+    if next(restored, None) is not None:
+        # A stand-in the lexer dropped would shift every later one onto the
+        # wrong word; refused rather than read misaligned.
+        raise ValueError("the lexer dropped a character raw_words() hid")
+    return words
 
 
 def is_operator(token: str) -> bool:
@@ -2377,7 +2467,7 @@ def global_refusal(arguments: list[str]) -> str | None:
 def refusal(command: str) -> str | None:
     """Why this command is blocked, or None when it is left alone."""
     try:
-        command = strip_comments(join_continuations(command))
+        command = strip_comments(join_continuations(drop_quoted_heredoc_bodies(command)))
         tokens = tokenize(command)
         masked = tokenize(mask_quotes_stripped(command))
         raws = raw_words(command)
