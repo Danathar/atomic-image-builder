@@ -7117,6 +7117,25 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("not an object", hints)
         self.assertIn("Press Enter to return to the main menu...", stub.prompts)
 
+    def test_render_build_status_reads_a_run_just_ahead_of_the_local_clock_as_now(self) -> None:
+        # A clock a few seconds behind GitHub's gives a negative delta, whose
+        # days field is -1, and the row read "-1d ago" (#511).
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        ahead = (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+        runs = json.dumps(
+            [{"conclusion": None, "workflowName": "build", "displayTitle": "skewed", "createdAt": ahead, "url": "u1"}]
+        )
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+            with patch.object(app, "repo_carried_scan_customizations", return_value=False):
+                with redirect_stdout(io.StringIO()):
+                    app.render_build_status("Example", "my-image")
+
+        (row,) = [m for level, m in stub.messages if level == "hint" and "skewed" in m]
+        self.assertNotIn("-1d", row)
+        self.assertIn("0m ago", row)
+
     def test_render_build_status_warns_when_no_runs_are_returned(self) -> None:
         app = self.make_app()
         stub = GumStub()
