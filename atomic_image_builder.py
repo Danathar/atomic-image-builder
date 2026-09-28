@@ -5122,7 +5122,13 @@ class App:
             labels: list[str] = []
             mapping: dict[str, tuple[str, str]] = {}
             for item in visible_repos:
-                description = item.get("description") or "(no description)"
+                # gum filter hands the chosen line back with its surrounding
+                # whitespace stripped, so a label ending in a space never
+                # matched its mapping key and Enter on that repo went back to
+                # the menu. GitHub keeps whatever the owner typed, trailing
+                # space and line breaks included; one line of single-spaced
+                # words is also what a picker row can show.
+                description = " ".join(str(item.get("description") or "").split()) or "(no description)"
                 if len(description) > 40:
                     description = description[:37] + "..."
                 label = f"{item['name']:<30} {description}"
