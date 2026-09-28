@@ -250,9 +250,11 @@ SPAWN_VM_REBUILD_FIXED = (
 )
 FROM_LINE_RE = re.compile(r"^(\s*FROM(?:\s+--platform=\S+)?\s+)(\S+)(.*)$", flags=re.IGNORECASE)
 FROM_STAGE_NAME_RE = re.compile(r"^\s+AS\s+(\S+)", flags=re.IGNORECASE)
-# A Dockerfile heredoc opener: <<EOF, <<-EOF, <<"EOF" or <<'EOF'. The
-# lookarounds keep a shell here-string (<<<) from reading as one.
-CONTAINERFILE_HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)(-?)([\"']?)([A-Za-z_][A-Za-z0-9_]*)\2")
+# BuildKit (frontend/dockerfile/parser) reads heredocs only from RUN, COPY and
+# ADD, and only from a whole shell word -- split with quotes kept -- shaped
+# <<[-]WORD. So "<<EOF" in quotes, cat<<EOF and a <<< here-string open none.
+CONTAINERFILE_HEREDOC_INSTRUCTION_RE = re.compile(r"^\s*(?:ONBUILD\s+)?(?:RUN|COPY|ADD)\s", flags=re.IGNORECASE)
+CONTAINERFILE_HEREDOC_WORD_RE = re.compile(r"^\d*<<(-?)\s*([^<]*)$")
 INSTALLER_SWITCH_RE = re.compile(r"^(\s*bootc switch --mutate-in-place --transport registry )(\S+)(.*)$")
 INSTALLER_UNVERIFIED_SWITCH_COMMENT = (
     "# Signature enforcement is deliberately omitted for this installer switch:",
@@ -704,18 +706,67 @@ def ensure_trailing_newline(text: str) -> str:
     return text.rstrip("\n") + "\n"
 
 
+def containerfile_shell_words(text: str) -> list[str]:
+    """Split ``text`` into shell words with their quotes and escapes kept."""
+    words: list[str] = []
+    word: list[str] = []
+    quote = ""
+    escaped = False
+    for char in text:
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        elif char.isspace():
+            if word:
+                words.append("".join(word))
+                word = []
+            continue
+        word.append(char)
+    if word:
+        words.append("".join(word))
+    return words
+
+
+def containerfile_heredocs(instruction: str) -> list[tuple[str, bool]]:
+    """(terminator, strips-leading-tabs) for each heredoc ``instruction`` opens."""
+    if "<<" not in instruction or not CONTAINERFILE_HEREDOC_INSTRUCTION_RE.match(instruction):
+        return []
+    heredocs: list[tuple[str, bool]] = []
+    for word in containerfile_shell_words(instruction):
+        match = CONTAINERFILE_HEREDOC_WORD_RE.match(word)
+        if not match:
+            continue
+        try:
+            # The terminator is the word with its quoting removed: <<"EOF"
+            # ends at a line reading EOF.
+            name = shlex.split(match.group(2))
+        except ValueError:
+            continue
+        if len(name) == 1:
+            heredocs.append((name[0], match.group(1) == "-"))
+    return heredocs
+
+
 def containerfile_from_indices(lines: list[str]) -> list[int]:
     """Indices of the lines that are FROM instructions, in order.
 
     A line that merely looks like one is skipped when it is the continuation
     of the instruction above it or part of a heredoc body -- a Python
     "from x import y" written by a RUN heredoc matches FROM_LINE_RE, and the
-    last FROM decides which stage is published, so it must not count.
+    last FROM decides which stage is published, so it must not count. The
+    walk follows BuildKit's parser: comment and blank lines never end a
+    continued instruction, and heredoc bodies start after the whole
+    instruction has been read.
     """
     indices: list[int] = []
-    continuing = False
-    pending: list[tuple[str, bool]] = []
     heredocs: list[tuple[str, bool]] = []
+    instruction: str | None = None
     for index, line in enumerate(lines):
         if heredocs:
             name, strip_tabs = heredocs[0]
@@ -723,19 +774,17 @@ def containerfile_from_indices(lines: list[str]) -> list[int]:
                 heredocs.pop(0)
             continue
         stripped = line.strip()
-        if continuing and (not stripped or stripped.startswith("#")):
-            # The parser skips blank and comment lines inside a continued
-            # instruction without ending it.
+        if not stripped or stripped.startswith("#"):
             continue
-        if not continuing and FROM_LINE_RE.match(line):
-            indices.append(index)
-        if not stripped.startswith("#"):
-            pending.extend(
-                (match.group(3), match.group(1) == "-") for match in CONTAINERFILE_HEREDOC_RE.finditer(line)
-            )
-        continuing = line.rstrip().endswith("\\")
-        if not continuing:
-            heredocs, pending = pending, []
+        if instruction is None:
+            if FROM_LINE_RE.match(line):
+                indices.append(index)
+            instruction = ""
+        if stripped.endswith("\\"):
+            instruction += line.rstrip()[:-1]
+            continue
+        heredocs = containerfile_heredocs(instruction + line)
+        instruction = None
     return indices
 
 

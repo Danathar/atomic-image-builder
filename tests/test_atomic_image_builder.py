@@ -12127,13 +12127,16 @@ class BuilderTests(unittest.TestCase):
 
     def test_render_containerfile_ignores_from_lookalikes_in_continuations_and_heredocs(self) -> None:
         # Only a FROM instruction starts a stage. A continuation line or a
-        # heredoc body that happens to begin with "from" is part of a RUN, and
-        # a shell here-string (<<<) opens no heredoc to skip over.
+        # heredoc body that happens to begin with "from" is part of a RUN.
+        # "<<EOF" as a quoted or escaped shell argument, a bare "<<" word and
+        # a <<< here-string open no heredoc for BuildKit: treating one as open
+        # would skip ahead to the later EOF line and hide the real final FROM.
         app = self.make_app()
         app.config.base_image_uri = "ghcr.io/ublue-os/aurora:stable"
         existing = textwrap.dedent("""\
             FROM docker.io/library/golang:1.24 AS builder
             RUN cat <<<"hello"
+            RUN echo "<<EOF" '<<EOF' \\<<EOF << EOF
 
             FROM ghcr.io/ublue-os/bazzite:stable
             RUN echo \\
@@ -12141,7 +12144,9 @@ class BuilderTests(unittest.TestCase):
             RUN <<EOF
             from os import path
             EOF
-            RUN python3 - <<-'PY'
+            RUN python3 - \\
+                # a comment does not end the instruction
+                <<-'PY'
             \tfrom sys import argv
             \tPY
         """)
