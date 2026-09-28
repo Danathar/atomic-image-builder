@@ -4796,7 +4796,13 @@ class App:
                 if name not in by_name:
                     by_name[name] = summary.strip()
 
-            needle = normalized.lower()
+            # dnf5 was asked for the words in order with anything between
+            # them, but no RPM name contains a space, so ranking on the raw
+            # term would leave every multi-word search in alphabetical order
+            # and could push the obvious package past the limit. Words in a
+            # package name are hyphen-joined, so rank on that spelling:
+            # "kernel devel" puts kernel-devel first.
+            needle = normalized.lower().replace(" ", "-")
             cached = sorted(
                 by_name.items(),
                 key=lambda item: (

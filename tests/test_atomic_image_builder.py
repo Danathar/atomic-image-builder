@@ -5025,6 +5025,34 @@ class BuilderTests(unittest.TestCase):
         self.assertIsNone(message)
         self.assertEqual(results, [("tmux", "Terminal multiplexer")])
 
+    def test_search_host_packages_ranks_a_multi_word_term_as_the_hyphenated_name(self) -> None:
+        # The dnf5 pattern turns spaces into wildcards, but no RPM name has a
+        # space in it. Ranking on the raw term matched nothing, so results
+        # fell back to alphabetical order and python3-test landed past the
+        # limit behind every mingw build (#506).
+        app = self.make_app()
+        stub = GumStub()
+        filler = [f"a{i:03d}-python3-test-extra\tFiller" for i in range(PACKAGE_SEARCH_LIMIT + 5)]
+        rows = [
+            *filler,
+            "mingw64-python3-test\tMinGW build",
+            "python3-testpath\tPrefix match",
+            "python3-test\tThe exact package",
+        ]
+        stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.CompletedProcess(
+            list(command), 0, "\n".join(rows) + "\n", ""
+        )
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "dnf5"):
+            results, truncated, message = app.search_host_packages("  Python3   test ")
+
+        self.assertIsNone(message)
+        self.assertTrue(truncated)
+        self.assertEqual(
+            [name for name, _summary in results[:3]],
+            ["python3-test", "python3-testpath", "a000-python3-test-extra"],
+        )
+
     def test_search_host_packages_reports_missing_cache_when_refresh_is_declined(self) -> None:
         app = self.make_app()
         stub = GumStub()
