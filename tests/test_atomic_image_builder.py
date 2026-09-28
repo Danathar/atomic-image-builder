@@ -7446,79 +7446,128 @@ class BuilderTests(unittest.TestCase):
             any(level == "error" and "rpm-ostree not found" in message for level, message in stub.messages)
         )
 
-    def test_scan_os_retries_without_booted_and_uses_that_result(self) -> None:
-        # rpm-ostree on some hosts rejects or empties out `--booted`; the retry
-        # without it is what keeps scanning working there, so the fallback
-        # payload must be the one actually parsed.
-        app = self.make_app()
-        app.github_user = "example"
-        status_payload = json.dumps(
+    def pending_status(self, *, pending_packages: list[str], booted_packages: list[str]) -> str:
+        # A host with `rpm-ostree install`/`uninstall` run since the last boot:
+        # the pending deployment is listed first, ahead of the booted one.
+        return json.dumps(
             {
                 "deployments": [
                     {
-                        "booted": True,
-                        "container-image-reference": "docker://ghcr.io/ublue-os/bazzite:stable",
-                        "requested-packages": [],
+                        "booted": False,
+                        "staged": True,
+                        "osname": "default",
+                        "container-image-reference": "ostree-image-signed:docker://ghcr.io/ublue-os/bazzite:stable",
+                        "requested-packages": pending_packages,
                         "requested-base-removals": [],
-                    }
+                    },
+                    {
+                        "booted": True,
+                        "staged": False,
+                        "osname": "default",
+                        "container-image-reference": "ostree-image-signed:docker://ghcr.io/ublue-os/bazzite:stable",
+                        "requested-packages": booted_packages,
+                        "requested-base-removals": ["firefox"],
+                    },
                 ]
             }
         )
+
+    def pending_warnings(self, stub: GumStub) -> list[str]:
+        return [message for level, message in stub.messages if level == "warn" and "waiting for a reboot" in message]
+
+    def test_scan_os_reads_packages_layered_since_the_last_boot(self) -> None:
+        # `rpm-ostree install htop` without a reboot puts htop only in the
+        # staged deployment. Reading the booted one dropped it, and the reset
+        # the generated README recommends then discarded it for good (#519).
+        # `--booted` leaves the staged deployment out of the JSON altogether,
+        # so the scan has to ask for the full status.
+        app = self.make_app()
+        app.github_user = "example"
+        stub = GumStub()
+        stub.choose = lambda options, **_kwargs: list(options)
+        app.gum = stub
+        payload = self.pending_status(pending_packages=["tmux", "htop"], booted_packages=["tmux"])
         commands: list[list[str]] = []
 
         def fake_run(args, **_kwargs):
             commands.append(list(args))
-            if "--booted" in args:
-                return subprocess.CompletedProcess(list(args), 1, "", "not booted")
-            return subprocess.CompletedProcess(list(args), 0, status_payload, "")
+            return subprocess.CompletedProcess(list(args), 0, payload, "")
 
-        app.gum = GumStub()
         with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
             with patch("atomic_image_builder.run", side_effect=fake_run):
-                self.assertEqual(app.scan_os(), SCAN_OK)
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(app.scan_os(), SCAN_OK)
 
-        self.assertEqual(
-            commands,
-            [
-                ["rpm-ostree", "status", "--json", "--booted"],
-                ["rpm-ostree", "status", "--json"],
-            ],
-        )
-        self.assertEqual(app.config.base_image_uri, "ghcr.io/ublue-os/bazzite:stable")
+        self.assertEqual(commands, [["rpm-ostree", "status", "--json"]])
+        self.assertEqual(app.config.scanned_packages, ["tmux", "htop"])
+        self.assertEqual(app.config.packages, ["tmux", "htop"])
+        # The pending deployment's removals too, not the booted one's.
+        self.assertEqual(app.config.scanned_removed, [])
+        self.assertEqual(len(self.pending_warnings(stub)), 1)
 
-    def test_scan_os_retries_without_booted_when_output_is_empty(self) -> None:
-        # A zero exit with empty stdout is the other shape that triggers the
-        # retry; exit status alone is not enough to accept the first attempt.
+    def test_scan_os_drops_a_package_uninstalled_since_the_last_boot(self) -> None:
+        # The mirror case, through the contrib/aib status file: `rpm-ostree
+        # uninstall foo` without a reboot leaves foo in the booted deployment
+        # only, and the image must not put it back.
         app = self.make_app()
         app.github_user = "example"
-        status_payload = json.dumps(
-            {
-                "deployments": [
-                    {
-                        "booted": True,
-                        "container-image-reference": "docker://ghcr.io/ublue-os/bazzite:stable",
-                        "requested-packages": [],
-                        "requested-base-removals": [],
-                    }
-                ]
-            }
-        )
-        commands: list[list[str]] = []
+        stub = GumStub()
+        stub.choose = lambda options, **_kwargs: list(options)
+        app.gum = stub
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = Path(tmp) / "rpm-ostree-status.json"
+            status_path.write_text(self.pending_status(pending_packages=["tmux"], booted_packages=["tmux", "foo"]))
+            with patch("atomic_image_builder.command_exists", return_value=False):
+                with patch.dict("os.environ", {"AIB_RPM_OSTREE_STATUS_FILE": str(status_path)}):
+                    with redirect_stdout(io.StringIO()):
+                        self.assertEqual(app.scan_os(), SCAN_OK)
 
-        def fake_run(args, **_kwargs):
-            commands.append(list(args))
-            if "--booted" in args:
-                return subprocess.CompletedProcess(list(args), 0, "   \n", "")
-            return subprocess.CompletedProcess(list(args), 0, status_payload, "")
+        self.assertEqual(app.config.packages, ["tmux"])
+        self.assertEqual(len(self.pending_warnings(stub)), 1)
 
-        app.gum = GumStub()
+    def test_scan_os_reads_the_booted_deployment_when_nothing_is_pending(self) -> None:
+        # A rollback deployment sits behind the booted one. It is not what
+        # the next boot runs, so neither its packages nor the warning apply.
+        app = self.make_app()
+        app.github_user = "example"
+        stub = GumStub()
+        stub.choose = lambda options, **_kwargs: list(options)
+        app.gum = stub
+        newer, older = json.loads(self.pending_status(pending_packages=["tmux", "htop"], booted_packages=["tmux"]))["deployments"]
+        # The same two package sets, after the reboot: the newer one is
+        # booted and the older one is the rollback behind it.
+        newer.update({"booted": True, "staged": False})
+        older.update({"booted": False})
+        payload = json.dumps({"deployments": [newer, older]})
         with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
-            with patch("atomic_image_builder.run", side_effect=fake_run):
-                self.assertEqual(app.scan_os(), SCAN_OK)
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, payload, "")):
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(app.scan_os(), SCAN_OK)
 
-        self.assertEqual(len(commands), 2)
+        self.assertEqual(app.config.packages, ["tmux", "htop"])
+        self.assertEqual(self.pending_warnings(stub), [])
 
-    def test_scan_os_returns_false_when_both_rpm_ostree_attempts_fail(self) -> None:
+    def test_next_boot_deployment_follows_rpm_ostree_pending_rules(self) -> None:
+        booted = {"booted": True, "osname": "default"}
+        staged = {"staged": True, "osname": "default"}
+        # `rpm-ostree rollback` reorders without staging: still pending.
+        rolled_back = {"osname": "default"}
+        other_os = {"osname": "other"}
+        rollback = {"osname": "default"}
+        cases = [
+            ("staged ahead of booted", [staged, booted, rollback], (staged, True)),
+            ("rollback put first", [rolled_back, booted], (rolled_back, True)),
+            ("nothing pending", [booted, rollback], (booted, False)),
+            # Another stateroot is not this OS's next deployment.
+            ("another osname ahead", [other_os, booted, rollback], (booted, False)),
+            ("no booted flag", [rollback, other_os], (rollback, False)),
+            ("no deployments", [], ({}, False)),
+        ]
+        for label, deployments, expected in cases:
+            with self.subTest(label):
+                self.assertEqual(atomic_image_builder.next_boot_deployment(deployments), expected)
+
+    def test_scan_os_returns_false_when_rpm_ostree_status_fails(self) -> None:
         app = self.make_app()
         stub = GumStub()
         app.gum = stub

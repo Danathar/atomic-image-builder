@@ -52,7 +52,7 @@ Other options — plain `podman run`, distrobox, running from source — are in 
 
 ## What it does
 
-**Create Image** starts by scanning the system you are on. It reads your booted deployment's `rpm-ostree` state — the image you are running, the packages you have layered, and any base packages you have removed — and offers all of it, pre-selected, to carry into a new repo. The base image comes from your system rather than a menu, because Universal Blue images are not rebase-compatible with each other and one built on the wrong base is one you cannot switch back onto.
+**Create Image** starts by scanning the system you are on. It reads the `rpm-ostree` state of the deployment your system boots next — the image, the packages you have layered, and any base packages you have removed — and offers all of it, pre-selected, to carry into a new repo. That is the running deployment unless changes such as an `rpm-ostree install` are waiting for a reboot, in which case the scan reads those and says so. The base image comes from your system rather than a menu, because Universal Blue images are not rebase-compatible with each other and one built on the wrong base is one you cannot switch back onto.
 
 What it creates and maintains is a **separate GitHub repository** that builds your image through GitHub Actions. From the guided menu you can:
 

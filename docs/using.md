@@ -94,6 +94,12 @@ replaced by a local build, a regenerated initramfs. Those are pinned to files
 on your machine, so no generated image reproduces them. Run `rpm-ostree status`
 before the reset if you want the full list.
 
+If you have layered or removed packages since your last reboot, the scan reads
+that pending deployment rather than the one running now, and says so. It is the
+deployment `rpm-ostree reset` and `bootc switch` start from, so a package
+installed with `rpm-ostree install` and not yet booted is still carried over,
+and one removed with `rpm-ostree uninstall` is not brought back.
+
 ## Homebrew on Fedora Atomic images
 
 This is about adding Homebrew to the image you **build** — not about installing
