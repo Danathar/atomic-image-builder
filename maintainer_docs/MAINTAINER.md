@@ -249,6 +249,13 @@ for it. It exits 0 whatever GitHub does, so a rate limit or an auth blip
 cannot turn a green audit red — which would recreate the problem #129 was
 filed about.
 
+A run that could not compare every snapshot — an upstream `git ls-remote`
+failed, or a `.template-source` would not load — leaves the issue exactly as
+it is: it does not open one, rewrite the body, or close it. Being unable to
+check is neither drift nor proof that the drift cleared, and the next run that
+can compare both snapshots decides. The audit itself still reports the failure
+as an advisory (or, for unloadable metadata, a failure) in the job summary.
+
 ### Advisory: a pin no longer matches its tag or branch
 
 Read the **direction** before acting. The message states it:
