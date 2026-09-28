@@ -292,11 +292,13 @@ affected for as long as it lasts, and the fix is entirely yours — cut a
 release. Being unable to reach the API stays an advisory, like every other
 network check.
 
-`Release v0.9.6 … carries no aib asset` (or no `aib.sha256`), and `The
+`Release v0.9.6 … carries no aib asset` (or no `aib.sha256`), `The
 aib.sha256 attached to release v0.9.6 records …, but the aib beside it hashes
-to …`, are the other shape: the release exists but the install cannot complete
-from it — the URL 404s, or `sha256sum -c` rejects the pair — because
-`publish-wrapper.yml` never ran for the tag, or one asset was replaced by hand.
+to …`, and `The aib.sha256 … also lists contrib/aib` are the other shape: the
+release exists but the install cannot complete from it — the URL 404s, or
+`sha256sum -c` rejects the pair, which it does when any one line of the
+checksum names another file or another digest — because `publish-wrapper.yml`
+never ran for the tag, or one asset was replaced by hand.
 The finding says which repair applies, and it depends on the tag. The
 workflow's dispatch fallback checks out the tag it is given and attaches
 *that* tag's `contrib/aib`, so it is the fix only while the tag's wrapper is
