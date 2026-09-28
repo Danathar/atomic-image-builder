@@ -172,6 +172,13 @@ MANAGED_REPO_HINT_CONTAINERFILE = (
 MANAGED_REPO_HINT_BLUEBUILD = (
     f"Future updates use {STATE_FILE} as the source of truth and rewrite managed files such as README.md and recipes/recipe.yml."
 )
+# Lead-in to the reset-then-switch instructions in the README, the creation
+# panel and the build-status screen. It must hold whether the scan carried
+# packages into the image or only found customizations the user agreed to
+# leave behind: the build-status screen reads the single state-file flag and
+# cannot tell the two apart, and an update regenerates the README from that
+# same flag. So it says where the repo came from, not what the image carries.
+SCAN_SWITCH_LEAD_IN = "This repo was created from a scan of your current system's rpm-ostree customizations."
 CONTAINERFILE_TEMPLATE_REPO = "ublue-os/image-template"
 BLUEBUILD_TEMPLATE_REPO = "blue-build/template"
 TEMPLATE_SNAPSHOT_DIR = Path(__file__).resolve().parent / "template_snapshots"
@@ -550,8 +557,10 @@ SCAN_UNSUPPORTED_BASE = "unsupported-base"
 
 # rpm-ostree records customizations in more fields than this tool reads.
 # `requested-packages` and `requested-base-removals` are the two it can carry,
-# because both are just names an image build can install or remove from a
-# repository. The rest are real customizations pinned to files on this host --
+# because both are names an image build can install or remove from a
+# repository -- except a `requested-packages` entry typed as a capability or
+# file path, which scan_os reports alongside these. The rest are real
+# customizations pinned to files on this host --
 # an RPM built somewhere else, a package replaced by a local build -- and no
 # generated image reproduces them. They were read as absent rather than as
 # unsupported, so a scan reported success and recommended `rpm-ostree reset`
@@ -599,9 +608,12 @@ class Config:
     # The scan lists hold the running host's complete layered-package and
     # base-removal inventory. They stay in memory to drive the selection screens
     # and are deliberately NOT written to the state file - see state_payload().
+    # scan_omitted_customizations is in-memory too: the scan found something the
+    # user agreed to leave behind, which reset still has to clear on switch.
     # scan_customizations_carried is the one bit anything downstream needs.
     scanned_packages: list[str] = field(default_factory=list)
     scanned_removed: list[str] = field(default_factory=list)
+    scan_omitted_customizations: bool = False
     scan_customizations_carried: bool = False
 
     def normalize(self) -> None:
@@ -4063,12 +4075,24 @@ class App:
                 self.gum.hint(f"Supported: {supported_base_image_names()}")
                 return SCAN_UNAVAILABLE
             base = mapped
-        self.config.scanned_packages = unique(string_list(booted.get("requested-packages")))
+        # rpm-ostree records what was typed, and `rpm-ostree install` resolves
+        # capabilities and file paths as well as names: 'pkgconfig(gtk4)' and
+        # /usr/bin/zsh both land in requested-packages verbatim. Neither is a
+        # value validate_config lets into a generated repo, so pre-selecting
+        # them sent the user through every step to an "Invalid package
+        # value(s)" refusal at the very end, with nothing pointing back here.
+        # Split them off now and name them with everything else this image
+        # cannot carry, where the user decides with them in view.
+        requested_packages = unique(string_list(booted.get("requested-packages")))
+        self.config.scanned_packages = [spec for spec in requested_packages if PACKAGE_TOKEN_RE.fullmatch(spec)]
+        unwritable_packages = [spec for spec in requested_packages if not PACKAGE_TOKEN_RE.fullmatch(spec)]
         self.config.scanned_removed = unique(string_list(booted.get("requested-base-removals")))
         self.config.removed_packages = list(self.config.scanned_removed)
         # Read alongside the two supported fields, not instead of them: a host
         # can have both, and the counts below have to be able to say so.
         omitted = self.unsupported_scan_customizations(booted)
+        if unwritable_packages:
+            omitted.insert(0, ("Packages layered by capability or file path, not by name", unwritable_packages))
 
         self.config.base_image_uri = base
         self.config.base_image_name = base
@@ -4141,8 +4165,13 @@ class App:
             rows.append(("Cannot Be Carried Over", str(sum(len(values) or 1 for _label, values in omitted))))
         self.gum.table(rows, columns="Setting,Value", widths=self.gum.table_widths(22))
         print()
-        if omitted and not self.confirm_omitted_scan_customizations(omitted):
-            return SCAN_CANCELLED
+        if omitted:
+            if not self.confirm_omitted_scan_customizations(omitted):
+                return SCAN_CANCELLED
+            # That screen promised the switch instructions end with a reset.
+            # A host whose only layering is omitted leaves both scan lists
+            # empty, so without this nothing downstream would know to say it.
+            self.config.scan_omitted_customizations = True
         # The table states facts and nothing else. Without this a user is left
         # looking at their own system's details with no idea what the tool is
         # about to do with them, or that the base is settled and will not be
@@ -4289,6 +4318,11 @@ class App:
         return None
 
     def carried_scan_customizations(self) -> bool:
+        # True when the switch has to start with `rpm-ostree reset`: something
+        # scanned was carried into the image, or something scanned was left out
+        # on the user's say-so and the omission screen promised the reset.
+        if self.config.scan_omitted_customizations:
+            return True
         scanned_packages = set(self.config.scanned_packages)
         scanned_removed = set(self.config.scanned_removed)
         if scanned_packages or scanned_removed:
@@ -5312,7 +5346,7 @@ class App:
             summary_lines.extend(
                 [
                     "",
-                    "This repo carries over package changes from your current system.",
+                    SCAN_SWITCH_LEAD_IN,
                     "Before rebooting, run this first in the same session:",
                     "sudo rpm-ostree reset",
                     "Then run the bootc switch command above.",
@@ -5684,7 +5718,7 @@ class App:
             print()
             self.menu_section(
                 "Switching This Machine",
-                "This image carries package changes scanned from your system.",
+                SCAN_SWITCH_LEAD_IN,
                 *(
                     (
                         "First follow 'Trusting The Signing Key' in the repo README.",
@@ -6115,6 +6149,9 @@ class App:
         payload["scan_customizations_carried"] = self.carried_scan_customizations()
         payload.pop("scanned_packages", None)
         payload.pop("scanned_removed", None)
+        # Already folded into scan_customizations_carried above; the state
+        # file keeps the one flag it has always had.
+        payload.pop("scan_omitted_customizations", None)
         payload["tool_version"] = VERSION
         payload["state_version"] = 1
         return payload
@@ -7585,7 +7622,7 @@ class App:
                 *signing_policy_lines,
                 "## Using The Image",
                 "",
-                "This repo carries over package changes scanned from your current system.",
+                SCAN_SWITCH_LEAD_IN,
                 "Run these commands in the same session before rebooting:",
                 "",
                 "```bash",
