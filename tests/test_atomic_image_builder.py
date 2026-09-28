@@ -5602,11 +5602,15 @@ class BuilderTests(unittest.TestCase):
         stub = GumStub()
         stub.write = lambda **_kwargs: "tmux"
         app.gum = stub
-        with patch.object(app, "lookup_host_packages") as lookup:
+        with (
+            patch.object(app, "validate_token_list") as validate,
+            patch.object(app, "lookup_host_packages") as lookup,
+        ):
             app.manual_packages()
+        validate.assert_not_called()
         lookup.assert_not_called()
         self.assertEqual(app.config.packages, ["tmux"])
-        self.assertFalse(any(level == "success" for level, _message in stub.messages))
+        self.assertFalse(any(level in {"success", "error", "warn"} for level, _message in stub.messages))
         self.assertEqual(stub.prompts, ["No packages were added. Press Enter to return to the package menu..."])
 
     def test_select_common_services_replaces_curated_selection_only(self) -> None:

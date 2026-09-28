@@ -4337,19 +4337,16 @@ class App:
         *,
         source_label: str,
     ) -> bool:
-        packages = unique(candidates)
+        # A name already in the list adds nothing: drop it before validation,
+        # the dnf5 lookup (and any metadata-refresh offer) and every message,
+        # so "Added N" counts only names the config actually gains.
+        packages = [package for package in unique(candidates) if package not in self.config.packages]
         if not packages:
             return False
         try:
             self.validate_token_list(packages, PACKAGE_TOKEN_RE, "package")
         except CommandError as exc:
             self.gum.error(str(exc))
-            return False
-        # A name already in the list adds nothing: drop it before the dnf5
-        # lookup (and any metadata-refresh offer) and before the count is
-        # reported, so "Added N" counts only names the config actually gains.
-        packages = [package for package in packages if package not in self.config.packages]
-        if not packages:
             return False
         if source_label == "manual entry":
             packages = self.filter_available_manual_packages(packages)
