@@ -57,11 +57,52 @@ COMMENT_STEP = "Post the intake comment"
 # rather than parsed back out of the workflow: a table that reordered or
 # renamed itself would otherwise still match, and the report's shape is what
 # a reader of the comment relies on.
-EXPECTED_CHECKS = ["unittest", "coverage", "ruff", "shellcheck", "actionlint", "hadolint", "audit"]
+EXPECTED_CHECKS = [
+    "unittest",
+    "coverage",
+    "ruff",
+    "shellcheck",
+    "actionlint",
+    "hadolint",
+    "contrib-aib",
+    "entrypoint",
+    "audit",
+]
 
 # ci.yml's `Run <tool>` steps name the linter; the intake table names the
 # check. Only one of the two differs.
 CI_STEP_TO_CHECK = {"tests": "unittest"}
+
+# The `test` job's steps that are not `Run <tool>`, and the intake checks that
+# stand for each. Every step of the job has to appear either here or as a
+# `Run <tool>` step, so a gating step added under any other name fails
+# test_every_step_of_the_ci_gate_is_accounted_for until it is placed. An
+# empty tuple is a step that gates nothing: setup, reporting, uploads.
+CI_OTHER_STEPS = {
+    "Checkout": (),
+    "Set up Python": (),
+    "Install test tooling": (),
+    # Enforces the unit coverage threshold, which the coverage check does.
+    "Report coverage": ("coverage",),
+    "Package unit coverage": (),
+    "Upload unit coverage": (),
+    # bashcov runs each harness, and a failing case fails the step.
+    "Test shell entrypoints with coverage": ("contrib-aib", "entrypoint"),
+    "Upload shell entrypoint coverage": (),
+}
+
+# A harness the table runs by path. Stubbed inside the checkout rather than on
+# PATH, and keyed by its basename without `.sh`, since `test_entrypoint.sh`
+# is not a valid shell variable name for STUB_EXIT_*/STUB_LINES_*.
+HARNESS_STUB = r"""#!/usr/bin/env bash
+{ printf '%s\t' "$0" "$@"; printf '\n'; } >> "$STUB_LOG"
+key="$(basename "$0" .sh)"
+lines_var="STUB_LINES_${key}"
+exit_var="STUB_EXIT_${key}"
+count="${!lines_var:-0}"
+for ((i = 1; i <= count; i++)); do echo "$key diagnostic $i"; done
+exit "${!exit_var:-0}"
+"""
 
 # Records argv (with $0, so one log shows which tool ran) and can be told to
 # fail with a given number of diagnostic lines, which is what the report's
@@ -160,6 +201,24 @@ def _ci_lint_steps() -> dict[str, str]:
     return steps
 
 
+def _ci_test_job_steps() -> list[str]:
+    """The names of every step in ci.yml's gating `test` job, in order."""
+    lines = CI_WORKFLOW.read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line == "  test:")
+    end = next((i for i, line in enumerate(lines) if line.startswith("  publish-coverage:")), len(lines))
+    return [
+        match.group("name")
+        for line in lines[start:end]
+        if (match := re.match(r"^\s+- name: (?P<name>.+)$", line))
+    ]
+
+
+def _ci_harnesses() -> list[str]:
+    """The shell harnesses ci.yml's `test` job runs under bashcov."""
+    body = step_run_body(CI_WORKFLOW, "Test shell entrypoints with coverage")
+    return re.findall(r"^\s*bashcov\b.*\s--\s+(\S+)\s*$", body, re.MULTILINE)
+
+
 def _check_table() -> list[tuple[str, str]]:
     """The `for check in ... do` table as (check name, command) pairs.
 
@@ -187,7 +246,12 @@ def _tools_the_gate_needs() -> list[str]:
     for _, command in _check_table():
         for segment in command.split("&&"):
             tools.add(segment.split()[0])
-    return sorted(tools)
+    return sorted(tool for tool in tools if "/" not in tool)
+
+
+def _harnesses_the_gate_runs() -> list[str]:
+    """Every command the check table runs by path rather than from PATH."""
+    return sorted({command.split()[0] for _, command in _check_table() if "/" in command.split()[0]})
 
 
 def _files_the_checks_name() -> list[str]:
@@ -231,6 +295,10 @@ class GateHarness:
             target = self.root / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.touch()
+        for rel in _harnesses_the_gate_runs():
+            target = self.root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _make_stub(target.parent, target.name, HARNESS_STUB)
 
         # `git rev-parse --short HEAD` names the commit the report describes.
         _git(self.root, "init", "-q", "-b", "main")
@@ -360,6 +428,48 @@ class GateStepTests(unittest.TestCase):
                 f"ci.yml gates on `Run {tool}` and the intake table does not run it -- "
                 "the comment would report a green main while CI is red on it",
             )
+
+    def test_the_report_runs_every_harness_ci_gates_on(self) -> None:
+        # The harnesses are not `Run <tool>` steps, so the join above cannot
+        # see them; this reads them out of the bashcov step instead.
+        harnesses = _ci_harnesses()
+        self.assertEqual(sorted(harnesses), ["tests/test_contrib_aib.sh", "tests/test_entrypoint.sh"])
+        harness = self.harness()
+        harness.run(GATE_STEP)
+        ran = {call[0] for call in harness.calls}
+        for path in harnesses:
+            self.assertIn(
+                path,
+                ran,
+                f"ci.yml's test job runs {path} and the intake table does not -- "
+                "the comment would report a green main while CI is red on it",
+            )
+
+    def test_every_step_of_the_ci_gate_is_accounted_for(self) -> None:
+        # A gating step added to ci.yml under a name other than `Run <tool>`
+        # is invisible to the join above. Make every step declare itself.
+        run_steps = {f"Run {tool}" for tool in _ci_lint_steps()}
+        for step in _ci_test_job_steps():
+            with self.subTest(step=step):
+                self.assertTrue(
+                    step in run_steps or step in CI_OTHER_STEPS,
+                    f"ci.yml's test job has a step {step!r} that is neither a `Run <tool>` "
+                    "step nor listed in CI_OTHER_STEPS -- say which intake check covers it",
+                )
+        harness = self.harness()
+        harness.run(GATE_STEP)
+        reported = {name for name, _ in harness.report()}
+        for step, checks in CI_OTHER_STEPS.items():
+            for check in checks:
+                with self.subTest(step=step, check=check):
+                    self.assertIn(check, reported)
+
+    def test_a_failing_harness_is_a_fail(self) -> None:
+        harness = self.harness()
+        proc = harness.run(GATE_STEP, STUB_EXIT_test_entrypoint="1", STUB_LINES_test_entrypoint="3")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(("entrypoint", "**FAIL**"), harness.report())
+        self.assertIn("test_entrypoint diagnostic 3", harness.intake)
 
     def test_the_linters_are_called_the_way_ci_calls_them(self) -> None:
         # The commands themselves, not just the check names: a table entry

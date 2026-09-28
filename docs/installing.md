@@ -242,7 +242,8 @@ AIB_ALLOW_UNVERIFIED_AUTH=1 AIB_IMAGE=localhost/my-own-build:dev aib
 
 It warns each time. Set it only for an image you built yourself.
 
-A release tag of the published image (`ghcr.io/danathar/atomic-image-builder:v1.2.3`)
+A release tag of the published image (`ghcr.io/danathar/atomic-image-builder:1.2.3`,
+the bare version with no leading `v`)
 *is* verified, because the identity below accepts tag refs as well as `main`.
 
 To run the same check by hand — before a bare `podman run`, say, so that run

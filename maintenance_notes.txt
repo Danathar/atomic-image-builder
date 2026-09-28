@@ -27,8 +27,8 @@ Workflow Patcher Indentation Sensitivity
 patch_workflow_signing_steps, ensure_workflow_job_env_entries, and the per-line
 patch_container_workflow / patch_bluebuild_workflow helpers in
 atomic_image_builder.py all depend on the exact indentation used by the bundled
-template snapshots (2-space step items; 4-space env:/steps: anchors; 6-space
-job-env entries).  ensure_workflow_job_env_entries defines a variable in
+template snapshots (2-space step items; 4-space env:/steps: anchors).
+ensure_workflow_job_env_entries defines a variable in
 each job that reads it (a line referring to env.<NAME>), never in "the first
 job": job env does not cross jobs, and a guard in build_push testing a variable
 defined in an owner's earlier lint job is false forever -- the silent-unsigned
@@ -36,29 +36,81 @@ outcome (#344).  When the reading job has no env:/steps: anchor at the expected
 indentation it raises CommandError rather than returning the text unchanged,
 because that no-op is exactly the failure this section warns about.  When no
 job reads the variable it does nothing, which is the shape of a workflow whose
-owner removed the signing steps.  Indentation is the only thing it is strict
-about within a job: the presence check is by key name among the 6-space
-entries directly under the job's env: block, so an owner's differing value or
-trailing comment counts as defined and is left alone, and the env:/steps:
-anchors tolerate an inline comment.  The alternative was a duplicate mapping
-key, which GitHub refuses to parse (#345).  An env: that already carries an
-inline value (env: { FOO: bar }) cannot take nested entries; that shape raises
-CommandError rather than writing a second env: key into the same job.
+owner removed the signing steps.  Within a job the presence check is by key
+name among the entries directly under the job's env: block, at whatever indent
+that block's first entry uses, and a new entry is written at that indent too:
+an editor's reformat can put them at eight, and counting only six there wrote
+a second SIGNING_ENABLED at six, which does not parse (#524).  So an owner's
+differing value or trailing comment counts as defined and is left alone, and
+the env:/steps: anchors tolerate an inline comment.  The alternative was a
+duplicate mapping key, which GitHub refuses to parse (#345).  An env: that
+already carries an inline value (env: { FOO: bar }) cannot take nested
+entries; that shape raises CommandError rather than writing a second env: key
+into the same job.  strip_job_env_entries, which removes the legacy
+COSIGN_PRIVATE_KEY/COSIGN_PASSWORD, reads the same block at the same indent.
+Matched only at six, an update of a job env at eight would succeed and leave
+the signing key exposed to every step in the job.
 
-The paths-ignore state-file entry is the exception to "no match, no change":
-it is inserted as a new sequence item, so a shape mismatch corrupts the file
-rather than leaving it alone.  A managed repository may write the list inline
-("paths-ignore: ['**.md']"), where a block "- item" beneath it is a parse
-error and GitHub runs nothing from the workflow.  Both patchers therefore go
-through extend_flow_sequence_line first, which extends an inline list in place
-(keeping a trailing comment, and not doubling a trailing comma) and returns
-None for the block form — see #358.
+Key identity is the parsed key name, never its spelling (#525).  workflow_key
+and workflow_block_key read a key bare, single- or double-quoted, and with
+whitespace before the colon, so "SIGNING_ENABLED":, 'env': and env : are the
+keys they name; patch_signing_step_block also reads the first key of a step's
+own "- " item, so a key-sorted "- if: ..." step is rewritten rather than given
+a second if:.  It reads only the step's own keys -- that first key and lines
+at its column -- so a run: | line such as "if : ; then", which parses as an if
+key on its own, is not taken for the step's condition and the guard still goes
+in.  Action pinning and the Cosign floor go through
+yaml_key_pattern and accept a quoted uses: value and a plain (unquoted)
+cosign-release: value, and write the owner's quoting back.  Each missed
+spelling was a duplicate key GitHub rejects, a floating tag with nothing
+reported, or a Cosign 2.x install handed the 3.x signing flags.
 
-The one place a mismatch corrupts output rather than no-op'ing is the
-paths-ignore state-file entry: it is inserted as a new sequence item, and an
-item at the wrong indent makes the whole sequence unparseable.  Both patchers
-therefore copy the indent of the first existing entry (block_sequence_entry_indent)
-and only assume key indent plus two for an empty list — see #359.
+Any patcher that writes a new or rewritten line, rather than editing one in
+place, can corrupt the file instead of no-op'ing: a line at the wrong indent
+ends the mapping or sequence it was meant to join, and the owner's next line
+becomes a parse error.  Every such write takes its indent from the block it
+joins (#524):
+
+  - paths-ignore block entries copy the first existing entry
+    (block_sequence_entry_indent) and assume key indent plus two only for an
+    empty list (#359).
+  - The BlueBuild action's push/build_opts/chunkah inputs, and new job-env
+    entries, copy the first entry under with: or env:
+    (block_mapping_entry_indent), with the same plus-two fallback.
+  - IMAGE_DESC is rewritten at the indent it already has, so a job or step
+    env entry stays in its mapping; a value continued over deeper lines (>-,
+    a folded plain scalar) is dropped with it rather than orphaned.
+
+A line inside a block scalar (run: |) is the owner's script, not a key.
+block_scalar_body_indexes finds those lines, and the IMAGE_DESC rewrite and
+strip_permission_entries skip them.  strip_permission_entries also does not
+count a comment as a kept entry, and lets neither comments nor blank lines end
+a permissions: block, so removing its last real entry collapses it to
+permissions: {} rather than a bare, null permissions: key.
+
+A managed repository may write paths-ignore as a flow list rather than a
+block sequence, where a block "- item" is a parse error and GitHub runs
+nothing from the workflow.  add_paths_ignore_entry covers all three shapes.
+A one-line list ("paths-ignore: ['**.md']") is extended in place by
+extend_flow_sequence_line, which keeps a trailing comment and does not double
+a trailing comma (#358).  A list spread over lines -- prettier's
+"paths-ignore: [" or "[" on the next line, items, then "]" -- takes the entry
+straight after its "[", the one position whose syntax is known without
+finding the matching bracket (#524).  Any other value (a scalar, an alias) is
+left alone.
+
+patch_workflow_branch_filters has the same exposure and runs on every update
+of both workflow types: it replaces a trigger's branches: entries with the
+default branch.  It writes the new entry at the indent of the existing ones
+(an indentless list stays indentless), removes every old entry however deep
+and whatever comments sit between them, only touches push/pull_request keys
+inside the on: block (a job may be called push), and leaves a trigger with
+branches-ignore: alone, since Actions refuses both filters on one event.  The
+on: block is recognised in every spelling YAML reads as that key -- on:,
+"on":, 'on': and on : (is_workflow_on_block, shared with
+patch_workflow_path_filters) -- because a bare-only match made a quoted key a
+silent no-op that left the old branch in place.  The branch name is quoted
+when YAML would misread it bare (#main, null, 1.0) — see #523.
 
 maintenance_audit.py currently validates action pin coverage but does not run
 the patchers against the snapshots.  When refreshing a template snapshot, run
@@ -319,7 +371,7 @@ user's files and credentials in reach; a tag anyone with push access to
 ghcr.io/blue-build/cli can repoint is not something to execute on that basis.
 The tag kept beside the digest is the floating one the pinned
 blue-build/github-action installs by default (CLI_VERSION_TAG in its
-"Determine Vars" step, "v0.9" at v1.12). The cost of the pin is parity: CI
+"Determine Vars" step, "v0.9" at v1.13). The cost of the pin is parity: CI
 pulls the tag and moves with it, the local build stays until re-pinned, so a
 local build can render with a CLI a step behind CI's. maintenance_audit.py's
 weekly run (audit_bluebuild_cli_image_pin) advises when the tag no longer
@@ -412,10 +464,23 @@ in ways that are quiet rather than loud:
   is the failure mode patch_cosign_compatibility() already fails closed
   against, arriving from a different direction.
 
-test_existing_repository_migrates_off_the_job_level_key covers the second, and
-test_signing_step_carries_its_own_password the first. Both run against text
-shaped like what is really on disk in a managed repository, because that is
-the input that matters here -- new repositories would look correct either way.
+  The clause goes in the step walker, patch_workflow_steps(), and the
+  job-level key afterwards in strip_legacy_signing_job_env(). With
+  `steps: # build`, or items at +4 or +0, the walker once visited no step
+  while the key was stripped regardless -- this exact silent outcome (#526).
+  So the walker accepts a commented key and takes the item indent from the
+  first item, and the strip raises a CommandError rather than run while a
+  job that loses the key still reads it (a workflow-level `env:` definition,
+  which the strip leaves alone, still answers such a read and is allowed).
+
+test_existing_repository_migrates_off_the_job_level_key and
+test_legacy_migration_rewrites_steps_under_a_commented_key_or_at_any_item_indent
+cover the second, with
+test_legacy_migration_fails_closed_when_a_condition_still_reads_the_job_key
+for the refusal, and test_signing_step_carries_its_own_password covers the
+first. They run against text shaped like what is really on disk in a managed
+repository, because that is the input that matters here -- new repositories
+would look correct either way.
 
 Sign The Digest, Not The Tag
 -----------------------------
@@ -627,17 +692,24 @@ name `vim-enhanced`, not string-equal to the spec. The batch cannot say which
 argument printed which line, so _resolve_package_spec() re-asks per leftover
 spec, on the cache the batch just warmed: `--whatprovides <spec>` first (it is
 case-sensitive and every package provides its own name), then a positional
-`<spec>` query for NEVRA forms, accepted only when a printed name opens the
-spec verbatim. That last condition is what keeps `Vim-Enhanced` rejected:
-positional repoquery matches ignoring case (5.4.2.1 prints vim-enhanced for
-it), install does not ("No match for argument"). A spec with no ".", "-" or
-":" skips the positional query, since it can only be a plain name and
---whatprovides already answered that. Confirmed live against dnf5 5.4.2.1:
-vim, vim-enhanced.x86_64, htop-3.4.1 and the virtual `webserver` resolve;
-Vim-Enhanced, HTOP, nethock and python3-foo-typo do not. Binaries by bare name
-(`dnf5 install <name>` also matches /usr/bin/<name>) are not resolved here; a
-user who types one keeps the "not found" message and can enter the package
-name instead.
+`<spec>` query for NEVRA forms, accepted only when the spec is verbatim one
+of the spellings dnf5 prints for what it matched (DNF5_SPEC_SPELLINGS: name,
+name.arch, name-version, name-version-release, name-version-release.arch,
+and the epoch forms of the last three and of name-version). That condition is
+what keeps `Vim-Enhanced` and `htop.X86_64` rejected: positional repoquery
+matches ignoring case (5.4.2.1 prints vim-enhanced and htop for them),
+install does not ("No match for argument"), and neither does rpm -q
+(`rpm -q bash.X86_64` is "not installed"). The check used to be "a printed
+%{name} opens the spec", which guarded only the name part and let a
+wrong-case arch or version through (#505): the install then failed on
+GitHub, and a removal was silently skipped by the build's rpm -q gate. A
+spec with no ".", "-" or ":" skips the positional query, since it can only be
+a plain name and --whatprovides already answered that. Confirmed live against
+dnf5 5.4.2.1: vim, vim-enhanced.x86_64, htop-3.4.1 and the virtual
+`webserver` resolve; Vim-Enhanced, HTOP, nethock and python3-foo-typo do not.
+Binaries by bare name (`dnf5 install <name>` also matches /usr/bin/<name>)
+are not resolved here; a user who types one keeps the "not found" message and
+can enter the package name instead.
 
 The same lookup checks the Removed Base Packages screen, and there Provides
 must stay rejected. The generated build.sh only removes a package after
@@ -677,11 +749,16 @@ misses are parsed off rpm's own "package <spec> is not installed" stdout
 lines rather than by matching the printed %{name} of the hits: rpm accepts
 name.arch and name-version specs and prints the bare name for them, so a
 hit for vim-enhanced.x86_64 prints "vim-enhanced" and would never match the
-spec that was asked. The miss line echoes the spec verbatim. A database rpm
-cannot open produces the same exit 1 *and* a "not installed" line per spec,
-distinguishable only by the "error:" line on stderr, so that is checked
-first and turns the whole batch into "could not check" rather than a
-confident typo verdict for every removal.
+spec that was asked. The miss line echoes the spec verbatim. rpm's exit
+status is the number of specs it did not find, not a flat 1: three misses
+exit 3. Reading any status above 1 as a failure sent every name in a batch
+with two misses to the repo query, where uupd and the ublue-os-* set were
+refused as typos (#503). So any exit status is an ordinary answer and the
+misses come from the miss lines alone. A database rpm cannot open also
+prints a "not installed" line per spec, distinguishable only by the
+"error:" line on stderr, so that is checked first and turns the whole batch
+into "could not check" rather than a confident typo verdict for every
+removal. A signal-killed rpm (negative status) is treated the same way.
 
 The rpm results are cached separately (installed_package_lookup_cache) from
 the repo results (package_lookup_cache). They answer different questions:
@@ -782,3 +859,46 @@ the fix is in the managed repo, not here -- replace the link with a regular
 file or directory and run the update again. There is no legitimate reason
 for a managed file to be a link; a repo that has one is telling us something
 has gone wrong with it.
+
+
+Containerfile Patcher: Which FROM Is the Published Stage
+--------------------------------------------------------
+render_containerfile() rewrites the base image of, and adds or removes the
+Homebrew block in, the last stage of an existing Containerfile, because that
+is the stage that gets built and published (#522). Which physical line is the
+last FROM is decided by containerfile_from_indices(), and it has to read the
+file the way BuildKit's frontend/dockerfile/parser does: a line that merely
+starts with "FROM" -- a continuation line, a heredoc body such as a Python
+`from x import y` -- is not a stage, and counting one rewrites the wrong line
+while the published image keeps its old base.
+
+The rules it follows, all from BuildKit's parser:
+
+  - The line-continuation character is the escape character: a backslash,
+    or a backtick when the file opens with an "# escape=`" parser
+    directive. containerfile_escape() reads it. Directives count only in the
+    unbroken run of `# key=value` lines (escape, syntax, check; key case
+    insensitive) at the very top -- a blank line, any other comment, an
+    unknown key or an instruction ends the run, and a later `# escape=` is an
+    ordinary comment.
+  - A line continues only when it ends in an unescaped escape character
+    followed by spaces or tabs; `C:\\` ends the instruction.
+  - Comment lines are dropped before continuations are joined: a comment
+    ending in the escape character continues nothing, and a comment inside a
+    continued instruction neither ends it nor extends it. Blank lines inside
+    one do not end it either.
+  - Heredocs open only in RUN, COPY and ADD, from a whole unquoted
+    `<<[-]WORD` shell word, after the whole instruction has been read. The
+    heredoc lexer always uses backslash, whatever the escape directive says.
+
+The Homebrew block this tool injects continues its RUNs with backslashes, so
+under a backtick escape it would split into separate (invalid) instructions.
+render_containerfile() therefore raises CommandError when brew_enabled is on
+and the file sets "# escape=`", before anything is diffed or pushed. With
+Homebrew off, an existing block is still found and removed using the file's
+own continuation character.
+
+Action required: none on a schedule. If BuildKit's parser changes these rules
+(parser.go, directives.go), update containerfile_escape() and
+containerfile_from_indices() together; the render_containerfile tests in
+tests/test_atomic_image_builder.py cover each rule through the real patch path.

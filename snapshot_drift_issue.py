@@ -18,12 +18,13 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from maintenance_audit import (
     SUBPROCESS_TIMEOUT_SECONDS,
     TEMPLATE_SOURCES,
-    audit_upstream_drift,
+    check_upstream_drift,
     load_template_source,
 )
 
@@ -80,21 +81,37 @@ def run_gh(args: list[str]) -> str:
     return proc.stdout
 
 
-def collect_drift(repo_root: Path) -> list[str]:
-    # Both buckets: an issue that only tracked the advisory would close itself
-    # at exactly the point the drift became bad enough to fail the audit.
-    messages: list[str] = []
+@dataclass
+class DriftReport:
+    # `messages` is the drift found among the snapshots that were compared;
+    # `unchecked` says why any snapshot was not. They are kept apart because
+    # "could not check" is neither drift nor its absence, and folding it into
+    # either bucket makes sync() act on something it does not know.
+    messages: list[str] = field(default_factory=list)
+    unchecked: list[str] = field(default_factory=list)
+
+
+def collect_drift(repo_root: Path) -> DriftReport:
+    # Every drift message, blocking or not: an issue that only tracked the
+    # advisory would close itself at exactly the point the drift became bad
+    # enough to fail the audit.
+    report = DriftReport()
     for source_rel, _workflow_rel in TEMPLATE_SOURCES:
         try:
             source = load_template_source(repo_root / source_rel)
-        except (OSError, ValueError):
-            # Already reported as a failure by the audit's local checks; this
-            # script has nothing to add and must not crash the step.
+        except (OSError, ValueError) as exc:
+            # Already reported as a failure by the audit's local checks. Here
+            # it only means this snapshot was not compared.
+            report.unchecked.append(f"Could not load {source_rel}: {exc}")
             continue
-        findings, advisories = audit_upstream_drift(source)
-        messages.extend(findings)
-        messages.extend(advisories)
-    return messages
+        try:
+            drift = check_upstream_drift(source)
+        except RuntimeError as exc:
+            report.unchecked.append(f"Unable to query upstream template HEAD for {source.repo}: {exc}")
+            continue
+        if drift is not None:
+            report.messages.append(drift.message)
+    return report
 
 
 def render_body(messages: list[str], *, run_url: str | None = None) -> str:
@@ -162,7 +179,17 @@ def find_tracking_issue(repo: str | None = None) -> tuple[int, str] | None:
 
 
 def sync(repo_root: Path, *, repo: str | None = None, run_url: str | None = None) -> str:
-    messages = collect_drift(repo_root)
+    report = collect_drift(repo_root)
+    if report.unchecked:
+        # A partial comparison can neither open the issue (an unreachable
+        # upstream is not drift) nor close it (nothing says the drift cleared),
+        # and rewriting the body from a subset would drop the unchecked
+        # snapshot's line only for the next run to put it back -- the weekly
+        # churn this single reused issue exists to avoid. So leave it exactly
+        # as it is; the next run that can compare everything decides.
+        reasons = "\n".join(f"- {reason}" for reason in report.unchecked)
+        return f"Could not compare every bundled snapshot with its upstream; left the tracking issue as it is.\n{reasons}"
+    messages = report.messages
     existing = find_tracking_issue(repo)
     repo_args = ["--repo", repo] if repo else []
 

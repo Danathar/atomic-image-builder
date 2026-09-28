@@ -1199,14 +1199,29 @@ def tokenize(command: str) -> list[str]:
     A run of punctuation is split back into the pieces bash reads, so a
     `(` or `)` glued to a separator (`;(`, `);`, `&&(`) is the paren and the
     separator rather than a word of its own. See punctuation_pieces().
+
+    An unquoted newline ends a command in bash the way `;` does, so it is
+    lexed as punctuation rather than whitespace and comes out as a `\\n`
+    token of its own, which OPERATORS splits on. shlex's default whitespace
+    includes it, and left there `podman ps<newline>git diff --no-index a b`
+    read as podman's arguments and the git command on the second line was
+    never checked (#569). A quoted newline is inside a word in bash and
+    stays inside the word here: shlex does not split in a quoted region.
     """
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="".join(sorted(PUNCTUATION)) + "\n")
+    lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     lexer.commenters = ""
     tokens: list[str] = []
     for token in lexer:
-        if len(token) > 1 and set(token) <= PUNCTUATION:
-            tokens.extend(punctuation_pieces(token))
+        if len(token) > 1 and set(token) <= PUNCTUATION | {"\n"}:
+            # A newline glued to other punctuation (`;\n`, `|\n`, `)\n\n`)
+            # is a separator of its own, one token per newline.
+            for run in re.split(r"(\n)", token):
+                if len(run) > 1:
+                    tokens.extend(punctuation_pieces(run))
+                elif run:
+                    tokens.append(run)
         else:
             tokens.append(token)
     return tokens

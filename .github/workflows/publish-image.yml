@@ -14,18 +14,23 @@ on:
     types: [published]
   workflow_dispatch:
 
-# Every event above writes the same repository tags, so all of them share one
-# group and run one at a time. Not keyed by github.ref: a release event's ref
-# is refs/tags/<tag> while a push is refs/heads/main, so a per-ref key puts
-# them in different groups and lets both push `latest` concurrently -- and if
-# the release built an older commit and finished last, it would win.
+# One group per ref: every merge to main shares refs/heads/main, and each
+# release (or dispatch on a tag) gets a group of its own. GitHub keeps at most
+# one *pending* run per group and cancels it when a newer one queues;
+# cancel-in-progress: false protects only the running member. So while a
+# release shared main's group, a release queued behind a main build was
+# cancelled before it started by the next merge to land.
 #
-# cancel-in-progress is false so a release publish is never cancelled by a
-# merge landing behind it. Queued runs supersede each other, so a burst of
-# merges still settles on the newest commit; it just costs a build to get
-# there rather than cancelling one mid-flight.
+# Separate groups cannot race for `latest`, because only a build of main
+# writes it (see the meta step) and those all run in the one group. A release
+# cut from an older commit therefore cannot drag `latest` backwards however
+# the two interleave. Nor for the version tag: only a tag ref writes it. They
+# meet only on a SHA tag, and then both built the same commit.
+#
+# Within main's group, queued runs still supersede each other, so a burst of
+# merges settles on the newest commit without cancelling a build mid-flight.
 concurrency:
-  group: publish-image
+  group: publish-image-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -53,13 +58,18 @@ jobs:
           # (e.g. "Danathar"). Lowercase it before building the registry path.
           OWNER_LC="${GITHUB_REPOSITORY_OWNER,,}"
           # `latest` means the tip of main, so only a main build may claim it.
-          # A release is published from a tag ref, and one cut from an older
-          # commit must not drag `latest` backwards; it still gets the version
-          # and SHA tags, which is what identifies a release anyway.
+          # The version tag means the release, so only a build of a tag ref
+          # may claim that. VERSION stays at the released value until the next
+          # bump, so a main build tagging it would re-point :X.Y.Z at
+          # unreleased main on every merge after a release. A release cut from
+          # an older commit must not drag `latest` backwards either. Every
+          # build gets its short-SHA tag.
           if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
-            TAGS="latest ${VERSION} ${SHORT_SHA}"
-          else
+            TAGS="latest ${SHORT_SHA}"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             TAGS="${VERSION} ${SHORT_SHA}"
+          else
+            TAGS="${SHORT_SHA}"
           fi
           {
             echo "version=${VERSION}"

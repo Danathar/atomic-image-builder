@@ -5,9 +5,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from maintenance_audit import SnapshotDrift
 from snapshot_drift_issue import (
     ISSUE_TITLE,
     SUBPROCESS_TIMEOUT_SECONDS,
+    DriftReport,
     collect_drift,
     find_tracking_issue,
     main,
@@ -65,27 +67,44 @@ class RunGhTests(unittest.TestCase):
 
 
 class CollectDriftTests(unittest.TestCase):
-    def test_collect_drift_reports_both_buckets(self) -> None:
+    def test_collect_drift_reports_blocking_and_advisory_drift(self) -> None:
         # An issue tracking only the advisory would close itself at exactly the
         # point the drift got bad enough to fail the audit.
         with patch(
-            "snapshot_drift_issue.audit_upstream_drift",
-            side_effect=[(["far behind"], []), ([], ["slightly behind"])],
+            "snapshot_drift_issue.check_upstream_drift",
+            side_effect=[SnapshotDrift("far behind", True), SnapshotDrift("slightly behind", False)],
         ):
-            messages = collect_drift(REPO_ROOT)
-        self.assertEqual(messages, ["far behind", "slightly behind"])
+            report = collect_drift(REPO_ROOT)
+        self.assertEqual(report, DriftReport(messages=["far behind", "slightly behind"]))
 
     def test_collect_drift_is_quiet_when_the_snapshots_match(self) -> None:
-        with patch("snapshot_drift_issue.audit_upstream_drift", return_value=([], [])):
-            self.assertEqual(collect_drift(REPO_ROOT), [])
+        with patch("snapshot_drift_issue.check_upstream_drift", return_value=None):
+            self.assertEqual(collect_drift(REPO_ROOT), DriftReport())
 
-    def test_collect_drift_skips_an_unloadable_source(self) -> None:
+    def test_collect_drift_marks_an_unloadable_source_unchecked(self) -> None:
         # A missing .template-source already fails the audit's local checks.
-        # This script must not crash on top of that.
+        # This script must not crash on top of that -- nor read a snapshot it
+        # never compared as one that matches upstream.
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("snapshot_drift_issue.audit_upstream_drift") as drift:
-                self.assertEqual(collect_drift(Path(tmp)), [])
+            with patch("snapshot_drift_issue.check_upstream_drift") as drift:
+                report = collect_drift(Path(tmp))
             drift.assert_not_called()
+        self.assertEqual(report.messages, [])
+        self.assertEqual(len(report.unchecked), 2)
+        self.assertTrue(all(reason.startswith("Could not load") for reason in report.unchecked))
+
+    def test_collect_drift_keeps_an_unreachable_upstream_out_of_the_drift(self) -> None:
+        # The audit's "Unable to query" advisory is not drift; filing it as
+        # such opened the tracking issue on a network failure (#530).
+        with patch(
+            "snapshot_drift_issue.check_upstream_drift",
+            side_effect=[RuntimeError("Could not resolve host: github.com"), SnapshotDrift("slightly behind", False)],
+        ):
+            report = collect_drift(REPO_ROOT)
+        self.assertEqual(report.messages, ["slightly behind"])
+        self.assertEqual(len(report.unchecked), 1)
+        self.assertIn("Unable to query upstream template HEAD", report.unchecked[0])
+        self.assertIn("Could not resolve host", report.unchecked[0])
 
 
 class RenderBodyTests(unittest.TestCase):
@@ -199,7 +218,7 @@ class FindTrackingIssueTests(unittest.TestCase):
 
 class SyncTests(unittest.TestCase):
     def test_sync_opens_an_issue_when_drift_appears(self) -> None:
-        with patch("snapshot_drift_issue.collect_drift", return_value=["snapshot behind"]):
+        with patch("snapshot_drift_issue.collect_drift", return_value=DriftReport(messages=["snapshot behind"])):
             with patch("snapshot_drift_issue.find_tracking_issue", return_value=None):
                 with patch("snapshot_drift_issue.run_gh", return_value="https://example.test/issues/9\n") as gh:
                     message = sync(REPO_ROOT)
@@ -208,7 +227,7 @@ class SyncTests(unittest.TestCase):
         self.assertIn("create", gh.call_args.args[0])
 
     def test_sync_updates_the_existing_issue_when_the_drift_changed(self) -> None:
-        with patch("snapshot_drift_issue.collect_drift", return_value=["now 30 commits behind"]):
+        with patch("snapshot_drift_issue.collect_drift", return_value=DriftReport(messages=["now 30 commits behind"])):
             with patch("snapshot_drift_issue.find_tracking_issue", return_value=(9, "stale body")):
                 with patch("snapshot_drift_issue.run_gh", return_value="") as gh:
                     message = sync(REPO_ROOT)
@@ -219,7 +238,7 @@ class SyncTests(unittest.TestCase):
         # A weekly edit with identical content is the same noise this exists to
         # avoid, one inbox over.
         body = render_body(["unchanged drift"], run_url="https://example.test/run/1")
-        with patch("snapshot_drift_issue.collect_drift", return_value=["unchanged drift"]):
+        with patch("snapshot_drift_issue.collect_drift", return_value=DriftReport(messages=["unchanged drift"])):
             with patch("snapshot_drift_issue.find_tracking_issue", return_value=(9, body)):
                 with patch("snapshot_drift_issue.run_gh") as gh:
                     message = sync(REPO_ROOT, run_url="https://example.test/run/2")
@@ -227,7 +246,7 @@ class SyncTests(unittest.TestCase):
         self.assertIn("unchanged", message)
 
     def test_sync_closes_the_issue_once_the_drift_clears(self) -> None:
-        with patch("snapshot_drift_issue.collect_drift", return_value=[]):
+        with patch("snapshot_drift_issue.collect_drift", return_value=DriftReport()):
             with patch("snapshot_drift_issue.find_tracking_issue", return_value=(9, "body")):
                 with patch("snapshot_drift_issue.run_gh", return_value="") as gh:
                     message = sync(REPO_ROOT)
@@ -237,7 +256,7 @@ class SyncTests(unittest.TestCase):
         self.assertIn("close", commands[1])
 
     def test_sync_does_nothing_when_clean_and_no_issue_is_open(self) -> None:
-        with patch("snapshot_drift_issue.collect_drift", return_value=[]):
+        with patch("snapshot_drift_issue.collect_drift", return_value=DriftReport()):
             with patch("snapshot_drift_issue.find_tracking_issue", return_value=None):
                 with patch("snapshot_drift_issue.run_gh") as gh:
                     message = sync(REPO_ROOT)
@@ -245,12 +264,50 @@ class SyncTests(unittest.TestCase):
         self.assertIn("nothing to do", message)
 
     def test_sync_passes_the_repo_through_to_every_write(self) -> None:
-        with patch("snapshot_drift_issue.collect_drift", return_value=[]):
+        with patch("snapshot_drift_issue.collect_drift", return_value=DriftReport()):
             with patch("snapshot_drift_issue.find_tracking_issue", return_value=(9, "body")):
                 with patch("snapshot_drift_issue.run_gh", return_value="") as gh:
                     sync(REPO_ROOT, repo="owner/name")
         for call in gh.call_args_list:
             self.assertIn("--repo", call.args[0])
+
+    def test_sync_does_not_open_an_issue_when_upstream_is_unreachable(self) -> None:
+        # #530: the audit's "Unable to query" advisory used to be filed as
+        # drift, so a run that could not reach GitHub opened the tracking issue
+        # with nothing in it but ls-remote errors -- and the next clean run
+        # closed it again. Exercised at the git boundary, not collect_drift.
+        unreachable = subprocess.CompletedProcess(
+            ["git"], 128, "", "fatal: unable to access: Could not resolve host: github.com"
+        )
+        with patch("maintenance_audit.subprocess.run", return_value=unreachable):
+            with patch("snapshot_drift_issue.run_gh") as gh:
+                message = sync(REPO_ROOT)
+        gh.assert_not_called()
+        self.assertIn("left the tracking issue as it is", message)
+        self.assertIn("Could not resolve host", message)
+
+    def test_sync_does_not_close_the_issue_when_no_source_was_compared(self) -> None:
+        # #530: with every .template-source unloadable there was nothing to
+        # report, which read as "in sync" and closed an open issue on the
+        # strength of a comparison that never happened.
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("snapshot_drift_issue.find_tracking_issue", return_value=(9, "body")):
+                with patch("snapshot_drift_issue.run_gh") as gh:
+                    message = sync(Path(tmp))
+        gh.assert_not_called()
+        self.assertIn("left the tracking issue as it is", message)
+        self.assertIn("Could not load", message)
+
+    def test_sync_does_not_rewrite_the_issue_from_a_partial_comparison(self) -> None:
+        # One snapshot compared and drifted, the other unchecked. Rewriting the
+        # body from that subset drops the unchecked snapshot's line, and the
+        # next complete run puts it back: two edits for nothing having moved.
+        report = DriftReport(messages=["snapshot behind"], unchecked=["Unable to query upstream template HEAD"])
+        with patch("snapshot_drift_issue.collect_drift", return_value=report):
+            with patch("snapshot_drift_issue.find_tracking_issue", return_value=(9, "older body")):
+                with patch("snapshot_drift_issue.run_gh") as gh:
+                    sync(REPO_ROOT)
+        gh.assert_not_called()
 
 
 class MainTests(unittest.TestCase):

@@ -58,6 +58,7 @@ setup_stubs() {
     cat >"$stub_dir/podman" <<PODMAN
 #!/usr/bin/env bash
 if [ "\$1" = "pull" ]; then
+    [ -n "\${AIB_TEST_PULL_ERROR-}" ] && printf '%s\n' "\$AIB_TEST_PULL_ERROR" >&2
     exit \${AIB_TEST_PULL_STATUS:-0}
 fi
 if [ "\$1" = "image" ] && [ "\$2" = "inspect" ]; then
@@ -301,6 +302,61 @@ test_pull_failure_refuses_to_run() {
     cleanup_stubs
 }
 
+# --- a tag the registry does not have is not an offline host --------------
+# Pointing an online user who mistyped a tag at the unchecked escape hatch is
+# the wrong advice. :v1.2.3 is the likeliest mistyped tag, because the git
+# tags carry a v and the image tags do not, so that one gets the corrected
+# command.
+test_pull_of_a_missing_tag_is_not_called_offline() {
+    setup_stubs
+    local out status
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_TEST_PULL_STATUS=125 \
+        AIB_TEST_PULL_ERROR="Error: reading manifest v0.10.0 in ghcr.io/danathar/atomic-image-builder: manifest unknown" \
+        AIB_IMAGE="ghcr.io/danathar/atomic-image-builder:v0.10.0" "$aib" 2>&1)"
+    status=$?
+    assert_eq "$status" "1" "missing tag: exit status"
+    assert_contains "$out" "manifest unknown" "missing tag: podman's own error is still shown"
+    assert_contains "$out" "no image by this name" "missing tag: says the registry has no such image"
+    assert_contains "$out" "AIB_IMAGE=ghcr.io/danathar/atomic-image-builder:0.10.0 aib" "missing tag: gives the tag without the v"
+    assert_not_contains "$out" "Offline" "missing tag: not blamed on the network"
+    assert_not_contains "$out" "AIB_SKIP_VERIFY" "missing tag: no unchecked escape hatch for a typo"
+    assert_eq "$(cat "$podman_log" 2>/dev/null)" "" "missing tag: podman run never happens"
+
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_TEST_PULL_STATUS=125 \
+        AIB_TEST_PULL_ERROR="Error: initializing source docker://ghcr.io/danathar/atomic-image-builder:nightly: reading manifest nightly: manifest unknown" \
+        AIB_IMAGE="ghcr.io/danathar/atomic-image-builder:nightly" "$aib" 2>&1)"
+    assert_contains "$out" "no image by this name" "missing non-v tag: says the registry has no such image"
+    assert_contains "$out" "env -u AIB_IMAGE aib" "missing non-v tag: offers the official image"
+    assert_not_contains "$out" "AIB_SKIP_VERIFY" "missing non-v tag: no unchecked escape hatch"
+    cleanup_stubs
+}
+
+# --- every remedy repeats a pinned AIB_IMAGE back ---------------------------
+# A pin set inline lasts only for the command it was typed on. A remedy that
+# drops it is a pasted line that silently runs :latest instead of the release
+# the reader asked for.
+test_remedies_keep_a_pinned_release() {
+    local pin="ghcr.io/danathar/atomic-image-builder:0.9.5" out
+    setup_stubs
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_TEST_PULL_STATUS=125 \
+        AIB_TEST_PULL_ERROR="Error: dial tcp: lookup ghcr.io: no such host" AIB_IMAGE="$pin" "$aib" 2>&1)"
+    assert_contains "$out" "Offline?" "pinned, offline: still the offline message"
+    assert_contains "$out" "AIB_SKIP_VERIFY=1 AIB_IMAGE=$pin aib" "pinned, offline: remedy keeps the pin"
+    cleanup_stubs
+
+    setup_stubs
+    rm -f "$stub_dir/cosign"
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_IMAGE="$pin" "$aib" 2>&1)"
+    assert_contains "$out" "AIB_SKIP_VERIFY=1 AIB_IMAGE=$pin aib" "pinned, no cosign: remedy keeps the pin"
+    cleanup_stubs
+
+    setup_stubs
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_SKIP_VERIFY=1 AIB_IMAGE="$pin" "$aib" 2>&1)"
+    assert_contains "$out" "env -u AIB_SKIP_VERIFY AIB_IMAGE=$pin aib" "pinned, skip verify: remedy keeps the pin"
+    assert_contains "$out" "AIB_ALLOW_UNVERIFIED_AUTH=1 AIB_SKIP_VERIFY=1 AIB_IMAGE=$pin aib" "pinned, skip verify: login remedy keeps the pin"
+    cleanup_stubs
+}
+
 # --- a user's own image is not forced through our identity -----------------
 # Someone running their own build cannot satisfy this repository's certificate
 # identity, so verifying theirs would fail every time and the only way out
@@ -319,7 +375,7 @@ test_custom_image_is_not_verified() {
 # supported, verified way to run -- not a way around the check.
 test_published_release_tag_is_verified() {
     setup_stubs
-    PATH="$stub_dir" HOME="$stub_dir/home" AIB_IMAGE="ghcr.io/danathar/atomic-image-builder:v0.9.5" "$aib" >/dev/null 2>&1
+    PATH="$stub_dir" HOME="$stub_dir/home" AIB_IMAGE="ghcr.io/danathar/atomic-image-builder:0.9.5" "$aib" >/dev/null 2>&1
     assert_contains "$(cat "$cosign_log")" "ghcr.io/danathar/atomic-image-builder@$test_digest" "release tag: verified like latest"
     cleanup_stubs
 }
@@ -359,6 +415,33 @@ test_gh_authenticated() {
     args="$(cat "$podman_log")"
     assert_contains "$args" "-e GH_TOKEN" "gh authenticated: GH_TOKEN forwarded"
     assert_not_contains "$args" "aib-gh:/root/.config/gh" "gh authenticated: aib-gh volume not mounted"
+    cleanup_stubs
+}
+
+# --- a stale login elsewhere does not hide a working github.com one --------
+# Bare `gh auth status` exits 1 when any account on any host fails, even with
+# a working active github.com account (#513). This gh answers the way that
+# setup does: only the github.com/--active question succeeds.
+test_gh_stale_other_host_still_forwards_token() {
+    setup_stubs
+    cat >"$stub_dir/gh" <<'GH'
+#!/usr/bin/env bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+    [ "$*" = "auth status --hostname github.com --active" ] && exit 0
+    exit 1
+fi
+if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
+    echo "fake-token-123"
+    exit 0
+fi
+exit 1
+GH
+    chmod +x "$stub_dir/gh"
+    PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1
+    local args
+    args="$(cat "$podman_log")"
+    assert_contains "$args" "-e GH_TOKEN" "stale other host: GH_TOKEN still forwarded"
+    assert_not_contains "$args" "aib-gh:/root/.config/gh" "stale other host: aib-gh volume not mounted"
     cleanup_stubs
 }
 
@@ -822,6 +905,7 @@ RPMOSTREE
 
 test_podman_missing
 test_gh_authenticated
+test_gh_stale_other_host_still_forwards_token
 test_gh_token_forwarded_by_environment_not_argv
 test_custom_image_gets_no_credentials
 test_skip_verify_gets_no_credentials
@@ -852,6 +936,8 @@ test_skip_verify_warns_and_runs
 test_pull_failure_refuses_to_run
 test_custom_image_is_not_verified
 test_published_release_tag_is_verified
+test_pull_of_a_missing_tag_is_not_called_offline
+test_remedies_keep_a_pinned_release
 test_unparseable_digest_refuses_to_run
 test_malformed_digest_refuses_to_run
 

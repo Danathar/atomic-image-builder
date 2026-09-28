@@ -52,6 +52,7 @@ from atomic_image_builder import (  # noqa: E402
     METHOD_DISPLAY,
     TOOL_COMMAND,
     VERSION,
+    next_boot_deployment,
 )
 
 TEMPLATE_DIR = ROOT / ".github/ISSUE_TEMPLATE"
@@ -364,14 +365,30 @@ class SystemScanTests(unittest.TestCase):
         self.assertIn(placeholder, {image.image_uri for image in BASE_IMAGES})
 
     def test_the_command_the_form_suggests_reads_what_the_scan_reads(self) -> None:
-        # The scan runs `rpm-ostree status --json --booted`; the form asks a
-        # reporter for the same deployment with the short spelling of the
-        # same flag. A scan that stopped scoping itself to the booted
-        # deployment would make the answer describe something else.
-        description = field(BUG, "base")["attributes"]["description"]
-        self.assertIn("`rpm-ostree status -b`", description)
-        source = (ROOT / "atomic_image_builder.py").read_text()
-        self.assertIn('["rpm-ostree", "status", "--json", "--booted"]', source)
+        # The form tells a reporter to copy the first entry `rpm-ostree status`
+        # prints for the booted OS, skipping entries of another StateRoot. That
+        # is the deployment the scan reads: the first one sharing the booted
+        # deployment's osname -- the pending one when something is waiting
+        # for a reboot, the booted one otherwise -- never another stateroot's
+        # deployment listed ahead of it. rpm-ostree prints a `StateRoot:` line
+        # on every entry once more than one stateroot exists, which is how a
+        # reporter tells them apart. The form used to ask for
+        # `rpm-ostree status -b`, which names a different deployment on a
+        # pending host (#519), and then for the bare first entry, which names
+        # another OS's deployment on a multi-stateroot host.
+        description = " ".join(field(BUG, "base")["attributes"]["description"].split())
+        self.assertIn("first entry `rpm-ostree status` prints for the OS you booted", description)
+        self.assertIn("skip any whose StateRoot differs from the booted", description)
+        booted = {"booted": True, "osname": "default", "container-image-reference": "booted"}
+        staged = {"staged": True, "osname": "default", "container-image-reference": "staged"}
+        rollback = {"osname": "default", "container-image-reference": "rollback"}
+        other_os = {"osname": "other", "container-image-reference": "other"}
+        for status in ([staged, booted, rollback], [booted, rollback], [other_os, booted, rollback]):
+            # The entry the form names: the first after dropping every entry
+            # whose StateRoot is not the booted entry's.
+            same_root = [item for item in status if item["osname"] == booted["osname"]]
+            with self.subTest(first=status[0]["container-image-reference"]):
+                self.assertEqual(next_boot_deployment(status)[0], same_root[0])
 
     def test_the_form_expects_no_scan_where_the_tool_requires_none(self) -> None:
         # "container, no host scan" is only a sensible answer while

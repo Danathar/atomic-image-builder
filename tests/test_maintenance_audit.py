@@ -1453,16 +1453,54 @@ class WrapperReleaseAuditTests(unittest.TestCase):
         self.assertIn("does not record a sha256 for a file named `aib`", finding)
         self.assertIn("gh workflow run publish-wrapper.yml -f tag=v0.9.6", finding)
 
-    def test_parse_wrapper_checksum_reads_what_sha256sum_writes(self) -> None:
+    def test_a_checksum_with_an_extra_line_for_another_file_is_a_failure(self) -> None:
+        # `sha256sum -c` checks every line and fails if any one does, so a
+        # correct `aib` line does not rescue a second line naming a file the
+        # install never downloads (#531).
+        wrapper = b"x"
+        checksum = self._checksum(wrapper) + self._checksum(wrapper, "contrib/aib")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._checkout(tmp, wrapper)
+            with patch("maintenance_audit.query_latest_release", return_value=self._release("v0.9.6")):
+                served = self._served("v0.9.6", aib=wrapper, checksum=checksum)
+                with patch("maintenance_audit.fetch_bytes", side_effect=served.__getitem__):
+                    findings, advisories = audit_wrapper_release(root)
+        self.assertEqual(advisories, [])
+        (finding,) = findings
+        self.assertIn("also lists `contrib/aib`", finding)
+        self.assertIn("sha256sum -c", finding)
+        self.assertIn("gh workflow run publish-wrapper.yml -f tag=v0.9.6", finding)
+
+    def test_a_second_aib_line_with_a_stale_digest_is_a_failure(self) -> None:
+        # Two `aib` lines are both checked; the first agreeing with the
+        # download does not excuse the second (#531).
+        wrapper = b"#!/usr/bin/env bash\ncosign verify\n"
+        stale = self._checksum(b"#!/usr/bin/env bash\npodman run\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._checkout(tmp, wrapper)
+            with patch("maintenance_audit.query_latest_release", return_value=self._release("v0.9.6")):
+                served = self._served("v0.9.6", aib=wrapper, checksum=self._checksum(wrapper) + stale)
+                with patch("maintenance_audit.fetch_bytes", side_effect=served.__getitem__):
+                    findings, advisories = audit_wrapper_release(root)
+        self.assertEqual(advisories, [])
+        (finding,) = findings
+        self.assertIn(stale.split()[0].decode(), finding)
+        self.assertIn(hashlib.sha256(wrapper).hexdigest(), finding)
+
+    def test_parse_wrapper_checksum_reads_every_line_sha256sum_checks(self) -> None:
         digest = "a" * 64
+        other = "b" * 64
         cases = {
-            f"{digest}  aib\n": digest,
-            f"{digest} *aib\r\n": digest,  # binary-mode marker, CRLF
-            f"{'b' * 64}  aib.sha256\n{digest}  aib\n": digest,
-            f"{digest}  contrib/aib\n": None,
-            f"{digest[:63]}  aib\n": None,
-            "": None,
-            "not a checksum": None,
+            f"{digest}  aib\n": ([digest], []),
+            f"{digest} *aib\r\n": ([digest], []),  # binary-mode marker, CRLF
+            f"{other}  aib.sha256\n{digest}  aib\n": ([digest], ["aib.sha256"]),
+            f"{digest}  aib\n{digest}  contrib/aib\n": ([digest], ["contrib/aib"]),
+            f"{digest}  aib\n{other}  aib\n": ([digest, other], []),
+            f"{digest}  aib\n\nnot a checksum\n": ([digest], []),  # skipped, as without --strict
+            f"{digest}  contrib/aib\n": ([], ["contrib/aib"]),
+            f"{digest[:63]}  aib\n": ([], []),
+            "": ([], []),
+            "not a checksum": ([], []),
         }
         for text, expected in cases.items():
             with self.subTest(text=text):
