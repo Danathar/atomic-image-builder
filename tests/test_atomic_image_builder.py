@@ -2362,6 +2362,144 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("[main, dev]", patched)
         self.assertEqual(app.patch_workflow_branch_filters(patched, "master"), patched)
 
+    @staticmethod
+    def workflow_triggers(workflow: str) -> dict:
+        """Parse just the `on:` block of ``workflow`` -- the snapshots' other
+        blocks carry shapes the strict test parser deliberately refuses."""
+        lines = workflow.splitlines()
+        start = lines.index("on:")
+        end = next(
+            (index for index in range(start + 1, len(lines)) if lines[index] and not lines[index][0].isspace()),
+            len(lines),
+        )
+        return parse_block_yaml("\n".join(lines[start:end]) + "\n")["on"]
+
+    def test_patch_container_workflow_keeps_an_indentless_branches_list_parseable(self) -> None:
+        # PyYAML and ruamel write a sequence at its key's own indent. The new
+        # entry went in at key indent plus two beside it, and the bundled
+        # workflow stopped parsing (#523).
+        app = self.make_app()
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github" / "workflows" / "build.yml").read_text()
+        indentless = snapshot.replace("    branches:\n      - main\n", "    branches:\n    - main\n")
+        self.assertEqual(indentless.count("    branches:\n    - main\n"), 2)
+        patched = app.patch_container_workflow(indentless, default_branch="master")
+        triggers = self.workflow_triggers(patched)
+        self.assertEqual(triggers["pull_request"], {"branches": ["master"]})
+        self.assertEqual(triggers["push"]["branches"], ["master"])
+        self.assertEqual(app.patch_container_workflow(patched, default_branch="master"), patched)
+
+    def test_patch_workflow_branch_filters_replaces_deeper_entries_and_entries_behind_a_comment(self) -> None:
+        # Only entries at exactly six spaces were removed: a new entry at six
+        # above old ones at eight folded into one scalar, "main - main", and
+        # a comment line ended the removal early, keeping a stale branch.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            on:
+              push:
+                branches:
+                    - main
+              pull_request:
+                branches:
+                  - trunk
+                  # the release line
+                  - dev
+                paths:
+                  - Containerfile
+            """
+        )
+        patched = app.patch_workflow_branch_filters(workflow, "master")
+        self.assertEqual(
+            parse_block_yaml(patched),
+            {
+                "on": {
+                    "push": {"branches": ["master"]},
+                    "pull_request": {"branches": ["master"], "paths": ["Containerfile"]},
+                }
+            },
+        )
+        self.assertIn("    branches:\n        - master\n", patched)
+        self.assertIn("      # the release line\n", patched)
+        self.assertEqual(app.patch_workflow_branch_filters(patched, "master"), patched)
+
+    def test_patch_workflow_branch_filters_leaves_a_job_named_push_alone(self) -> None:
+        # `push` and `pull_request` are only triggers under `on:`. A job with
+        # that ID was given a branches: key, which Actions rejects.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            on:
+              pull_request:
+            jobs:
+              push:
+                runs-on: ubuntu-latest
+            """
+        )
+        patched = app.patch_workflow_branch_filters(workflow, "master")
+        self.assertEqual(
+            parse_block_yaml(patched),
+            {"on": {"pull_request": {"branches": ["master"]}}, "jobs": {"push": {"runs-on": "ubuntu-latest"}}},
+        )
+
+    def test_patch_workflow_branch_filters_leaves_a_branches_ignore_trigger_alone(self) -> None:
+        # Actions refuses `branches` beside `branches-ignore` on one event.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            on:
+              push:
+                branches-ignore:
+                  - 'dependabot/**'
+              pull_request:
+            """
+        )
+        patched = app.patch_workflow_branch_filters(workflow, "master")
+        self.assertEqual(
+            parse_block_yaml(patched),
+            {"on": {"push": {"branches-ignore": ["dependabot/**"]}, "pull_request": {"branches": ["master"]}}},
+        )
+
+    def test_branch_filters_find_the_triggers_under_a_quoted_on_key(self) -> None:
+        # `"on":`, `'on':` and `on :` are the same key to YAML and to Actions.
+        # Scoping the patch to a literal `on:` skipped every trigger under
+        # them, so a default-branch switch left both workflow types building
+        # the old branch, and reported nothing.
+        cases = (
+            (self.make_app(), CONTAINERFILE_TEMPLATE_DIR, "patch_container_workflow"),
+            (self.make_bluebuild_app(), BLUEBUILD_TEMPLATE_DIR, "patch_bluebuild_workflow"),
+        )
+        for app, template_dir, method in cases:
+            patch = getattr(app, method)
+            # The workflow a repository generated on `main` carries.
+            snapshot = (template_dir / ".github" / "workflows" / "build.yml").read_text()
+            generated = patch(snapshot, default_branch="main")
+            self.assertEqual(generated.count("\non:\n"), 1)
+            self.assertEqual(generated.count("    branches:\n      - main\n"), 2)
+            for spelling in ('"on":', "'on':", "on :", '"on" : # triggers'):
+                with self.subTest(method=method, spelling=spelling):
+                    quoted = generated.replace("\non:\n", f"\n{spelling}\n")
+                    patched = patch(quoted, default_branch="master")
+                    self.assertIn(f"\n{spelling}\n", patched)
+                    self.assertIn("  pull_request:\n    branches:\n      - master\n", patched)
+                    self.assertIn("  push:\n    branches:\n      - master\n", patched)
+                    self.assertNotIn("      - main\n", patched)
+                    self.assertEqual(patch(patched, default_branch="master"), patched)
+
+    def test_branch_filters_quote_a_default_branch_yaml_would_misread(self) -> None:
+        # `#main` is a comment and `null` is not a string when written bare;
+        # both are legal branch names. An ordinary name stays unquoted.
+        app = self.make_app()
+        workflow = "on:\n  push:\n    branches:\n      - main\n  pull_request:\n"
+        for branch in ("#main", "null", "@dev", "1.0"):
+            with self.subTest(branch=branch):
+                patched = app.patch_workflow_branch_filters(workflow, branch)
+                expected = {"branches": [branch]}
+                self.assertEqual(parse_block_yaml(patched), {"on": {"push": expected, "pull_request": expected}})
+                generated = self.workflow_triggers(app.generate_container_workflow(default_branch=branch))
+                self.assertEqual(generated["pull_request"], expected)
+                self.assertEqual(generated["push"]["branches"], [branch])
+        self.assertIn("      - master\n", app.patch_workflow_branch_filters(workflow, "master"))
+
     def test_validate_config_rejects_unsafe_package_token(self) -> None:
         app = self.make_app()
         app.config.packages = ["tmux", "bad;rm"]
@@ -16347,6 +16485,19 @@ class BuilderTests(unittest.TestCase):
             "on:\n  push:\n    paths-ignore:\n      - './README.md'\n"
         )
         self.assertIn("      - 'README.md'\n", result)
+
+    def test_patch_workflow_path_filters_finds_a_quoted_on_block(self) -> None:
+        # `"on":` is the same trigger block as `on:`; matching only the bare
+        # spelling left its invalid './' filters in place.
+        app = self.make_app()
+        for spelling in ('"on":', "'on':", "on :"):
+            with self.subTest(spelling=spelling):
+                workflow_text = f"{spelling}\n  pull_request:\n    paths:\n      - './disk_config/disk.toml'\n"
+                result = app.patch_workflow_path_filters(workflow_text)
+                self.assertIn(f"{spelling}\n", result)
+                self.assertIn("      - 'disk_config/disk.toml'\n", result)
+                self.assertNotIn("'./", result)
+                self.assertEqual(app.patch_workflow_path_filters(result), result)
 
     def test_generated_disk_workflow_filters_name_files_that_exist(self) -> None:
         # The filters are only worth fixing if they point at something. Every

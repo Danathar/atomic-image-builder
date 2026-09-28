@@ -74,6 +74,19 @@ item at the wrong indent makes the whole sequence unparseable.  Both patchers
 therefore copy the indent of the first existing entry (block_sequence_entry_indent)
 and only assume key indent plus two for an empty list — see #359.
 
+patch_workflow_branch_filters has the same exposure and runs on every update
+of both workflow types: it replaces a trigger's branches: entries with the
+default branch.  It writes the new entry at the indent of the existing ones
+(an indentless list stays indentless), removes every old entry however deep
+and whatever comments sit between them, only touches push/pull_request keys
+inside the on: block (a job may be called push), and leaves a trigger with
+branches-ignore: alone, since Actions refuses both filters on one event.  The
+on: block is recognised in every spelling YAML reads as that key -- on:,
+"on":, 'on': and on : (is_workflow_on_block, shared with
+patch_workflow_path_filters) -- because a bare-only match made a quoted key a
+silent no-op that left the old branch in place.  The branch name is quoted
+when YAML would misread it bare (#main, null, 1.0) — see #523.
+
 maintenance_audit.py currently validates action pin coverage but does not run
 the patchers against the snapshots.  When refreshing a template snapshot, run
 the test suite — the golden-file patcher tests in
