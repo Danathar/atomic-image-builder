@@ -4304,8 +4304,8 @@ class App:
         # A classic origin names its architecture in the ref, checked below.
         # A container image does not: a multi-arch one such as
         # quay.io/fedora/fedora-kinoite:44 is the same reference on every
-        # architecture, so read what the booted image actually was.
-        image_architecture = deployment_image_architecture(booted)
+        # architecture, so read what the scanned deployment's image actually is.
+        image_architecture = deployment_image_architecture(deployment)
         if image_architecture and image_architecture != PUBLISHED_OCI_ARCHITECTURE:
             self.gum.error(f"This system runs a {image_architecture} image.")
             self.gum.hint(
