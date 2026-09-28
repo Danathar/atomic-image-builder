@@ -798,7 +798,7 @@ while the published image keeps its old base.
 The rules it follows, all from BuildKit's parser:
 
   - The line-continuation character is the escape character: a backslash,
-    or a backtick when the file opens with an `# escape=`` ` parser
+    or a backtick when the file opens with an "# escape=`" parser
     directive. containerfile_escape() reads it. Directives count only in the
     unbroken run of `# key=value` lines (escape, syntax, check; key case
     insensitive) at the very top -- a blank line, any other comment, an
@@ -817,7 +817,7 @@ The rules it follows, all from BuildKit's parser:
 The Homebrew block this tool injects continues its RUNs with backslashes, so
 under a backtick escape it would split into separate (invalid) instructions.
 render_containerfile() therefore raises CommandError when brew_enabled is on
-and the file sets `# escape=`` `, before anything is diffed or pushed. With
+and the file sets "# escape=`", before anything is diffed or pushed. With
 Homebrew off, an existing block is still found and removed using the file's
 own continuation character.
 
