@@ -63,6 +63,11 @@ pull credentials for root before the switch works. See
   reason the Homebrew layer below is: it produces every qcow2 and installer ISO
   your repository publishes. The pinned digest moves when this tool is updated,
   and an update re-pins a repository it created earlier.
+- The menu honours the [no-color.org](https://no-color.org) convention: set
+  `NO_COLOR` to any non-empty value and its styled headings and helper text
+  render as plain text. `TERM=dumb`, an unset `TERM`, or a non-interactive
+  stdout fall back the same way, since none of those can render ANSI escape
+  codes.
 
 ## Migrating layered packages from your current system
 
