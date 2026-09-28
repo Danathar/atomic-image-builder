@@ -332,17 +332,29 @@ def describe_snapshot_drift(source: TemplateSource, head: str) -> SnapshotDrift:
     return SnapshotDrift(f"{prefix}, on a diverged history. Review both before refreshing.", False)
 
 
+def check_upstream_drift(source: TemplateSource) -> SnapshotDrift | None:
+    """Compare one bundled snapshot with its upstream HEAD; None when they match.
+
+    Raises RuntimeError when the upstream cannot be queried. Callers decide what
+    "could not check" means to them: the audit reports it as an advisory, and
+    snapshot_drift_issue.py must not read it as drift in either direction.
+    """
+    head = query_remote_head(source.repo)
+    if head == source.revision:
+        return None
+    return describe_snapshot_drift(source, head)
+
+
 def audit_upstream_drift(source: TemplateSource) -> tuple[list[str], list[str]]:
     """Return (failures, advisories) for one bundled template snapshot."""
     try:
-        head = query_remote_head(source.repo)
+        drift = check_upstream_drift(source)
     except RuntimeError as exc:
         # Being unable to check is not an inconsistency, and an unreachable
         # upstream must not fail the weekly job.
         return [], [f"Unable to query upstream template HEAD for {source.repo}: {exc}"]
-    if head == source.revision:
+    if drift is None:
         return [], []
-    drift = describe_snapshot_drift(source, head)
     return ([drift.message], []) if drift.blocking else ([], [drift.message])
 
 
@@ -881,10 +893,11 @@ def audit_wrapper_release(repo_root: Path) -> tuple[list[str], list[str]]:
     a red audit.
 
     A release the install cannot complete from is also a failure: no `aib`
-    asset, no `aib.sha256` beside it, or a checksum that does not name the
-    `aib` it sits beside with the digest of it. The install docs fetch both by
-    name and pipe the second into `sha256sum -c`, so any of those is a
-    recommended install that stops with a 404 or a checksum mismatch, and
+    asset, no `aib.sha256` beside it, or a checksum with any line that does
+    not name the `aib` it sits beside with the digest of it. The install docs
+    fetch both by name and pipe the second into `sha256sum -c`, which checks
+    every line and fails if any one does, so any of those is a recommended
+    install that stops with a 404, a missing file or a checksum mismatch, and
     a green audit over it would be reporting on a wrapper nobody can install.
     Which repair the finding names depends on the tag: publish-wrapper.yml's
     dispatch packages the tag's own contrib/aib, so it repairs the release
@@ -913,16 +926,24 @@ def audit_wrapper_release(repo_root: Path) -> tuple[list[str], list[str]]:
         checksum = fetch_bytes(assets[WRAPPER_CHECKSUM_ASSET]).decode("utf-8", errors="replace")
     except RuntimeError as exc:
         return [], [f"Unable to download the `{WRAPPER_ASSET}` release assets: {exc}"]
-    recorded = parse_wrapper_checksum(checksum)
-    if recorded is None:
+    recorded, others = parse_wrapper_checksum(checksum)
+    if not recorded:
         return [
             f"The `{WRAPPER_CHECKSUM_ASSET}` attached to release {tag} does not record a sha256 for a "
             f"file named `{WRAPPER_ASSET}`, so the recommended install's `sha256sum -c` fails. "
             f"{describe_wrapper_release_repair(tag, expected)}"
         ], []
-    if recorded != published:
+    if others:
+        names = ", ".join(f"`{name}`" for name in others)
         return [
-            f"The `{WRAPPER_CHECKSUM_ASSET}` attached to release {tag} records {recorded}, but the "
+            f"The `{WRAPPER_CHECKSUM_ASSET}` attached to release {tag} also lists {names}, which the "
+            f"recommended install does not download, so its `sha256sum -c` fails on the missing file. "
+            f"{describe_wrapper_release_repair(tag, expected)}"
+        ], []
+    stale = next((digest for digest in recorded if digest != published), None)
+    if stale is not None:
+        return [
+            f"The `{WRAPPER_CHECKSUM_ASSET}` attached to release {tag} records {stale}, but the "
             f"`{WRAPPER_ASSET}` beside it hashes to {published}, so the recommended install's "
             f"`sha256sum -c` fails. {describe_wrapper_release_repair(tag, expected)}"
         ], []
@@ -951,20 +972,30 @@ def fetch_bytes(url: str) -> bytes:
         raise RuntimeError(describe_network_error(exc)) from exc
 
 
-def parse_wrapper_checksum(text: str) -> str | None:
-    """Return the digest `sha256sum -c` would check the downloaded `aib` against.
+def parse_wrapper_checksum(text: str) -> tuple[list[str], list[str]]:
+    """Return (digests recorded for `aib`, other names listed) in a checksum.
 
     The install saves the download under the asset's own name and runs the
     checksum file through `sha256sum -c`, which looks up each line's file by
-    the name on that line. A line for any other name -- `contrib/aib`, say,
-    from a checksum written outside publish-wrapper.yml -- is a file that
-    does not exist, and the check fails. None when no line names `aib`.
+    the name on that line and fails if any line fails. A line for any other
+    name -- `contrib/aib`, say, from a checksum written outside
+    publish-wrapper.yml -- is a file that does not exist, and the check fails
+    even beside a correct `aib` line (#531); so does a second `aib` line with
+    another digest. Every line is returned for the caller to judge, not just
+    the first `aib` one. A line that is not a checksum line is skipped, as
+    `sha256sum -c` skips it without `--strict`.
     """
+    recorded: list[str] = []
+    others: list[str] = []
     for line in text.splitlines():
         match = WRAPPER_CHECKSUM_LINE_RE.match(line.strip())
-        if match and match.group("name") == WRAPPER_ASSET:
-            return match.group("digest")
-    return None
+        if not match:
+            continue
+        if match.group("name") == WRAPPER_ASSET:
+            recorded.append(match.group("digest"))
+        else:
+            others.append(match.group("name"))
+    return recorded, others
 
 
 def describe_wrapper_release_repair(tag: str, expected: str) -> str:

@@ -259,7 +259,8 @@ INSTALLER_UNVERIFIED_SWITCH_COMMENT = (
 # dnf5 prints this when -C (cache-only) is used and no repository metadata has
 # been downloaded yet. Matched so package search and the exact-name check can
 # offer to fix it in place instead of naming a command the user may have no
-# shell to run.
+# shell to run. It and DNF5_MISSING_MARKERS are dnf5's English messages, which
+# is why dnf5_command() pins the locale for every dnf5 run the tool makes.
 DNF5_NO_CACHE_MARKER = "cache-only enabled but no cache"
 PACKAGE_SEARCH_NEEDS_METADATA = (
     "Package search needs local DNF metadata. "
@@ -271,6 +272,23 @@ DNF5_MISSING_MARKERS = (
     "no packages to list",
     "matched no packages",
     "no matching packages",
+)
+# Every spelling of a package that `dnf5 install` and `rpm -q` accept as a
+# NEVRA spec: libdnf5's NAME, NA, NEV, NEVR and NEVRA forms, each with and
+# without the epoch (dnf5 prints %{epoch} as 0 when the package has none,
+# and an explicit 0: still matches it). A positional repoquery matches a spec
+# ignoring case where install and rpm -q do not, so the exact-name check asks
+# dnf5 to print these for whatever it matched and requires the spec to be one
+# of them verbatim -- see _resolve_package_spec.
+DNF5_SPEC_SPELLINGS = (
+    "%{name}",
+    "%{name}.%{arch}",
+    "%{name}-%{version}",
+    "%{name}-%{version}-%{release}",
+    "%{name}-%{version}-%{release}.%{arch}",
+    "%{name}-%{epoch}:%{version}",
+    "%{name}-%{epoch}:%{version}-%{release}",
+    "%{name}-%{epoch}:%{version}-%{release}.%{arch}",
 )
 # What `rpm -q` prints, on stdout, for each spec it was asked about that is
 # not installed. The spec comes back verbatim, so it is the key the removal
@@ -675,8 +693,11 @@ def is_valid_repo_name(value: str) -> bool:
 # U+FFFE/U+FFFF. YAML 1.2's c-printable production stops there -- C0 controls
 # are already escaped by json.dumps, and everything else up to U+10FFFF is
 # printable. U+0085 (NEL) is technically printable but a 1.1 line break, which
-# PyYAML folds to a space, so it is escaped along with its neighbours.
-_YAML_UNPRINTABLE_RE = re.compile("[\x7f-\x9f￾￿]")
+# PyYAML folds to a space, so it is escaped along with its neighbours. U+2028
+# and U+2029 are the other two 1.1 line breaks, and also line boundaries to
+# str.splitlines(): the workflow patchers re-split build.yml with it, so a raw
+# one comes back as a real newline that orphans the rest of the value (#527).
+_YAML_UNPRINTABLE_RE = re.compile("[\x7f-\x9f\u2028\u2029￾￿]")
 
 
 def yaml_scalar(value: str) -> str:
@@ -1170,21 +1191,53 @@ def pin_disk_builder_image_line(line: str) -> str | None:
     return f"{prefix}{quote}{BOOTC_IMAGE_BUILDER_IMAGE}{quote}{suffix}"
 
 
+def yaml_key_pattern(name: str) -> str:
+    """A regex fragment for the YAML key `name` and its colon, in any spelling.
+
+    `uses:`, `"uses":`, `'uses':` and `uses :` are one key to YAML and to
+    Actions. A patcher that recognizes only the first leaves the others
+    unpatched -- an action on its floating tag, a Cosign release below the
+    floor -- and reports nothing (#525).
+    """
+    escaped = re.escape(name)
+    return rf"""(?:{escaped}|"{escaped}"|'{escaped}')\s*:"""
+
+
+# A `uses:` line: an optional list dash (the compact `- uses:` step form),
+# the key in any spelling, and an `action@ref` value, bare or quoted. The
+# quote is its own group so the rewrite writes it back, and the ref stops
+# short of it so `'actions/checkout@v4'` looks up `actions/checkout`, not
+# `'actions/checkout`. Anything after the value must be whitespace-led, so
+# an unbalanced quote does not match.
+WORKFLOW_USES_LINE_RE = re.compile(
+    rf"""(\s*(?:-\s+)?{yaml_key_pattern("uses")}\s+)(['"]?)([^@\s'"]+)@([^\s#'"]+)\2((?:\s.*)?)"""
+)
+
+
+def step_uses_action(step_lines: Sequence[str], action: str) -> bool:
+    """Whether a step block runs `action`, at any ref and in any `uses:` spelling."""
+    return any(
+        match is not None and match.group(3) == action
+        for match in map(WORKFLOW_USES_LINE_RE.fullmatch, step_lines)
+    )
+
+
 def pin_action_uses_line(line: str) -> str:
     # When patching upstream workflow text, we rewrite "uses:" lines to pinned
     # SHAs. This avoids supply-chain drift if an upstream tag ever changes.
     #
-    # Both YAML spellings of a step have to be read, because this runs over
+    # Every YAML spelling of a step has to be read, because this runs over
     # workflow text written elsewhere -- upstream's snapshot, or whatever the
     # repository's owner has edited it into since. maintenance_audit's USES_RE
     # already allows for the compact `- uses:` form; a rewriter that only knew
     # the `- name:` / `uses:` form would leave a compact step on its floating
     # tag and report nothing, in a managed repository nothing audits later.
-    # The list dash is captured in the prefix so the line keeps its own shape.
-    match = re.fullmatch(r"(\s*(?:-\s+)?uses:\s+)([^@\s]+)@([^\s#]+)(.*)", line)
+    # A quoted value is the same miss (#525). The list dash and the quote are
+    # captured so the line keeps its own shape.
+    match = WORKFLOW_USES_LINE_RE.fullmatch(line)
     if not match:
         return line
-    prefix, action, _ref, suffix = match.groups()
+    prefix, quote, action, _ref, _suffix = match.groups()
     pin = ACTION_REF_PINS.get(f"{action}@{_ref}") or ACTION_PINS.get(action)
     if not pin:
         return line
@@ -1200,9 +1253,7 @@ def pin_action_uses_line(line: str) -> str:
     current = ACTION_PINS.get(action)
     if current is not None and current[0] == sha:
         label = current[1]
-    suffix = re.sub(r"\s+#.*$", "", suffix)
-    comment = f" # {label}"
-    return f"{prefix}{action}@{sha}{comment}"
+    return f"{prefix}{quote}{action}@{sha}{quote} # {label}"
 
 
 def pinned_action(action: str) -> str:
@@ -1263,6 +1314,79 @@ def strip_job_env_entries(workflow_text: str, names: Sequence[str]) -> str:
                 drop.add(start + offset)
     kept = [line for index, line in enumerate(lines) if index not in drop]
     return ensure_trailing_newline("\n".join(kept))
+
+
+def workflow_level_env_keys(lines: Sequence[str]) -> set[str]:
+    """Return the names defined in the top-level `env:` block, if there is one."""
+    defined: set[str] = set()
+    inside = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not line[0].isspace():
+            inside = workflow_block_key(stripped) == "env"
+            continue
+        if inside and line.startswith("  ") and not line.startswith("   "):
+            key = workflow_key(stripped)
+            if key is not None:
+                defined.add(key)
+    return defined
+
+
+def strip_legacy_signing_job_env(workflow_text: str) -> str:
+    """Remove the legacy job-level signing key and password, or refuse to.
+
+    Run after patch_workflow_signing_steps(). Removing a job's COSIGN_PRIVATE_KEY
+    is only safe once nothing in that job reads `env.COSIGN_PRIVATE_KEY` any
+    more: a step's own `env:` is not visible to its `if:`, so a condition the
+    step rewrite did not reach would test a variable that no longer exists, be
+    false forever, and publish every image unsigned on a green run (#526).
+    Keeping the keys instead would leave the signing key exposed to every
+    action in the job, which is what the migration exists to end (#255). So a
+    surviving reference fails closed, naming the line to fix by hand.
+
+    Only a read the removal actually breaks counts: one inside a job whose
+    job-level entry for that name is removed, and not also defined in the
+    workflow-level `env:`, which this leaves alone and which would still
+    answer it. A removed entry outside every job the parser recognizes has no
+    scope it can judge, so there any read in the file counts. A workflow with
+    no legacy job-level entry is returned as it is: this update cannot be
+    what breaks it.
+    """
+    stripped = strip_job_env_entries(workflow_text, LEGACY_SIGNING_ENV_KEYS)
+    if stripped == ensure_trailing_newline(workflow_text):
+        return stripped
+    lines = workflow_text.splitlines()
+    still_defined = workflow_level_env_keys(lines)
+
+    def removed_names(scope: Sequence[str]) -> set[str]:
+        return {
+            name
+            for name in LEGACY_SIGNING_ENV_KEYS
+            if name not in still_defined and any(line.startswith(f"      {name}: ") for line in scope)
+        }
+
+    ranges = workflow_job_ranges(lines)
+    covered = {index for _, start, end in ranges for index in range(start, end)}
+    outside = removed_names([line for index, line in enumerate(lines) if index not in covered])
+    scopes = [(lines, outside)] + [(lines[start:end], removed_names(lines[start:end])) for _, start, end in ranges]
+    for scope, names in scopes:
+        if not names:
+            continue
+        reads = re.compile(rf"\benv\.(?:{'|'.join(sorted(names))})\b")
+        for line in scope:
+            if line.lstrip().startswith("#") or not reads.search(line):
+                continue
+            raise CommandError(
+                f"This workflow still reads a legacy job-level signing variable after its signing "
+                f"steps were migrated ({line.strip()!r}), and this update removes that variable from "
+                f"the job's 'env:'. Left as it is, that condition would be false forever and the "
+                f"image would be published unsigned. Make it test env.{SIGNING_ENABLED_ENV[0]} == "
+                f"'true' instead -- in a signing step's 'if:', delete "
+                f"\"{LEGACY_SIGN_CONDITION.strip()}\" -- then run this update again."
+            )
+    return stripped
 
 
 # Nothing in the Containerfile path asks GitHub for an OIDC token. Signing
@@ -1348,18 +1472,37 @@ def strip_permission_entries(workflow_text: str, names: Sequence[str]) -> str:
 def patch_signing_step_block(step_lines: Sequence[str], *, branch_if: str, sign_if: str) -> list[str]:
     # Signing-related steps are identified by behavior rather than display
     # names so template renames do not silently bypass our signing guard.
-    is_cosign_install = any("uses:" in line and "sigstore/cosign-installer@" in line for line in step_lines)
+    is_cosign_install = step_uses_action(step_lines, "sigstore/cosign-installer")
     is_cosign_sign = any(re.search(r"\bcosign\s+sign\b", line) for line in step_lines)
     if not (is_cosign_install or is_cosign_sign):
         return list(step_lines)
     if is_cosign_sign:
         step_lines = add_signing_step_password(step_lines)
 
+    # The step's own keys sit at one column: just past the `- ` of its first
+    # line. Anything deeper is a value -- above all a `run: |` body, where a
+    # shell line such as `if : ; then` parses as an `if` key when read on its
+    # own. Counting that as the step's condition meant no guard was inserted,
+    # and the step signed on pull requests or with no key configured.
+    first_stripped = step_lines[0].lstrip()
+    dash = re.match(r"-\s+", first_stripped)
+    first_key_text = first_stripped[dash.end() :] if dash else first_stripped
+    key_column = len(step_lines[0]) - len(first_key_text)
     patched: list[str] = []
     has_if = False
-    for line in step_lines:
+    for index, line in enumerate(step_lines):
         stripped = line.lstrip()
-        if stripped.startswith("if: "):
+        # The key is read by name, so `if :` and `"if":` count, and so does
+        # the first key of the step's own `- ` item: key-sorted YAML writes
+        # `- if: ...` first, and missing it meant a second `if:` was inserted
+        # into the same mapping, which Actions rejects (#525).
+        if index == 0:
+            key_text = first_key_text
+        elif len(line) - len(stripped) == key_column:
+            key_text = stripped
+        else:
+            key_text = ""
+        if key_text and workflow_key(key_text) == "if":
             has_if = True
             # Drop the legacy clause first. Rewriting around it would leave
             # "... && env.SIGNING_ENABLED == 'true' && env.COSIGN_PRIVATE_KEY != ''",
@@ -1388,6 +1531,13 @@ def patch_workflow_steps(workflow_text: str, patch_step: Callable[[list[str]], l
     A step block is a "- " item directly under a `steps:` key, plus every line
     indented beneath it. Lines outside any step pass through untouched.
 
+    The key may carry a comment (`steps: # build`), and the items sit
+    wherever the first one puts them: YAML asks only that a sequence's
+    entries agree with each other, so +4 and the indentless +0 are as valid
+    as +2. Anchoring on a bare `steps:` with items at +2 walked past every
+    step in those shapes, and the signing migration then stripped the job
+    key its unrewritten conditions still read (#526).
+
     Both workflow patchers walked their own byte-identical copy of this state
     machine, so a correction to the step-boundary rules reached only one of
     them. Returns the output lines; the caller decides how to join them.
@@ -1395,7 +1545,8 @@ def patch_workflow_steps(workflow_text: str, patch_step: Callable[[list[str]], l
     output: list[str] = []
     current_step: list[str] = []
     in_steps = False
-    steps_indent: int | None = None
+    steps_indent = 0
+    item_indent: int | None = None
 
     def flush_step() -> None:
         nonlocal current_step
@@ -1407,20 +1558,30 @@ def patch_workflow_steps(workflow_text: str, patch_step: Callable[[list[str]], l
     for line in workflow_text.splitlines():
         stripped = line.strip()
         indent = len(line) - len(line.lstrip())
+        is_item = stripped == "-" or stripped.startswith("- ")
 
-        if in_steps and steps_indent is not None and indent <= steps_indent and stripped and not stripped.startswith("#"):
-            flush_step()
-            in_steps = False
-            steps_indent = None
+        if in_steps and stripped and not stripped.startswith("#"):
+            if item_indent is None:
+                # The first line with content decides where the items sit.
+                # Anything but a sequence item at or beyond the key means the
+                # key holds no block sequence to walk.
+                if is_item and indent >= steps_indent:
+                    item_indent = indent
+                else:
+                    in_steps = False
+            elif indent < item_indent or (indent == item_indent and not is_item):
+                flush_step()
+                in_steps = False
 
-        if stripped == "steps:":
+        if workflow_block_key(stripped) == "steps":
             flush_step()
             in_steps = True
             steps_indent = indent
+            item_indent = None
             output.append(line)
             continue
 
-        if in_steps and steps_indent is not None and indent == steps_indent + 2 and stripped.startswith("- "):
+        if in_steps and indent == item_indent and is_item:
             flush_step()
             current_step = [line]
             continue
@@ -1465,10 +1626,23 @@ def patch_workflow_signing_steps(workflow_text: str, *, branch_if: str, sign_if:
     )
 
 
-# A YAML mapping key, with or without an inline comment after it:
+# A YAML mapping key, bare or quoted in either style, with optional
+# whitespace before the colon. Each spelling is its own group; the key name
+# is whichever one matched.
 #   push:
 #   workflow_dispatch: # allow manually triggering builds
-WORKFLOW_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.-]*):(\s|$)")
+#   "SIGNING_ENABLED": ...
+#   'build_push':
+#   env :
+WORKFLOW_KEY_PATTERN = r"""(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_.-]*))\s*:"""
+WORKFLOW_KEY_RE = re.compile(rf"^{WORKFLOW_KEY_PATTERN}(?=\s|$)")
+
+
+def workflow_key_name(match: re.Match[str] | None) -> str | None:
+    """The key a WORKFLOW_KEY_PATTERN match names, without its quotes."""
+    if match is None:
+        return None
+    return next(group for group in match.groups()[:3] if group is not None)
 
 
 def workflow_key(stripped_line: str) -> str | None:
@@ -1476,20 +1650,23 @@ def workflow_key(stripped_line: str) -> str | None:
 
     Comparing against a literal "push:" misses the equally valid
     "push: # only the default branch", and the bundled snapshots do carry
-    inline comments on trigger keys.
+    inline comments on trigger keys. It misses `"SIGNING_ENABLED":`,
+    `'env':` and `env :` too, all of which YAML reads as the same key, and a
+    patcher that decides a key is absent writes a second one beside it --
+    which Actions rejects outright (#525). So the key is compared by the
+    name it parses to, never by its spelling.
 
     This deliberately also matches keys carrying an inline value, such as
     "push: { branches: [main] }" - a sibling key with a value still ends the
     previous trigger's block. Use workflow_block_key() when deciding whether a
     key opens a block that nested lines may be appended under.
     """
-    match = WORKFLOW_KEY_RE.match(stripped_line)
-    return match.group(1) if match else None
+    return workflow_key_name(WORKFLOW_KEY_RE.match(stripped_line))
 
 
 # Like WORKFLOW_KEY_RE, but only when nothing follows the colon except an
 # optional inline comment - i.e. the key opens a block mapping.
-WORKFLOW_BLOCK_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.-]*):\s*(?:#.*)?$")
+WORKFLOW_BLOCK_KEY_RE = re.compile(rf"^{WORKFLOW_KEY_PATTERN}\s*(?:#.*)?$")
 
 
 def workflow_block_key(stripped_line: str) -> str | None:
@@ -1500,9 +1677,14 @@ def workflow_block_key(stripped_line: str) -> str | None:
     when the key has no value of its own: "push: { branches: [main] }" already
     carries an inline flow mapping, and writing "branches:" beneath it produces
     a YAML parse error, not a patched workflow.
+
+    Quoted keys count here as they do there. A quoted job ID such as
+    `"build_push":` is legal and some owners' editors emit it; a walk that
+    did not see it dropped the whole job from workflow_job_ranges(), its
+    guards still got rewritten to test env.SIGNING_ENABLED, no job was found
+    to define the variable in, and the image shipped unsigned on a green run.
     """
-    match = WORKFLOW_BLOCK_KEY_RE.match(stripped_line)
-    return match.group(1) if match else None
+    return workflow_key_name(WORKFLOW_BLOCK_KEY_RE.match(stripped_line))
 
 
 def block_sequence_entry_indent(lines: list[str], key_index: int) -> str:
@@ -1692,10 +1874,17 @@ def add_paths_ignore_entry(lines: list[str], item: str, anchors: Iterable[str]) 
 # choice and stays. The bundled snapshot pins this same version.
 COSIGN_COMPATIBILITY_FLOOR = "v3.1.2"
 # A whole line that is the `cosign-release:` input: the key at the start of
-# the line, a quoted value, and nothing after it but an optional comment.
-# Anchoring both ends is what keeps a shell line that merely mentions the
-# input -- `run: echo "cosign-release: '2.6.3'"` -- from being rewritten.
-COSIGN_RELEASE_LINE_RE = re.compile(r"^(\s*cosign-release:\s*)(['\"])([^'\"]*)\2(\s*(?:#.*)?)$")
+# the line, in any spelling, a value, and nothing after it but an optional
+# comment. Anchoring both ends is what keeps a shell line that merely
+# mentions the input -- `run: echo "cosign-release: '2.6.3'"` -- from being
+# rewritten. The value may be quoted or plain: `cosign-release: v2.2.4` is
+# the same string, and missing it left the release below the floor while
+# the signing step still gained flags that release rejects (#525).
+COSIGN_RELEASE_LINE_RE = re.compile(
+    rf"""^(?P<prefix>\s*{yaml_key_pattern("cosign-release")}\s*)"""
+    r"""(?:(?P<quote>['"])(?P<quoted>[^'"]*)(?P=quote)|(?P<plain>[^\s'"#]\S*))"""
+    r"""(?P<suffix>\s*(?:#.*)?)$"""
+)
 
 
 def cosign_release_tuple(release: str) -> tuple[int, int, int] | None:
@@ -1719,7 +1908,7 @@ def raise_cosign_release_floor(step_lines: Sequence[str]) -> list[str]:
     script, a comment, another action that happens to take an input of that
     name -- is theirs and stays as written.
     """
-    if not any("uses:" in line and "sigstore/cosign-installer@" in line for line in step_lines):
+    if not step_uses_action(step_lines, "sigstore/cosign-installer"):
         return list(step_lines)
     floor = cosign_release_tuple(COSIGN_COMPATIBILITY_FLOOR)
     patched: list[str] = []
@@ -1736,10 +1925,10 @@ def raise_cosign_release_floor(step_lines: Sequence[str]) -> list[str]:
             continue
         match = COSIGN_RELEASE_LINE_RE.match(line)
         if match is not None:
-            current = cosign_release_tuple(match.group(3))
+            quote = match.group("quote") or ""
+            current = cosign_release_tuple(match.group("quoted") if quote else match.group("plain"))
             if current is not None and current < floor:
-                prefix, quote, _, suffix = match.groups()
-                line = f"{prefix}{quote}{COSIGN_COMPATIBILITY_FLOOR}{quote}{suffix}"
+                line = f"{match.group('prefix')}{quote}{COSIGN_COMPATIBILITY_FLOOR}{quote}{match.group('suffix')}"
         patched.append(line)
     return patched
 
@@ -1808,34 +1997,11 @@ def patch_cosign_compatibility(workflow_text: str) -> str:
     return "\n".join(lines)
 
 
-# A job-level `env: {}` -- an empty flow mapping, optionally commented. It
-# holds nothing, so it can be unwrapped into a block and entries written
-# beneath it; `env: { FOO: bar }` cannot, and is handled separately.
-WORKFLOW_EMPTY_ENV_RE = re.compile(r"^env:\s*\{\s*\}\s*(#.*)?$")
-
-
-# A job ID under `jobs:`, bare or quoted, opening a block (no inline value):
-#   build_push:
-#   "build_push":   # quoting is legal YAML and some owners' editors emit it
-#   'build_push': # with a comment
-WORKFLOW_JOB_KEY_RE = re.compile(
-    r"""^(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_.-]*)):\s*(?:#.*)?$"""
-)
-
-
-def workflow_job_key(stripped_line: str) -> str | None:
-    """Return the job ID a stripped line under `jobs:` declares, if any.
-
-    workflow_key() only knows bare keys. A quoted job ID such as
-    `"build_push":` is equally valid, and a parser that does not see it
-    drops the whole job from workflow_job_ranges(): its guards still get
-    rewritten to test env.SIGNING_ENABLED, no job is found to define the
-    variable in, and the image ships unsigned on a green run.
-    """
-    match = WORKFLOW_JOB_KEY_RE.match(stripped_line)
-    if match is None:
-        return None
-    return next(group for group in match.groups() if group is not None)
+# A job-level `env: {}` -- an empty flow mapping, optionally commented, the
+# key in any spelling. It holds nothing, so it can be unwrapped into a block
+# and entries written beneath it; `env: { FOO: bar }` cannot, and is handled
+# separately.
+WORKFLOW_EMPTY_ENV_RE = re.compile(rf"^({yaml_key_pattern('env')})\s*\{{\s*\}}\s*(#.*)?$")
 
 
 def workflow_job_ranges(lines: Sequence[str]) -> list[tuple[str, int, int]]:
@@ -1863,7 +2029,7 @@ def workflow_job_ranges(lines: Sequence[str]) -> list[tuple[str, int, int]]:
             in_jobs = workflow_block_key(stripped) == "jobs"
             continue
         if in_jobs and indent == 2:
-            key = workflow_job_key(stripped)
+            key = workflow_block_key(stripped)
             if key is None:
                 continue
             if name is not None:
@@ -1985,8 +2151,8 @@ def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[
                 stripped = job[env_at].strip()
                 empty = WORKFLOW_EMPTY_ENV_RE.match(stripped)
                 if empty:
-                    comment = empty.group(1)
-                    lines[start + env_at] = "    env:" + (f" {comment}" if comment else "")
+                    key_text, comment = empty.groups()
+                    lines[start + env_at] = f"    {key_text}" + (f" {comment}" if comment else "")
                 elif workflow_block_key(stripped) != "env":
                     raise CommandError(
                         f"This workflow's '{job_name}' job-level 'env:' carries an inline value "
@@ -2553,23 +2719,33 @@ class Gum:
 
     def enter_to_continue(self, placeholder: str = "Press Enter to continue...") -> None:
         self.instruction(placeholder)
-        self.require_interactive_success(
-            self.interactive_stdout(
-                [
-                    "gum",
-                    "input",
-                    "--no-show-help",
-                    "--prompt",
-                    "> ",
-                    "--prompt.foreground",
-                    str(ACCENT_COLOR),
-                    "--cursor.foreground",
-                    str(ACCENT_COLOR),
-                    "--width",
-                    "3",
-                ]
+        # A pause is an acknowledgement, not a screen: there is nothing to go
+        # back to, and every placeholder names where Enter goes next. So Esc
+        # means the same as Enter here. Left as ScreenBack it unwound past the
+        # screen the prompt promised -- through main_menu() to main(), which
+        # exits 0, discarding a filled-in wizard (#507). Only Esc is absorbed:
+        # gum exiting 1 with no terminal is still a CommandError (#367), and
+        # Ctrl+C still quits.
+        try:
+            self.require_interactive_success(
+                self.interactive_stdout(
+                    [
+                        "gum",
+                        "input",
+                        "--no-show-help",
+                        "--prompt",
+                        "> ",
+                        "--prompt.foreground",
+                        str(ACCENT_COLOR),
+                        "--cursor.foreground",
+                        str(ACCENT_COLOR),
+                        "--width",
+                        "3",
+                    ]
+                )
             )
-        )
+        except ScreenBack:
+            pass
 
 
 class App:
@@ -2806,15 +2982,10 @@ class App:
                     "This tool expects a supported rpm-ostree / bootc desktop image with dnf5 and rpm-ostree available.",
                 )
                 print()
-            try:
-                self.gum.enter_to_continue("Press Enter to exit to the terminal...")
-            except ScreenBack:
-                # Esc at this prompt means the same as Enter: leave. Left to
-                # propagate, it skipped the SystemExit(1) preflight() raises
-                # after this returns, and main() turned it into exit 0 -- a
-                # failed preflight that reported success to the wrapper,
-                # CI job or container entrypoint that ran it (#367).
-                pass
+            # Esc here leaves just as Enter does: enter_to_continue() reads
+            # Esc as acknowledgement, so preflight() still raises its
+            # SystemExit(1) and the wrapper sees the failure (#367).
+            self.gum.enter_to_continue("Press Enter to exit to the terminal...")
             return
 
         print()
@@ -3102,11 +3273,16 @@ class App:
                     self.update_existing_image()
                 elif selected == "View Build Status":
                     self.view_build_status()
+            except ScreenBack:
+                # Esc that a flow did not handle itself pops back one screen,
+                # and from inside any of these flows that screen is this menu.
+                # Left to propagate, main() read it as quitting and exited 0,
+                # dropping whatever the flow held (#507).
+                continue
             except CommandError as exc:
                 # A failure here means something in the flow broke, not that
-                # the user chose to leave (that is ScreenBack/SystemExit).
-                # Report it and return to the main menu instead of taking the
-                # whole app down.
+                # the user chose to leave (that is SystemExit). Report it and
+                # return to the main menu instead of taking the whole app down.
                 self.gum.error(str(exc))
                 self.gum.enter_to_continue("Press Enter to return to the main menu...")
 
@@ -3166,6 +3342,13 @@ class App:
         review_step = len(steps) + 1
         total_steps = review_step
         index = 0
+        # Set while the user is on a step they opened from the review screen
+        # (and the steps the wizard walks through after it). Esc there returns
+        # to review, which is where they came from: stepping back one index
+        # instead meant Esc on "Build method" -- index 0 -- hit the "leave the
+        # wizard" case meant for the first pass and discarded everything
+        # entered so far (#507). Review has its own explicit Cancel for that.
+        editing_from_review = False
         while True:
             try:
                 if index < len(steps):
@@ -3183,10 +3366,14 @@ class App:
                         self.select_packages(step=number, total_steps=total_steps)
                     index += 1
                     continue
+                editing_from_review = False
                 action = self.review_new_image(
                     step=review_step, total_steps=total_steps, allow_base_edit="base" in steps
                 )
             except ScreenBack:
+                if editing_from_review:
+                    index = len(steps)
+                    continue
                 if index == 0:
                     return
                 index -= 1
@@ -3203,6 +3390,10 @@ class App:
                 try:
                     if self.do_build():
                         return
+                except ScreenBack:
+                    # Esc on a screen inside the build returns to review with
+                    # the config intact, the same as declining does.
+                    pass
                 except CommandError as exc:
                     # Keep the wizard's in-memory state intact and return to
                     # the review screen instead of taking the whole app down.
@@ -3211,6 +3402,7 @@ class App:
                 continue
             if action in steps:
                 index = steps.index(action)
+                editing_from_review = True
             else:
                 return
 
@@ -4631,6 +4823,19 @@ class App:
             raise CommandError(f"refusing to use {state_dir}: owned by uid {st.st_uid}, not us")
         return state_dir
 
+    def dnf5_command(self, state_dir: Path, *args: str) -> list[str]:
+        # Every dnf5 run the tool makes goes through here, so that each one
+        # uses the scoped state directory and speaks English. The no-cache
+        # and "nothing matched" markers are matched as English text, and dnf5
+        # translates both: under a German or French locale neither matches,
+        # so a missing cache never gets the refresh offer and every name is
+        # left unchecked (#504). LC_ALL=C overrides LANG and every LC_*.
+        # LANGUAGE is removed too: it outranks the locale in gettext, so
+        # LANGUAGE=de alone gives German output. glibc happens to ignore it
+        # under the C locale, but dropping it does not lean on that. Same
+        # reasoning as the rpm -q pin in lookup_installed_host_packages().
+        return ["env", "-u", "LANGUAGE", "LC_ALL=C", f"XDG_STATE_HOME={state_dir}", "dnf5", *args]
+
     def refresh_package_metadata(self) -> bool:
         # Offered rather than run automatically: this is a real download over
         # whatever connection the user happens to be on.
@@ -4647,7 +4852,7 @@ class App:
             return False
         proc = self.gum.spinner_result(
             "Refreshing package metadata...",
-            ["env", f"XDG_STATE_HOME={self.dnf5_state_dir()}", "dnf5", "makecache"],
+            self.dnf5_command(self.dnf5_state_dir(), "makecache"),
         )
         if proc.returncode != 0:
             self.gum.error("Could not refresh package metadata.")
@@ -4742,7 +4947,9 @@ class App:
             results[package] = outcome
         return results
 
-    def _dnf5_repoquery_names(self, title: str, state_dir: Path, args: Sequence[str]) -> tuple[set[str], bool, bool]:
+    def _dnf5_repoquery_names(
+        self, title: str, state_dir: Path, args: Sequence[str], *, query_format: str = "%{name}\n"
+    ) -> tuple[set[str], bool, bool]:
         # One `dnf5 repoquery` run, reduced to the package names it printed,
         # whether that answer can be trusted, and whether the reason it
         # cannot is dnf5 having no metadata cache to answer from. A nonzero
@@ -4752,21 +4959,21 @@ class App:
         # a typo. The no-cache case is singled out because the batch caller
         # can offer to fix it (#369); the per-spec follow-ups run on the cache
         # the batch just used, so for them it is just another failed query.
+        # query_format defaults to the bare name; the NEVRA follow-up swaps
+        # in every spelling of the matched package, one per line.
         proc = self.gum.spinner_result(
             title,
-            [
-                "env",
-                f"XDG_STATE_HOME={state_dir}",
-                "dnf5",
+            self.dnf5_command(
+                state_dir,
                 "-C",
                 "repoquery",
                 "--available",
                 "--qf",
-                "%{name}\n",
+                query_format,
                 "--latest-limit",
                 "1",
                 *args,
-            ],
+            ),
         )
         # %{name}\n means one result per line even when multiple packages are
         # queried at once; without the trailing newline in the format string,
@@ -4808,13 +5015,19 @@ class App:
         # a name the user never typed.
         if not any(separator in spec for separator in ".-:"):
             return False
-        # NEVRA forms. dnf5 prints the bare %{name} for vim-enhanced.x86_64,
-        # and matches positional specs ignoring case where install does not
-        # (5.4.2.1: Vim-Enhanced prints vim-enhanced here but is "No match
-        # for argument" to install). So the printed name must open the spec
-        # verbatim; the rest is the arch or version dnf5 matched it against.
-        names, uncheckable, _no_cache = self._dnf5_repoquery_names(title, state_dir, [spec])
-        if any(spec.startswith(name) for name in names):
+        # NEVRA forms. dnf5 matches positional specs ignoring case where
+        # install and rpm -q do not: on 5.4.2.1 repoquery matches
+        # Vim-Enhanced and htop.X86_64, and install says "No match for
+        # argument" to both; `rpm -q bash.X86_64` is "not installed".
+        # Comparing only the printed %{name} against the start of the spec
+        # let a wrong-case arch or version through (#505), so dnf5 prints
+        # every spelling of what it matched and the spec must be one of them
+        # verbatim.
+        query_format = "".join(f"{spelling}\n" for spelling in DNF5_SPEC_SPELLINGS)
+        spellings, uncheckable, _no_cache = self._dnf5_repoquery_names(
+            title, state_dir, [spec], query_format=query_format
+        )
+        if spec in spellings:
             return True
         return None if uncheckable else False
 
@@ -4858,7 +5071,7 @@ class App:
         #
         # Batched for the same reason as lookup_host_packages. Every spec
         # rpm does not find is named back on stdout as "package <spec> is not
-        # installed" (exit 1), and those lines are what the misses are read
+        # installed", and those lines are what the misses are read
         # from -- deliberately not the %{name} of the hits. rpm accepts
         # name.arch and name-version specs and prints the bare name for
         # them, so a hit for vim-enhanced.x86_64 would print vim-enhanced
@@ -4880,22 +5093,25 @@ class App:
             return results
         # Both the "not installed" line and the "error:" prefix are
         # translated strings, so a host locale other than English would hide
-        # every miss and every failure from the checks below -- and with an
-        # exit status of 1 that reads as "everything is installed". Pin the
+        # every miss and every failure from the checks below, and the batch
+        # would read as "everything is installed". Pin the
         # locale so rpm speaks the English the parser expects.
         env = os.environ.copy()
         env["LC_ALL"] = "C"
         proc = run(["rpm", "-q", "--qf", "%{name}\n", *to_check], env=env, check=False)
-        # rpm exits 1 for "some of these are not installed" and, on a
-        # database it cannot open, *also* exits 1 and reports every spec as
-        # not installed. Only the "error:" line on stderr tells the two
-        # apart, so it is checked before the exit status is believed.
-        uncheckable = proc.returncode not in (0, 1) or "error:" in (proc.stderr or "").lower()
         not_installed: set[str] = set()
         for line in (proc.stdout or "").splitlines():
             match = RPM_NOT_INSTALLED_RE.match(line.strip())
             if match:
                 not_installed.add(match.group(1))
+        # rpm exits with the number of specs it did not find, not 1: three
+        # misses exit 3. Any exit status is therefore an ordinary answer,
+        # and the misses are the "not installed" lines above. On a database
+        # it cannot open, rpm also reports every spec as not installed; only
+        # the "error:" line on stderr tells that apart, so it is checked
+        # before the stdout is believed. A negative status is a signal, not
+        # an exit, and rpm's output is incomplete.
+        uncheckable = proc.returncode < 0 or "error:" in (proc.stderr or "").lower()
         for package in to_check:
             if uncheckable:
                 outcome: bool | None = None
@@ -4919,10 +5135,8 @@ class App:
             pattern = f"*{normalized.replace(' ', '*')}*"
             proc = self.gum.spinner_result(
                 f"Searching package names for: {normalized}",
-                [
-                    "env",
-                    f"XDG_STATE_HOME={state_dir}",
-                    "dnf5",
+                self.dnf5_command(
+                    state_dir,
                     "-C",
                     "repoquery",
                     "--available",
@@ -4931,7 +5145,7 @@ class App:
                     "--qf",
                     "%{name}\t%{summary}\n",
                     pattern,
-                ],
+                ),
             )
             detail = "\n".join(part for part in [proc.stdout, proc.stderr] if part).lower()
             if proc.returncode != 0:
@@ -4958,7 +5172,13 @@ class App:
                 if name not in by_name:
                     by_name[name] = summary.strip()
 
-            needle = normalized.lower()
+            # dnf5 was asked for the words in order with anything between
+            # them, but no RPM name contains a space, so ranking on the raw
+            # term would leave every multi-word search in alphabetical order
+            # and could push the obvious package past the limit. Words in a
+            # package name are hyphen-joined, so rank on that spelling:
+            # "kernel devel" puts kernel-devel first.
+            needle = normalized.lower().replace(" ", "-")
             cached = sorted(
                 by_name.items(),
                 key=lambda item: (
@@ -6103,13 +6323,16 @@ class App:
         def sanitize_env_value(value: str) -> str:
             # These characters would either break the double-quoted shell value,
             # let it escape into command substitution (e.g. via $(...)), or (for
-            # newlines) split the value across multiple physical lines. The
-            # rewrite regexes below are per-line, so an embedded newline would
-            # otherwise make this patcher silently stop matching that field on
-            # every subsequent update.
-            for char in ('"', "\\", "$", "`", "\n", "\r"):
+            # line breaks) split the value across multiple physical lines. The
+            # rewrite regexes below are per-line, so an embedded line break
+            # would otherwise make this patcher silently stop matching that
+            # field on every subsequent update. "Line break" is every boundary
+            # str.splitlines() recognises, not only \n and \r: the pin loop
+            # below re-splits the file with it, so a U+2028 (or \v, \f, U+0085)
+            # left in the value is written out as a real newline (#527).
+            for char in ('"', "\\", "$", "`"):
                 value = value.replace(char, "")
-            return value
+            return "".join(value.splitlines())
 
         repo_name = self.config.repo_name
         github_user = sanitize_env_value(self.config.github_user)
@@ -6191,8 +6414,9 @@ class App:
         text = self.patch_workflow_branch_filters(text, default_branch)
         # Remove before adding: a repository generated earlier has the key and
         # password at job level, and they have to go, not merely be joined by
-        # the boolean.
-        text = strip_job_env_entries(text, LEGACY_SIGNING_ENV_KEYS)
+        # the boolean -- but only once the step rewrite above has taken every
+        # condition off them.
+        text = strip_legacy_signing_job_env(text)
         text = ensure_workflow_job_env_entries(text, [SIGNING_ENABLED_ENV])
         text = self.patch_container_rechunk_step(text)
         text = strip_permission_entries(text, UNUSED_WORKFLOW_PERMISSIONS)

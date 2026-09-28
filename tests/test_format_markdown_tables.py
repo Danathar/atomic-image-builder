@@ -21,7 +21,6 @@ from pathlib import Path
 
 from format_markdown_tables import (
     SKIP_PREFIXES,
-    code_block_flags,
     delimiter_width,
     fence_closes,
     fence_open,
@@ -30,6 +29,7 @@ from format_markdown_tables import (
     main,
     render_delimiter,
     split_row,
+    table_spans,
     tracked_markdown,
 )
 
@@ -55,6 +55,23 @@ class SplitRowTests(unittest.TestCase):
 
     def test_pipe_inside_a_code_span_is_content_not_a_separator(self) -> None:
         self.assertEqual(split_row("| `a | b` | c |"), ["`a | b`", "c"])
+
+    def test_a_double_backtick_span_holding_a_backtick_is_one_cell(self) -> None:
+        # CommonMark closes a span only on a run of the opening length. Toggling
+        # on each backtick left this span open and swallowed the next pipe.
+        self.assertEqual(
+            split_row("| `` ` `` | a literal backtick |"),
+            ["`` ` ``", "a literal backtick"],
+        )
+
+    def test_a_shorter_run_inside_a_span_does_not_close_it(self) -> None:
+        self.assertEqual(split_row("| `` a ` | b `` | c |"), ["`` a ` | b ``", "c"])
+
+    def test_an_unmatched_backtick_is_literal_and_does_not_hide_pipes(self) -> None:
+        self.assertEqual(split_row("| a ` b | c |"), ["a ` b", "c"])
+
+    def test_a_backslash_inside_a_code_span_does_not_escape_the_closer(self) -> None:
+        self.assertEqual(split_row(r"| `a\` | b |"), [r"`a\`", "b"])
 
     def test_a_row_of_only_empty_edge_cells_is_not_a_row(self) -> None:
         self.assertIsNone(split_row("|"))
@@ -210,6 +227,21 @@ class FormatTextTests(unittest.TestCase):
         once = format_text("| a | bb |\n| :-- | --: |\n| cccc | d |\n")
         self.assertEqual(format_text(once), once)
 
+    def test_a_literal_backtick_span_formats_once_and_then_settles(self) -> None:
+        text = (
+            "| Key | Meaning |\n|---|---|\n"
+            "| `` ` `` | a literal backtick |\n| a ` b | y |\n"
+        )
+        once = format_text(text)
+        self.assertEqual(
+            once,
+            "| Key     | Meaning            |\n"
+            "| ------- | ------------------ |\n"
+            "| `` ` `` | a literal backtick |\n"
+            "| a ` b   | y                  |\n",
+        )
+        self.assertEqual(format_text(once), once)
+
     def test_a_table_in_a_longer_fence_is_left_verbatim(self) -> None:
         # The shape this repo's own docs use to show a fenced example: an
         # outer four-backtick block whose body contains a bare ```. A boolean
@@ -239,13 +271,20 @@ class FormatTextTests(unittest.TestCase):
             "    | A | B |\n\n| C   | D   |\n| --- | --- |\n",
         )
 
-    def test_four_space_indentation_after_prose_is_not_a_code_block(self) -> None:
-        # CommonMark only opens an indented code block where a paragraph could
-        # start. Treating every four-space line as code would leave a lazily
-        # indented table unaligned instead.
+    def test_a_delimiter_four_spaces_in_after_prose_is_paragraph_text(self) -> None:
+        # Four-space lines after prose continue the paragraph rather than
+        # open a code block -- but a delimiter row there cannot open a table
+        # either, so GitHub renders all three lines as one paragraph. This
+        # used to be aligned as a table, which rewrote that paragraph's text.
+        text = "intro\n    | A | B |\n    | --- | --- |\n"
+        self.assertEqual(format_text(text), text)
+
+    def test_a_fence_four_spaces_in_after_prose_does_not_open(self) -> None:
+        # The other half of the same rule: the paragraph goes on through the
+        # indented fence line, so the table after it is live Markdown.
         self.assertEqual(
-            format_text("intro\n    | A | B |\n    | --- | --- |\n"),
-            "intro\n    | A   | B   |\n    | --- | --- |\n",
+            format_text("intro\n    ```\n| A | B |\n| --- | --- |\n"),
+            "intro\n    ```\n| A   | B   |\n| --- | --- |\n",
         )
 
     def test_a_table_nested_in_a_list_item_keeps_its_indentation(self) -> None:
@@ -255,59 +294,183 @@ class FormatTextTests(unittest.TestCase):
             "- item\n\n  | A   | B   |\n  | --- | --- |\n  | 1   | 2   |\n",
         )
 
+    def test_a_table_in_a_tab_indented_list_item_keeps_its_tab(self) -> None:
+        # A tab reaches column 4, two columns into "- item" -- a table there,
+        # not code -- and the rows keep the tab rather than lose it.
+        self.assertEqual(
+            format_text("- item\n\n\t| A | B |\n\t| --- | --- |\n"),
+            "- item\n\n\t| A   | B   |\n\t| --- | --- |\n",
+        )
 
-class CodeBlockFlagTests(unittest.TestCase):
-    """The oracle format_text() and the repo-wide alignment check share.
+    def test_a_table_four_spaces_into_a_list_item_is_a_table(self) -> None:
+        # Four spaces is only two past "- item"'s content column. This used
+        # to be read as an indented code block and left unaligned.
+        self.assertEqual(
+            format_text("- item\n\n    | A | B |\n    | --- | --- |\n"),
+            "- item\n\n    | A   | B   |\n    | --- | --- |\n",
+        )
 
-    They used to decide this separately, and the check knew only about
-    fences. A deliberately ragged pipe table inside a four-space example
-    would have been reported as a misaligned table that the formatter then
-    correctly refused to touch -- a failure with no way to clear it.
+
+class CodeIsLeftVerbatimTests(unittest.TestCase):
+    """Code GitHub renders as code, which a formatter must never rewrite.
+
+    Every case here was checked against cmark-gfm, GitHub's own renderer.
     """
 
-    def flags(self, text: str) -> list[bool]:
-        return code_block_flags(text.split("\n"))
-
-    def test_a_ragged_example_in_indented_code_is_all_code(self) -> None:
-        text = (
-            "An example of a ragged table:\n"
-            "\n"
-            "    | A | B |\n"
-            "    | --- | --- |\n"
-            "    | 1 | 2 |\n"
-            "\n"
-            "Back to prose.\n"
-        )
-        # The trailing blank is still inside the block: only a non-blank line
-        # under four spaces closes one. Harmless either way -- a blank line
-        # carries no pipes, so neither consumer does anything with it.
-        self.assertEqual(
-            self.flags(text),
-            [False, False, True, True, True, True, False, False],
-        )
-        # And the two agree: nothing to reformat, so nothing to report.
+    def assertUnchanged(self, text: str) -> None:
         self.assertEqual(format_text(text), text)
+        self.assertEqual(table_spans(text.split("\n")), [])
 
-    def test_fence_lines_count_as_code(self) -> None:
+    def test_a_tab_indented_code_block(self) -> None:
+        # A tab counts to column 4, so this is an indented code block. It
+        # used to come back as a live table with its tab stripped.
+        self.assertUnchanged("Para\n\n\t| a | b |\n\t|---|---|\n\t| 1 | 2 |\n")
+
+    def test_a_fence_inside_a_list_item(self) -> None:
+        # Fence indentation counts from the item's content column, not from
+        # column zero: four spaces under "- item:" is two into the item.
+        for text in (
+            "- item:\n    ```\n    | a | b |\n    |---|---|\n    ```\n",
+            "10. item\n    ```\n    | a | b |\n    |---|---|\n    ```\n",
+            "- a\n  - b\n      ```\n      | a | b |\n      |---|---|\n      ```\n",
+            "- ```\n  | a | b |\n  |---|---|\n  ```\n",
+            "-\t```\n\t| a | b |\n\t|---|---|\n\t```\n",
+            # A lazy continuation line leaves the item open.
+            "- item\nlazy\n    ```\n    | a | b |\n    |---|---|\n    ```\n",
+        ):
+            with self.subTest(text=text):
+                self.assertUnchanged(text)
+
+    def test_indented_code_inside_a_list_item(self) -> None:
+        for text in (
+            # Six spaces is four past "- item"'s content column.
+            "- item\n\n      | a | b |\n      |---|---|\n",
+            # Five spaces after the marker: the content column is one past
+            # it, and the other four indent a code block.
+            "-     | a | b |\n      |---|---|\n",
+            # An item may start with one blank line, not two: after an empty
+            # one and a blank, four spaces is code at the top level.
+            "-\n\n    | a | b |\n    |---|---|\n",
+        ):
+            with self.subTest(text=text):
+                self.assertUnchanged(text)
+
+    def test_indented_code_where_no_paragraph_continues(self) -> None:
+        # An indented block needs no blank line before it -- only that no
+        # paragraph is being continued.
+        for text in (
+            "# Heading\n    | a | b |\n    |---|---|\n",
+            "```\nx\n```\n    | a | b |\n    |---|---|\n",
+            "Title\n---\n    | a | b |\n    |---|---|\n",
+            "text\n* * *\n    | a | b |\n    |---|---|\n",
+        ):
+            with self.subTest(text=text):
+                self.assertUnchanged(text)
+
+    def test_an_html_block(self) -> None:
+        # Raw HTML up to its end condition -- a blank line, for a <div>.
+        self.assertUnchanged("<div>\n| a | b |\n|---|---|\n</div>\n")
+        self.assertUnchanged("<!--\n| a | b |\n\n|---|---|\n-->\n")
+        # Any other tag alone on its line opens one too, where no paragraph
+        # is being continued.
+        self.assertUnchanged("<span>\n| a | b |\n|---|---|\n")
+
+
+class TableBoundaryTests(unittest.TestCase):
+    """Where a table starts and stops, as GitHub reads it.
+
+    table_spans() is what both format_text() and the repo-wide alignment
+    check in test_atomic_image_builder.py read, so a line wrongly pulled into
+    a table is rewritten by one and reported as ragged by the other.
+    """
+
+    def spans(self, text: str) -> list[range]:
+        return table_spans(text.split("\n"))
+
+    def test_a_line_opening_another_block_ends_the_table(self) -> None:
+        # Each of these has a pipe, and each used to become the table's last
+        # row -- "| - item | with pipe |".
+        for line in (
+            "- item | with pipe",
+            "* item | with pipe",
+            "2. item | with pipe",
+            "# Heading | x",
+            "> quote | x",
+            "<!-- comment --> | x",
+            "``` a|b",
+            "    | 3 | 4 |",
+        ):
+            with self.subTest(line=line):
+                text = f"| a | b |\n|---|---|\n| 1 | 2 |\n{line}\n"
+                self.assertEqual(self.spans(text), [range(0, 3)])
+                self.assertEqual(
+                    format_text(text),
+                    f"| a   | b   |\n| --- | --- |\n| 1   | 2   |\n{line}\n",
+                )
+
+    def test_a_line_that_only_looks_like_a_block_is_still_a_row(self) -> None:
+        # No space after the marker, seven hashes, an inline tag, and three
+        # spaces of indentation: all text, so all still rows.
+        for line in ("-x | y", "####### x | y", "<b>x</b> | y", "   | 3 | 4 |"):
+            with self.subTest(line=line):
+                self.assertEqual(
+                    self.spans(f"| a | b |\n|---|---|\n{line}\n"), [range(0, 3)]
+                )
+
+    def test_a_line_leaving_a_list_item_ends_its_table(self) -> None:
+        # Rows do not continue lazily, so the dedented one is a paragraph
+        # outside the item.
         self.assertEqual(
-            self.flags("a\n```\n| x |\n```\nb"),
-            [False, True, True, True, False],
+            self.spans("- x\n\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n| 3 | 4 |\n"),
+            [range(2, 5)],
         )
 
-    def test_a_longer_fence_is_not_closed_by_a_shorter_run(self) -> None:
+    def test_a_header_that_opens_another_block_heads_no_table(self) -> None:
+        for text in (
+            "# a | b\n|---|---|\n",
+            "- a | b\n|---|---|\n| 1 | 2 |\n",
+            "> a | b\n|---|---|\n",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.spans(text), [])
+                self.assertEqual(format_text(text), text)
+
+    def test_lazy_continuation_lines_are_paragraph_text(self) -> None:
+        # Under a list item or a quote, an unindented pipe line continues
+        # that paragraph rather than starting a table.
+        for text in ("- item\n| a | b |\n|---|---|\n", "> q\n| a | b |\n|---|---|\n"):
+            with self.subTest(text=text):
+                self.assertEqual(self.spans(text), [])
+
+    def test_the_header_and_delimiter_must_have_the_same_cell_count(self) -> None:
+        self.assertEqual(self.spans("| e |\n|---|---|\n"), [])
+        # And a paragraph gets one try: once a delimiter row in it has failed
+        # to match, no later line of it can head a table.
+        self.assertEqual(self.spans("text\n| --- | --- |\n|---|---|\n"), [])
+
+    def test_a_table_can_interrupt_a_paragraph(self) -> None:
+        self.assertEqual(self.spans("text\n| a | b |\n|---|---|\n"), [range(1, 3)])
+
+    def test_leaving_a_list_item_closes_a_fence_inside_it(self) -> None:
+        # The unindented line is outside the item, and so outside the fence.
+        self.assertEqual(self.spans("- ```\n  x\n| a | b |\n|---|---|\n"), [range(2, 4)])
+
+    def test_an_html_block_inside_a_list_item_ends_with_it(self) -> None:
         self.assertEqual(
-            self.flags("````\n```\n| x |\n```\n````\nafter"),
-            [True, True, True, True, True, False],
+            self.spans("- <div>\n  | x |\n| a | b |\n|---|---|\n"), [range(2, 4)]
         )
 
-    def test_a_blank_line_does_not_end_an_indented_block(self) -> None:
+    def test_what_cannot_interrupt_a_paragraph_continues_it(self) -> None:
+        # An item numbered other than 1 is paragraph text, so the lines after
+        # it are four columns past no item: the delimiter there is text too.
+        self.assertEqual(self.spans("text\n2) x\n    | a | b |\n    |---|---|\n"), [])
+        # An arbitrary tag after text is inline HTML, not a block.
         self.assertEqual(
-            self.flags("intro\n\n    code\n\n    more code\nprose"),
-            [False, False, True, True, True, False],
+            self.spans("text\n<span>\n| a | b |\n|---|---|\n"), [range(2, 4)]
         )
 
-    def test_indentation_after_prose_is_not_code(self) -> None:
-        self.assertEqual(self.flags("intro\n    | A | B |"), [False, False])
+    def test_an_item_opened_empty_holds_the_table_under_it(self) -> None:
+        self.assertEqual(self.spans("-\n  | a | b |\n  |---|---|\n"), [range(1, 3)])
 
 
 class FenceTests(unittest.TestCase):

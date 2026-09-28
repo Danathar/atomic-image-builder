@@ -81,6 +81,7 @@ from atomic_image_builder import (
     managed_path,
     normalize_container_image_reference,
     patch_cosign_compatibility,
+    patch_signing_step_block,
     patch_workflow_steps,
     pin_action_uses_line,
     pinned_action,
@@ -427,8 +428,11 @@ class BuilderTests(unittest.TestCase):
             yaml_scalar("a\x7fb\x80c\x85d\x9fe￾f￿g"),
             '"a\\u007fb\\u0080c\\u0085d\\u009fe\\ufffef\\uffffg"',
         )
+        # U+2028/U+2029 are the other YAML 1.1 line breaks and line boundaries
+        # to str.splitlines(), which the workflow patchers re-split with (#527).
+        self.assertEqual(yaml_scalar("a\u2028b\u2029c"), '"a\\u2028b\\u2029c"')
         # The neighbours on either side of each escaped range stay raw.
-        self.assertEqual(yaml_scalar("~\xa0�\U0010ffff"), '"~\xa0�\U0010ffff"')
+        self.assertEqual(yaml_scalar("~\xa0\u2027\u202a�\U0010ffff"), '"~\xa0\u2027\u202a�\U0010ffff"')
 
     def test_repository_status_omits_description_separator_when_unset(self) -> None:
         app = self.make_app()
@@ -692,6 +696,73 @@ class BuilderTests(unittest.TestCase):
 
         self.assertEqual(patched.count("env.SIGNING_ENABLED == 'true'"), 2)
         self.assertIn(ACTION_PINS["sigstore/cosign-installer"][0], patched)
+
+    def test_patch_container_workflow_guards_a_step_whose_first_key_is_if(self) -> None:
+        """A compact `- if:` step keeps one `if:`, and it is the guarded one.
+
+        Key-sorted YAML puts `if` first in the step's `- ` item. The patcher
+        only recognized an `if:` on a line of its own, decided the step had
+        none, and inserted a second one into the same mapping, which Actions
+        rejects as already defined (#525). Modelled on the bundled snapshot
+        with its Install Cosign step reordered that way.
+        """
+        app = self.make_app()
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        branch_if = "github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+        uses = "        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2\n"
+        original = f"      - name: Install Cosign\n{uses}        if: {branch_if}\n"
+        self.assertIn(original, snapshot)
+        reordered = snapshot.replace(original, f"      - if: {branch_if}\n        name: Install Cosign\n{uses}")
+        patched = app.patch_container_workflow(reordered)
+        lines = patched.splitlines()
+        start = lines.index(f"      - if: {branch_if} && env.SIGNING_ENABLED == 'true'")
+        step = [lines[start]]
+        for line in lines[start + 1 :]:
+            if line.startswith("      - ") or (line.strip() and len(line) - len(line.lstrip()) < 8):
+                break
+            step.append(line)
+        self.assertEqual([line for line in step if re.match(r"\s*(?:- )?if:", line)], [step[0]])
+        self.assertEqual(app.patch_container_workflow(patched), patched)
+
+    def test_patch_signing_step_block_reads_the_if_key_in_any_spelling(self) -> None:
+        branch_if = "github.ref == 'refs/heads/main'"
+        sign_if = f"{branch_if} && env.SIGNING_ENABLED == 'true'"
+        for key in ("if :", '"if":', "'if':"):
+            with self.subTest(key=key):
+                step = ["      - name: Install Cosign", "        uses: sigstore/cosign-installer@v3", f"        {key} {branch_if}"]
+                self.assertEqual(
+                    patch_signing_step_block(step, branch_if=branch_if, sign_if=sign_if),
+                    [*step[:2], f"        {key} {sign_if}"],
+                )
+
+    def test_patch_container_workflow_guards_a_sign_step_whose_script_reads_like_an_if_key(self) -> None:
+        """A `run: |` line that parses as an `if` key is script, not the step's condition.
+
+        Read on its own, the shell line `if : ; then` is the YAML key `if`.
+        Counting every line of the step as a key meant a signing step with no
+        condition of its own but such a script was taken as already guarded:
+        no guard went in, and it signed on pull requests or with no key set.
+        Modelled on the bundled snapshot with the Sign step's `if:` removed
+        and its `cosign sign` command wrapped in a valid `if : ; then ... fi`.
+        """
+        app = self.make_app()
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        branch_if = "github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+        original = f"        id: sign-image\n        if: {branch_if}\n"
+        self.assertIn(original, snapshot)
+        [sign_line] = [line for line in snapshot.splitlines() if line.startswith("          cosign sign -y ")]
+        script = ["          if : ; then", f"  {sign_line}", "          fi"]
+        workflow = snapshot.replace(original, "        id: sign-image\n").replace(sign_line, "\n".join(script))
+        patched = app.patch_container_workflow(workflow)
+        lines = patched.splitlines()
+        start = lines.index("      - name: Sign container image")
+        self.assertEqual(
+            lines[start + 1 : start + 3],
+            [f"        if: {branch_if} && env.SIGNING_ENABLED == 'true'", "        id: sign-image"],
+        )
+        script_start = lines.index(script[0])
+        self.assertEqual(lines[script_start : script_start + 3], script)
+        self.assertEqual(app.patch_container_workflow(patched), patched)
 
     def test_patch_container_workflow_injects_job_env_even_when_step_env_matches(self) -> None:
         """A step-level entry must not prevent the job-level one being added.
@@ -1069,6 +1140,28 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(job["steps"][0]["run"].splitlines(), ["cat <<EOF", "IMAGE_DESC: literal", "EOF"])
         self.assertEqual(app.patch_container_workflow(patched), patched)
 
+    def test_patch_container_workflow_keeps_a_line_separator_description_on_one_line(self) -> None:
+        # #527: a build.yml generated from scratch carried U+2028 raw, the
+        # next patch re-split it with str.splitlines(), rewrote only the first
+        # half and kept the tail as an orphan line YAML could not parse. Every
+        # further update added another orphan.
+        app = self.make_app()
+        app.config.image_desc = "My image\u2028line two\u2029end"
+        generated = app.generate_container_workflow()
+        self.assertIn('  IMAGE_DESC: "My image\\u2028line two\\u2029end"', generated)
+        once = app.patch_container_workflow(generated)
+        self.assertNotIn("\u2028", once)
+        self.assertNotIn("\u2029", once)
+        self.assertEqual(parse_block_yaml(once)["env"]["IMAGE_DESC"], "My image\u2028line two\u2029end")
+        self.assertEqual(app.patch_container_workflow(once), once)
+        libyaml_document = parse_with_libyaml(once)
+        if libyaml_document is not None:
+            self.assertEqual(libyaml_document["env"]["IMAGE_DESC"], "My image\u2028line two\u2029end")
+        app.config.image_desc = "A plain new description"
+        updated = app.patch_container_workflow(once)
+        self.assertEqual(parse_block_yaml(updated)["env"]["IMAGE_DESC"], "A plain new description")
+        self.assertNotIn("line two", updated)
+
     def test_patch_container_workflow_adds_state_ignore_only_once(self) -> None:
         # Both the key branch and the README anchor can match the same
         # workflow; only one entry may be inserted.
@@ -1193,6 +1286,48 @@ class BuilderTests(unittest.TestCase):
             patch_cosign_compatibility(text),
             self.cosign_installer_step('          cosign-release: "v3.1.2"  # bumped by hand'),
         )
+
+    def test_patch_cosign_compatibility_raises_an_unquoted_release(self) -> None:
+        # `cosign-release: v2.2.4` is the same string as its quoted spelling.
+        # Missing it left 2.x installed while the signing step still gained
+        # flags only 2.6.0 and later accept, so `cosign sign` failed (#525).
+        for line, expected in (
+            ("          cosign-release: v2.2.4", "          cosign-release: v3.1.2"),
+            ("          cosign-release: v2.2.4  # pinned", "          cosign-release: v3.1.2  # pinned"),
+            ("          'cosign-release' : \"v2.2.4\"", "          'cosign-release' : \"v3.1.2\""),
+        ):
+            with self.subTest(line=line):
+                patched = patch_cosign_compatibility(self.cosign_installer_step(line))
+                self.assertEqual(patched, self.cosign_installer_step(expected))
+                self.assertEqual(patch_cosign_compatibility(patched), patched)
+        for release in ("v4.0.0", "main", "${{ env.COSIGN_RELEASE }}"):
+            with self.subTest(release=release):
+                text = self.cosign_installer_step(f"          cosign-release: {release}")
+                self.assertEqual(patch_cosign_compatibility(text), text)
+
+    def test_patch_container_workflow_raises_an_unquoted_release_it_adds_flags_for(self) -> None:
+        # Through the generated-repo path: the flags land only alongside a
+        # release that accepts them.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build:
+                steps:
+                  - name: Install Cosign
+                    uses: "sigstore/cosign-installer@v3"
+                    with:
+                      cosign-release: v2.2.4
+                  - name: Sign
+                    run: cosign sign -y --key env://COSIGN_PRIVATE_KEY image:latest
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn("      cosign-release: v3.1.2\n", patched)
+        self.assertNotIn("v2.2.4", patched)
+        self.assertIn("cosign sign --new-bundle-format=false --use-signing-config=false -y", patched)
+        self.assertIn(f'uses: "sigstore/cosign-installer@{ACTION_PINS["sigstore/cosign-installer"][0]}"', patched)
+        self.assertEqual(app.patch_container_workflow(patched), patched)
 
     def test_patch_cosign_compatibility_leaves_the_input_name_alone_outside_the_installer_step(self) -> None:
         # The workflow is patched in place. Text that merely mentions the
@@ -1516,6 +1651,101 @@ class BuilderTests(unittest.TestCase):
             migrated.splitlines(),
         )
         self.assertEqual(app.patch_container_workflow(migrated), migrated)
+
+    LEGACY_SIGNING_JOB = textwrap.dedent(
+        """\
+        name: Build container image
+        jobs:
+          build_push:
+            env:
+              BUILD_FLAVOR: main
+              COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+              COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+            steps:
+              - name: Install Cosign
+                uses: sigstore/cosign-installer@v3
+                if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.COSIGN_PRIVATE_KEY != ''
+              - name: Sign container image
+                if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.COSIGN_PRIVATE_KEY != ''
+                env:
+                  COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+                run: cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/example/test:latest
+        """
+    )
+
+    @staticmethod
+    def reindent_step_items(workflow: str, shift: int) -> str:
+        """Move every line under `steps:` by `shift` columns, keeping the rest."""
+        lines = workflow.splitlines()
+        at = next(index for index, line in enumerate(lines) if line.strip() == "steps:")
+        moved = [(" " * shift + line) if shift >= 0 else line[-shift:] for line in lines[at + 1 :]]
+        return "\n".join([*lines[: at + 1], *moved]) + "\n"
+
+    def test_legacy_migration_rewrites_steps_under_a_commented_key_or_at_any_item_indent(self) -> None:
+        # The step walker only knew a bare `steps:` with items at +2, so in
+        # each of these shapes it rewrote no condition -- and the job-level key
+        # both conditions read was stripped anyway. The result parsed, every
+        # run was green, and every image was published unsigned (#526).
+        app = self.make_app()
+        shapes = {
+            "commented steps key": self.LEGACY_SIGNING_JOB.replace("    steps:\n", "    steps: # build\n"),
+            "items at +4": self.reindent_step_items(self.LEGACY_SIGNING_JOB, 2),
+            "indentless items": self.reindent_step_items(self.LEGACY_SIGNING_JOB, -2),
+        }
+        for label, legacy in shapes.items():
+            with self.subTest(shape=label):
+                migrated = app.patch_container_workflow(legacy)
+                self.assertEqual(
+                    sorted(self.job_env_entries(migrated)),
+                    ["BUILD_FLAVOR: main", "SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}"],
+                )
+                self.assertNotIn("env.COSIGN_PRIVATE_KEY", migrated)
+                self.assertEqual(migrated.count("&& env.SIGNING_ENABLED == 'true'"), 2)
+                self.assertEqual(migrated.count("COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}"), 1)
+                self.assertEqual(app.patch_container_workflow(migrated), migrated)
+
+    def test_legacy_migration_fails_closed_when_a_condition_still_reads_the_job_key(self) -> None:
+        # Any condition the step rewrite leaves reading the job-level key --
+        # in a step the walker cannot reach, or one it does not treat as a
+        # signing step, as here -- is false forever once that key is
+        # stripped. Refusing is the only outcome that is not a silently
+        # unsigned image.
+        app = self.make_app()
+        legacy = self.LEGACY_SIGNING_JOB + "\n".join(
+            [
+                "      - name: Report signing",
+                "        if: env.COSIGN_PRIVATE_KEY != ''",
+                "        run: echo signed",
+                "",
+            ]
+        )
+        with self.assertRaisesRegex(CommandError, r"if: env\.COSIGN_PRIVATE_KEY != ''.*published unsigned"):
+            app.patch_container_workflow(legacy)
+
+    def test_legacy_migration_allows_reads_the_strip_does_not_break(self) -> None:
+        # The refusal is for reads the removal breaks. A workflow-level env
+        # entry is left in place and still answers the read, and a job that
+        # never carried the key is not changed by removing it from another --
+        # refusing either would block an update over a reference that works.
+        app = self.make_app()
+        report = ["      - name: Report signing", "        if: env.COSIGN_PRIVATE_KEY != ''", "        run: echo signed"]
+        shapes = {
+            "workflow-level definition": self.LEGACY_SIGNING_JOB.replace(
+                "jobs:\n", "env:\n  COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}\njobs:\n", 1
+            )
+            + "\n".join([*report, ""]),
+            "read in another job": self.LEGACY_SIGNING_JOB
+            + "\n".join(["  notify:", "    runs-on: ubuntu-latest", "    steps:", *report, ""]),
+        }
+        for label, legacy in shapes.items():
+            with self.subTest(shape=label):
+                migrated = app.patch_container_workflow(legacy)
+                self.assertEqual(
+                    sorted(self.job_env_entries(migrated)),
+                    ["BUILD_FLAVOR: main", "SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}"],
+                )
+                self.assertEqual(migrated.count("&& env.SIGNING_ENABLED == 'true'"), 2)
+                self.assertIn("        if: env.COSIGN_PRIVATE_KEY != ''", migrated.splitlines())
 
     @staticmethod
     def job_env_entries_by_job(workflow: str) -> dict[str, list[str]]:
@@ -2408,6 +2638,25 @@ class BuilderTests(unittest.TestCase):
         line = "        reuses: actions/checkout@v4"
         self.assertEqual(pin_action_uses_line(line), line)
 
+    def test_pin_action_uses_line_pins_a_quoted_value_and_keeps_its_quotes(self) -> None:
+        # A quoted `uses:` value names the same action. The action group used
+        # to capture the opening quote, miss the pin tables, and leave the
+        # step on its floating tag with nothing reported (#525).
+        sha, label = ACTION_PINS["actions/checkout"]
+        for line, expected in (
+            ('        uses: "actions/checkout@v4"', f'        uses: "actions/checkout@{sha}" # {label}'),
+            ("      - uses: 'actions/checkout@v4'", f"      - uses: 'actions/checkout@{sha}' # {label}"),
+            ('        "uses" : actions/checkout@v4 # old', f'        "uses" : actions/checkout@{sha} # {label}'),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(pin_action_uses_line(line), expected)
+                self.assertEqual(pin_action_uses_line(expected), expected)
+
+    def test_pin_action_uses_line_leaves_an_unbalanced_quote_alone(self) -> None:
+        for line in ("        uses: 'actions/checkout@v4", "        uses: actions/checkout@v4'", "        uses: 'actions/checkout@v4\""):
+            with self.subTest(line=line):
+                self.assertEqual(pin_action_uses_line(line), line)
+
     def test_pin_action_uses_line_is_a_fixed_point_on_every_generated_pin(self) -> None:
         # The generator writes ACTION_PINS' label; the patcher runs over that
         # same text on every later update. If the two ever disagree on the
@@ -2612,6 +2861,34 @@ class BuilderTests(unittest.TestCase):
             result.splitlines(),
             ["jobs:", "  build:", "    env:", "      FOO: ours", "    steps: # the work", *self.READER.splitlines()],
         )
+
+    def test_ensure_workflow_job_env_entries_knows_a_key_by_name_whatever_its_spelling(self) -> None:
+        # YAML reads `"FOO":`, `'FOO':` and `FOO :` as `FOO:`, and so does
+        # Actions -- which rejects a second one as already defined. A walk
+        # that only knew the bare spelling wrote exactly that duplicate (#525).
+        for shape in ('      "FOO": theirs', "      'FOO': theirs", "      FOO : theirs"):
+            with self.subTest(shape=shape):
+                workflow_text = f"jobs:\n  build:\n    env:\n{shape}\n    steps:\n" + self.READER
+                self.assertEqual(ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")]), workflow_text)
+
+    def test_ensure_workflow_job_env_entries_extends_a_quoted_or_spaced_env_key(self) -> None:
+        # The same miss one level up: an `env:` key spelled any other way was
+        # not found, and a second `env:` was opened above `steps:`. It is
+        # extended instead, and keeps the owner's spelling.
+        for shape, header in (
+            ('    "env":', '    "env":'),
+            ("    'env': # settings", "    'env': # settings"),
+            ("    env : {}", "    env :"),
+            ('    "env": {} # nothing yet', '    "env": # nothing yet'),
+        ):
+            with self.subTest(shape=shape):
+                workflow_text = f"jobs:\n  build:\n{shape}\n    steps:\n" + self.READER
+                result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")])
+                self.assertEqual(
+                    result.splitlines(),
+                    ["jobs:", "  build:", header, "      FOO: ours", "    steps:", *self.READER.splitlines()],
+                )
+                self.assertEqual(ensure_workflow_job_env_entries(result, [("FOO", "ours")]), result)
 
     def test_patch_container_workflow_leaves_a_renamed_signing_secret_with_one_key(self) -> None:
         """A generated repo whose owner renamed the guard's secret keeps one key.
@@ -4486,21 +4763,39 @@ class BuilderTests(unittest.TestCase):
             results = app.lookup_host_packages(["tmux"])
         self.assertEqual(results, {"tmux": None})
 
+    # Stand-ins for what dnf5 matched, rendered through whatever --qf the
+    # lookup passed. Epoch 0 is what dnf5 prints for a package without one.
+    HTOP_X86_64 = {"name": "htop", "epoch": "0", "version": "3.4.1", "release": "1.fc44", "arch": "x86_64"}
+    VIM_ENHANCED_X86_64 = {
+        "name": "vim-enhanced",
+        "epoch": "2",
+        "version": "9.1.1000",
+        "release": "1.fc44",
+        "arch": "x86_64",
+    }
+
     def _lookup_with_dnf5_stub(
-        self, app, packages: list[str], answers: dict[str, str], *, resolve_provides: bool = True
+        self, app, packages: list[str], answers: dict[str, str | dict[str, str]], *, resolve_provides: bool = True
     ) -> tuple[dict, list[list[str]]]:
         # `answers` maps the tail of a repoquery command (what follows
-        # --latest-limit 1) to the stdout dnf5 would print for it. The batch
-        # is keyed by its joined names; a follow-up by "--whatprovides <spec>"
-        # or "<spec>". Anything unlisted prints nothing with exit 0, which is
-        # what dnf5 5.4.2.1 does for a spec that matches no package.
+        # --latest-limit 1) to what dnf5 would print for it. The batch is
+        # keyed by its joined names; a follow-up by "--whatprovides <spec>"
+        # or "<spec>". A string is printed as is; a package dict is rendered
+        # through the command's --qf, the way dnf5 expands %{tag}. Anything
+        # unlisted prints nothing with exit 0, which is what dnf5 5.4.2.1
+        # does for a spec that matches no package.
         stub = GumStub()
         calls: list[list[str]] = []
 
         def fake_spinner_result(_title, command, *, cwd=None):
             calls.append(list(command))
             tail = " ".join(command[command.index("1") + 1 :])
-            return subprocess.CompletedProcess(list(command), 0, answers.get(tail, ""), "")
+            answer = answers.get(tail, "")
+            if isinstance(answer, dict):
+                package = answer
+                query_format = command[command.index("--qf") + 1]
+                answer = re.sub(r"%\{(\w+)\}", lambda match: package[match.group(1)], query_format)
+            return subprocess.CompletedProcess(list(command), 0, answer, "")
 
         stub.spinner_result = fake_spinner_result
         app.gum = stub
@@ -4524,14 +4819,15 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.package_lookup_cache["vim", True], True)
 
     def test_lookup_host_packages_accepts_a_name_dot_arch_spec(self) -> None:
-        # repoquery resolves vim-enhanced.x86_64 but prints the bare name,
-        # which is not string-equal to the spec. The printed name opening
-        # the spec is the accept condition.
+        # repoquery resolves vim-enhanced.x86_64, which is not string-equal
+        # to any printed name. The follow-up prints every spelling of the
+        # matched package, and the spec being one of them is the accept
+        # condition.
         app = self.make_app()
         results, calls = self._lookup_with_dnf5_stub(
             app,
             ["vim-enhanced.x86_64"],
-            {"vim-enhanced.x86_64": "vim-enhanced\n"},
+            {"vim-enhanced.x86_64": self.VIM_ENHANCED_X86_64},
         )
         self.assertEqual(results, {"vim-enhanced.x86_64": True})
         # Batch, then --whatprovides (a name.arch is not a Provides), then
@@ -4541,18 +4837,54 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(calls[2][-1], "vim-enhanced.x86_64")
         self.assertNotIn("--whatprovides", calls[2])
 
+    def test_lookup_host_packages_accepts_every_nevra_spelling_install_takes(self) -> None:
+        # libdnf5's NA, NEV, NEVR and NEVRA forms, with and without the
+        # epoch -- including an explicit 0: for a package that has none.
+        specs = [
+            "htop-3.4.1",
+            "htop-3.4.1-1.fc44",
+            "htop-3.4.1-1.fc44.x86_64",
+            "htop-0:3.4.1",
+            "htop-0:3.4.1-1.fc44",
+            "htop-0:3.4.1-1.fc44.x86_64",
+            "vim-enhanced-2:9.1.1000-1.fc44.x86_64",
+        ]
+        app = self.make_app()
+        answers: dict[str, str | dict[str, str]] = dict.fromkeys(specs, self.HTOP_X86_64)
+        answers["vim-enhanced-2:9.1.1000-1.fc44.x86_64"] = self.VIM_ENHANCED_X86_64
+        results, _calls = self._lookup_with_dnf5_stub(app, specs, answers)
+        self.assertEqual(results, dict.fromkeys(specs, True))
+
     def test_lookup_host_packages_still_rejects_a_wrong_case_name(self) -> None:
         # repoquery matches positional specs ignoring case, install does not:
-        # `dnf5 install Vim-Enhanced` is "No match for argument". Printed
-        # name vim-enhanced does not open the spec Vim-Enhanced, so the
-        # lookup must keep saying no, exactly as the issue expects.
+        # `dnf5 install Vim-Enhanced` is "No match for argument". No
+        # spelling of vim-enhanced is Vim-Enhanced, so the lookup must keep
+        # saying no, exactly as the issue expects.
         app = self.make_app()
         results, _calls = self._lookup_with_dnf5_stub(
             app,
             ["Vim-Enhanced"],
-            {"Vim-Enhanced": "vim-enhanced\n"},
+            {"Vim-Enhanced": self.VIM_ENHANCED_X86_64},
         )
         self.assertEqual(results, {"Vim-Enhanced": False})
+
+    def test_lookup_host_packages_rejects_a_wrong_case_arch_or_release(self) -> None:
+        # #505: repoquery matches htop.X86_64 ignoring case and prints htop,
+        # which opens the spec, but `dnf5 install htop.X86_64` is "No match
+        # for argument". Only the name used to be compared, so a wrong-case
+        # suffix passed and the GitHub build failed on it.
+        specs = ["htop.X86_64", "htop-3.4.1-1.FC44", "htop-3.4.1-1.fc44.X86_64", "htop.x86_64"]
+        app = self.make_app()
+        results, _calls = self._lookup_with_dnf5_stub(app, specs, dict.fromkeys(specs, self.HTOP_X86_64))
+        self.assertEqual(
+            results,
+            {
+                "htop.X86_64": False,
+                "htop-3.4.1-1.FC44": False,
+                "htop-3.4.1-1.fc44.X86_64": False,
+                "htop.x86_64": True,
+            },
+        )
 
     def test_lookup_host_packages_typo_without_separator_skips_the_nevra_query(self) -> None:
         # "nethock" has no ".", "-" or ":" so it cannot be a name.arch or
@@ -4651,7 +4983,7 @@ class BuilderTests(unittest.TestCase):
         results, calls = self._lookup_with_dnf5_stub(
             app,
             ["vim-enhanced.x86_64", "htop-3.4.1"],
-            {"vim-enhanced.x86_64": "vim-enhanced\n", "htop-3.4.1": "htop\n"},
+            {"vim-enhanced.x86_64": self.VIM_ENHANCED_X86_64, "htop-3.4.1": self.HTOP_X86_64},
             resolve_provides=False,
         )
         self.assertEqual(results, {"vim-enhanced.x86_64": True, "htop-3.4.1": True})
@@ -4661,17 +4993,22 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(calls[2][-1], "htop-3.4.1")
 
     def test_removal_lookup_keeps_the_wrong_case_and_typo_answers(self) -> None:
+        # htop.X86_64 is #505 on this screen: `rpm -q bash.X86_64` is "not
+        # installed", so the build's rpm -q gate would skip the removal and
+        # leave the package in the image.
         app = self.make_app()
         results, calls = self._lookup_with_dnf5_stub(
             app,
-            ["Vim-Enhanced", "HTOP", "python3-foo-typo"],
-            {"Vim-Enhanced": "vim-enhanced\n"},
+            ["Vim-Enhanced", "HTOP", "python3-foo-typo", "htop.X86_64"],
+            {"Vim-Enhanced": self.VIM_ENHANCED_X86_64, "htop.X86_64": self.HTOP_X86_64},
             resolve_provides=False,
         )
-        self.assertEqual(results, {"Vim-Enhanced": False, "HTOP": False, "python3-foo-typo": False})
+        self.assertEqual(
+            results, {"Vim-Enhanced": False, "HTOP": False, "python3-foo-typo": False, "htop.X86_64": False}
+        )
         # Batch, then one positional query for each spec with a separator;
         # HTOP has none and needs no follow-up.
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 4)
 
     def test_removal_lookup_nevra_follow_up_failure_is_unchecked_not_missing(self) -> None:
         # For a single spec the batch and the positional follow-up are the
@@ -4739,6 +5076,27 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(kept, [])
         self.assertTrue(app.last_manual_removed_package_check_had_missing)
         self.assertTrue(any(level == "error" and "not found: vim" in message for level, message in stub.messages))
+
+    def test_manual_removal_entry_keeps_an_installed_name_beside_two_typos(self) -> None:
+        # #503: rpm exits with the number of misses, so two typos exit 2.
+        # Read as an unreadable rpmdb, that sent uupd -- installed here, in
+        # no enabled repo -- to the repo query, which called it a typo too.
+        app = self.make_app()
+        stub = GumStub()
+        stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.CompletedProcess(list(command), 0, "", "")
+        app.gum = stub
+        rpm = subprocess.CompletedProcess(
+            ["rpm"], 2, "uupd\npackage typoone is not installed\npackage typotwo is not installed\n", ""
+        )
+        with (
+            patch("atomic_image_builder.command_exists", return_value=True),
+            patch("atomic_image_builder.run", return_value=rpm),
+        ):
+            kept = app.filter_available_manual_removed_packages(["uupd", "typoone", "typotwo"])
+        self.assertEqual(kept, ["uupd"])
+        errors = [message for level, message in stub.messages if level == "error"]
+        self.assertTrue(any("not found: typoone, typotwo" in message for message in errors), errors)
+        self.assertFalse(any("uupd" in message for message in errors), errors)
 
     def test_filter_modes_ask_the_lookup_for_their_own_build_step(self) -> None:
         app = self.make_app()
@@ -4999,8 +5357,8 @@ class BuilderTests(unittest.TestCase):
     def test_lookup_installed_host_packages_pins_rpm_to_the_c_locale(self) -> None:
         # rpm translates both "package <spec> is not installed" and the
         # "error:" prefix, so on a German or Japanese desktop the misses and
-        # failures would slip past the English-only parser and exit 1 would
-        # read as "everything is installed". The call has to pin the locale
+        # failures would slip past the English-only parser and a batch with
+        # misses would read as "everything is installed". The call has to pin the locale
         # while keeping the rest of the environment (PATH, RPM_CONFIGDIR).
         app = self.make_app()
         completed = subprocess.CompletedProcess(["rpm"], 1, "package nethock is not installed\n", "")
@@ -5020,6 +5378,21 @@ class BuilderTests(unittest.TestCase):
                 results = app.lookup_installed_host_packages(["bash", "coreutils"])
         self.assertEqual(results, {"bash": True, "coreutils": True})
 
+    def test_lookup_installed_host_packages_reads_an_exit_status_counting_several_misses(self) -> None:
+        # rpm 6.0.2 exits with the number of specs it did not find, so three
+        # misses exit 3. That is an ordinary answer, not a broken rpmdb.
+        app = self.make_app()
+        completed = subprocess.CompletedProcess(
+            ["rpm"],
+            3,
+            "bash\npackage nosuch1 is not installed\npackage nosuch2 is not installed\npackage nosuch3 is not installed\n",
+            "",
+        )
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", return_value=completed):
+                results = app.lookup_installed_host_packages(["bash", "nosuch1", "nosuch2", "nosuch3"])
+        self.assertEqual(results, {"bash": True, "nosuch1": False, "nosuch2": False, "nosuch3": False})
+
     def test_lookup_installed_host_packages_returns_none_when_rpmdb_is_unreadable(self) -> None:
         # Same exit status as an honest miss, and rpm still reports the spec
         # as not installed; only the stderr line says the database never
@@ -5034,9 +5407,11 @@ class BuilderTests(unittest.TestCase):
                 results = app.lookup_installed_host_packages(["bash"])
         self.assertEqual(results, {"bash": None})
 
-    def test_lookup_installed_host_packages_returns_none_on_unexpected_exit_status(self) -> None:
+    def test_lookup_installed_host_packages_returns_none_when_rpm_is_killed(self) -> None:
+        # A negative status is a signal, not rpm's miss count: the output
+        # stopped partway, so a name with no miss line was never answered.
         app = self.make_app()
-        completed = subprocess.CompletedProcess(["rpm"], 2, "", "")
+        completed = subprocess.CompletedProcess(["rpm"], -9, "bash\n", "")
         with patch("atomic_image_builder.command_exists", return_value=True):
             with patch("atomic_image_builder.run", return_value=completed):
                 results = app.lookup_installed_host_packages(["bash"])
@@ -5168,6 +5543,34 @@ class BuilderTests(unittest.TestCase):
         self.assertIsNone(message)
         self.assertEqual(results, [("tmux", "Terminal multiplexer")])
 
+    def test_search_host_packages_ranks_a_multi_word_term_as_the_hyphenated_name(self) -> None:
+        # The dnf5 pattern turns spaces into wildcards, but no RPM name has a
+        # space in it. Ranking on the raw term matched nothing, so results
+        # fell back to alphabetical order and python3-test landed past the
+        # limit behind every mingw build (#506).
+        app = self.make_app()
+        stub = GumStub()
+        filler = [f"a{i:03d}-python3-test-extra\tFiller" for i in range(PACKAGE_SEARCH_LIMIT + 5)]
+        rows = [
+            *filler,
+            "mingw64-python3-test\tMinGW build",
+            "python3-testpath\tPrefix match",
+            "python3-test\tThe exact package",
+        ]
+        stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.CompletedProcess(
+            list(command), 0, "\n".join(rows) + "\n", ""
+        )
+        app.gum = stub
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "dnf5"):
+            results, truncated, message = app.search_host_packages("  Python3   test ")
+
+        self.assertIsNone(message)
+        self.assertTrue(truncated)
+        self.assertEqual(
+            [name for name, _summary in results[:3]],
+            ["python3-test", "python3-testpath", "a000-python3-test-extra"],
+        )
+
     def test_search_host_packages_reports_missing_cache_when_refresh_is_declined(self) -> None:
         app = self.make_app()
         stub = GumStub()
@@ -5193,6 +5596,74 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(message, atomic_image_builder.PACKAGE_SEARCH_NEEDS_METADATA)
         # Declining must not download anything.
         self.assertTrue(all("makecache" not in command for command in commands))
+
+    @contextlib.contextmanager
+    def run_dnf5_for_real_under_a_german_locale(self, stub: GumStub):
+        # Runs the argv the tool builds, env prefix and all, against a stand-in
+        # dnf5 on PATH, from a German desktop session. The stand-in answers the
+        # way gettext picks a language -- LANGUAGE first, then LC_ALL, then
+        # LANG -- without glibc's exception that ignores LANGUAGE under the C
+        # locale, so only a run with LANGUAGE gone *and* LC_ALL=C reads English.
+        # Asserting on the argv alone would pass a prefix env never applies.
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "dnf5"
+            fake.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/bin/sh
+                    if [ -n "${LANGUAGE:-}" ] || [ "${LC_ALL:-${LANG:-C}}" != C ]; then
+                        echo 'Cache-only ist aktiviert, aber kein Cache für Paketquelle „fedora“' >&2
+                    else
+                        echo 'Cache-only enabled but no cache for repository "fedora"' >&2
+                    fi
+                    exit 1
+                    """
+                )
+            )
+            fake.chmod(0o755)
+            stub.spinner_result = lambda _title, command, *, cwd=None: subprocess.run(
+                list(command), capture_output=True, text=True, check=False
+            )
+            german = {
+                "PATH": f"{tmp}{os.pathsep}{os.environ.get('PATH', '')}",
+                "LANG": "de_DE.UTF-8",
+                "LC_ALL": "de_DE.UTF-8",
+                "LANGUAGE": "de",
+            }
+            with patch.dict(os.environ, german):
+                with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "dnf5"):
+                    yield
+
+    def test_lookup_host_packages_offers_metadata_refresh_on_a_german_host(self) -> None:
+        # #504: dnf5's no-cache message is translated, so on a German host it
+        # never matched and the names were silently left unchecked.
+        app = self.make_app()
+        stub = GumStub()
+        prompts: list[str] = []
+        stub.confirm = lambda prompt, **_kwargs: prompts.append(prompt) or False
+        app.gum = stub
+        with self.run_dnf5_for_real_under_a_german_locale(stub):
+            with redirect_stdout(io.StringIO()):
+                results = app.lookup_host_packages(["htop"])
+
+        self.assertEqual(prompts, ["Refresh package metadata now?"])
+        self.assertEqual(results, {"htop": None})
+
+    def test_search_host_packages_reports_missing_cache_on_a_german_host(self) -> None:
+        # #504: the untranslated marker is what tells a missing cache apart
+        # from dnf5 being broken; without it, search pointed the user at
+        # exact-name entry, which could not check names either.
+        app = self.make_app()
+        stub = GumStub()
+        prompts: list[str] = []
+        stub.confirm = lambda prompt, **_kwargs: prompts.append(prompt) or False
+        app.gum = stub
+        with self.run_dnf5_for_real_under_a_german_locale(stub):
+            with redirect_stdout(io.StringIO()):
+                results, truncated, message = app.search_host_packages("htop")
+
+        self.assertEqual(prompts, ["Refresh package metadata now?"])
+        self.assertEqual((results, truncated, message), ([], False, atomic_image_builder.PACKAGE_SEARCH_NEEDS_METADATA))
 
     def test_search_host_packages_refreshes_metadata_then_retries_the_search(self) -> None:
         app = self.make_app()
@@ -5345,9 +5816,9 @@ class BuilderTests(unittest.TestCase):
 
         self.assertEqual(len(commands), 1)
         command = commands[0]
-        self.assertEqual(command[0], "env")
-        self.assertTrue(command[1].startswith("XDG_STATE_HOME="))
-        self.assertEqual(command[2:], ["dnf5", "makecache"])
+        self.assertEqual(command[:4], ["env", "-u", "LANGUAGE", "LC_ALL=C"])
+        self.assertTrue(command[4].startswith("XDG_STATE_HOME="))
+        self.assertEqual(command[5:], ["dnf5", "makecache"])
         self.assertTrue(any(level == "success" for level, _message in stub.messages))
 
     def test_refresh_package_metadata_reports_a_bare_failure_without_detail(self) -> None:
@@ -6928,6 +7399,118 @@ class BuilderTests(unittest.TestCase):
         ]
         self.assertEqual(resumed_steps, ["method", "base", "repo", "software"])
         self.assertEqual(events[-1], "review")
+
+    def run_wizard_with_esc(self, review_actions: list[str | None], esc_on: dict[str, int]) -> tuple[App, list[str]]:
+        """Run create_new_image() with each step recording itself.
+
+        ``esc_on`` maps a step name to the call number (1-based) on which
+        that step raises ScreenBack, as Esc on its screen does. Every other
+        call succeeds. A None in ``review_actions`` is Esc on the review
+        screen itself. configure_repo() fills in a repo name so the test can
+        see whether the wizard's state survived.
+        """
+        app = self.make_app()
+        app.gum = GumStub()
+        events: list[str] = []
+        calls: dict[str, int] = {}
+        actions = iter(review_actions)
+
+        def step(name: str):
+            def run_step(**_kwargs) -> None:
+                calls[name] = calls.get(name, 0) + 1
+                events.append(name)
+                if esc_on.get(name) == calls[name]:
+                    raise ScreenBack()
+                if name == "repo":
+                    app.config.repo_name = "sentinel-repo"
+
+            return run_step
+
+        def review(**_kwargs) -> str:
+            events.append("review")
+            action = next(actions)
+            if action is None:
+                raise ScreenBack()
+            return action
+
+        with patch.object(app, "choose_method", side_effect=step("method")):
+            with patch.object(app, "choose_base_image", side_effect=step("base")):
+                with patch.object(app, "configure_repo", side_effect=step("repo")):
+                    with patch.object(app, "select_packages", side_effect=step("software")):
+                        with patch.object(app, "review_new_image", side_effect=review):
+                            app.create_new_image()
+        return app, events
+
+    def test_esc_on_build_method_opened_from_review_returns_to_review(self) -> None:
+        # Build method is step index 0, so Esc there hit the "leave the
+        # wizard" case meant for the first pass: create_new_image() returned
+        # and the next Create Image started from a fresh config (#507).
+        app, events = self.run_wizard_with_esc(["method", "cancel"], {"method": 2})
+        self.assertEqual(events, ["method", "base", "repo", "software", "review", "method", "review"])
+        self.assertEqual(app.config.repo_name, "sentinel-repo")
+
+    def test_esc_on_a_later_step_opened_from_review_returns_to_review(self) -> None:
+        # Not to the step before it: the user came from review, and review
+        # is where Esc takes them back to.
+        _app, events = self.run_wizard_with_esc(["repo", "cancel"], {"repo": 2})
+        self.assertEqual(events, ["method", "base", "repo", "software", "review", "repo", "review"])
+
+    def test_esc_while_walking_forward_from_a_review_edit_returns_to_review(self) -> None:
+        # Editing Build method walks on through the steps after it. Esc on
+        # one of those still belongs to the edit, so it returns to review
+        # rather than stepping back to method -- where one more Esc would
+        # have left the wizard.
+        _app, events = self.run_wizard_with_esc(["method", "cancel"], {"base": 2})
+        self.assertEqual(events, ["method", "base", "repo", "software", "review", "method", "base", "review"])
+
+    def test_esc_back_from_review_still_steps_back_through_the_wizard(self) -> None:
+        # Esc on the review screen itself is ordinary back navigation: it
+        # goes to the last step, and Esc there steps back again. Only a step
+        # opened *from* review returns to it.
+        _app, events = self.run_wizard_with_esc([None, "cancel"], {"software": 2})
+        self.assertEqual(
+            events,
+            ["method", "base", "repo", "software", "review", "software", "repo", "software", "review"],
+        )
+
+    def test_esc_inside_the_build_returns_to_review_with_the_config_intact(self) -> None:
+        # The build branch sat outside the wizard's ScreenBack handler, so
+        # Esc on any screen do_build() showed unwound through main_menu()
+        # to main(), which exited 0 (#507).
+        app = self.make_app()
+        app.gum = GumStub()
+        review_actions = iter(["build", "cancel"])
+
+        def fake_configure_repo(**_kwargs):
+            app.config.repo_name = "sentinel-repo"
+
+        with patch.object(app, "choose_method", return_value=None):
+            with patch.object(app, "choose_base_image", return_value=None):
+                with patch.object(app, "configure_repo", side_effect=fake_configure_repo):
+                    with patch.object(app, "select_packages", return_value=None):
+                        with patch.object(app, "review_new_image", side_effect=lambda **_k: next(review_actions)) as review:
+                            with patch.object(app, "do_build", side_effect=ScreenBack()):
+                                app.create_new_image()
+
+        self.assertEqual(review.call_count, 2)
+        self.assertEqual(app.config.repo_name, "sentinel-repo")
+
+    def test_main_menu_returns_to_itself_when_a_flow_lets_esc_through(self) -> None:
+        # main() reads a ScreenBack that reaches it as quitting and exits 0,
+        # so one leaking out of a flow ended the whole app (#507). It pops
+        # back one screen, and from a flow that screen is the main menu.
+        app = self.make_app()
+        stub = GumStub()
+        choices = ["View Build Status", "Quit"]
+        stub.choose = lambda _options, **_kwargs: [choices.pop(0)]
+        app.gum = stub
+        with patch.object(app, "view_build_status", side_effect=ScreenBack()) as flow:
+            with self.assertRaises(SystemExit) as raised:
+                app.main_menu()
+
+        flow.assert_called_once()
+        self.assertEqual(choices, [])
+        self.assertEqual(raised.exception.code, 0)
 
     def test_main_menu_recovers_from_command_error(self) -> None:
         # A CommandError raised by any dispatched action must be reported and
@@ -9939,7 +10522,9 @@ class BuilderTests(unittest.TestCase):
     def test_piped_widgets_say_so_and_inherited_widgets_do_not(self) -> None:
         # Each widget is run twice: once succeeding, to show which of the
         # two stdin arrangements it actually uses; once exiting 1, to show
-        # that the terminal probe is asked about that same arrangement.
+        # that the terminal probe is asked about that same arrangement. The
+        # probe answers "no terminal", the one outcome every widget shares:
+        # with a terminal, exit 1 is Esc, which enter_to_continue() absorbs.
         gum = Gum()
         widgets = {
             "choose": (lambda: gum.choose(["alpha", "beta"]), False),
@@ -9954,10 +10539,10 @@ class BuilderTests(unittest.TestCase):
                 with patch.object(Gum, "interactive_stdout", return_value=ok) as run_mock:
                     call()
                 self.assertEqual(run_mock.call_args.kwargs.get("stdin") is None, inherited)
-                esc = subprocess.CompletedProcess(["gum", name], 1, "", "")
-                with patch.object(Gum, "interactive_stdout", return_value=esc):
-                    with patch.object(Gum, "terminal_available", return_value=True) as probe:
-                        with self.assertRaises(ScreenBack):
+                no_tty = subprocess.CompletedProcess(["gum", name], 1, "", "")
+                with patch.object(Gum, "interactive_stdout", return_value=no_tty):
+                    with patch.object(Gum, "terminal_available", return_value=False) as probe:
+                        with self.assertRaises(CommandError):
                             call()
                 probe.assert_called_once_with(stdin_inherited=inherited)
 
@@ -10270,6 +10855,20 @@ class BuilderTests(unittest.TestCase):
             with patch.object(Gum, "interactive_stdout", return_value=completed):
                 with self.assertRaises(KeyboardInterrupt):
                     gum.enter_to_continue()
+
+    def test_gum_enter_to_continue_treats_esc_as_enter(self) -> None:
+        # A pause names where Enter goes next. Esc raising ScreenBack instead
+        # unwound past that screen to main(), which exited 0 (#507). gum
+        # exiting 1 with no terminal behind it is still a failure (#367).
+        gum = Gum()
+        esc = subprocess.CompletedProcess(["gum", "input"], 1, "", "")
+        with patch.object(Gum, "instruction"):
+            with patch.object(Gum, "interactive_stdout", return_value=esc):
+                with patch.object(Gum, "terminal_available", return_value=True):
+                    self.assertIsNone(gum.enter_to_continue("Press Enter to return to the main menu..."))
+                with patch.object(Gum, "terminal_available", return_value=False):
+                    with self.assertRaises(CommandError):
+                        gum.enter_to_continue("Press Enter to return to the main menu...")
 
     # ── gum flag-injection guards ───────────────────────────────────────
     # gum parses any leading-dash positional as a flag and exits 80. Captured
@@ -11360,38 +11959,17 @@ class BuilderTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         ragged: list[str] = []
         for path in format_markdown_tables.tracked_markdown(root):
-            block: list[tuple[int, str]] = []
-
-            def close(block: list[tuple[int, str]], path: Path = path) -> None:
-                # Two lines is a header and a delimiter -- the shortest thing
-                # that is a table at all.
-                if len(block) < 2 or not format_markdown_tables.is_delimiter(
-                    format_markdown_tables.split_row(block[1][1]) or []
-                ):
-                    return
-                if len({len(line) for _, line in block}) > 1:
-                    name = path.relative_to(root)
-                    ragged.append(f"{name}:{block[0][0]}")
-
-            # Which lines are code comes from the module, so this check and
-            # the formatter cannot disagree about it: a check that read a
-            # four-backtick example or a four-space indented one as prose
-            # would report it as a ragged table, and the formatter would then
-            # correctly refuse to touch it -- a failure with no way to clear
-            # it. The alignment arithmetic below, which is what this test
-            # exists to check independently, is still its own.
+            # Where each table is comes from the module, so this check and the
+            # formatter cannot disagree about it: a check that read a
+            # four-backtick example, an indented one, or a list item under a
+            # table as table rows would report them as ragged, and the
+            # formatter would then correctly refuse to touch them -- a failure
+            # with no way to clear it. The alignment arithmetic below, which
+            # is what this test exists to check independently, is its own.
             lines = path.read_text().split("\n")
-            for number, (line, is_code) in enumerate(
-                zip(lines, format_markdown_tables.code_block_flags(lines)), start=1
-            ):
-                # A bare "|" carries no cell, so it ends the table rather than
-                # belonging to it -- the same place the formatter stops.
-                if is_code or not format_markdown_tables.split_row(line):
-                    close(block)
-                    block = []
-                    continue
-                block.append((number, line))
-            close(block)
+            for span in format_markdown_tables.table_spans(lines):
+                if len({len(lines[number]) for number in span}) > 1:
+                    ragged.append(f"{path.relative_to(root)}:{span.start + 1}")
 
         self.assertEqual(
             ragged,
@@ -13773,6 +14351,40 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(seen, [])
         self.assertEqual("\n".join(output), workflow.rstrip("\n"))
 
+    def test_patch_workflow_steps_finds_items_wherever_the_first_one_sits(self) -> None:
+        # YAML only asks a sequence's items to agree with each other, and a
+        # key may carry a comment. Each shape here is valid Actions input that
+        # the walker used to pass through without visiting a single step
+        # (#526). The job key after the list must still end it, including
+        # the indentless shape where it sits at the items' own indent.
+        shapes = {
+            "commented key": ("    steps: # build", "      "),
+            "items at +4": ("    steps:", "        "),
+            "indentless items": ("    steps:", "    "),
+        }
+        for label, (key, item) in shapes.items():
+            with self.subTest(shape=label):
+                workflow = "\n".join(
+                    [
+                        "jobs:",
+                        "  build:",
+                        key,
+                        f"{item}# a comment is not an item",
+                        f"{item}- name: One",
+                        f"{item}  run: echo one",
+                        f"{item}- name: Two",
+                        f"{item}  with:",
+                        f"{item}    list:",
+                        f"{item}      - nested",
+                        "    timeout-minutes: 5",
+                    ]
+                )
+                seen: list[list[str]] = []
+                output = patch_workflow_steps(workflow, lambda step: (seen.append(step), step)[1])
+                self.assertEqual([step[0].strip() for step in seen], ["- name: One", "- name: Two"])
+                self.assertEqual(seen[1][-1].strip(), "- nested")
+                self.assertEqual("\n".join(output), workflow)
+
     def test_clone_bluebuild_template_copies_snapshot(self) -> None:
         app = self.make_bluebuild_app()
         with tempfile.TemporaryDirectory() as tmp:
@@ -14456,23 +15068,29 @@ class BuilderTests(unittest.TestCase):
         # of render_preflight_failure(), so preflight() never reached its
         # SystemExit(1) and main() exited 0: a missing tool reported success
         # to the wrapper that ran it (#367). Esc and Enter mean the same
-        # thing here -- leave -- and the exit status is the point.
+        # thing here -- leave -- and the exit status is the point. The pause
+        # runs through the real Gum.enter_to_continue(), which is what now
+        # absorbs Esc (#507), with gum exiting 1 as Esc makes it.
         app = self.make_app()
         stub = GumStub()
         stub.ensure_available = lambda: None
+        real_gum = Gum()
 
-        def esc(placeholder: str = "Press Enter to continue...") -> None:
+        def pause(placeholder: str = "Press Enter to continue...") -> None:
             stub.prompts.append(placeholder)
-            raise ScreenBack()
+            real_gum.enter_to_continue(placeholder)
 
-        stub.enter_to_continue = esc
+        stub.enter_to_continue = pause
         app.gum = stub
-        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name != "cosign"):
-            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gh"], 0, "", "")):
-                with patch.object(app, "github_login_name", return_value="octocat"):
-                    with redirect_stdout(io.StringIO()):
-                        with self.assertRaises(SystemExit) as raised:
-                            app.preflight()
+        esc = subprocess.CompletedProcess(["gum", "input"], 1, "", "")
+        with patch.object(Gum, "interactive_stdout", return_value=esc), patch.object(Gum, "instruction"):
+            with patch.object(Gum, "terminal_available", return_value=True):
+                with patch("atomic_image_builder.command_exists", side_effect=lambda name: name != "cosign"):
+                    with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess(["gh"], 0, "", "")):
+                        with patch.object(app, "github_login_name", return_value="octocat"):
+                            with redirect_stdout(io.StringIO()):
+                                with self.assertRaises(SystemExit) as raised:
+                                    app.preflight()
         self.assertEqual(raised.exception.code, 1)
         self.assertEqual(stub.prompts, ["Press Enter to exit to the terminal..."])
 
@@ -15460,6 +16078,24 @@ class BuilderTests(unittest.TestCase):
         self.assertIn('IMAGE_DESC="Line oneLine twoLine three"', once)
         twice = app.patch_image_template_env(once)
         self.assertEqual(twice, once)
+
+    def test_patch_image_template_env_strips_every_splitlines_boundary(self) -> None:
+        # #527: \n and \r were stripped, but str.splitlines() -- which this
+        # patcher re-splits the file with -- also breaks on \v, \f, \x1c-\x1e,
+        # U+0085, U+2028 and U+2029. Any of those left in the description came
+        # out as a real newline, orphaning the tail of IMAGE_DESC so a later
+        # update to a new description no longer matched the line.
+        app = self.make_app()
+        app.config.image_desc = "My image\u2028line\u2029two\x0bthree\x0cfour\x1cfive\x1dsix\x1eseven\x85end"
+        existing = (CONTAINERFILE_TEMPLATE_DIR / "image-template.env").read_text()
+        created = app.patch_image_template_env(existing)
+        self.assertEqual(len(created.splitlines()), len(existing.splitlines()))
+        self.assertIn('IMAGE_DESC="My imagelinetwothreefourfivesixsevenend"\n', created)
+        self.assertEqual(app.patch_image_template_env(created), created)
+        app.config.image_desc = "A plain new description"
+        updated = app.patch_image_template_env(created)
+        self.assertIn('IMAGE_DESC="A plain new description"\n', updated)
+        self.assertNotIn("My image", updated)
 
     def test_patch_image_template_env_ensures_trailing_newline(self) -> None:
         app = self.make_app()
@@ -16795,6 +17431,25 @@ class BuilderTests(unittest.TestCase):
     def test_write_esc_raises_screen_back_with_real_gum(self) -> None:
         with self.assertRaises(ScreenBack):
             self.write_with_real_gum([b"sshd.service", b"\x1b"])
+
+    def test_esc_at_a_pause_returns_like_enter_with_real_gum(self) -> None:
+        # The reproduction from #507: gum exits 1 on Esc, and the pause after
+        # a failed `gh run list` let that out of render_build_status() as
+        # ScreenBack, which main() turned into a quiet exit 0.
+        if shutil.which("gum") is None:
+            self.skipTest("gum is not installed")
+        app = self.make_app()
+        gum = Gum()
+        gum.interactive_stdout = lambda args, *, stdin=None: drive_real_gum(args, stdin=stdin, keys=[b"\x1b"])
+        app.gum = gum
+        failing = subprocess.CompletedProcess(["gh"], 1, "", "boom")
+        # See write_with_real_gum() for why the terminal probe is answered.
+        with patch.object(Gum, "terminal_available", return_value=True):
+            with patch.object(Gum, "instruction") as instruction:
+                with patch("atomic_image_builder.run", return_value=failing):
+                    with redirect_stdout(io.StringIO()):
+                        app.render_build_status("owner", "repo")
+        instruction.assert_called_once_with("Press Enter to return to the main menu...")
 
     def test_input_passes_value_placeholder_and_width_flags_through(self) -> None:
         gum = Gum()
