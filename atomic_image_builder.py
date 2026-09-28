@@ -675,8 +675,11 @@ def is_valid_repo_name(value: str) -> bool:
 # U+FFFE/U+FFFF. YAML 1.2's c-printable production stops there -- C0 controls
 # are already escaped by json.dumps, and everything else up to U+10FFFF is
 # printable. U+0085 (NEL) is technically printable but a 1.1 line break, which
-# PyYAML folds to a space, so it is escaped along with its neighbours.
-_YAML_UNPRINTABLE_RE = re.compile("[\x7f-\x9f￾￿]")
+# PyYAML folds to a space, so it is escaped along with its neighbours. U+2028
+# and U+2029 are the other two 1.1 line breaks, and also line boundaries to
+# str.splitlines(): the workflow patchers re-split build.yml with it, so a raw
+# one comes back as a real newline that orphans the rest of the value (#527).
+_YAML_UNPRINTABLE_RE = re.compile("[\x7f-\x9f\u2028\u2029￾￿]")
 
 
 def yaml_scalar(value: str) -> str:
@@ -5941,13 +5944,16 @@ class App:
         def sanitize_env_value(value: str) -> str:
             # These characters would either break the double-quoted shell value,
             # let it escape into command substitution (e.g. via $(...)), or (for
-            # newlines) split the value across multiple physical lines. The
-            # rewrite regexes below are per-line, so an embedded newline would
-            # otherwise make this patcher silently stop matching that field on
-            # every subsequent update.
-            for char in ('"', "\\", "$", "`", "\n", "\r"):
+            # line breaks) split the value across multiple physical lines. The
+            # rewrite regexes below are per-line, so an embedded line break
+            # would otherwise make this patcher silently stop matching that
+            # field on every subsequent update. "Line break" is every boundary
+            # str.splitlines() recognises, not only \n and \r: the pin loop
+            # below re-splits the file with it, so a U+2028 (or \v, \f, U+0085)
+            # left in the value is written out as a real newline (#527).
+            for char in ('"', "\\", "$", "`"):
                 value = value.replace(char, "")
-            return value
+            return "".join(value.splitlines())
 
         repo_name = self.config.repo_name
         github_user = sanitize_env_value(self.config.github_user)

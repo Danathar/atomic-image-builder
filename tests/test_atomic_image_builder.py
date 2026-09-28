@@ -427,8 +427,11 @@ class BuilderTests(unittest.TestCase):
             yaml_scalar("a\x7fb\x80c\x85d\x9fe￾f￿g"),
             '"a\\u007fb\\u0080c\\u0085d\\u009fe\\ufffef\\uffffg"',
         )
+        # U+2028/U+2029 are the other YAML 1.1 line breaks and line boundaries
+        # to str.splitlines(), which the workflow patchers re-split with (#527).
+        self.assertEqual(yaml_scalar("a\u2028b\u2029c"), '"a\\u2028b\\u2029c"')
         # The neighbours on either side of each escaped range stay raw.
-        self.assertEqual(yaml_scalar("~\xa0�\U0010ffff"), '"~\xa0�\U0010ffff"')
+        self.assertEqual(yaml_scalar("~\xa0\u2027\u202a�\U0010ffff"), '"~\xa0\u2027\u202a�\U0010ffff"')
 
     def test_repository_status_omits_description_separator_when_unset(self) -> None:
         app = self.make_app()
@@ -990,6 +993,28 @@ class BuilderTests(unittest.TestCase):
         self.assertIn('  IMAGE_DESC: "My 🚀 image"', patched)
         self.assertNotIn("\\u", patched)
         self.assertEqual(parse_block_yaml(patched)["env"]["IMAGE_DESC"], "My 🚀 image")
+
+    def test_patch_container_workflow_keeps_a_line_separator_description_on_one_line(self) -> None:
+        # #527: a build.yml generated from scratch carried U+2028 raw, the
+        # next patch re-split it with str.splitlines(), rewrote only the first
+        # half and kept the tail as an orphan line YAML could not parse. Every
+        # further update added another orphan.
+        app = self.make_app()
+        app.config.image_desc = "My image\u2028line two\u2029end"
+        generated = app.generate_container_workflow()
+        self.assertIn('  IMAGE_DESC: "My image\\u2028line two\\u2029end"', generated)
+        once = app.patch_container_workflow(generated)
+        self.assertNotIn("\u2028", once)
+        self.assertNotIn("\u2029", once)
+        self.assertEqual(parse_block_yaml(once)["env"]["IMAGE_DESC"], "My image\u2028line two\u2029end")
+        self.assertEqual(app.patch_container_workflow(once), once)
+        libyaml_document = parse_with_libyaml(once)
+        if libyaml_document is not None:
+            self.assertEqual(libyaml_document["env"]["IMAGE_DESC"], "My image\u2028line two\u2029end")
+        app.config.image_desc = "A plain new description"
+        updated = app.patch_container_workflow(once)
+        self.assertEqual(parse_block_yaml(updated)["env"]["IMAGE_DESC"], "A plain new description")
+        self.assertNotIn("line two", updated)
 
     def test_patch_container_workflow_adds_state_ignore_only_once(self) -> None:
         # Both the key branch and the README anchor can match the same
@@ -15275,6 +15300,24 @@ class BuilderTests(unittest.TestCase):
         self.assertIn('IMAGE_DESC="Line oneLine twoLine three"', once)
         twice = app.patch_image_template_env(once)
         self.assertEqual(twice, once)
+
+    def test_patch_image_template_env_strips_every_splitlines_boundary(self) -> None:
+        # #527: \n and \r were stripped, but str.splitlines() -- which this
+        # patcher re-splits the file with -- also breaks on \v, \f, \x1c-\x1e,
+        # U+0085, U+2028 and U+2029. Any of those left in the description came
+        # out as a real newline, orphaning the tail of IMAGE_DESC so a later
+        # update to a new description no longer matched the line.
+        app = self.make_app()
+        app.config.image_desc = "My image\u2028line\u2029two\x0bthree\x0cfour\x1cfive\x1dsix\x1eseven\x85end"
+        existing = (CONTAINERFILE_TEMPLATE_DIR / "image-template.env").read_text()
+        created = app.patch_image_template_env(existing)
+        self.assertEqual(len(created.splitlines()), len(existing.splitlines()))
+        self.assertIn('IMAGE_DESC="My imagelinetwothreefourfivesixsevenend"\n', created)
+        self.assertEqual(app.patch_image_template_env(created), created)
+        app.config.image_desc = "A plain new description"
+        updated = app.patch_image_template_env(created)
+        self.assertIn('IMAGE_DESC="A plain new description"\n', updated)
+        self.assertNotIn("My image", updated)
 
     def test_patch_image_template_env_ensures_trailing_newline(self) -> None:
         app = self.make_app()
