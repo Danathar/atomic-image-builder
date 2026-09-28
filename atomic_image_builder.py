@@ -513,6 +513,10 @@ SCAN_CANCELLED = "cancelled"
 # The running image is not one of the curated bases. Distinct from
 # SCAN_UNAVAILABLE: the scan worked perfectly, and what it found is the problem.
 SCAN_UNSUPPORTED_BASE = "unsupported-base"
+# The host runs on an architecture the generated workflow publishes no image
+# for. Also a scan that worked: no base chosen by hand would change the
+# answer, so the caller stops rather than offering one.
+SCAN_UNPUBLISHED_ARCHITECTURE = "unpublished-architecture"
 
 # rpm-ostree records customizations in more fields than this tool reads.
 # `requested-packages` and `requested-base-removals` are the two it can carry,
@@ -756,6 +760,24 @@ FEDORA_OSTREE_REMOTE = "fedora"
 # A host on another architecture can be scanned, but the image it would be
 # guided into building could never be switched onto it.
 PUBLISHED_ARCHITECTURE = "x86_64"
+# The same architecture as an OCI image config spells it.
+PUBLISHED_OCI_ARCHITECTURE = "amd64"
+
+
+def deployment_image_architecture(deployment: dict) -> str:
+    # The OCI architecture ("amd64", "arm64", ...) of the image a
+    # container-image deployment booted, or "" when the status does not
+    # carry one. rpm-ostree keeps the image's config in the commit metadata,
+    # as JSON text; a decoded object is taken as-is.
+    meta = deployment.get("base-commit-meta")
+    config = meta.get("ostree.container.image-config") if isinstance(meta, dict) else None
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except json.JSONDecodeError:
+            return ""
+    architecture = config.get("architecture") if isinstance(config, dict) else None
+    return architecture.strip() if isinstance(architecture, str) else ""
 
 
 def classic_ostree_origin(origin: str) -> tuple[str, str] | None:
@@ -2957,7 +2979,9 @@ class App:
         if outcome == SCAN_OK:
             self.create_new_image(scanned=True)
             return
-        if outcome == SCAN_CANCELLED:
+        if outcome in (SCAN_CANCELLED, SCAN_UNPUBLISHED_ARCHITECTURE):
+            # For the architecture, scan_os has already said why: any base
+            # chosen by hand is an image this machine cannot switch to.
             return
         if outcome == SCAN_UNSUPPORTED_BASE:
             # scan_os has already explained what it found. Defaulting to no:
@@ -3682,6 +3706,17 @@ class App:
                 "This deployment has no container image reference; scanning only supports bootc / image-based deployments."
             )
             return SCAN_UNAVAILABLE
+        # A classic origin names its architecture in the ref, checked below.
+        # A container image does not: a multi-arch one such as
+        # quay.io/fedora/fedora-kinoite:44 is the same reference on every
+        # architecture, so read what the booted image actually was.
+        image_architecture = deployment_image_architecture(booted)
+        if image_architecture and image_architecture != PUBLISHED_OCI_ARCHITECTURE:
+            self.gum.error(f"This system runs a {image_architecture} image.")
+            self.gum.hint(
+                f"This tool only publishes {PUBLISHED_ARCHITECTURE} images, so a {image_architecture} system cannot switch to an image it builds."
+            )
+            return SCAN_UNPUBLISHED_ARCHITECTURE
         classic = classic_ostree_origin(container_ref)
         if classic is None:
             base = normalize_container_image_reference(container_ref)
@@ -3707,9 +3742,12 @@ class App:
                     # The variant may well be supported; the architecture is
                     # not. Say so, or the "Supported" list below reads as a
                     # contradiction to someone running Kinoite on aarch64.
+                    # And stop: SCAN_UNAVAILABLE would have create_image offer
+                    # a base by hand, which is an x86_64 image all the same.
                     self.gum.hint(
                         f"This tool only publishes {PUBLISHED_ARCHITECTURE} images, so a {parsed[1]} system cannot switch to an image it builds."
                     )
+                    return SCAN_UNPUBLISHED_ARCHITECTURE
                 self.gum.hint(f"Supported: {supported_base_image_names()}")
                 return SCAN_UNAVAILABLE
             base = mapped

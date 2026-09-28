@@ -20,7 +20,7 @@ import urllib.error
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import atomic_image_builder
 from _block_yaml import parse as parse_block_yaml
@@ -56,6 +56,7 @@ from atomic_image_builder import (
     SCAN_CANCELLED,
     SCAN_OK,
     SCAN_UNAVAILABLE,
+    SCAN_UNPUBLISHED_ARCHITECTURE,
     SCAN_UNSUPPORTED_BASE,
     SIGNING_ENABLED_ENV,
     STATE_FILE,
@@ -7765,7 +7766,9 @@ class BuilderTests(unittest.TestCase):
                 with redirect_stdout(io.StringIO()):
                     result = app.scan_os()
 
-        self.assertEqual(result, SCAN_UNAVAILABLE)
+        # Not SCAN_UNAVAILABLE: that sends create_image on to offer a base
+        # chosen by hand, which is an x86_64 image all the same (#518).
+        self.assertEqual(result, SCAN_UNPUBLISHED_ARCHITECTURE)
         self.assertEqual(app.config.base_image_uri, "")
         self.assertEqual(app.config.base_image_name, "")
         errors = " ".join(m for level, m in stub.messages if level == "error")
@@ -7773,6 +7776,88 @@ class BuilderTests(unittest.TestCase):
         hints = " ".join(m for level, m in stub.messages if level == "hint")
         self.assertIn("only publishes x86_64 images", hints)
         self.assertIn("aarch64 system", hints)
+
+    def container_status_with_architecture(self, image_config: object) -> str:
+        # A container-image deployment of the multi-arch Kinoite image. The
+        # reference is the same on every architecture; only the booted
+        # image's config says which one this is.
+        return json.dumps(
+            {
+                "deployments": [
+                    {
+                        "booted": True,
+                        "container-image-reference": "ostree-unverified-registry:quay.io/fedora/fedora-kinoite:44",
+                        "base-commit-meta": {"ostree.container.image-config": image_config},
+                        "requested-packages": ["tmux"],
+                        "requested-base-removals": [],
+                    }
+                ]
+            }
+        )
+
+    def create_image_with_default_answers(self, status_text: str) -> tuple[list[str], Mock, GumStub]:
+        app = self.make_app()
+        app.github_user = "example"
+        stub = GumStub()
+        prompts: list[str] = []
+
+        def confirm(prompt: str, default: bool = False) -> bool:
+            prompts.append(prompt)
+            return default
+
+        stub.confirm = confirm
+        stub.choose = lambda options, **_kwargs: list(options)
+        app.gum = stub
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = Path(tmp) / "status.json"
+            status_path.write_text(status_text)
+            with patch.dict(os.environ, {"AIB_RPM_OSTREE_STATUS_FILE": str(status_path)}):
+                with patch.object(app, "create_new_image") as create_mock:
+                    with redirect_stdout(io.StringIO()):
+                        app.create_image()
+        return prompts, create_mock, stub
+
+    def test_create_image_stops_on_a_classic_install_on_an_unpublished_architecture(self) -> None:
+        # The refusal used to be undone one screen later: create_image read it
+        # as "no host state" and offered a base chosen by hand, defaulting to
+        # yes, which walked an aarch64 user into an x86_64 image (#518).
+        prompts, create_mock, stub = self.create_image_with_default_answers(
+            self.classic_fedora_status("fedora:fedora/44/aarch64/kinoite", ["tmux"])
+        )
+        create_mock.assert_not_called()
+        self.assertEqual(prompts, [])
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertIn("aarch64 system cannot switch", hints)
+        self.assertNotIn("chosen by hand", hints)
+
+    def test_create_image_stops_on_a_container_deployment_of_an_unpublished_architecture(self) -> None:
+        # The same host rebased onto the multi-arch image has no architecture
+        # in its reference, and used to scan as SCAN_OK (#518).
+        for image_config in (json.dumps({"architecture": "arm64", "os": "linux"}), {"architecture": "arm64"}):
+            with self.subTest(image_config=type(image_config).__name__):
+                prompts, create_mock, stub = self.create_image_with_default_answers(
+                    self.container_status_with_architecture(image_config)
+                )
+                create_mock.assert_not_called()
+                self.assertEqual(prompts, [])
+                hints = " ".join(m for level, m in stub.messages if level == "hint")
+                self.assertIn("only publishes x86_64 images, so a arm64 system cannot switch", hints)
+
+    def test_scan_os_accepts_a_container_deployment_of_the_published_architecture(self) -> None:
+        for image_config in (json.dumps({"architecture": "amd64"}), "not json", None):
+            with self.subTest(image_config=image_config):
+                app = self.make_app()
+                app.github_user = "example"
+                app.gum = GumStub()
+                app.gum.choose = lambda options, **_kwargs: list(options)
+                with tempfile.TemporaryDirectory() as tmp:
+                    status_path = Path(tmp) / "status.json"
+                    status_path.write_text(self.container_status_with_architecture(image_config))
+                    with patch.dict(os.environ, {"AIB_RPM_OSTREE_STATUS_FILE": str(status_path)}):
+                        with redirect_stdout(io.StringIO()):
+                            result = app.scan_os()
+                self.assertEqual(result, SCAN_OK)
+                self.assertEqual(app.config.scanned_packages, ["tmux"])
 
     def test_create_image_starts_the_scanned_wizard_for_a_stock_silverblue_install(self) -> None:
         # The reproduction from #352, end to end: every prompt answered with
