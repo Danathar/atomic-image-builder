@@ -11217,38 +11217,17 @@ class BuilderTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         ragged: list[str] = []
         for path in format_markdown_tables.tracked_markdown(root):
-            block: list[tuple[int, str]] = []
-
-            def close(block: list[tuple[int, str]], path: Path = path) -> None:
-                # Two lines is a header and a delimiter -- the shortest thing
-                # that is a table at all.
-                if len(block) < 2 or not format_markdown_tables.is_delimiter(
-                    format_markdown_tables.split_row(block[1][1]) or []
-                ):
-                    return
-                if len({len(line) for _, line in block}) > 1:
-                    name = path.relative_to(root)
-                    ragged.append(f"{name}:{block[0][0]}")
-
-            # Which lines are code comes from the module, so this check and
-            # the formatter cannot disagree about it: a check that read a
-            # four-backtick example or a four-space indented one as prose
-            # would report it as a ragged table, and the formatter would then
-            # correctly refuse to touch it -- a failure with no way to clear
-            # it. The alignment arithmetic below, which is what this test
-            # exists to check independently, is still its own.
+            # Where each table is comes from the module, so this check and the
+            # formatter cannot disagree about it: a check that read a
+            # four-backtick example, an indented one, or a list item under a
+            # table as table rows would report them as ragged, and the
+            # formatter would then correctly refuse to touch them -- a failure
+            # with no way to clear it. The alignment arithmetic below, which
+            # is what this test exists to check independently, is its own.
             lines = path.read_text().split("\n")
-            for number, (line, is_code) in enumerate(
-                zip(lines, format_markdown_tables.code_block_flags(lines)), start=1
-            ):
-                # A bare "|" carries no cell, so it ends the table rather than
-                # belonging to it -- the same place the formatter stops.
-                if is_code or not format_markdown_tables.split_row(line):
-                    close(block)
-                    block = []
-                    continue
-                block.append((number, line))
-            close(block)
+            for span in format_markdown_tables.table_spans(lines):
+                if len({len(lines[number]) for number in span}) > 1:
+                    ragged.append(f"{path.relative_to(root)}:{span.start + 1}")
 
         self.assertEqual(
             ragged,
