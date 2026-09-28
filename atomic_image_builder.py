@@ -369,6 +369,13 @@ STALE_CHUNKAH_COMMENT_BLOCKS: tuple[str, ...] = tuple(
     )
     for invocation in ("just", "sudo -E $(command -v just)")
 )
+# "Is the user logged in to GitHub" asks about the active github.com account
+# only. Bare `gh auth status` checks every account on every configured host and
+# exits 1 if any one fails, so a stale GHES login or an old inactive github.com
+# account made a working login look missing and sent the user into the login
+# guide on every launch (#513). contrib/aib and container/entrypoint.sh use the
+# same probe. --active needs gh 2.40 or later.
+GH_AUTH_PROBE = ("gh", "auth", "status", "--hostname", "github.com", "--active")
 PRECHECK_REQUIRED_TOOLS: tuple[str, ...] = ("gum", "git", "gh", "cosign")
 BREW_INSTALLABLE_TOOLS: tuple[str, ...] = ("gum", "git", "gh", "cosign")
 HOST_REQUIRED_TOOLS: tuple[str, ...] = ("dnf5", "rpm-ostree")
@@ -2742,7 +2749,7 @@ class App:
         github_account_error = False
 
         if "gh" not in missing_tools:
-            if run(["gh", "auth", "status"], check=False).returncode != 0:
+            if run(GH_AUTH_PROBE, check=False).returncode != 0:
                 github_login_missing = True
             else:
                 try:
@@ -2818,7 +2825,7 @@ class App:
             print()
             self.gum.hint("Install it with: brew install gh")
             return False
-        if run(["gh", "auth", "status"], check=False).returncode != 0:
+        if run(GH_AUTH_PROBE, check=False).returncode != 0:
             self.github_setup_guide()
         try:
             self.github_user = self.github_login_name()

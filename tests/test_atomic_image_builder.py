@@ -14865,7 +14865,7 @@ class BuilderTests(unittest.TestCase):
         app.gum = GumStub()
 
         def fake_run(args, **_kwargs):
-            self.assertEqual(list(args), ["gh", "auth", "status"])
+            self.assertEqual(list(args), ["gh", "auth", "status", "--hostname", "github.com", "--active"])
             return subprocess.CompletedProcess(list(args), 1, "", "not logged in")
 
         with patch("atomic_image_builder.command_exists", return_value=True):
@@ -14875,6 +14875,29 @@ class BuilderTests(unittest.TestCase):
                         self.assertTrue(app.require_github())
 
         guide_mock.assert_called_once()
+        self.assertTrue(app.github_available)
+        self.assertEqual(app.github_user, "octocat")
+
+    def test_preflight_asks_only_about_the_active_github_com_account(self) -> None:
+        # #513: bare `gh auth status` exits 1 when any account on any host is
+        # stale, even with a working github.com login, and preflight sent that
+        # user into the login guide on every launch.
+        app = self.make_app()
+        app.gum = GumStub()
+        calls = []
+
+        def fake_run(args, **_kwargs):
+            calls.append(list(args))
+            return subprocess.CompletedProcess(list(args), 1 if list(args) == ["gh", "auth", "status"] else 0, "", "")
+
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch("atomic_image_builder.run", side_effect=fake_run):
+                with patch.object(app, "github_setup_guide") as guide_mock:
+                    with patch.object(app, "github_login_name", return_value="octocat"):
+                        app.preflight()
+
+        guide_mock.assert_not_called()
+        self.assertIn(["gh", "auth", "status", "--hostname", "github.com", "--active"], calls)
         self.assertTrue(app.github_available)
         self.assertEqual(app.github_user, "octocat")
 

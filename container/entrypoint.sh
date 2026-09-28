@@ -8,7 +8,9 @@
 # already reports missing GitHub auth clearly.
 set -eu
 
-if [ -n "${GH_TOKEN:-}" ] || gh auth status >/dev/null 2>&1; then
+# The active github.com account only; a stale login on another host or an
+# inactive account must not decide it (#513, same probe as contrib/aib).
+if [ -n "${GH_TOKEN:-}" ] || gh auth status --hostname github.com --active >/dev/null 2>&1; then
     gh auth setup-git || true
 fi
 
