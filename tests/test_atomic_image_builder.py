@@ -8608,6 +8608,109 @@ class BuilderTests(unittest.TestCase):
             with self.subTest(label):
                 self.assertEqual(atomic_image_builder.next_boot_deployment(deployments), expected)
 
+    def scan_pending(self, pending: dict, booted: dict, *, gum: GumStub) -> tuple[str, App, list[tuple[str, tuple[str, ...]]], list[tuple[str, str]]]:
+        # scan_os() on a host with `pending` waiting for a reboot ahead of
+        # `booted`, keeping the sections and table rows it showed.
+        app = self.make_app()
+        app.github_user = "example"
+        gum.choose = lambda options, **_kwargs: list(options)
+        app.gum = gum
+        sections: list[tuple[str, tuple[str, ...]]] = []
+        rows: list[tuple[str, str]] = []
+        gum.table = lambda table_rows, **_kwargs: rows.extend(table_rows)
+        payload = json.dumps(
+            {
+                "deployments": [
+                    {"booted": False, "staged": True, "osname": "default", **pending},
+                    {"booted": True, "staged": False, "osname": "default", **booted},
+                ]
+            }
+        )
+        with patch("atomic_image_builder.command_exists", side_effect=lambda name: name == "rpm-ostree"):
+            with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, payload, "")):
+                with patch.object(App, "menu_section", lambda _self, title, *lines: sections.append((title, lines))):
+                    with patch.object(App, "scanned_image_is_managed", return_value=None):
+                        with redirect_stdout(io.StringIO()):
+                            result = app.scan_os()
+        return result, app, sections, rows
+
+    BAZZITE_STABLE = "ostree-image-signed:docker://ghcr.io/ublue-os/bazzite:stable"
+
+    def test_scan_os_reads_the_base_of_a_rebase_waiting_for_a_reboot(self) -> None:
+        # `rpm-ostree rebase` (or `bootc switch`) without a reboot changes the
+        # base only in the pending deployment. The image has to be built on
+        # the base the next boot runs; the booted one is about to be replaced.
+        # The tag warning and the closing summary have to say the base is
+        # the one the system is set to boot, not the one it runs now.
+        stub = GumStub()
+        stub.confirm = lambda _prompt, default=False: False
+        pending_ref = "ostree-unverified-registry:ghcr.io/ublue-os/bluefin:testing"
+        result, app, sections, _rows = self.scan_pending(
+            {"container-image-reference": pending_ref, "requested-packages": ["tmux"]},
+            {"container-image-reference": self.BAZZITE_STABLE, "requested-packages": ["tmux"]},
+            gum=stub,
+        )
+        self.assertEqual(result, SCAN_OK)
+        pending_base = app.match_base_image("ghcr.io/ublue-os/bluefin:testing")
+        booted_base = app.match_base_image("ghcr.io/ublue-os/bazzite:stable")
+        self.assertIsNotNone(pending_base)
+        self.assertIsNotNone(booted_base)
+        self.assertNotEqual(pending_base.name, booted_base.name)
+        self.assertEqual(app.config.base_image_name, pending_base.name)
+        # The recommended-tag offer was declined, so the pending tag stands.
+        self.assertEqual(app.config.base_image_uri, "ghcr.io/ublue-os/bluefin:testing")
+        tag_warnings = [m for level, m in stub.messages if level == "warn" and "recommends" in m]
+        self.assertEqual(len(tag_warnings), 1)
+        self.assertIn("Your system is set to boot :testing,", tag_warnings[0])
+        next_steps = " ".join(" ".join(lines) for title, lines in sections if title == "What Happens Next")
+        self.assertIn(f"built on {pending_base.name} - the base this system boots next.", next_steps)
+        self.assertNotIn("already runs", next_steps)
+
+    def test_scan_os_refuses_an_unsupported_base_waiting_for_a_reboot(self) -> None:
+        # The refusal names the image the scan read. On a pending rebase to
+        # a custom image that is not the one the system is running, so the
+        # warning must not say it is.
+        stub = GumStub()
+        custom = "ghcr.io/example/custom:latest"
+        result, app, _sections, _rows = self.scan_pending(
+            {"container-image-reference": f"ostree-unverified-registry:{custom}"},
+            {"container-image-reference": self.BAZZITE_STABLE},
+            gum=stub,
+        )
+        self.assertEqual(result, SCAN_UNSUPPORTED_BASE)
+        self.assertEqual(app.config.base_image_uri, "")
+        refusals = [m for level, m in stub.messages if level == "warn" and "not one of the images" in m]
+        self.assertEqual(refusals, [f"This system is set to boot {custom}, which is not one of the images this tool supports."])
+
+    def test_scan_os_counts_customizations_on_the_deployment_it_reads(self) -> None:
+        # What cannot be carried over is judged on the same deployment as the
+        # packages: an `override replace` made since the last boot is on the
+        # pending deployment only, and one undone since is on the booted one
+        # only. Either way the next boot, and the reset the switch
+        # instructions end with, act on the pending one.
+        override = {"requested-base-local-replacements": ["mesa-libGL"]}
+        cases = [
+            ("added since the last boot", override, {}, [("Cannot Be Carried Over", "1")]),
+            ("removed since the last boot", {}, override, []),
+        ]
+        for label, pending_extra, booted_extra, expected in cases:
+            with self.subTest(label):
+                stub = GumStub()
+                stub.confirm = lambda _prompt, default=False: True
+                result, _app, sections, rows = self.scan_pending(
+                    {"container-image-reference": self.BAZZITE_STABLE, "requested-packages": ["tmux"], **pending_extra},
+                    {"container-image-reference": self.BAZZITE_STABLE, "requested-packages": ["tmux"], **booted_extra},
+                    gum=stub,
+                )
+                self.assertEqual(result, SCAN_OK)
+                self.assertEqual([row for row in rows if row[0] == "Cannot Be Carried Over"], expected)
+                not_carried = [lines for title, lines in sections if title == "Not Carried Over"]
+                if expected:
+                    self.assertEqual(len(not_carried), 1)
+                    self.assertIn("mesa-libGL", " ".join(not_carried[0]))
+                else:
+                    self.assertEqual(not_carried, [])
+
     def test_scan_os_returns_false_when_rpm_ostree_status_fails(self) -> None:
         app = self.make_app()
         stub = GumStub()
