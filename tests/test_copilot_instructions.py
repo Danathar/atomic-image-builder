@@ -22,7 +22,10 @@ Doing: Splits the document on its headings so a claim is checked against the
        rows exhaustively so a new one has to be classified before it can be
        described or omitted. Joins the document's number words -- five
        coverage tiers, four mirrored paragraphs, both e2e suites -- to counts
-       computed from the files that decide them.
+       computed from the files that decide them. Joins the onward list that
+       CLAUDE.md, AGENTS.md and the Cursor rule restate by name ("points on
+       to ARCHITECTURE.md, ...") to the opening bullets' link targets, with
+       the restating files held in a ledger checked both ways.
 Why: This file is the canonical brief every other agent-facing file in the
      repository defers to, and it was read only as a source. The no-copy and
      mirror halves of test_agent_guidance_has_one_canonical_file compare other
@@ -1142,6 +1145,110 @@ class CanonicalFileClaimTests(CopilotDocumentTestCase):
             f"{COPILOT_RELATIVE} says CLAUDE.md is the single exception that "
             f"mirrors it, and {mirroring} carry the markers",
         )
+
+
+# The pointer files that restate the brief's onward list in prose. Each says
+# the canonical brief "points on to" (or "points at") the documents its
+# opening bullets link, and names them. Asserted in both directions against
+# the files the enumeration test actually finds, so rewording one of these
+# sentences out of recognition fails here instead of leaving it unchecked.
+ONWARD_LIST_FILES = (
+    ".cursor/rules/atomic-image-builder.mdc",
+    "AGENTS.md",
+    "CLAUDE.md",
+)
+
+# Same families as test_agent_guidance_has_one_canonical_file walks, so a new
+# pointer that restates the list is read the day it is added.
+POINTER_PREFIXES = (".cursor/", ".github/prompts/", ".claude/skills/", ".claude/memory/")
+POINTER_FILES = ("CLAUDE.md", "AGENTS.md", ".claude/checkpoint.md")
+
+# A prose enumeration of at least three file names: "A.md, B.md, C.md and
+# D.txt". Deliberately not anchored to the verb in front of it, so the check
+# still finds the list after "points on to" is rewritten as "links".
+FILE_NAME = r"[\w.-]+\.(?:md|txt)"
+ENUMERATION = re.compile(rf"(?:{FILE_NAME}, )+{FILE_NAME},? and {FILE_NAME}")
+
+
+class OnwardListTests(CopilotDocumentTestCase):
+    """Every pointer's list of where the brief leads is the brief's own list."""
+
+    def canonical_onward_names(self) -> list[str]:
+        # The opening bullets are the brief's onward list: one link each, to
+        # the reference documents it defers to rather than restating.
+        section = self.section("Working in this repository")
+        targets = re.findall(r"^- \[[^\]]+\]\(([^)#]+)\)", section, re.MULTILINE)
+        self.assertGreater(
+            len(targets), 1, f"{COPILOT_RELATIVE}'s opening bullets link nothing"
+        )
+        tracked = tracked_files()
+        names = []
+        for target in targets:
+            relative = (COPILOT.parent / target).resolve().relative_to(ROOT).as_posix()
+            self.assertIn(relative, tracked, f"{COPILOT_RELATIVE} leads on to {target}, untracked")
+            name = Path(relative).name
+            # The pointers name these documents by basename. That only
+            # identifies one file while no other tracked file shares it.
+            sharing = sorted(path for path in tracked if Path(path).name == name)
+            self.assertEqual(
+                sharing,
+                [relative],
+                f"pointers name {relative} as {name!r}, which is ambiguous",
+            )
+            names.append(name)
+        return names
+
+    def pointer_enumerations(self) -> dict[str, list[list[str]]]:
+        found: dict[str, list[list[str]]] = {}
+        for name in sorted(tracked_files()):
+            if not name.endswith((".md", ".mdc")):
+                continue
+            if not (name.startswith(POINTER_PREFIXES) or name in POINTER_FILES):
+                continue
+            text = squashed((ROOT / name).read_text())
+            for match in ENUMERATION.finditer(text):
+                items = re.split(r",? and |, ", match.group(0))
+                found.setdefault(name, []).append(items)
+        return found
+
+    def test_every_pointer_names_exactly_the_documents_the_brief_leads_to(self) -> None:
+        # CLAUDE.md, AGENTS.md and the Cursor rule each tell an agent where the
+        # brief goes next, by name, without a link. Nothing joined those names
+        # to the bullets that decide them, so adding a fifth reference to the
+        # brief -- or moving one -- would leave three auto-loaded files
+        # describing an onward list the brief no longer has.
+        canonical = self.canonical_onward_names()
+        found = self.pointer_enumerations()
+        restating = set()
+        for path, enumerations in found.items():
+            for items in enumerations:
+                if not set(items) & set(canonical):
+                    continue
+                restating.add(path)
+                self.assertEqual(
+                    items,
+                    canonical,
+                    f"{path} says the brief leads on to {items}; its opening "
+                    f"bullets link {canonical}, in that order",
+                )
+        self.assertEqual(
+            sorted(restating),
+            sorted(ONWARD_LIST_FILES),
+            "the pointers that restate the brief's onward list are not the "
+            "ones ONWARD_LIST_FILES names; update the ledger or the prose",
+        )
+
+    def test_each_restating_pointer_attributes_the_list_to_the_brief(self) -> None:
+        # The list is only correct as a description of where the brief leads.
+        # A pointer that kept the names and dropped the verb would read as its
+        # own reading list, which is a different claim.
+        for path in ONWARD_LIST_FILES:
+            text = squashed((ROOT / path).read_text())
+            self.assertRegex(
+                text,
+                rf"points (?:on to|at) {ENUMERATION.pattern}",
+                f"{path} no longer says the brief points on to its list",
+            )
 
 
 if __name__ == "__main__":
