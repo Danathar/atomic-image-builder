@@ -362,6 +362,33 @@ test_gh_authenticated() {
     cleanup_stubs
 }
 
+# --- a stale login elsewhere does not hide a working github.com one --------
+# Bare `gh auth status` exits 1 when any account on any host fails, even with
+# a working active github.com account (#513). This gh answers the way that
+# setup does: only the github.com/--active question succeeds.
+test_gh_stale_other_host_still_forwards_token() {
+    setup_stubs
+    cat >"$stub_dir/gh" <<'GH'
+#!/usr/bin/env bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+    [ "$*" = "auth status --hostname github.com --active" ] && exit 0
+    exit 1
+fi
+if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
+    echo "fake-token-123"
+    exit 0
+fi
+exit 1
+GH
+    chmod +x "$stub_dir/gh"
+    PATH="$stub_dir" HOME="$stub_dir/home" "$aib" >/dev/null 2>&1
+    local args
+    args="$(cat "$podman_log")"
+    assert_contains "$args" "-e GH_TOKEN" "stale other host: GH_TOKEN still forwarded"
+    assert_not_contains "$args" "aib-gh:/root/.config/gh" "stale other host: aib-gh volume not mounted"
+    cleanup_stubs
+}
+
 # --- the token's value goes to podman's environment, never its argv --------
 # The header comment's claim for `-e GH_TOKEN` is that the value "is never
 # placed in the Podman command line or written to disk by this script", and
@@ -822,6 +849,7 @@ RPMOSTREE
 
 test_podman_missing
 test_gh_authenticated
+test_gh_stale_other_host_still_forwards_token
 test_gh_token_forwarded_by_environment_not_argv
 test_custom_image_gets_no_credentials
 test_skip_verify_gets_no_credentials

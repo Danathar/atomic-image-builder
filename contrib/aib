@@ -335,7 +335,10 @@ if [ "$forward_auth" = no ]; then
         echo "aib: Or to keep this image and send your login anyway, copy this:" >&2
         echo "aib:   AIB_ALLOW_UNVERIFIED_AUTH=1 AIB_IMAGE=$AIB_IMAGE aib" >&2
     fi
-elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+# Only the active github.com account decides this: bare `gh auth status` fails
+# when any account on any host is stale, even with a working github.com login,
+# and the container then asked the user to log in again (#513).
+elif command -v gh >/dev/null 2>&1 && gh auth status --hostname github.com --active >/dev/null 2>&1; then
     GH_TOKEN="$(gh auth token)"
     export GH_TOKEN
     podman_args+=(-e GH_TOKEN)

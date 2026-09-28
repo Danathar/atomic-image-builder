@@ -247,6 +247,26 @@ GH
     cleanup_stubs
 }
 
+# --- only the active github.com account gates setup-git --------------------
+# A stale login on another host makes bare `gh auth status` exit 1 (#513).
+test_gh_auth_probe_asks_only_about_github_com() {
+    setup_stubs
+    cat >"$stub_dir/gh" <<GH
+#!/usr/bin/env bash
+printf '%s ' "\$@" >> "$gh_log"
+if [ "\$1" = "auth" ] && [ "\$2" = "status" ]; then
+    [ "\$*" = "auth status --hostname github.com --active" ] && exit 0
+    exit 1
+fi
+exit 0
+GH
+    chmod +x "$stub_dir/gh"
+    env -u GH_TOKEN PATH="$stub_dir" bash "$entrypoint" --version >/dev/null 2>&1
+    assert_contains "$(read_log "$gh_log")" "auth setup-git" \
+        "gh auth probe: a stale other host does not skip setup-git"
+    cleanup_stubs
+}
+
 test_gh_token_set
 test_gh_token_set_no_gh_binary
 test_gh_authenticated
@@ -257,6 +277,7 @@ test_exit_code_preserved
 test_arguments_are_forwarded_without_word_splitting
 test_tool_replaces_the_shell
 test_gh_auth_probe_prints_nothing
+test_gh_auth_probe_asks_only_about_github_com
 
 echo
 echo "$pass passed, $fail failed"
