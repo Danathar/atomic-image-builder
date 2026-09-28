@@ -17321,26 +17321,38 @@ class BuilderTests(unittest.TestCase):
         # Each `uses:` is compared against pinned_action's own output, so an
         # action that lost its pin -- or gained a different one -- fails here
         # rather than at whatever the tag happens to point at on the day.
+        expected = {
+            "Checkout": pinned_action("actions/checkout"),
+            "Maximize build space": pinned_action("ublue-os/remove-unwanted-software"),
+            "Image Metadata": pinned_action("docker/metadata-action"),
+            "Build Image": pinned_action("redhat-actions/buildah-build"),
+            "Login to GHCR": pinned_action("docker/login-action"),
+            "Push to GHCR": pinned_action("redhat-actions/push-to-registry"),
+            "Install Cosign": pinned_action("sigstore/cosign-installer"),
+        }
+        # The version label is a YAML comment, so the parsed value -- what
+        # Actions reads -- is the bare SHA ref, and the label can only be
+        # seen on the line as written.
         used = {
             step["name"]: step["uses"]
             for step in self.workflow_steps(self.workflow_document(signing=True))
             if "uses" in step
         }
-        self.assertEqual(
-            used,
-            {
-                "Checkout": pinned_action("actions/checkout"),
-                "Maximize build space": pinned_action("ublue-os/remove-unwanted-software"),
-                "Image Metadata": pinned_action("docker/metadata-action"),
-                "Build Image": pinned_action("redhat-actions/buildah-build"),
-                "Login to GHCR": pinned_action("docker/login-action"),
-                "Push to GHCR": pinned_action("redhat-actions/push-to-registry"),
-                "Install Cosign": pinned_action("sigstore/cosign-installer"),
-            },
-        )
+        self.assertEqual(used, {name: pin.split(" # ")[0] for name, pin in expected.items()})
+        app = self.make_app()
+        app.config.signing_enabled = True
+        uses_lines = [
+            line.strip().removeprefix("- ").removeprefix("uses: ")
+            for line in app.generate_container_workflow(default_branch="main").splitlines()
+            if re.match(r"\s*(- )?uses: ", line)
+        ]
+        self.assertEqual(sorted(uses_lines), sorted(expected.values()))
         for name, uses in used.items():
             with self.subTest(step=name):
-                self.assertRegex(uses, r"^[^@]+@[0-9a-f]{40} # \S")
+                self.assertRegex(uses, r"^[^@ ]+@[0-9a-f]{40}$")
+        for line in uses_lines:
+            with self.subTest(line=line):
+                self.assertRegex(line, r"^[^@]+@[0-9a-f]{40} # \S")
 
     def test_generated_workflow_metadata_step_emits_every_tag_and_label(self) -> None:
         # `tags:` and `labels:` are literal blocks, so each is one scalar with

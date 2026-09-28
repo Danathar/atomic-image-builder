@@ -268,6 +268,67 @@ class BlockYamlTests(unittest.TestCase):
         with self.assertRaises(BlockYamlError):
             parse_block_yaml("value: >-\n  normal line\n    indented line\n")
 
+    def test_a_trailing_comment_is_not_part_of_a_plain_scalar(self) -> None:
+        # A pinned `uses:` line carries its version label as a comment, and
+        # Actions reads only the ref before it. Folding the comment into the
+        # value let a test assert on text no YAML reader ever returns.
+        self.assertEqual(
+            parse_block_yaml(
+                "description: a #b\n"
+                "uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v7\n"
+                "empty: # nothing here\n"
+                "tag: a#b\n"
+            ),
+            {
+                "description": "a",
+                "uses": "actions/checkout@0123456789abcdef0123456789abcdef01234567",
+                "empty": None,
+                "tag": "a#b",
+            },
+        )
+
+    def test_a_comment_ends_a_plain_scalar_even_between_apostrophes(self) -> None:
+        # Apostrophes inside a plain scalar are ordinary characters, so they
+        # do not protect a " #" from starting a comment.
+        self.assertEqual(parse_block_yaml("if: x == ' #y'\n"), {"if": "x == '"})
+
+    def test_a_comment_after_a_quoted_scalar_or_flow_sequence_is_dropped(self) -> None:
+        self.assertEqual(
+            parse_block_yaml(
+                "a: \"x # y\"  # z\n"
+                "b: 'it''s # here' # z\n"
+                "c: ['p # q', r] # z\n"
+                'd: "v" # z\n'
+            ),
+            {"a": "x # y", "b": "it's # here", "c": ["p # q", "r"], "d": "v"},
+        )
+
+    def test_content_after_a_quoted_scalar_is_refused(self) -> None:
+        # '"a"#b' is looser in PyYAML, but the spec needs whitespace before a
+        # comment, and the generators never write either form.
+        for raw in ('"a" b', "'a' b", '"a"#b'):
+            with self.subTest(raw=raw), self.assertRaises(BlockYamlError):
+                parse_block_yaml(f"k: {raw}\n")
+
+    def test_a_comment_after_a_block_indicator_is_refused(self) -> None:
+        # Valid YAML, but not a form the generators write, and the line filter
+        # would not have kept the block's own blank and "#" lines for it.
+        with self.assertRaises(BlockYamlError):
+            parse_block_yaml("value: | # note\n  text\n")
+
+    def test_rejects_plain_scalars_real_yaml_rejects(self) -> None:
+        # PyYAML refuses each of these, so accepting it as a string would let
+        # a generator emit a file a real YAML reader cannot load.
+        for raw in ("foo: bar", "? x", "- x", ": x", "a\tb", ",x", "]x", "}x", "%x", "@x", "`x", "a:"):
+            with self.subTest(raw=raw), self.assertRaises(BlockYamlError):
+                parse_block_yaml(f"k: {raw}\n")
+
+    def test_an_indicator_followed_by_a_non_space_still_starts_a_plain_scalar(self) -> None:
+        self.assertEqual(
+            parse_block_yaml("a: -foo\nb: ?x\nc: :x\nd: -1\n"),
+            {"a": "-foo", "b": "?x", "c": ":x", "d": -1},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
