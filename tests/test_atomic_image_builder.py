@@ -1439,6 +1439,76 @@ class BuilderTests(unittest.TestCase):
         )
         self.assertEqual(app.patch_container_workflow(migrated), migrated)
 
+    LEGACY_SIGNING_JOB = textwrap.dedent(
+        """\
+        name: Build container image
+        jobs:
+          build_push:
+            env:
+              BUILD_FLAVOR: main
+              COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+              COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+            steps:
+              - name: Install Cosign
+                uses: sigstore/cosign-installer@v3
+                if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.COSIGN_PRIVATE_KEY != ''
+              - name: Sign container image
+                if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.COSIGN_PRIVATE_KEY != ''
+                env:
+                  COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+                run: cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/example/test:latest
+        """
+    )
+
+    @staticmethod
+    def reindent_step_items(workflow: str, shift: int) -> str:
+        """Move every line under `steps:` by `shift` columns, keeping the rest."""
+        lines = workflow.splitlines()
+        at = next(index for index, line in enumerate(lines) if line.strip() == "steps:")
+        moved = [(" " * shift + line) if shift >= 0 else line[-shift:] for line in lines[at + 1 :]]
+        return "\n".join([*lines[: at + 1], *moved]) + "\n"
+
+    def test_legacy_migration_rewrites_steps_under_a_commented_key_or_at_any_item_indent(self) -> None:
+        # The step walker only knew a bare `steps:` with items at +2, so in
+        # each of these shapes it rewrote no condition -- and the job-level key
+        # both conditions read was stripped anyway. The result parsed, every
+        # run was green, and every image was published unsigned (#526).
+        app = self.make_app()
+        shapes = {
+            "commented steps key": self.LEGACY_SIGNING_JOB.replace("    steps:\n", "    steps: # build\n"),
+            "items at +4": self.reindent_step_items(self.LEGACY_SIGNING_JOB, 2),
+            "indentless items": self.reindent_step_items(self.LEGACY_SIGNING_JOB, -2),
+        }
+        for label, legacy in shapes.items():
+            with self.subTest(shape=label):
+                migrated = app.patch_container_workflow(legacy)
+                self.assertEqual(
+                    sorted(self.job_env_entries(migrated)),
+                    ["BUILD_FLAVOR: main", "SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}"],
+                )
+                self.assertNotIn("env.COSIGN_PRIVATE_KEY", migrated)
+                self.assertEqual(migrated.count("&& env.SIGNING_ENABLED == 'true'"), 2)
+                self.assertEqual(migrated.count("COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}"), 1)
+                self.assertEqual(app.patch_container_workflow(migrated), migrated)
+
+    def test_legacy_migration_fails_closed_when_a_condition_still_reads_the_job_key(self) -> None:
+        # Any condition the step rewrite leaves reading the job-level key --
+        # in a step the walker cannot reach, or one it does not treat as a
+        # signing step, as here -- is false forever once that key is
+        # stripped. Refusing is the only outcome that is not a silently
+        # unsigned image.
+        app = self.make_app()
+        legacy = self.LEGACY_SIGNING_JOB + "\n".join(
+            [
+                "      - name: Report signing",
+                "        if: env.COSIGN_PRIVATE_KEY != ''",
+                "        run: echo signed",
+                "",
+            ]
+        )
+        with self.assertRaisesRegex(CommandError, r"if: env\.COSIGN_PRIVATE_KEY != ''.*published unsigned"):
+            app.patch_container_workflow(legacy)
+
     @staticmethod
     def job_env_entries_by_job(workflow: str) -> dict[str, list[str]]:
         """Job-level env entries keyed by job name, compared by whole line.
@@ -13587,6 +13657,40 @@ class BuilderTests(unittest.TestCase):
         output = patch_workflow_steps(workflow, lambda step: (seen.append(step), step)[1])
         self.assertEqual(seen, [])
         self.assertEqual("\n".join(output), workflow.rstrip("\n"))
+
+    def test_patch_workflow_steps_finds_items_wherever_the_first_one_sits(self) -> None:
+        # YAML only asks a sequence's items to agree with each other, and a
+        # key may carry a comment. Each shape here is valid Actions input that
+        # the walker used to pass through without visiting a single step
+        # (#526). The job key after the list must still end it, including
+        # the indentless shape where it sits at the items' own indent.
+        shapes = {
+            "commented key": ("    steps: # build", "      "),
+            "items at +4": ("    steps:", "        "),
+            "indentless items": ("    steps:", "    "),
+        }
+        for label, (key, item) in shapes.items():
+            with self.subTest(shape=label):
+                workflow = "\n".join(
+                    [
+                        "jobs:",
+                        "  build:",
+                        key,
+                        f"{item}# a comment is not an item",
+                        f"{item}- name: One",
+                        f"{item}  run: echo one",
+                        f"{item}- name: Two",
+                        f"{item}  with:",
+                        f"{item}    list:",
+                        f"{item}      - nested",
+                        "    timeout-minutes: 5",
+                    ]
+                )
+                seen: list[list[str]] = []
+                output = patch_workflow_steps(workflow, lambda step: (seen.append(step), step)[1])
+                self.assertEqual([step[0].strip() for step in seen], ["- name: One", "- name: Two"])
+                self.assertEqual(seen[1][-1].strip(), "- nested")
+                self.assertEqual("\n".join(output), workflow)
 
     def test_clone_bluebuild_template_copies_snapshot(self) -> None:
         app = self.make_bluebuild_app()

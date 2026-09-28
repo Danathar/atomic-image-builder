@@ -1224,6 +1224,7 @@ SIGNING_ENABLED_ENV = ("SIGNING_ENABLED", "${{ secrets.SIGNING_SECRET != '' }}")
 # worse than signing that fails.
 LEGACY_SIGNING_ENV_KEYS = ("COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
 LEGACY_SIGN_CONDITION = " && env.COSIGN_PRIVATE_KEY != ''"
+LEGACY_SIGNING_ENV_READ_RE = re.compile(rf"\benv\.(?:{'|'.join(LEGACY_SIGNING_ENV_KEYS)})\b")
 
 
 def strip_job_env_entries(workflow_text: str, names: Sequence[str]) -> str:
@@ -1239,6 +1240,38 @@ def strip_job_env_entries(workflow_text: str, names: Sequence[str]) -> str:
         if not any(line.startswith(f"      {name}: ") for name in names)
     ]
     return ensure_trailing_newline("\n".join(kept))
+
+
+def strip_legacy_signing_job_env(workflow_text: str) -> str:
+    """Remove the legacy job-level signing key and password, or refuse to.
+
+    Run after patch_workflow_signing_steps(). Removing the job-level
+    COSIGN_PRIVATE_KEY is only safe once nothing reads `env.COSIGN_PRIVATE_KEY`
+    any more: a step's own `env:` is not visible to its `if:`, so a condition
+    the step rewrite did not reach would test a variable that no longer exists,
+    be false forever, and publish every image unsigned on a green run (#526).
+    Keeping the keys instead would leave the signing key exposed to every
+    action in the job, which is what the migration exists to end (#255). So a
+    surviving reference fails closed, naming the line to fix by hand.
+
+    A workflow with no legacy job-level entry is returned as it is: there is
+    nothing to strip, so this update cannot be what breaks it.
+    """
+    stripped = strip_job_env_entries(workflow_text, LEGACY_SIGNING_ENV_KEYS)
+    if stripped == ensure_trailing_newline(workflow_text):
+        return stripped
+    for line in stripped.splitlines():
+        if line.lstrip().startswith("#") or not LEGACY_SIGNING_ENV_READ_RE.search(line):
+            continue
+        raise CommandError(
+            f"This workflow still reads a legacy job-level signing variable after its signing "
+            f"steps were migrated ({line.strip()!r}), and this update removes that variable from "
+            f"the job's 'env:'. Left as it is, that condition would be false forever and the image "
+            f"would be published unsigned. Make it test env.{SIGNING_ENABLED_ENV[0]} == 'true' "
+            f"instead -- in a signing step's 'if:', delete \"{LEGACY_SIGN_CONDITION.strip()}\" -- "
+            f"then run this update again."
+        )
+    return stripped
 
 
 # Nothing in the Containerfile path asks GitHub for an OIDC token. Signing
@@ -1354,6 +1387,13 @@ def patch_workflow_steps(workflow_text: str, patch_step: Callable[[list[str]], l
     A step block is a "- " item directly under a `steps:` key, plus every line
     indented beneath it. Lines outside any step pass through untouched.
 
+    The key may carry a comment (`steps: # build`), and the items sit
+    wherever the first one puts them: YAML asks only that a sequence's
+    entries agree with each other, so +4 and the indentless +0 are as valid
+    as +2. Anchoring on a bare `steps:` with items at +2 walked past every
+    step in those shapes, and the signing migration then stripped the job
+    key its unrewritten conditions still read (#526).
+
     Both workflow patchers walked their own byte-identical copy of this state
     machine, so a correction to the step-boundary rules reached only one of
     them. Returns the output lines; the caller decides how to join them.
@@ -1361,7 +1401,8 @@ def patch_workflow_steps(workflow_text: str, patch_step: Callable[[list[str]], l
     output: list[str] = []
     current_step: list[str] = []
     in_steps = False
-    steps_indent: int | None = None
+    steps_indent = 0
+    item_indent: int | None = None
 
     def flush_step() -> None:
         nonlocal current_step
@@ -1373,20 +1414,30 @@ def patch_workflow_steps(workflow_text: str, patch_step: Callable[[list[str]], l
     for line in workflow_text.splitlines():
         stripped = line.strip()
         indent = len(line) - len(line.lstrip())
+        is_item = stripped == "-" or stripped.startswith("- ")
 
-        if in_steps and steps_indent is not None and indent <= steps_indent and stripped and not stripped.startswith("#"):
-            flush_step()
-            in_steps = False
-            steps_indent = None
+        if in_steps and stripped and not stripped.startswith("#"):
+            if item_indent is None:
+                # The first line with content decides where the items sit.
+                # Anything but a sequence item at or beyond the key means the
+                # key holds no block sequence to walk.
+                if is_item and indent >= steps_indent:
+                    item_indent = indent
+                else:
+                    in_steps = False
+            elif indent < item_indent or (indent == item_indent and not is_item):
+                flush_step()
+                in_steps = False
 
-        if stripped == "steps:":
+        if workflow_block_key(stripped) == "steps":
             flush_step()
             in_steps = True
             steps_indent = indent
+            item_indent = None
             output.append(line)
             continue
 
-        if in_steps and steps_indent is not None and indent == steps_indent + 2 and stripped.startswith("- "):
+        if in_steps and indent == item_indent and is_item:
             flush_step()
             current_step = [line]
             continue
@@ -6026,8 +6077,9 @@ class App:
         text = self.patch_workflow_branch_filters(text, default_branch)
         # Remove before adding: a repository generated earlier has the key and
         # password at job level, and they have to go, not merely be joined by
-        # the boolean.
-        text = strip_job_env_entries(text, LEGACY_SIGNING_ENV_KEYS)
+        # the boolean -- but only once the step rewrite above has taken every
+        # condition off them.
+        text = strip_legacy_signing_job_env(text)
         text = ensure_workflow_job_env_entries(text, [SIGNING_ENABLED_ENV])
         text = self.patch_container_rechunk_step(text)
         text = strip_permission_entries(text, UNUSED_WORKFLOW_PERMISSIONS)

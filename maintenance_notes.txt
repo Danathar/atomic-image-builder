@@ -412,10 +412,22 @@ in ways that are quiet rather than loud:
   is the failure mode patch_cosign_compatibility() already fails closed
   against, arriving from a different direction.
 
-test_existing_repository_migrates_off_the_job_level_key covers the second, and
-test_signing_step_carries_its_own_password the first. Both run against text
-shaped like what is really on disk in a managed repository, because that is
-the input that matters here -- new repositories would look correct either way.
+  The clause goes in the step walker, patch_workflow_steps(), and the
+  job-level key afterwards in strip_legacy_signing_job_env(). With
+  `steps: # build`, or items at +4 or +0, the walker once visited no step
+  while the key was stripped regardless -- this exact silent outcome (#526).
+  So the walker accepts a commented key and takes the item indent from the
+  first item, and the strip raises a CommandError rather than run while any
+  `env.COSIGN_PRIVATE_KEY` or `env.COSIGN_PASSWORD` reference survives.
+
+test_existing_repository_migrates_off_the_job_level_key and
+test_legacy_migration_rewrites_steps_under_a_commented_key_or_at_any_item_indent
+cover the second, with
+test_legacy_migration_fails_closed_when_a_condition_still_reads_the_job_key
+for the refusal, and test_signing_step_carries_its_own_password covers the
+first. They run against text shaped like what is really on disk in a managed
+repository, because that is the input that matters here -- new repositories
+would look correct either way.
 
 Sign The Digest, Not The Tag
 -----------------------------
