@@ -54,8 +54,11 @@ body:
       label: What are you running it on?
       description: >-
         The image your system boots next, which is what the scan reads: the
-        first entry `rpm-ostree status` prints. Say "container, no host scan"
-        if you ran it somewhere with no rpm-ostree to read.
+        first entry `rpm-ostree status` prints for the OS you booted. If the
+        entries have a `StateRoot:` line, skip any whose StateRoot differs from
+        the booted (●) entry's; those belong to another installed OS. Say
+        "container, no host scan" if you ran it somewhere with no rpm-ostree
+        to read.
       placeholder: "ghcr.io/ublue-os/bluefin:stable"
     validations:
       required: true
