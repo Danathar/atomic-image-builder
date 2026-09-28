@@ -696,6 +696,27 @@ def yaml_scalar(value: str) -> str:
     return _YAML_UNPRINTABLE_RE.sub(lambda m: f"\\u{ord(m.group()):04x}", json.dumps(value, ensure_ascii=False))
 
 
+# A plain scalar that every YAML reader Actions and BlueBuild use resolves to
+# the string it spells: letters, digits and the separators a branch name
+# usually carries, not starting with a digit or an indicator character.
+_YAML_SAFE_PLAIN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_./-]*")
+# ...minus the words YAML 1.1 resolves to a boolean or null when unquoted.
+_YAML_RESERVED_PLAIN_WORDS = frozenset({"y", "n", "yes", "no", "on", "off", "true", "false", "null"})
+
+
+def yaml_plain_or_scalar(value: str) -> str:
+    """``value`` bare when YAML reads it back as that string, else yaml_scalar().
+
+    For hand-shaped lines such as a branch filter entry, where the ordinary
+    value -- ``main`` -- is expected to stay bare, but a legal branch name
+    such as ``#main`` (a comment), ``@dev`` (a reserved indicator) or
+    ``null`` (not a string at all) must not be written unquoted.
+    """
+    if _YAML_SAFE_PLAIN_RE.fullmatch(value) and value.lower() not in _YAML_RESERVED_PLAIN_WORDS:
+        return value
+    return yaml_scalar(value)
+
+
 def ensure_trailing_newline(text: str) -> str:
     return text.rstrip("\n") + "\n"
 
@@ -6292,82 +6313,116 @@ class App:
         return ensure_trailing_newline("\n".join(output))
 
     def patch_workflow_branch_filters(self, workflow_text: str, default_branch: str) -> str:
+        # Points every pull_request and push trigger at the default branch.
+        # It runs over owner-edited text on every update, so it reads the
+        # shape the file already has rather than assuming the snapshot's
+        # (#523): an entry written at a different indent from the entries
+        # beside it either mixes indentation inside one sequence -- a parse
+        # error -- or folds into the entry above as one scalar, "main - main",
+        # which matches no branch. Both leave a repository that builds nothing.
+        #
+        # Scoped to the `on:` block, the way patch_workflow_path_filters is:
+        # a job may be called `push` too, and a `branches:` key inserted into
+        # a job is a key Actions rejects.
+        entry = yaml_plain_or_scalar(default_branch)
+
+        def patch_trigger(block: list[str], trigger_indent: int) -> list[str]:
+            content = [
+                (index, len(line) - len(line.lstrip()), line.strip())
+                for index, line in enumerate(block)
+                if line.strip() and not line.strip().startswith("#")
+            ]
+            filter_indent = content[0][1] if content else trigger_indent + 2
+            filter_keys: dict[str, int] = {}
+            for index, indent, stripped in content:
+                key = workflow_key(stripped) if indent == filter_indent else None
+                if key is not None:
+                    filter_keys.setdefault(key, index)
+            # Actions refuses `branches` and `branches-ignore` on one event.
+            # A trigger filtered by exclusion is the owner's choice, and
+            # rewriting it into an inclusion list would be guessing at intent.
+            if "branches-ignore" in filter_keys:
+                return block
+            prefix = " " * filter_indent
+            key_index = filter_keys.get("branches")
+            if key_index is None:
+                return [f"{prefix}branches:", f"{prefix}  - {entry}", *block]
+            key_line = block[key_index]
+            is_block_key = workflow_block_key(key_line.strip()) is not None
+            # The key's value is every deeper line, plus -- for a block key --
+            # the entries of an indentless sequence at the key's own indent,
+            # which is how PyYAML and ruamel write one. Comments inside it are
+            # the owner's and stay; every entry goes, so no stale branch
+            # survives behind a comment line.
+            value_end = key_index + 1
+            for index, indent, stripped in content:
+                if index <= key_index:
+                    continue
+                is_entry = stripped == "-" or stripped.startswith("- ")
+                if indent > filter_indent or (is_block_key and indent == filter_indent and is_entry):
+                    value_end = index + 1
+                    continue
+                break
+            if is_block_key:
+                # Where the existing entries sit, so the new one joins the
+                # same sequence -- key indent plus two only for an empty list.
+                entry_indent = block_sequence_entry_indent(block, key_index)
+            else:
+                # An inline value, "branches: [main]", cannot take a block
+                # entry beneath it; rewrite it to the block form.
+                key_line = f"{prefix}branches:"
+                entry_indent = prefix + "  "
+            kept = [
+                line for line in block[key_index + 1 : value_end] if not line.strip() or line.strip().startswith("#")
+            ]
+            return [*block[:key_index], key_line, f"{entry_indent}- {entry}", *kept, *block[value_end:]]
+
         lines = workflow_text.splitlines()
         output: list[str] = []
+        in_triggers = False
+        trigger_indent: int | None = None
         index = 0
         while index < len(lines):
             line = lines[index]
             stripped = line.strip()
             indent = len(line) - len(line.lstrip())
-            # Only block-style triggers can take an appended branches: block.
-            # An inline flow mapping such as "push: { branches: [main] }"
-            # already owns its filter inline; nesting another one under it is a
-            # parse error, so it is left exactly as written.
-            if indent == 2 and workflow_block_key(stripped) in {"pull_request", "push"}:
-                output.append(line)
-                index += 1
-                block_start = index
-                while index < len(lines):
-                    block_line = lines[index]
-                    block_stripped = block_line.strip()
-                    block_indent = len(block_line) - len(block_line.lstrip())
-                    # A sibling trigger ends the block. Testing for a trailing
-                    # colon missed any key carrying an inline comment - the
-                    # bundled BlueBuild snapshot literally ships
-                    # "  workflow_dispatch: # allow manually triggering builds"
-                    # - so the sibling was absorbed into the previous block. If
-                    # that sibling owns a branches: key, branches_found flips on
-                    # the wrong trigger, the filter is written there instead,
-                    # and the block we were actually patching never gets one:
-                    # PR builds then fire from every branch.
-                    if block_indent <= 2 and workflow_key(block_stripped) is not None:
-                        break
-                    index += 1
-                block = lines[block_start:index]
-                branch_block = ["    branches:", f"      - {default_branch}"]
-                patched_block: list[str] = []
-                branches_found = False
-                block_index = 0
-                while block_index < len(block):
-                    block_line = block[block_index]
-                    block_stripped = block_line.strip()
-                    block_indent = len(block_line) - len(block_line.lstrip())
-                    if block_indent == 4 and workflow_key(block_stripped) == "branches":
-                        prefix = block_line[: len(block_line) - len(block_line.lstrip())]
-                        if workflow_block_key(block_stripped) is None:
-                            # Inline flow form: "branches: [main]". Appending
-                            # "- <branch>" beneath it is a parse error, so
-                            # rewrite it to the same block form the other
-                            # branch writes - which also replaces the existing
-                            # entries with the default branch, exactly as the
-                            # block path below does.
-                            patched_block.append(f"{prefix}branches:")
-                            patched_block.append(f"{prefix}  - {default_branch}")
-                            branches_found = True
-                            block_index += 1
-                            continue
-                        patched_block.append(block_line)
-                        patched_block.append(f"{prefix}  - {default_branch}")
-                        branches_found = True
-                        block_index += 1
-                        while block_index < len(block):
-                            branch_line = block[block_index]
-                            branch_stripped = branch_line.strip()
-                            branch_indent = len(branch_line) - len(branch_line.lstrip())
-                            if branch_indent == 6 and branch_stripped.startswith("- "):
-                                block_index += 1
-                                continue
-                            break
-                        continue
-                    patched_block.append(block_line)
-                    block_index += 1
-                if branches_found:
-                    output.extend(patched_block)
-                else:
-                    output.extend(branch_block + block)
-                continue
-            output.append(line)
             index += 1
+            if not stripped or stripped.startswith("#"):
+                output.append(line)
+                continue
+            if indent == 0:
+                in_triggers = workflow_block_key(stripped) == "on"
+                trigger_indent = None
+                output.append(line)
+                continue
+            if not in_triggers:
+                output.append(line)
+                continue
+            if trigger_indent is None:
+                trigger_indent = indent
+            output.append(line)
+            # Only block-style triggers can take a branches: key. An inline
+            # flow mapping such as "push: { branches: [main] }" already owns
+            # its filter inline; nesting another one under it is a parse
+            # error, so it is left exactly as written.
+            if indent != trigger_indent or workflow_block_key(stripped) not in {"pull_request", "push"}:
+                continue
+            # The trigger's block runs to the next line at or above its own
+            # indent that is not a comment: a sibling trigger or the next
+            # top-level key. That sibling is recognised by position, not by
+            # a trailing colon -- the bundled BlueBuild snapshot ships
+            # "  workflow_dispatch: # allow manually triggering builds", and
+            # absorbing it into pull_request once wrote the filter onto the
+            # wrong trigger and let PR builds fire from every branch.
+            block_start = index
+            while index < len(lines):
+                block_line = lines[index]
+                block_stripped = block_line.strip()
+                block_indent = len(block_line) - len(block_line.lstrip())
+                if block_stripped and not block_stripped.startswith("#") and block_indent <= trigger_indent:
+                    break
+                index += 1
+            output.extend(patch_trigger(lines[block_start:index], trigger_indent))
         return ensure_trailing_newline("\n".join(output))
 
     def patch_bluebuild_action_inputs(self, workflow_text: str) -> str:
@@ -6856,12 +6911,12 @@ class App:
             "on:",
             "  pull_request:",
             "    branches:",
-            f"      - {default_branch}",
+            f"      - {yaml_plain_or_scalar(default_branch)}",
             "  schedule:",
             f"    - cron: '{DEFAULT_GITHUB_BUILD_CRON}'",
             "  push:",
             "    branches:",
-            f"      - {default_branch}",
+            f"      - {yaml_plain_or_scalar(default_branch)}",
             f"    paths-ignore: ['**/README.md', '{STATE_FILE}']",
             "  workflow_dispatch:",
             "",
