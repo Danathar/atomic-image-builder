@@ -70,6 +70,7 @@ from atomic_image_builder import (
     ScreenBack,
     classic_ostree_origin,
     config_from_state_payload,
+    containerfile_escape,
     determine_fedora_atomic_default_tag,
     ensure_trailing_newline,
     ensure_workflow_job_env_entries,
@@ -12155,6 +12156,111 @@ class BuilderTests(unittest.TestCase):
             result,
             existing.replace("FROM ghcr.io/ublue-os/bazzite:stable", "FROM ghcr.io/ublue-os/aurora:stable"),
         )
+
+    def test_render_containerfile_does_not_let_a_comment_line_continue_into_the_final_from(self) -> None:
+        # BuildKit drops comment lines before it joins continuations, so a
+        # comment ending in a backslash continues nothing, and one inside a
+        # continued RUN neither ends it nor continues it past its last line.
+        # Reading either as a continuation hides the real final FROM.
+        app = self.make_app()
+        app.config.base_image_uri = "ghcr.io/ublue-os/aurora:stable"
+        existing = textwrap.dedent("""\
+            FROM docker.io/library/golang:1.24 AS builder
+            RUN go build \\
+                # ends in a backslash too \\
+                ./...
+            # the published stage follows \\
+            FROM ghcr.io/ublue-os/bazzite:stable
+            RUN /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertEqual(
+            result,
+            existing.replace("FROM ghcr.io/ublue-os/bazzite:stable", "FROM ghcr.io/ublue-os/aurora:stable"),
+        )
+        self.assertEqual(app.render_containerfile(result), result)
+
+    def test_render_containerfile_continues_lines_with_the_escape_directive_character(self) -> None:
+        # "# escape=`" makes the backtick the continuation character, so the
+        # FROM-shaped line after "RUN ... `" is part of that RUN, and a line
+        # ending in a backslash (a Windows path here) continues nothing. A
+        # backslash-only scanner reads it the other way round and rewrites
+        # the continuation instead of the stage that gets published. Without
+        # the directive, an escaped backslash at the end of a line is also a
+        # literal, not a continuation.
+        app = self.make_app()
+        app.config.base_image_uri = "ghcr.io/ublue-os/aurora:stable"
+        cases = {
+            "backtick": textwrap.dedent("""\
+                # escape=`
+
+                FROM ghcr.io/ublue-os/bazzite:stable AS base
+                RUN echo copying `
+                    FROM the base stage
+                RUN echo C:\\
+                FROM ghcr.io/ublue-os/bazzite:stable
+                RUN /ctx/build.sh
+            """),
+            "escaped backslash": textwrap.dedent("""\
+                FROM ghcr.io/ublue-os/bazzite:stable AS base
+                RUN echo C:\\\\
+                FROM ghcr.io/ublue-os/bazzite:stable
+                RUN /ctx/build.sh
+            """),
+        }
+        for name, existing in cases.items():
+            with self.subTest(name):
+                result = app.render_containerfile(existing)
+                final = existing.rindex("FROM ghcr.io/ublue-os/bazzite:stable\n")
+                self.assertEqual(
+                    result,
+                    existing[:final] + "FROM ghcr.io/ublue-os/aurora:stable\n" + existing[final:].split("\n", 1)[1],
+                )
+                self.assertEqual(app.render_containerfile(result), result)
+
+    def test_containerfile_escape_reads_only_the_leading_parser_directives(self) -> None:
+        # A directive counts only in the unbroken run of "# key=value" lines
+        # at the very top; a blank line, any other comment, an unknown key or
+        # an instruction ends the run, and a later "# escape=" is a comment.
+        cases = {
+            "first line": (["# escape=`", "FROM x"], "`"),
+            "spacing, case and a byte-order mark": (["\ufeff  #  ESCAPE = `  ", "FROM x"], "`"),
+            "after other directives": (["# syntax=docker/dockerfile:1", "# check=skip=all", "# escape=`"], "`"),
+            "explicit backslash": (["# escape=\\", "FROM x"], "\\"),
+            "none": (["FROM x"], "\\"),
+            "after a blank line": (["", "# escape=`"], "\\"),
+            "after a comment": (["# a comment", "# escape=`"], "\\"),
+            "after an unknown key": (["# owner=me", "# escape=`"], "\\"),
+            "after an instruction": (["FROM x", "# escape=`"], "\\"),
+        }
+        for name, (lines, expected) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(containerfile_escape(lines), expected)
+
+    def test_render_containerfile_removes_a_backtick_continued_brew_block_whole(self) -> None:
+        # Turning Homebrew off must take the preset RUN with the COPY. Its
+        # "brew" is on the backtick-continued line, so a scan that only knows
+        # backslash stops at the RUN line and strands the preset.
+        app = self.make_app()
+        existing = textwrap.dedent("""\
+            # escape=`
+            FROM ghcr.io/ublue-os/bazzite:stable
+            COPY --from=ghcr.io/ublue-os/brew:latest /system_files /
+            RUN --mount=type=tmpfs,dst=/tmp `
+                /usr/bin/systemctl preset brew-setup.service
+            RUN /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        self.assertEqual(result, "# escape=`\nFROM ghcr.io/ublue-os/bazzite:stable\nRUN /ctx/build.sh\n")
+        self.assertEqual(app.render_containerfile(result), result)
+
+    def test_render_containerfile_fails_closed_adding_brew_under_a_backtick_escape(self) -> None:
+        # The injected block continues its RUNs with backslashes, which a
+        # backtick-escaped Containerfile reads as separate instructions.
+        app = self.make_app()
+        app.config.brew_enabled = True
+        with self.assertRaisesRegex(CommandError, r"escape character to ` with an '# escape=' parser directive"):
+            app.render_containerfile("# escape=`\nFROM ghcr.io/ublue-os/bazzite:stable\nRUN /ctx/build.sh\n")
 
     # ── state file must not publish the host inventory ──────────────────
 

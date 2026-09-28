@@ -782,3 +782,46 @@ the fix is in the managed repo, not here -- replace the link with a regular
 file or directory and run the update again. There is no legitimate reason
 for a managed file to be a link; a repo that has one is telling us something
 has gone wrong with it.
+
+
+Containerfile Patcher: Which FROM Is the Published Stage
+--------------------------------------------------------
+render_containerfile() rewrites the base image of, and adds or removes the
+Homebrew block in, the last stage of an existing Containerfile, because that
+is the stage that gets built and published (#522). Which physical line is the
+last FROM is decided by containerfile_from_indices(), and it has to read the
+file the way BuildKit's frontend/dockerfile/parser does: a line that merely
+starts with "FROM" -- a continuation line, a heredoc body such as a Python
+`from x import y` -- is not a stage, and counting one rewrites the wrong line
+while the published image keeps its old base.
+
+The rules it follows, all from BuildKit's parser:
+
+  - The line-continuation character is the escape character: a backslash,
+    or a backtick when the file opens with an `# escape=`` ` parser
+    directive. containerfile_escape() reads it. Directives count only in the
+    unbroken run of `# key=value` lines (escape, syntax, check; key case
+    insensitive) at the very top -- a blank line, any other comment, an
+    unknown key or an instruction ends the run, and a later `# escape=` is an
+    ordinary comment.
+  - A line continues only when it ends in an unescaped escape character
+    followed by spaces or tabs; `C:\\` ends the instruction.
+  - Comment lines are dropped before continuations are joined: a comment
+    ending in the escape character continues nothing, and a comment inside a
+    continued instruction neither ends it nor extends it. Blank lines inside
+    one do not end it either.
+  - Heredocs open only in RUN, COPY and ADD, from a whole unquoted
+    `<<[-]WORD` shell word, after the whole instruction has been read. The
+    heredoc lexer always uses backslash, whatever the escape directive says.
+
+The Homebrew block this tool injects continues its RUNs with backslashes, so
+under a backtick escape it would split into separate (invalid) instructions.
+render_containerfile() therefore raises CommandError when brew_enabled is on
+and the file sets `# escape=`` `, before anything is diffed or pushed. With
+Homebrew off, an existing block is still found and removed using the file's
+own continuation character.
+
+Action required: none on a schedule. If BuildKit's parser changes these rules
+(parser.go, directives.go), update containerfile_escape() and
+containerfile_from_indices() together; the render_containerfile tests in
+tests/test_atomic_image_builder.py cover each rule through the real patch path.
