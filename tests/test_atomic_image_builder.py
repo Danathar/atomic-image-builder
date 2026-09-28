@@ -2229,6 +2229,32 @@ class BuilderTests(unittest.TestCase):
             {"on": {"push": {"branches-ignore": ["dependabot/**"]}, "pull_request": {"branches": ["master"]}}},
         )
 
+    def test_branch_filters_find_the_triggers_under_a_quoted_on_key(self) -> None:
+        # `"on":`, `'on':` and `on :` are the same key to YAML and to Actions.
+        # Scoping the patch to a literal `on:` skipped every trigger under
+        # them, so a default-branch switch left both workflow types building
+        # the old branch, and reported nothing.
+        cases = (
+            (self.make_app(), CONTAINERFILE_TEMPLATE_DIR, "patch_container_workflow"),
+            (self.make_bluebuild_app(), BLUEBUILD_TEMPLATE_DIR, "patch_bluebuild_workflow"),
+        )
+        for app, template_dir, method in cases:
+            patch = getattr(app, method)
+            # The workflow a repository generated on `main` carries.
+            snapshot = (template_dir / ".github" / "workflows" / "build.yml").read_text()
+            generated = patch(snapshot, default_branch="main")
+            self.assertEqual(generated.count("\non:\n"), 1)
+            self.assertEqual(generated.count("    branches:\n      - main\n"), 2)
+            for spelling in ('"on":', "'on':", "on :", '"on" : # triggers'):
+                with self.subTest(method=method, spelling=spelling):
+                    quoted = generated.replace("\non:\n", f"\n{spelling}\n")
+                    patched = patch(quoted, default_branch="master")
+                    self.assertIn(f"\n{spelling}\n", patched)
+                    self.assertIn("  pull_request:\n    branches:\n      - master\n", patched)
+                    self.assertIn("  push:\n    branches:\n      - master\n", patched)
+                    self.assertNotIn("      - main\n", patched)
+                    self.assertEqual(patch(patched, default_branch="master"), patched)
+
     def test_branch_filters_quote_a_default_branch_yaml_would_misread(self) -> None:
         # `#main` is a comment and `null` is not a string when written bare;
         # both are legal branch names. An ordinary name stays unquoted.
@@ -15823,6 +15849,19 @@ class BuilderTests(unittest.TestCase):
             "on:\n  push:\n    paths-ignore:\n      - './README.md'\n"
         )
         self.assertIn("      - 'README.md'\n", result)
+
+    def test_patch_workflow_path_filters_finds_a_quoted_on_block(self) -> None:
+        # `"on":` is the same trigger block as `on:`; matching only the bare
+        # spelling left its invalid './' filters in place.
+        app = self.make_app()
+        for spelling in ('"on":', "'on':", "on :"):
+            with self.subTest(spelling=spelling):
+                workflow_text = f"{spelling}\n  pull_request:\n    paths:\n      - './disk_config/disk.toml'\n"
+                result = app.patch_workflow_path_filters(workflow_text)
+                self.assertIn(f"{spelling}\n", result)
+                self.assertIn("      - 'disk_config/disk.toml'\n", result)
+                self.assertNotIn("'./", result)
+                self.assertEqual(app.patch_workflow_path_filters(result), result)
 
     def test_generated_disk_workflow_filters_name_files_that_exist(self) -> None:
         # The filters are only worth fixing if they point at something. Every

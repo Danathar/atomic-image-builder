@@ -1492,6 +1492,21 @@ def workflow_block_key(stripped_line: str) -> str | None:
     return match.group(1) if match else None
 
 
+# The top-level `on:` key opening the trigger block, in every spelling YAML
+# and Actions read as that one key: `on:`, `"on":`, `'on':` and `on :`.
+WORKFLOW_ON_BLOCK_RE = re.compile(r"""^(?:on|"on"|'on')\s*:\s*(?:#.*)?$""")
+
+
+def is_workflow_on_block(stripped_line: str) -> bool:
+    """Whether a top-level line opens the workflow's trigger block.
+
+    workflow_block_key() knows only the bare spelling, and a patcher scoped to
+    the `on:` block through it silently skips every trigger under `"on":`,
+    which an owner's editor or YAML dumper may well write.
+    """
+    return WORKFLOW_ON_BLOCK_RE.match(stripped_line) is not None
+
+
 def block_sequence_entry_indent(lines: list[str], key_index: int) -> str:
     """Indent for a new entry in the block sequence under ``lines[key_index]``.
 
@@ -6138,7 +6153,7 @@ class App:
             stripped = line.strip()
             indent = len(line) - len(line.lstrip())
             if stripped and indent == 0:
-                in_triggers = workflow_block_key(stripped) == "on"
+                in_triggers = is_workflow_on_block(stripped)
                 filter_indent = None
                 output.append(line)
                 continue
@@ -6391,7 +6406,7 @@ class App:
                 output.append(line)
                 continue
             if indent == 0:
-                in_triggers = workflow_block_key(stripped) == "on"
+                in_triggers = is_workflow_on_block(stripped)
                 trigger_indent = None
                 output.append(line)
                 continue
