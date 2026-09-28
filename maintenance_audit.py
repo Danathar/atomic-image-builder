@@ -332,17 +332,29 @@ def describe_snapshot_drift(source: TemplateSource, head: str) -> SnapshotDrift:
     return SnapshotDrift(f"{prefix}, on a diverged history. Review both before refreshing.", False)
 
 
+def check_upstream_drift(source: TemplateSource) -> SnapshotDrift | None:
+    """Compare one bundled snapshot with its upstream HEAD; None when they match.
+
+    Raises RuntimeError when the upstream cannot be queried. Callers decide what
+    "could not check" means to them: the audit reports it as an advisory, and
+    snapshot_drift_issue.py must not read it as drift in either direction.
+    """
+    head = query_remote_head(source.repo)
+    if head == source.revision:
+        return None
+    return describe_snapshot_drift(source, head)
+
+
 def audit_upstream_drift(source: TemplateSource) -> tuple[list[str], list[str]]:
     """Return (failures, advisories) for one bundled template snapshot."""
     try:
-        head = query_remote_head(source.repo)
+        drift = check_upstream_drift(source)
     except RuntimeError as exc:
         # Being unable to check is not an inconsistency, and an unreachable
         # upstream must not fail the weekly job.
         return [], [f"Unable to query upstream template HEAD for {source.repo}: {exc}"]
-    if head == source.revision:
+    if drift is None:
         return [], []
-    drift = describe_snapshot_drift(source, head)
     return ([drift.message], []) if drift.blocking else ([], [drift.message])
 
 
