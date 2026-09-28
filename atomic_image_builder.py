@@ -249,6 +249,10 @@ SPAWN_VM_REBUILD_FIXED = (
     '    [ "{{ rebuild }}" -eq 1 ] && echo "Rebuilding the {{ type }} image" && just rebuild-{{ type }}'
 )
 FROM_LINE_RE = re.compile(r"^(\s*FROM(?:\s+--platform=\S+)?\s+)(\S+)(.*)$", flags=re.IGNORECASE)
+FROM_STAGE_NAME_RE = re.compile(r"^\s+AS\s+(\S+)", flags=re.IGNORECASE)
+# A Dockerfile heredoc opener: <<EOF, <<-EOF, <<"EOF" or <<'EOF'. The
+# lookarounds keep a shell here-string (<<<) from reading as one.
+CONTAINERFILE_HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)(-?)([\"']?)([A-Za-z_][A-Za-z0-9_]*)\2")
 INSTALLER_SWITCH_RE = re.compile(r"^(\s*bootc switch --mutate-in-place --transport registry )(\S+)(.*)$")
 INSTALLER_UNVERIFIED_SWITCH_COMMENT = (
     "# Signature enforcement is deliberately omitted for this installer switch:",
@@ -698,6 +702,41 @@ def yaml_scalar(value: str) -> str:
 
 def ensure_trailing_newline(text: str) -> str:
     return text.rstrip("\n") + "\n"
+
+
+def containerfile_from_indices(lines: list[str]) -> list[int]:
+    """Indices of the lines that are FROM instructions, in order.
+
+    A line that merely looks like one is skipped when it is the continuation
+    of the instruction above it or part of a heredoc body -- a Python
+    "from x import y" written by a RUN heredoc matches FROM_LINE_RE, and the
+    last FROM decides which stage is published, so it must not count.
+    """
+    indices: list[int] = []
+    continuing = False
+    pending: list[tuple[str, bool]] = []
+    heredocs: list[tuple[str, bool]] = []
+    for index, line in enumerate(lines):
+        if heredocs:
+            name, strip_tabs = heredocs[0]
+            if (line.lstrip("\t") if strip_tabs else line) == name:
+                heredocs.pop(0)
+            continue
+        stripped = line.strip()
+        if continuing and (not stripped or stripped.startswith("#")):
+            # The parser skips blank and comment lines inside a continued
+            # instruction without ending it.
+            continue
+        if not continuing and FROM_LINE_RE.match(line):
+            indices.append(index)
+        if not stripped.startswith("#"):
+            pending.extend(
+                (match.group(3), match.group(1) == "-") for match in CONTAINERFILE_HEREDOC_RE.finditer(line)
+            )
+        continuing = line.rstrip().endswith("\\")
+        if not continuing:
+            heredocs, pending = pending, []
+    return indices
 
 
 def normalize_container_image_reference(container_ref: str) -> str:
@@ -5742,26 +5781,44 @@ class App:
         # If the template already has a Containerfile, replace the FROM line and
         # inject or remove the brew block so we preserve upstream formatting and
         # comments where possible.
-        if existing_text:
-            lines = existing_text.splitlines()
-            for index, line in enumerate(lines):
-                match = FROM_LINE_RE.match(line)
-                if not match:
-                    continue
-                prefix, image, suffix = match.groups()
-                if image.lower() == "scratch":
-                    continue
-                lines[index] = f"{prefix}{self.config.base_image_uri}{suffix}"
-                lines = self._patch_brew_block(lines, from_index=index)
-                return ensure_trailing_newline("\n".join(lines))
+        if not existing_text:
+            return self.generate_containerfile()
+        lines = existing_text.splitlines()
+        from_indices = containerfile_from_indices(lines)
+        if not from_indices:
             return ensure_trailing_newline(existing_text)
-        return self.generate_containerfile()
+        # The last stage is the image that gets built and published. Patching
+        # the first non-scratch FROM instead rebased a builder stage added
+        # ahead of it and gave it Homebrew, while the published stage kept its
+        # old base -- a change that looks like a normal edit in the diff (#522).
+        stage_names: set[str] = set()
+        for index in from_indices[:-1]:
+            stage = FROM_STAGE_NAME_RE.match(FROM_LINE_RE.match(lines[index]).group(3))
+            if stage:
+                stage_names.add(stage.group(1).lower())
+        index = from_indices[-1]
+        prefix, image, suffix = FROM_LINE_RE.match(lines[index]).groups()
+        if image.lower() == "scratch" or image.lower() in stage_names:
+            # Rewriting this FROM would discard the stage it builds on, and
+            # rewriting any other would not change the published image. Stop
+            # before anything is diffed or pushed.
+            raise CommandError(
+                f"The Containerfile's final stage (line {index + 1}: {lines[index].strip()}) does not "
+                "start from a registry image, so the chosen base image and Homebrew setting cannot be "
+                "applied to the image that gets published. Make the last FROM name the base image directly."
+            )
+        lines[index] = f"{prefix}{self.config.base_image_uri}{suffix}"
+        lines = self._patch_brew_block(lines, from_index=index)
+        return ensure_trailing_newline("\n".join(lines))
 
     def _patch_brew_block(self, lines: list[str], *, from_index: int) -> list[str]:
         # Find existing brew COPY line if present.
         brew_start: int | None = None
         brew_end: int | None = None
-        for i, line in enumerate(lines):
+        # Only the stage that FROM opens is searched: a block in an earlier
+        # stage is not in the published image, so it is not the one to update.
+        for i in range(from_index + 1, len(lines)):
+            line = lines[i]
             if line.strip().startswith("COPY --from=") and "brew" in line.lower() and "/system_files" in line:
                 brew_start = i
                 # The block is the COPY plus the RUNs that depend on what it

@@ -12047,6 +12047,110 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("RUN /ctx/build.sh", result)
         self.assertLess(result.index("system_files"), result.index("/ctx/build.sh"))
 
+    def snapshot_containerfile_with_builder_stage(self) -> str:
+        # The bundled snapshot with a builder stage added ahead of the stage
+        # that gets published, the way a user might extend a managed repo.
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / "Containerfile").read_text()
+        self.assertEqual(snapshot.count("\n# Base Image\n"), 1)
+        return snapshot.replace(
+            "\n# Base Image\n",
+            "\nFROM docker.io/library/golang:1.24 AS builder\nRUN go install example.com/tool@latest\n\n# Base Image\n",
+        )
+
+    def test_update_rebases_the_final_stage_not_a_builder_stage_ahead_of_it(self) -> None:
+        # #522: the first non-scratch FROM was rewritten, so the builder was
+        # rebased onto the chosen image and given Homebrew while the image
+        # that gets published kept its old base and had none.
+        app = self.make_app()
+        app.config.base_image_uri = "ghcr.io/ublue-os/aurora:stable"
+        app.config.brew_enabled = True
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / "Containerfile").write_text(self.snapshot_containerfile_with_builder_stage())
+            app.write_project_files(repo_dir, include_workflow=False)
+            result = (repo_dir / "Containerfile").read_text()
+        instructions = parse_containerfile(result)
+        froms = [(i.image, i.stage) for i in instructions if i.keyword == "FROM"]
+        self.assertEqual(
+            froms,
+            [("scratch", "ctx"), ("docker.io/library/golang:1.24", "builder"), ("ghcr.io/ublue-os/aurora:stable", None)],
+        )
+        final_from = max(n for n, i in enumerate(instructions) if i.keyword == "FROM")
+        brew_copies = [
+            n for n, i in enumerate(instructions) if i.keyword == "COPY" and i.flags == (f"--from={UNIVERSAL_BLUE_BREW_IMAGE}",)
+        ]
+        self.assertEqual(brew_copies, [final_from + 1])
+        build_run = next(n for n, i in enumerate(instructions) if i.keyword == "RUN" and i.argument.endswith("/ctx/build.sh"))
+        self.assertLess(brew_copies[0], build_run)
+        self.assertEqual(app.render_containerfile(result), result)
+
+    def test_render_containerfile_disabling_brew_removes_the_final_stage_block(self) -> None:
+        app = self.make_app()
+        app.config.brew_enabled = True
+        with_brew = app.render_containerfile(self.snapshot_containerfile_with_builder_stage())
+        app.config.brew_enabled = False
+        without = app.render_containerfile(with_brew)
+        self.assertNotIn("brew", without.lower())
+        self.assertIn("FROM docker.io/library/golang:1.24 AS builder", without)
+
+    def test_render_containerfile_gives_the_final_stage_brew_when_only_an_earlier_stage_has_it(self) -> None:
+        # A repo already updated by the #522 bug carries the brew block in its
+        # builder stage. Enabling Homebrew must put a block in the published
+        # stage, not refresh the one in a stage that is never published.
+        app = self.make_app()
+        app.config.brew_enabled = True
+        existing = textwrap.dedent("""\
+            FROM ghcr.io/ublue-os/bazzite:stable AS builder
+            COPY --from=ghcr.io/ublue-os/brew:old-tag /system_files /
+
+            FROM ghcr.io/ublue-os/bazzite:stable
+            RUN /ctx/build.sh
+        """)
+        result = app.render_containerfile(existing)
+        final_stage = result[result.index("FROM ghcr.io/ublue-os/bazzite:stable\n") :]
+        self.assertIn(f"COPY --from={UNIVERSAL_BLUE_BREW_IMAGE} /system_files /", final_stage)
+        self.assertLess(final_stage.index("system_files"), final_stage.index("/ctx/build.sh"))
+
+    def test_render_containerfile_fails_closed_when_the_final_stage_has_no_registry_base(self) -> None:
+        # Rewriting a final "FROM scratch" or "FROM <earlier stage>" would
+        # throw away what it builds on; rewriting any other FROM would not
+        # change the published image. Either way the update must stop.
+        app = self.make_app()
+        app.config.brew_enabled = True
+        cases = {
+            "scratch": "FROM ghcr.io/ublue-os/bazzite:stable AS base\nRUN /ctx/build.sh\n\nFROM scratch\nCOPY --from=base / /\n",
+            "stage": "FROM ghcr.io/ublue-os/bazzite:stable AS Base\nRUN /ctx/build.sh\n\nFROM base\nRUN bootc container lint\n",
+        }
+        for name, existing in cases.items():
+            with self.subTest(name), self.assertRaisesRegex(CommandError, r"final stage \(line 4: FROM "):
+                app.render_containerfile(existing)
+
+    def test_render_containerfile_ignores_from_lookalikes_in_continuations_and_heredocs(self) -> None:
+        # Only a FROM instruction starts a stage. A continuation line or a
+        # heredoc body that happens to begin with "from" is part of a RUN, and
+        # a shell here-string (<<<) opens no heredoc to skip over.
+        app = self.make_app()
+        app.config.base_image_uri = "ghcr.io/ublue-os/aurora:stable"
+        existing = textwrap.dedent("""\
+            FROM docker.io/library/golang:1.24 AS builder
+            RUN cat <<<"hello"
+
+            FROM ghcr.io/ublue-os/bazzite:stable
+            RUN echo \\
+                from here
+            RUN <<EOF
+            from os import path
+            EOF
+            RUN python3 - <<-'PY'
+            \tfrom sys import argv
+            \tPY
+        """)
+        result = app.render_containerfile(existing)
+        self.assertEqual(
+            result,
+            existing.replace("FROM ghcr.io/ublue-os/bazzite:stable", "FROM ghcr.io/ublue-os/aurora:stable"),
+        )
+
     # ── state file must not publish the host inventory ──────────────────
 
     def scanned_app(self) -> App:
