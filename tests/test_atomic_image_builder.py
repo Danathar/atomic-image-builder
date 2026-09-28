@@ -10614,6 +10614,57 @@ class BuilderTests(unittest.TestCase):
         self.assertIn(f"{'blank':<30} (no description)", seen_options)
         self.assertIn(f"{'multiline':<30} first line second line", seen_options)
 
+    def test_select_repo_finds_a_managed_repo_past_the_100_most_recent(self) -> None:
+        # gh repo list --limit is a cap. At 100, a managed repo at position 120
+        # never reached the state-file check, and the picker said the account
+        # had no managed repos at all (#510).
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        account = [{"name": f"repo-{i}", "description": None} for i in range(150)]
+        seen_options: list[str] = []
+
+        def fake_gh_repo_list(_title, args):
+            limit = int(args[args.index("--limit") + 1])
+            return account[:limit]
+
+        def fake_filter(options, **_kwargs):
+            seen_options.extend(options)
+            return options[0]
+
+        stub = GumStub()
+        stub.filter = fake_filter
+        app.gum = stub
+        with patch.object(app, "gh_json_with_spinner", side_effect=fake_gh_repo_list):
+            with patch.object(app, "batch_check_state_files", side_effect=lambda _owner, repos: {r["name"] for r in repos} & {"repo-120"}):
+                self.assertEqual(app.select_repo(require_state_file=True), ("example", "repo-120"))
+        self.assertFalse([m for level, m in stub.messages if level == "warn"])
+
+    def test_select_repo_says_the_list_was_capped_instead_of_none_found(self) -> None:
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        stub = GumStub()
+        stub.filter = lambda options, **_kwargs: options[-1]
+        stub.input = lambda **_kwargs: ""
+        app.gum = stub
+        capped = [{"name": f"repo-{i}", "description": None} for i in range(atomic_image_builder.REPO_LIST_LIMIT)]
+        calls = iter([capped])
+
+        def fake_fetch(_title, _args):
+            try:
+                return next(calls)
+            except StopIteration:
+                raise ScreenBack() from None
+
+        with patch.object(app, "gh_json_with_spinner", side_effect=fake_fetch):
+            with patch.object(app, "batch_check_state_files", return_value=set()):
+                with self.assertRaises(ScreenBack):
+                    app.select_repo(require_state_file=True)
+        warnings = " ".join(m for level, m in stub.messages if level == "warn")
+        self.assertIn(f"Only the {atomic_image_builder.REPO_LIST_LIMIT} most recent", warnings)
+        self.assertNotIn("couldn't find any", warnings)
+
     def test_select_repo_backs_out_when_github_is_not_available(self) -> None:
         # require_github() gates every entry into the picker; when it returns
         # False (e.g. gh missing or the user declines login) select_repo must
@@ -16591,6 +16642,37 @@ class BuilderTests(unittest.TestCase):
         )):
             found = app.batch_check_state_files("testuser", repos)
         self.assertEqual(found, {"repo-a", "repo-c"})
+
+    def test_batch_check_state_files_splits_a_long_list_across_queries(self) -> None:
+        """Every repo is checked, a bounded number of aliases per query (#510)."""
+        app = self.make_app()
+        repos = [{"name": f"repo-{i}"} for i in range(250)]
+        queries: list[str] = []
+
+        def fake_run(args, **_kwargs):
+            query = args[-1]
+            queries.append(query)
+            aliases = re.findall(r"(r\d+): repository\(owner: \"testuser\", name: \"([^\"]+)\"\)", query)
+            data = {alias: {"object": {"id": "x"}} if name in {"repo-0", "repo-120", "repo-249"} else None for alias, name in aliases}
+            return subprocess.CompletedProcess(args, 0, json.dumps({"data": data}), "")
+
+        with patch("atomic_image_builder.run", side_effect=fake_run):
+            found = app.batch_check_state_files("testuser", repos)
+
+        self.assertEqual(found, {"repo-0", "repo-120", "repo-249"})
+        self.assertEqual(len(queries), 3)
+        self.assertTrue(all(query.count(": repository(") <= atomic_image_builder.STATE_FILE_QUERY_BATCH for query in queries))
+
+    def test_batch_check_state_files_falls_back_only_for_the_batch_that_failed(self) -> None:
+        app = self.make_app()
+        repos = [{"name": f"repo-{i}"} for i in range(atomic_image_builder.STATE_FILE_QUERY_BATCH + 2)]
+        ok = json.dumps({"data": {"r0": {"object": {"id": "x"}}}})
+        results = [subprocess.CompletedProcess(["gh"], 0, ok, ""), subprocess.CompletedProcess(["gh"], 1, "", "boom")]
+        with patch("atomic_image_builder.run", side_effect=results):
+            with patch.object(app, "repo_has_state_file", side_effect=[False, True]) as rest_mock:
+                found = app.batch_check_state_files("testuser", repos)
+        self.assertEqual(found, {"repo-0", f"repo-{atomic_image_builder.STATE_FILE_QUERY_BATCH + 1}"})
+        self.assertEqual(rest_mock.call_count, 2)
 
     def test_batch_check_state_files_graphql_empty_object(self) -> None:
         """A repo where 'object' is null is not included in results."""

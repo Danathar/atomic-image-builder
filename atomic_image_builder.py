@@ -51,6 +51,15 @@ TOOL_SLUG = "atomic-image-builder"
 # tell which one they were running.
 TOOL_COMMAND = "aib-tool"
 STATE_FILE = f".{TOOL_SLUG}.json"
+# `gh repo list --limit N` is a cap, not a page size: gh pages on its own
+# until it has N repos. At 100 an account with more repos than that lost every
+# managed repo past the 100 most recent, and the picker then said none
+# existed. This means "every repo" for any real account while still bounding
+# a pathological one.
+REPO_LIST_LIMIT = 10000
+# Repos checked per GraphQL query in batch_check_state_files. One alias per
+# repo; a few thousand in a single query would run into GitHub's query limits.
+STATE_FILE_QUERY_BATCH = 100
 DEFAULT_REPO_NAME = "my-atomic-image"
 # Said the same way wherever a name is refused, because the wizard's field
 # error and validate_config()'s final gate are the same rule.
@@ -4648,8 +4657,13 @@ class App:
         Falls back to serial REST calls if GraphQL fails (e.g. token scopes).
         Returns a set of repo names that have the state file.
         """
-        if not repos:
-            return set()
+        found: set[str] = set()
+        for start in range(0, len(repos), STATE_FILE_QUERY_BATCH):
+            found |= self._check_state_file_batch(owner, repos[start : start + STATE_FILE_QUERY_BATCH])
+        return found
+
+    def _check_state_file_batch(self, owner: str, repos: list[dict[str, str]]) -> set[str]:
+        """One GraphQL query for batch_check_state_files, REST if it fails."""
         # GraphQL aliases must start with a letter and contain only [A-Za-z0-9_]
         alias_map: dict[str, str] = {}
         for i, item in enumerate(repos):
@@ -5763,7 +5777,7 @@ class App:
             try:
                 repo_data = self.gh_json_with_spinner(
                     "Fetching repositories from GitHub...",
-                    ["repo", "list", self.github_user, "--json", "name,description", "--limit", "100"],
+                    ["repo", "list", self.github_user, "--json", "name,description", "--limit", str(REPO_LIST_LIMIT)],
                 )
             except (CommandError, json.JSONDecodeError):
                 self.gum.warn("I couldn't load your repository list from GitHub right now.")
@@ -5779,7 +5793,12 @@ class App:
                 self.gum.hint("Checking which repos were created by this tool...")
                 managed = self.batch_check_state_files(self.github_user, repos)
                 visible_repos = [item for item in repos if item["name"] in managed]
-            if not visible_repos:
+            if len(repos) >= REPO_LIST_LIMIT:
+                # gh stopped at the cap, so a repo may be missing from the
+                # list below; say so rather than let "none found" stand as fact.
+                self.gum.warn(f"Only the {REPO_LIST_LIMIT} most recent repositories on your account were checked.")
+                self.gum.hint("If yours is not listed, type its name manually.")
+            elif not visible_repos:
                 if require_state_file:
                     self.gum.warn("I couldn't find any GitHub repos on your account that were created by this tool yet.")
                     self.gum.hint("Type a repository name manually if you know one, or press Esc to go back.")
