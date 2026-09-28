@@ -120,6 +120,15 @@ set -euo pipefail
 AIB_PUBLISHED_REPO="ghcr.io/danathar/atomic-image-builder"
 AIB_IMAGE="${AIB_IMAGE:-$AIB_PUBLISHED_REPO:latest}"
 
+# What every remedy below runs. A remedy is a whole line to paste (see the
+# GitHub auth block for why), so an AIB_IMAGE other than the default has to
+# be repeated in it: a pin set inline lasts only for the command it was typed
+# on, and a pasted line without it silently runs :latest instead.
+aib_command="aib"
+if [ "$AIB_IMAGE" != "$AIB_PUBLISHED_REPO:latest" ]; then
+    printf -v aib_command 'AIB_IMAGE=%q aib' "$AIB_IMAGE"
+fi
+
 # Byte-identical to the invocation in docs/installing.md, and to what
 # publish-image.yml signs with. The refs/(heads/main|tags/.+) alternation is
 # load-bearing: :latest is signed from a push to main, but a release is
@@ -151,7 +160,7 @@ verify_image="$publishes_this_image"
 if [ -n "${AIB_SKIP_VERIFY:-}" ] && [ "$verify_image" = yes ]; then
     echo "aib: WARNING - AIB_SKIP_VERIFY is set, so who built this image is not" >&2
     echo "aib: being checked. To check it first, copy this:" >&2
-    echo "aib:   env -u AIB_SKIP_VERIFY aib" >&2
+    echo "aib:   env -u AIB_SKIP_VERIFY $aib_command" >&2
     verify_image=no
 fi
 
@@ -192,7 +201,7 @@ else
         fi
         echo "aib:   brew install cosign" >&2
         echo "aib: Or skip the check -- an unchecked image gets no GitHub login:" >&2
-        echo "aib:   AIB_SKIP_VERIFY=1 aib" >&2
+        echo "aib:   AIB_SKIP_VERIFY=1 $aib_command" >&2
         exit 1
     fi
 
@@ -200,11 +209,35 @@ else
     # digest. Failing closed here is deliberate: a pull failure is also how an
     # offline run arrives, and running an unverified image is not the right
     # default for either.
-    if ! podman pull --quiet "$AIB_IMAGE" >/dev/null; then
+    #
+    # A registry that answers "no such image" is not an offline host, and
+    # pointing an online user at the unchecked escape hatch for a mistyped
+    # tag would be the wrong advice. podman's own error is still shown; the
+    # registry codes are what tell the two apart.
+    if ! pull_error="$(podman pull --quiet "$AIB_IMAGE" 2>&1 >/dev/null)"; then
+        [ -n "$pull_error" ] && printf '%s\n' "$pull_error" >&2
+        case "$pull_error" in
+            *"manifest unknown"* | *"name unknown"* | *MANIFEST_UNKNOWN* | *NAME_UNKNOWN*)
+                echo "aib: the registry has no image by this name, so there is nothing to run:" >&2
+                echo "aib:   $AIB_IMAGE" >&2
+                # Release tags are the bare version (:1.2.3), while the git
+                # tags they are built from carry a v, so :v1.2.3 is the
+                # likeliest way to get here.
+                release_tag="${AIB_IMAGE#"$AIB_PUBLISHED_REPO":v}"
+                if [ "$release_tag" != "$AIB_IMAGE" ] && [[ "$release_tag" =~ ^[0-9] ]]; then
+                    echo "aib: Release tags have no leading v. To run that release, copy this:" >&2
+                    printf 'aib:   AIB_IMAGE=%q aib\n' "$AIB_PUBLISHED_REPO:$release_tag" >&2
+                else
+                    echo "aib: To run the official image instead, copy this:" >&2
+                    echo "aib:   env -u AIB_IMAGE aib" >&2
+                fi
+                exit 1
+                ;;
+        esac
         echo "aib: could not download this image, so there is no way to check who built it:" >&2
         echo "aib:   $AIB_IMAGE" >&2
         echo "aib: Offline? Run an already-downloaded copy -- it gets no GitHub login:" >&2
-        echo "aib:   AIB_SKIP_VERIFY=1 aib" >&2
+        echo "aib:   AIB_SKIP_VERIFY=1 $aib_command" >&2
         exit 1
     fi
 
@@ -325,7 +358,7 @@ if [ "$forward_auth" = no ]; then
         # as two separate problems.
         echo "aib: An unchecked image also gets no GitHub login, so the steps that reach" >&2
         echo "aib: GitHub will fail. To run it unchecked and send your login anyway:" >&2
-        echo "aib:   AIB_ALLOW_UNVERIFIED_AUTH=1 AIB_SKIP_VERIFY=1 aib" >&2
+        echo "aib:   AIB_ALLOW_UNVERIFIED_AUTH=1 AIB_SKIP_VERIFY=1 $aib_command" >&2
     else
         echo "aib: This image is not published by this project, so there is no way" >&2
         echo "aib: to check who built it, and it gets no GitHub login:" >&2
@@ -333,7 +366,7 @@ if [ "$forward_auth" = no ]; then
         echo "aib: To run the official image instead, copy this:" >&2
         echo "aib:   env -u AIB_IMAGE aib" >&2
         echo "aib: Or to keep this image and send your login anyway, copy this:" >&2
-        echo "aib:   AIB_ALLOW_UNVERIFIED_AUTH=1 AIB_IMAGE=$AIB_IMAGE aib" >&2
+        echo "aib:   AIB_ALLOW_UNVERIFIED_AUTH=1 $aib_command" >&2
     fi
 # Only the active github.com account decides this: bare `gh auth status` fails
 # when any account on any host is stale, even with a working github.com login,
