@@ -81,6 +81,7 @@ from atomic_image_builder import (
     managed_path,
     normalize_container_image_reference,
     patch_cosign_compatibility,
+    patch_signing_step_block,
     patch_workflow_steps,
     pin_action_uses_line,
     pinned_action,
@@ -693,6 +694,44 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(patched.count("env.SIGNING_ENABLED == 'true'"), 2)
         self.assertIn(ACTION_PINS["sigstore/cosign-installer"][0], patched)
 
+    def test_patch_container_workflow_guards_a_step_whose_first_key_is_if(self) -> None:
+        """A compact `- if:` step keeps one `if:`, and it is the guarded one.
+
+        Key-sorted YAML puts `if` first in the step's `- ` item. The patcher
+        only recognized an `if:` on a line of its own, decided the step had
+        none, and inserted a second one into the same mapping, which Actions
+        rejects as already defined (#525). Modelled on the bundled snapshot
+        with its Install Cosign step reordered that way.
+        """
+        app = self.make_app()
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        branch_if = "github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+        uses = "        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2\n"
+        original = f"      - name: Install Cosign\n{uses}        if: {branch_if}\n"
+        self.assertIn(original, snapshot)
+        reordered = snapshot.replace(original, f"      - if: {branch_if}\n        name: Install Cosign\n{uses}")
+        patched = app.patch_container_workflow(reordered)
+        lines = patched.splitlines()
+        start = lines.index(f"      - if: {branch_if} && env.SIGNING_ENABLED == 'true'")
+        step = [lines[start]]
+        for line in lines[start + 1 :]:
+            if line.startswith("      - ") or (line.strip() and len(line) - len(line.lstrip()) < 8):
+                break
+            step.append(line)
+        self.assertEqual([line for line in step if re.match(r"\s*(?:- )?if:", line)], [step[0]])
+        self.assertEqual(app.patch_container_workflow(patched), patched)
+
+    def test_patch_signing_step_block_reads_the_if_key_in_any_spelling(self) -> None:
+        branch_if = "github.ref == 'refs/heads/main'"
+        sign_if = f"{branch_if} && env.SIGNING_ENABLED == 'true'"
+        for key in ("if :", '"if":', "'if':"):
+            with self.subTest(key=key):
+                step = ["      - name: Install Cosign", "        uses: sigstore/cosign-installer@v3", f"        {key} {branch_if}"]
+                self.assertEqual(
+                    patch_signing_step_block(step, branch_if=branch_if, sign_if=sign_if),
+                    [*step[:2], f"        {key} {sign_if}"],
+                )
+
     def test_patch_container_workflow_injects_job_env_even_when_step_env_matches(self) -> None:
         """A step-level entry must not prevent the job-level one being added.
 
@@ -1115,6 +1154,48 @@ class BuilderTests(unittest.TestCase):
             patch_cosign_compatibility(text),
             self.cosign_installer_step('          cosign-release: "v3.1.2"  # bumped by hand'),
         )
+
+    def test_patch_cosign_compatibility_raises_an_unquoted_release(self) -> None:
+        # `cosign-release: v2.2.4` is the same string as its quoted spelling.
+        # Missing it left 2.x installed while the signing step still gained
+        # flags only 2.6.0 and later accept, so `cosign sign` failed (#525).
+        for line, expected in (
+            ("          cosign-release: v2.2.4", "          cosign-release: v3.1.2"),
+            ("          cosign-release: v2.2.4  # pinned", "          cosign-release: v3.1.2  # pinned"),
+            ("          'cosign-release' : \"v2.2.4\"", "          'cosign-release' : \"v3.1.2\""),
+        ):
+            with self.subTest(line=line):
+                patched = patch_cosign_compatibility(self.cosign_installer_step(line))
+                self.assertEqual(patched, self.cosign_installer_step(expected))
+                self.assertEqual(patch_cosign_compatibility(patched), patched)
+        for release in ("v4.0.0", "main", "${{ env.COSIGN_RELEASE }}"):
+            with self.subTest(release=release):
+                text = self.cosign_installer_step(f"          cosign-release: {release}")
+                self.assertEqual(patch_cosign_compatibility(text), text)
+
+    def test_patch_container_workflow_raises_an_unquoted_release_it_adds_flags_for(self) -> None:
+        # Through the generated-repo path: the flags land only alongside a
+        # release that accepts them.
+        app = self.make_app()
+        workflow = textwrap.dedent(
+            """\
+            jobs:
+              build:
+                steps:
+                  - name: Install Cosign
+                    uses: "sigstore/cosign-installer@v3"
+                    with:
+                      cosign-release: v2.2.4
+                  - name: Sign
+                    run: cosign sign -y --key env://COSIGN_PRIVATE_KEY image:latest
+            """
+        )
+        patched = app.patch_container_workflow(workflow)
+        self.assertIn("      cosign-release: v3.1.2\n", patched)
+        self.assertNotIn("v2.2.4", patched)
+        self.assertIn("cosign sign --new-bundle-format=false --use-signing-config=false -y", patched)
+        self.assertIn(f'uses: "sigstore/cosign-installer@{ACTION_PINS["sigstore/cosign-installer"][0]}"', patched)
+        self.assertEqual(app.patch_container_workflow(patched), patched)
 
     def test_patch_cosign_compatibility_leaves_the_input_name_alone_outside_the_installer_step(self) -> None:
         # The workflow is patched in place. Text that merely mentions the
@@ -2278,6 +2359,25 @@ class BuilderTests(unittest.TestCase):
         line = "        reuses: actions/checkout@v4"
         self.assertEqual(pin_action_uses_line(line), line)
 
+    def test_pin_action_uses_line_pins_a_quoted_value_and_keeps_its_quotes(self) -> None:
+        # A quoted `uses:` value names the same action. The action group used
+        # to capture the opening quote, miss the pin tables, and leave the
+        # step on its floating tag with nothing reported (#525).
+        sha, label = ACTION_PINS["actions/checkout"]
+        for line, expected in (
+            ('        uses: "actions/checkout@v4"', f'        uses: "actions/checkout@{sha}" # {label}'),
+            ("      - uses: 'actions/checkout@v4'", f"      - uses: 'actions/checkout@{sha}' # {label}"),
+            ('        "uses" : actions/checkout@v4 # old', f'        "uses" : actions/checkout@{sha} # {label}'),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(pin_action_uses_line(line), expected)
+                self.assertEqual(pin_action_uses_line(expected), expected)
+
+    def test_pin_action_uses_line_leaves_an_unbalanced_quote_alone(self) -> None:
+        for line in ("        uses: 'actions/checkout@v4", "        uses: actions/checkout@v4'", "        uses: 'actions/checkout@v4\""):
+            with self.subTest(line=line):
+                self.assertEqual(pin_action_uses_line(line), line)
+
     def test_pin_action_uses_line_is_a_fixed_point_on_every_generated_pin(self) -> None:
         # The generator writes ACTION_PINS' label; the patcher runs over that
         # same text on every later update. If the two ever disagree on the
@@ -2469,6 +2569,34 @@ class BuilderTests(unittest.TestCase):
             result.splitlines(),
             ["jobs:", "  build:", "    env:", "      FOO: ours", "    steps: # the work", *self.READER.splitlines()],
         )
+
+    def test_ensure_workflow_job_env_entries_knows_a_key_by_name_whatever_its_spelling(self) -> None:
+        # YAML reads `"FOO":`, `'FOO':` and `FOO :` as `FOO:`, and so does
+        # Actions -- which rejects a second one as already defined. A walk
+        # that only knew the bare spelling wrote exactly that duplicate (#525).
+        for shape in ('      "FOO": theirs', "      'FOO': theirs", "      FOO : theirs"):
+            with self.subTest(shape=shape):
+                workflow_text = f"jobs:\n  build:\n    env:\n{shape}\n    steps:\n" + self.READER
+                self.assertEqual(ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")]), workflow_text)
+
+    def test_ensure_workflow_job_env_entries_extends_a_quoted_or_spaced_env_key(self) -> None:
+        # The same miss one level up: an `env:` key spelled any other way was
+        # not found, and a second `env:` was opened above `steps:`. It is
+        # extended instead, and keeps the owner's spelling.
+        for shape, header in (
+            ('    "env":', '    "env":'),
+            ("    'env': # settings", "    'env': # settings"),
+            ("    env : {}", "    env :"),
+            ('    "env": {} # nothing yet', '    "env": # nothing yet'),
+        ):
+            with self.subTest(shape=shape):
+                workflow_text = f"jobs:\n  build:\n{shape}\n    steps:\n" + self.READER
+                result = ensure_workflow_job_env_entries(workflow_text, [("FOO", "ours")])
+                self.assertEqual(
+                    result.splitlines(),
+                    ["jobs:", "  build:", header, "      FOO: ours", "    steps:", *self.READER.splitlines()],
+                )
+                self.assertEqual(ensure_workflow_job_env_entries(result, [("FOO", "ours")]), result)
 
     def test_patch_container_workflow_leaves_a_renamed_signing_secret_with_one_key(self) -> None:
         """A generated repo whose owner renamed the guard's secret keeps one key.

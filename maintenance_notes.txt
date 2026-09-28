@@ -45,6 +45,17 @@ key, which GitHub refuses to parse (#345).  An env: that already carries an
 inline value (env: { FOO: bar }) cannot take nested entries; that shape raises
 CommandError rather than writing a second env: key into the same job.
 
+Key identity is the parsed key name, never its spelling (#525).  workflow_key
+and workflow_block_key read a key bare, single- or double-quoted, and with
+whitespace before the colon, so "SIGNING_ENABLED":, 'env': and env : are the
+keys they name; patch_signing_step_block also reads the first key of a step's
+own "- " item, so a key-sorted "- if: ..." step is rewritten rather than given
+a second if:.  Action pinning and the Cosign floor go through
+yaml_key_pattern and accept a quoted uses: value and a plain (unquoted)
+cosign-release: value, and write the owner's quoting back.  Each missed
+spelling was a duplicate key GitHub rejects, a floating tag with nothing
+reported, or a Cosign 2.x install handed the 3.x signing flags.
+
 The paths-ignore state-file entry is the exception to "no match, no change":
 it is inserted as a new sequence item, so a shape mismatch corrupts the file
 rather than leaving it alone.  A managed repository may write the list inline

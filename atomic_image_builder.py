@@ -1170,21 +1170,53 @@ def pin_disk_builder_image_line(line: str) -> str | None:
     return f"{prefix}{quote}{BOOTC_IMAGE_BUILDER_IMAGE}{quote}{suffix}"
 
 
+def yaml_key_pattern(name: str) -> str:
+    """A regex fragment for the YAML key `name` and its colon, in any spelling.
+
+    `uses:`, `"uses":`, `'uses':` and `uses :` are one key to YAML and to
+    Actions. A patcher that recognizes only the first leaves the others
+    unpatched -- an action on its floating tag, a Cosign release below the
+    floor -- and reports nothing (#525).
+    """
+    escaped = re.escape(name)
+    return rf"""(?:{escaped}|"{escaped}"|'{escaped}')\s*:"""
+
+
+# A `uses:` line: an optional list dash (the compact `- uses:` step form),
+# the key in any spelling, and an `action@ref` value, bare or quoted. The
+# quote is its own group so the rewrite writes it back, and the ref stops
+# short of it so `'actions/checkout@v4'` looks up `actions/checkout`, not
+# `'actions/checkout`. Anything after the value must be whitespace-led, so
+# an unbalanced quote does not match.
+WORKFLOW_USES_LINE_RE = re.compile(
+    rf"""(\s*(?:-\s+)?{yaml_key_pattern("uses")}\s+)(['"]?)([^@\s'"]+)@([^\s#'"]+)\2((?:\s.*)?)"""
+)
+
+
+def step_uses_action(step_lines: Sequence[str], action: str) -> bool:
+    """Whether a step block runs `action`, at any ref and in any `uses:` spelling."""
+    return any(
+        match is not None and match.group(3) == action
+        for match in map(WORKFLOW_USES_LINE_RE.fullmatch, step_lines)
+    )
+
+
 def pin_action_uses_line(line: str) -> str:
     # When patching upstream workflow text, we rewrite "uses:" lines to pinned
     # SHAs. This avoids supply-chain drift if an upstream tag ever changes.
     #
-    # Both YAML spellings of a step have to be read, because this runs over
+    # Every YAML spelling of a step has to be read, because this runs over
     # workflow text written elsewhere -- upstream's snapshot, or whatever the
     # repository's owner has edited it into since. maintenance_audit's USES_RE
     # already allows for the compact `- uses:` form; a rewriter that only knew
     # the `- name:` / `uses:` form would leave a compact step on its floating
     # tag and report nothing, in a managed repository nothing audits later.
-    # The list dash is captured in the prefix so the line keeps its own shape.
-    match = re.fullmatch(r"(\s*(?:-\s+)?uses:\s+)([^@\s]+)@([^\s#]+)(.*)", line)
+    # A quoted value is the same miss (#525). The list dash and the quote are
+    # captured so the line keeps its own shape.
+    match = WORKFLOW_USES_LINE_RE.fullmatch(line)
     if not match:
         return line
-    prefix, action, _ref, suffix = match.groups()
+    prefix, quote, action, _ref, _suffix = match.groups()
     pin = ACTION_REF_PINS.get(f"{action}@{_ref}") or ACTION_PINS.get(action)
     if not pin:
         return line
@@ -1200,9 +1232,7 @@ def pin_action_uses_line(line: str) -> str:
     current = ACTION_PINS.get(action)
     if current is not None and current[0] == sha:
         label = current[1]
-    suffix = re.sub(r"\s+#.*$", "", suffix)
-    comment = f" # {label}"
-    return f"{prefix}{action}@{sha}{comment}"
+    return f"{prefix}{quote}{action}@{sha}{quote} # {label}"
 
 
 def pinned_action(action: str) -> str:
@@ -1314,7 +1344,7 @@ def strip_permission_entries(workflow_text: str, names: Sequence[str]) -> str:
 def patch_signing_step_block(step_lines: Sequence[str], *, branch_if: str, sign_if: str) -> list[str]:
     # Signing-related steps are identified by behavior rather than display
     # names so template renames do not silently bypass our signing guard.
-    is_cosign_install = any("uses:" in line and "sigstore/cosign-installer@" in line for line in step_lines)
+    is_cosign_install = step_uses_action(step_lines, "sigstore/cosign-installer")
     is_cosign_sign = any(re.search(r"\bcosign\s+sign\b", line) for line in step_lines)
     if not (is_cosign_install or is_cosign_sign):
         return list(step_lines)
@@ -1323,9 +1353,14 @@ def patch_signing_step_block(step_lines: Sequence[str], *, branch_if: str, sign_
 
     patched: list[str] = []
     has_if = False
-    for line in step_lines:
+    for index, line in enumerate(step_lines):
         stripped = line.lstrip()
-        if stripped.startswith("if: "):
+        # The key is read by name, so `if :` and `"if":` count, and so does
+        # the first key of the step's own `- ` item: key-sorted YAML writes
+        # `- if: ...` first, and missing it meant a second `if:` was inserted
+        # into the same mapping, which Actions rejects (#525).
+        key_text = re.sub(r"^-\s+", "", stripped) if index == 0 else stripped
+        if workflow_key(key_text) == "if":
             has_if = True
             # Drop the legacy clause first. Rewriting around it would leave
             # "... && env.SIGNING_ENABLED == 'true' && env.COSIGN_PRIVATE_KEY != ''",
@@ -1431,10 +1466,23 @@ def patch_workflow_signing_steps(workflow_text: str, *, branch_if: str, sign_if:
     )
 
 
-# A YAML mapping key, with or without an inline comment after it:
+# A YAML mapping key, bare or quoted in either style, with optional
+# whitespace before the colon. Each spelling is its own group; the key name
+# is whichever one matched.
 #   push:
 #   workflow_dispatch: # allow manually triggering builds
-WORKFLOW_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.-]*):(\s|$)")
+#   "SIGNING_ENABLED": ...
+#   'build_push':
+#   env :
+WORKFLOW_KEY_PATTERN = r"""(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_.-]*))\s*:"""
+WORKFLOW_KEY_RE = re.compile(rf"^{WORKFLOW_KEY_PATTERN}(?=\s|$)")
+
+
+def workflow_key_name(match: re.Match[str] | None) -> str | None:
+    """The key a WORKFLOW_KEY_PATTERN match names, without its quotes."""
+    if match is None:
+        return None
+    return next(group for group in match.groups()[:3] if group is not None)
 
 
 def workflow_key(stripped_line: str) -> str | None:
@@ -1442,20 +1490,23 @@ def workflow_key(stripped_line: str) -> str | None:
 
     Comparing against a literal "push:" misses the equally valid
     "push: # only the default branch", and the bundled snapshots do carry
-    inline comments on trigger keys.
+    inline comments on trigger keys. It misses `"SIGNING_ENABLED":`,
+    `'env':` and `env :` too, all of which YAML reads as the same key, and a
+    patcher that decides a key is absent writes a second one beside it --
+    which Actions rejects outright (#525). So the key is compared by the
+    name it parses to, never by its spelling.
 
     This deliberately also matches keys carrying an inline value, such as
     "push: { branches: [main] }" - a sibling key with a value still ends the
     previous trigger's block. Use workflow_block_key() when deciding whether a
     key opens a block that nested lines may be appended under.
     """
-    match = WORKFLOW_KEY_RE.match(stripped_line)
-    return match.group(1) if match else None
+    return workflow_key_name(WORKFLOW_KEY_RE.match(stripped_line))
 
 
 # Like WORKFLOW_KEY_RE, but only when nothing follows the colon except an
 # optional inline comment - i.e. the key opens a block mapping.
-WORKFLOW_BLOCK_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.-]*):\s*(?:#.*)?$")
+WORKFLOW_BLOCK_KEY_RE = re.compile(rf"^{WORKFLOW_KEY_PATTERN}\s*(?:#.*)?$")
 
 
 def workflow_block_key(stripped_line: str) -> str | None:
@@ -1466,9 +1517,14 @@ def workflow_block_key(stripped_line: str) -> str | None:
     when the key has no value of its own: "push: { branches: [main] }" already
     carries an inline flow mapping, and writing "branches:" beneath it produces
     a YAML parse error, not a patched workflow.
+
+    Quoted keys count here as they do there. A quoted job ID such as
+    `"build_push":` is legal and some owners' editors emit it; a walk that
+    did not see it dropped the whole job from workflow_job_ranges(), its
+    guards still got rewritten to test env.SIGNING_ENABLED, no job was found
+    to define the variable in, and the image shipped unsigned on a green run.
     """
-    match = WORKFLOW_BLOCK_KEY_RE.match(stripped_line)
-    return match.group(1) if match else None
+    return workflow_key_name(WORKFLOW_BLOCK_KEY_RE.match(stripped_line))
 
 
 def block_sequence_entry_indent(lines: list[str], key_index: int) -> str:
@@ -1535,10 +1591,17 @@ def extend_flow_sequence_line(line: str, item: str) -> str | None:
 # choice and stays. The bundled snapshot pins this same version.
 COSIGN_COMPATIBILITY_FLOOR = "v3.1.2"
 # A whole line that is the `cosign-release:` input: the key at the start of
-# the line, a quoted value, and nothing after it but an optional comment.
-# Anchoring both ends is what keeps a shell line that merely mentions the
-# input -- `run: echo "cosign-release: '2.6.3'"` -- from being rewritten.
-COSIGN_RELEASE_LINE_RE = re.compile(r"^(\s*cosign-release:\s*)(['\"])([^'\"]*)\2(\s*(?:#.*)?)$")
+# the line, in any spelling, a value, and nothing after it but an optional
+# comment. Anchoring both ends is what keeps a shell line that merely
+# mentions the input -- `run: echo "cosign-release: '2.6.3'"` -- from being
+# rewritten. The value may be quoted or plain: `cosign-release: v2.2.4` is
+# the same string, and missing it left the release below the floor while
+# the signing step still gained flags that release rejects (#525).
+COSIGN_RELEASE_LINE_RE = re.compile(
+    rf"""^(?P<prefix>\s*{yaml_key_pattern("cosign-release")}\s*)"""
+    r"""(?:(?P<quote>['"])(?P<quoted>[^'"]*)(?P=quote)|(?P<plain>[^\s'"#]\S*))"""
+    r"""(?P<suffix>\s*(?:#.*)?)$"""
+)
 
 
 def cosign_release_tuple(release: str) -> tuple[int, int, int] | None:
@@ -1562,7 +1625,7 @@ def raise_cosign_release_floor(step_lines: Sequence[str]) -> list[str]:
     script, a comment, another action that happens to take an input of that
     name -- is theirs and stays as written.
     """
-    if not any("uses:" in line and "sigstore/cosign-installer@" in line for line in step_lines):
+    if not step_uses_action(step_lines, "sigstore/cosign-installer"):
         return list(step_lines)
     floor = cosign_release_tuple(COSIGN_COMPATIBILITY_FLOOR)
     patched: list[str] = []
@@ -1579,10 +1642,10 @@ def raise_cosign_release_floor(step_lines: Sequence[str]) -> list[str]:
             continue
         match = COSIGN_RELEASE_LINE_RE.match(line)
         if match is not None:
-            current = cosign_release_tuple(match.group(3))
+            quote = match.group("quote") or ""
+            current = cosign_release_tuple(match.group("quoted") if quote else match.group("plain"))
             if current is not None and current < floor:
-                prefix, quote, _, suffix = match.groups()
-                line = f"{prefix}{quote}{COSIGN_COMPATIBILITY_FLOOR}{quote}{suffix}"
+                line = f"{match.group('prefix')}{quote}{COSIGN_COMPATIBILITY_FLOOR}{quote}{match.group('suffix')}"
         patched.append(line)
     return patched
 
@@ -1651,34 +1714,11 @@ def patch_cosign_compatibility(workflow_text: str) -> str:
     return "\n".join(lines)
 
 
-# A job-level `env: {}` -- an empty flow mapping, optionally commented. It
-# holds nothing, so it can be unwrapped into a block and entries written
-# beneath it; `env: { FOO: bar }` cannot, and is handled separately.
-WORKFLOW_EMPTY_ENV_RE = re.compile(r"^env:\s*\{\s*\}\s*(#.*)?$")
-
-
-# A job ID under `jobs:`, bare or quoted, opening a block (no inline value):
-#   build_push:
-#   "build_push":   # quoting is legal YAML and some owners' editors emit it
-#   'build_push': # with a comment
-WORKFLOW_JOB_KEY_RE = re.compile(
-    r"""^(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_.-]*)):\s*(?:#.*)?$"""
-)
-
-
-def workflow_job_key(stripped_line: str) -> str | None:
-    """Return the job ID a stripped line under `jobs:` declares, if any.
-
-    workflow_key() only knows bare keys. A quoted job ID such as
-    `"build_push":` is equally valid, and a parser that does not see it
-    drops the whole job from workflow_job_ranges(): its guards still get
-    rewritten to test env.SIGNING_ENABLED, no job is found to define the
-    variable in, and the image ships unsigned on a green run.
-    """
-    match = WORKFLOW_JOB_KEY_RE.match(stripped_line)
-    if match is None:
-        return None
-    return next(group for group in match.groups() if group is not None)
+# A job-level `env: {}` -- an empty flow mapping, optionally commented, the
+# key in any spelling. It holds nothing, so it can be unwrapped into a block
+# and entries written beneath it; `env: { FOO: bar }` cannot, and is handled
+# separately.
+WORKFLOW_EMPTY_ENV_RE = re.compile(rf"^({yaml_key_pattern('env')})\s*\{{\s*\}}\s*(#.*)?$")
 
 
 def workflow_job_ranges(lines: Sequence[str]) -> list[tuple[str, int, int]]:
@@ -1706,7 +1746,7 @@ def workflow_job_ranges(lines: Sequence[str]) -> list[tuple[str, int, int]]:
             in_jobs = workflow_block_key(stripped) == "jobs"
             continue
         if in_jobs and indent == 2:
-            key = workflow_job_key(stripped)
+            key = workflow_block_key(stripped)
             if key is None:
                 continue
             if name is not None:
@@ -1824,8 +1864,8 @@ def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[
                 stripped = job[env_at].strip()
                 empty = WORKFLOW_EMPTY_ENV_RE.match(stripped)
                 if empty:
-                    comment = empty.group(1)
-                    lines[start + env_at] = "    env:" + (f" {comment}" if comment else "")
+                    key_text, comment = empty.groups()
+                    lines[start + env_at] = f"    {key_text}" + (f" {comment}" if comment else "")
                 elif workflow_block_key(stripped) != "env":
                     raise CommandError(
                         f"This workflow's '{job_name}' job-level 'env:' carries an inline value "
