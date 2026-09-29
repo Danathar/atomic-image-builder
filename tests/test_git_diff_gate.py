@@ -666,6 +666,19 @@ REACH_CORPUS = (
     ("options", "podman images --cpu-pro\\\nfile cosign.pub", REFUSED, "a backslash-newline inside the option name is removed by bash, leaving --cpu-profile"),
     ("options", "podman images \"--cpu-pro\\\nfile\" cosign.pub", REFUSED, "inside double quotes the pair is removed too"),
     ("options", "podman images '--cpu-pro\\\nfile' cosign.pub", ALLOWED, "inside single quotes the backslash and the newline are literal; podman gets no option it knows"),
+    ("options", "gh label list --json name --jq env", REFUSED, "gojq's env builtin is the process environment: this printed GH_TOKEN"),
+    ("options", "gh label list --json name --jq=env", REFUSED, "the attached spelling of the same filter"),
+    ("options", "gh search issues x --json title -q 'env.GH_TOKEN'", REFUSED, "gh's short -q, one variable picked out"),
+    ("options", "gh search prs x --json title -qenv", REFUSED, "the filter attached to -q with no separator"),
+    ("options", "gh label list --json name -wq=env", REFUSED, "-q last in a cluster, its value after an ="),
+    ("options", "gh search prs x --json title -q '$ENV'", REFUSED, "gojq's $ENV, single-quoted so no substitution rule sees a $"),
+    ("options", "gh label list --json name --jq '[.[] | env]'", REFUSED, "env anywhere in the filter, not only the whole of it"),
+    ("options", "timeout 5 gh label list --json name --jq env", REFUSED, "behind a wrapper"),
+    ("options", "gh label list --json name --jq {e,}nv", REFUSED, "bash expands the brace into env before gh runs"),
+    ("options", "gh label list --json name --jq e?v", REFUSED, "a glob that matches a file named env"),
+    ("options", "gh label list --json name --jq '.[].name'", ALLOWED, "a field of the JSON gh fetched"),
+    ("options", "gh label list --json name --jq '.[].env'", ALLOWED, "a field named env is the JSON's, not the environment"),
+    ("options", "gh search issues env var --json title", ALLOWED, "env as search text, not in a filter"),
 )
 
 

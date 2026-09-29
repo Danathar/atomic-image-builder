@@ -416,6 +416,71 @@ def podman_profile_option(words: list[str]) -> str | None:
     return None
 
 
+# gh evaluates its --jq (-q) filter with gojq, and gojq's `env` builtin and
+# `$ENV` variable are the whole process environment: `gh label list --json
+# name --jq env` prints GH_TOKEN and every other exported variable under the
+# `gh label list:*` row, and `gh search issues`/`prs` take the same flag. A
+# filter reading either is refused. `env` counts only with no identifier
+# character on either side and no `.` or `$` before it, since `.env` is a
+# field of the JSON gh fetched and `$env` a variable of the filter's own. A
+# string literal is not told apart from code (`select(.name == "env")` is
+# refused too), because telling them apart means parsing jq here.
+GH_JQ_READS_ENV = re.compile(
+    r"(?<![A-Za-z0-9_.$])env(?![A-Za-z0-9_])|\$ENV(?![A-Za-z0-9_])"
+)
+
+
+def gh_jq_filters(words: list[str], twins: list[str]) -> list[tuple[str, str]]:
+    """Each --jq filter a gh invocation passes, as (word, masked twin).
+
+    gh parses its flags with pflag, which takes `--jq V`, `--jq=V`, `-q V`,
+    `-qV`, `-q=V` and `-q` last in a cluster of one-letter flags (`-wq V`,
+    `-wqV`). A cluster whose earlier letter takes a value (`-Sq`, a search
+    for "q") is read as a filter too, which can only refuse more: a filter
+    word is refused for `env`, not allowed for lacking one.
+    """
+    filters = []
+    detached = False
+    for word, twin in zip(words, twins, strict=True):
+        if detached:
+            filters.append((word, twin))
+            detached = False
+            continue
+        if word == "--jq":
+            detached = True
+        elif word.startswith("--jq="):
+            filters.append((word[len("--jq=") :], twin))
+        elif word.startswith("-") and not word.startswith("--") and "q" in word:
+            value = word.split("q", 1)[1]
+            value = value[1:] if value.startswith("=") else value
+            if value:
+                filters.append((value, twin))
+            else:
+                detached = True
+    return filters
+
+
+def gh_jq_env_filter(words: list[str], twins: list[str]) -> str | None:
+    """The first --jq filter of a gh invocation that reads the environment,
+    or that bash rewrites before gh sees it, or None.
+
+    A filter with a live brace, an unquoted `*`, `?` or `[`, or a leading `~`
+    in its masked twin is refused as well: `{e,}nv` reaches gh as `env`, and
+    a glob can match a file named `env`. Quote a filter that needs brackets
+    (`--jq '.[].name'`).
+    """
+    for value, twin in gh_jq_filters(words, twins):
+        if GH_JQ_READS_ENV.search(value) is not None:
+            return value
+        if (
+            EXPANDING_BRACE.search(twin) is not None
+            or any(char in twin for char in GLOB)
+            or twin.startswith("~")
+        ):
+            return value
+    return None
+
+
 def podman_expanding_brace(words: list[str], twins: list[str]) -> str | None:
     """The first word of a podman invocation that bash brace-expands before
     podman sees it, or None.
@@ -2707,6 +2772,21 @@ def refusal(command: str) -> str | None:
                         "the prefix and nothing prompts -- it is the write this hook "
                         f"refuses for `{' '.join(prefix)} >cosign.pub`, spelled as an "
                         "option. Run the command without the profile option"
+                    )
+            if prefix[0] == "gh":
+                env_filter = gh_jq_env_filter(invocation.words, invocation.twins)
+                if env_filter is not None:
+                    return (
+                        f"the --jq filter {env_filter} runs in gojq, whose `env` "
+                        "builtin and `$ENV` are the whole process environment, so "
+                        "`gh label list --json name --jq env` prints GH_TOKEN and every "
+                        f"other exported variable under the `{' '.join(prefix)}` allow "
+                        "row with no prompt, and no Read(...) deny rule stands in front "
+                        "of a variable. A filter naming `env` is refused wherever it "
+                        "stands in the filter, a quoted string included, and so is a "
+                        "filter bash rewrites before gh sees it (a brace, an unquoted "
+                        "glob, a leading ~). Name the fields you want instead: "
+                        "--jq '.[].name'"
                     )
             if invocation.assignments:
                 # Any name, not only a REFUSED_ENVIRONMENT one: a variable set
