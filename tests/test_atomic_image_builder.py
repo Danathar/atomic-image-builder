@@ -1844,6 +1844,44 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", lines)
         self.assertIn("      KEEP: yes", lines)
 
+    def test_strip_job_env_entries_reads_past_a_comment_at_the_job_indent(self) -> None:
+        # A comment ends no mapping, whatever its indent (#524). Taken for
+        # the end of the job env, the legacy key written after it stayed,
+        # and the update left the signing key handed to every step.
+        workflow = (
+            "jobs:\n"
+            "  build:\n"
+            "    env:\n"
+            "      KEEP: yes\n"
+            "    # signing key, removed from job env by #255\n"
+            "# kept for older runners\n"
+            "      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}\n"
+            "    steps: []\n"
+        )
+        self.assertEqual(
+            atomic_image_builder.strip_job_env_entries(workflow, ["COSIGN_PRIVATE_KEY"]),
+            workflow.replace("      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}\n", ""),
+        )
+
+    def test_ensure_workflow_job_env_entries_ignores_a_key_shaped_continuation_line(self) -> None:
+        # Only the env block's direct entries define a variable. A deeper
+        # line is part of the value above it, even when it reads like a key;
+        # counted as SIGNING_ENABLED, nothing was written, the guard read it
+        # undefined, and both cosign steps were skipped with the run green.
+        workflow = (
+            "jobs:\n"
+            "  build:\n"
+            "    env:\n"
+            "      NOTE: >-\n"
+            "        SIGNING_ENABLED: is written by the update\n"
+            "    steps:\n"
+            "      - if: env.SIGNING_ENABLED == 'true'\n"
+            "        run: cosign sign\n"
+        )
+        patched = atomic_image_builder.ensure_workflow_job_env_entries(workflow, [("SIGNING_ENABLED", "yes")])
+        self.assertIn("      SIGNING_ENABLED: yes", patched.splitlines())
+        self.assertIn("        SIGNING_ENABLED: is written by the update", patched.splitlines())
+
     def test_patch_container_workflow_strips_legacy_signing_keys_from_a_job_env_at_eight(self) -> None:
         # The job env ensure_workflow_job_env_entries() now reads at eight
         # is the one the legacy keys have to leave too (#524). Matched only
@@ -2044,6 +2082,33 @@ class BuilderTests(unittest.TestCase):
         )
 
         self.assertEqual(atomic_image_builder.strip_permission_entries(workflow, ["id-token"]), workflow)
+
+    def test_block_mapping_entry_indent_skips_comments_above_the_first_entry(self) -> None:
+        # The first entry sets the indent, not a comment above it: a comment
+        # can sit at any depth, and copying its indent (or stopping at a
+        # shallow one and falling back to plus two) wrote an entry that
+        # closed the owner's mapping early (#524).
+        for comment in ("      # inputs", "# inputs", "    # inputs"):
+            with self.subTest(comment=comment):
+                lines = ["    with:", comment, "", "        push: true"]
+                self.assertEqual(atomic_image_builder.block_mapping_entry_indent(lines, 0), "        ")
+
+    def test_block_scalar_body_indexes_finds_every_body_line(self) -> None:
+        # Each line of a body is the owner's script, not a key a patcher may
+        # rewrite (#524). A blank line inside the body does not end it; a
+        # chomping or indentation indicator is still a block scalar; a bare
+        # `- |` item's body is everything deeper than its dash.
+        cases = {
+            "blank line inside": (["      - run: |", "          echo one", "", "          permissions:", "        shell: bash"], {1, 2, 3}),
+            "strip chomping": (["      - run: |-", "          IMAGE_DESC: x", "        shell: bash"], {1}),
+            "keep chomping": (["      - run: >+", "          IMAGE_DESC: x", "        shell: bash"], {1}),
+            "indentation indicator": (["      - run: |2-", "          IMAGE_DESC: x", "        shell: bash"], {1}),
+            "bare dash item": (["          args:", "            - |", "              permissions:", "            - other"], {2}),
+            "commented header": (["      - run: | # script", "          permissions:", "      - uses: x"], {1}),
+        }
+        for label, (lines, expected) in cases.items():
+            with self.subTest(label):
+                self.assertEqual(atomic_image_builder.block_scalar_body_indexes(lines), expected)
 
     def test_patch_container_workflow_golden(self) -> None:
         expected_path = Path(__file__).parent / "fixtures/workflows/container_expected.yml"
@@ -9034,6 +9099,8 @@ class BuilderTests(unittest.TestCase):
                 self.assertEqual(prompts, [])
                 hints = " ".join(m for level, m in stub.messages if level == "hint")
                 self.assertIn("only publishes x86_64 images, so a arm64 system cannot switch", hints)
+                errors = [m for level, m in stub.messages if level == "error"]
+                self.assertEqual(errors, ["This system runs a arm64 image."])
 
     def test_scan_os_accepts_a_container_deployment_of_the_published_architecture(self) -> None:
         for image_config in (json.dumps({"architecture": "amd64"}), "not json", None):
@@ -10867,6 +10934,8 @@ class BuilderTests(unittest.TestCase):
         warnings = " ".join(m for level, m in stub.messages if level == "warn")
         self.assertIn(f"Only the {atomic_image_builder.REPO_LIST_LIMIT} most recent", warnings)
         self.assertNotIn("couldn't find any", warnings)
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertIn("If yours is not listed, type its name manually.", hints)
 
     def test_select_repo_backs_out_when_github_is_not_available(self) -> None:
         # require_github() gates every entry into the picker; when it returns
@@ -16851,11 +16920,13 @@ class BuilderTests(unittest.TestCase):
         app = self.make_app()
         repos = [{"name": f"repo-{i}"} for i in range(250)]
         queries: list[str] = []
+        queried: list[str] = []
 
         def fake_run(args, **_kwargs):
             query = args[-1]
             queries.append(query)
             aliases = re.findall(r"(r\d+): repository\(owner: \"testuser\", name: \"([^\"]+)\"\)", query)
+            queried.extend(name for _, name in aliases)
             data = {alias: {"object": {"id": "x"}} if name in {"repo-0", "repo-120", "repo-249"} else None for alias, name in aliases}
             return subprocess.CompletedProcess(args, 0, json.dumps({"data": data}), "")
 
@@ -16865,6 +16936,10 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(found, {"repo-0", "repo-120", "repo-249"})
         self.assertEqual(len(queries), 3)
         self.assertTrue(all(query.count(": repository(") <= atomic_image_builder.STATE_FILE_QUERY_BATCH for query in queries))
+        # Each repo in exactly one query. The three marked repos sit inside a
+        # batch, so a slice that lost the last repo of each (repo-99,
+        # repo-199) passed the checks above.
+        self.assertEqual(sorted(queried), sorted(repo["name"] for repo in repos))
 
     def test_batch_check_state_files_falls_back_only_for_the_batch_that_failed(self) -> None:
         app = self.make_app()
