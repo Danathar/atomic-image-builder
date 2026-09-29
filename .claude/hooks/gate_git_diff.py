@@ -2892,16 +2892,24 @@ def relocated_before(invocation: Invocation, start: int) -> str | None:
     return None
 
 
-def importable_names(directory: Path) -> list[Path]:
-    """The entries of `directory` an `import` could load from it: a module
-    file whose name is an identifier followed by one of the interpreter's
-    import suffixes (`.py`, `.pyc`, an extension module), and a package's
-    `__init__` file under a subdirectory named as an identifier. A directory
-    with no `__init__` is only a namespace portion, which a module or package
-    of the same name anywhere later on sys.path outranks, so it is left
-    out."""
+def importable_names(directory: Path, seen: set[str] | None = None) -> list[Path]:
+    """The files under `directory` an `import` could load: a module file
+    whose name is an identifier followed by one of the interpreter's import
+    suffixes (`.py`, `.pyc`, an extension module), in `directory` or in any
+    subdirectory reached through identifier-named directories. A directory
+    with no `__init__` is still a namespace package whenever no module of
+    that name comes later on sys.path, and `from yaml import CSafeLoader`
+    then imports `yaml/CSafeLoader.py` from it -- which is what the test
+    suite's optional PyYAML import does on a host without PyYAML, CI among
+    them. So every such directory is read, not only packages. `seen` holds
+    the real paths already read, so a symlink back up the tree ends."""
     suffixes = importlib.machinery.all_suffixes()
+    seen = set() if seen is None else seen
     found: list[Path] = []
+    real = os.path.realpath(directory)
+    if real in seen:
+        return found
+    seen.add(real)
     try:
         entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
     except OSError:
@@ -2909,11 +2917,7 @@ def importable_names(directory: Path) -> list[Path]:
     for entry in entries:
         if entry.is_dir():
             if entry.name.isidentifier():
-                found.extend(
-                    Path(entry.path) / f"__init__{suffix}"
-                    for suffix in suffixes
-                    if (Path(entry.path) / f"__init__{suffix}").is_file()
-                )
+                found.extend(importable_names(Path(entry.path), seen))
         elif any(
             entry.name.endswith(suffix) and entry.name[: -len(suffix)].isidentifier()
             for suffix in suffixes
@@ -2936,9 +2940,12 @@ def untracked_imports(cwd: Path) -> list[str] | None:
     if listed.returncode != 0:
         return None
     tracked = {os.fsdecode(path) for path in listed.stdout.split(b"\0") if path}
+    # One `seen` for both walks: `tests/` is read once, under the spelling
+    # the index uses, and not again through a symlink back up the tree.
+    seen: set[str] = set()
     untracked: list[str] = []
     for directory in IMPORT_DIRECTORIES:
-        for path in importable_names(cwd / directory):
+        for path in importable_names(cwd / directory, seen):
             relative = path.relative_to(cwd).as_posix()
             if relative not in tracked:
                 untracked.append(relative)

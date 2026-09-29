@@ -3015,6 +3015,27 @@ class UntrackedImportTests(unittest.TestCase):
             )
             self.assertTrue(marker.exists(), "an unittest.py in the working directory was not run")
 
+    def test_python_imports_a_submodule_of_a_directory_with_no_init(self) -> None:
+        # A directory with no __init__ is a namespace package whenever no
+        # module of that name comes later on sys.path. The suite's optional
+        # `from yaml import CSafeLoader` is that import on a host without
+        # PyYAML; the name here is one nothing installs.
+        with tempfile.TemporaryDirectory() as tmp:
+            top = Path(tmp)
+            marker = top / "ran"
+            (top / "zz_gate_namespace").mkdir()
+            (top / "zz_gate_namespace/loader.py").write_text(
+                f"open({str(marker)!r}, 'w').close()\n"
+            )
+            (top / "script.py").write_text(
+                "try:\n"
+                "    from zz_gate_namespace import loader\n"
+                "except ImportError:\n"
+                "    pass\n"
+            )
+            subprocess.run([sys.executable, "script.py"], cwd=top, check=False, capture_output=True)
+            self.assertTrue(marker.exists(), "a submodule of a namespace directory was not imported")
+
     def test_an_untracked_module_on_the_path_refuses_every_python_row(self) -> None:
         commands = (
             "python3 -m unittest discover -s tests",
@@ -3032,6 +3053,10 @@ class UntrackedImportTests(unittest.TestCase):
             "tests/argparse.py",
             "argparse/__init__.py",
             "tests/helpers/__init__.py",
+            "yaml/CSafeLoader.py",
+            "tests/yaml/CSafeLoader.py",
+            "fixtures/data.py",
+            "argparse/sub/deeper.py",
         )
         with tempfile.TemporaryDirectory() as tmp:
             top = self.repository(tmp)
@@ -3058,7 +3083,15 @@ class UntrackedImportTests(unittest.TestCase):
     def test_what_python_cannot_import_is_left_alone(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             top = self.repository(tmp)
-            for name in ("notes.txt", "my-script.py", "fixtures/data.py", ".env", "tests/e2e/lib.sh"):
+            for name in (
+                "notes.txt",
+                "my-script.py",
+                "unit-coverage/data.py",
+                ".venv/lib/json.py",
+                "tests/__pycache__/test_tracked.cpython-313.pyc",
+                ".env",
+                "tests/e2e/lib.sh",
+            ):
                 path = top / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("")
@@ -3073,6 +3106,19 @@ class UntrackedImportTests(unittest.TestCase):
             for command in ("git status", "python3 -m venv .venv", "shellcheck tests/e2e/lib.sh"):
                 with self.subTest(command=command):
                     self.assertIsNone(gate.untracked_import_refusal(command, top))
+
+    def test_a_symlink_back_up_the_tree_ends(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            top = self.repository(tmp)
+            (top / "tests/loop").symlink_to("..", target_is_directory=True)
+            subprocess.run(["git", "add", "tests/loop"], cwd=top, check=True, capture_output=True)
+            self.assertIsNone(
+                gate.untracked_import_refusal("python3 -m unittest discover -s tests", top)
+            )
+            (top / "json.py").write_text("")
+            reason = gate.untracked_import_refusal("python3 -m unittest discover -s tests", top)
+            self.assertIsNotNone(reason)
+            self.assertIn("json.py", reason)
 
     def test_a_row_moved_to_another_directory_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
