@@ -7783,7 +7783,7 @@ class App:
                     f"        uses: {pinned_action('sigstore/cosign-installer')}",
                     f"        if: {sign_if}",
                     "        with:",
-                    "          cosign-release: 'v3.1.2'",
+                    f"          cosign-release: '{COSIGN_COMPATIBILITY_FLOOR}'",
                     "",
                     # Sign the digest this run pushed, not the tags pointing at
                     # it. The bundled template signs `@${DIGEST}` and so does

@@ -10572,6 +10572,19 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("          cosign-release: 'v3.1.2'", workflow)
         self.assertIn("--new-bundle-format=false --use-signing-config=false", workflow)
 
+    def test_generate_container_workflow_follows_the_cosign_compatibility_floor(self) -> None:
+        # The floor is what the patched path raises an existing workflow to,
+        # and this generator writes straight to disk with nothing lifting it
+        # afterwards. A literal here survives a floor bump and writes the one
+        # workflow it produces below the floor (#588), while the literal
+        # assertion in the test above keeps passing.
+        app = self.make_app()
+        app.config.signing_enabled = True
+        with patch("atomic_image_builder.COSIGN_COMPATIBILITY_FLOOR", "v9.8.7"):
+            workflow = app.generate_container_workflow()
+        self.assertIn("          cosign-release: 'v9.8.7'\n", workflow)
+        self.assertEqual(workflow.count("cosign-release:"), 1)
+
     def test_select_repo_manual_entry_recovers_after_missing_repo(self) -> None:
         app = self.make_app()
         app.github_available = True
