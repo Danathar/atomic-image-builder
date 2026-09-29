@@ -10572,6 +10572,21 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("          cosign-release: 'v3.1.2'", workflow)
         self.assertIn("--new-bundle-format=false --use-signing-config=false", workflow)
 
+    def test_generate_container_workflow_follows_cosign_compatibility_floor(self) -> None:
+        # A regenerated workflow must land at the same floor the patcher raises
+        # existing workflows to, so a literal in the generator fails here.
+        app = self.make_app()
+        app.config.signing_enabled = True
+        with patch.object(atomic_image_builder, "COSIGN_COMPATIBILITY_FLOOR", "v3.2.0"):
+            workflow = app.generate_container_workflow()
+            patched = atomic_image_builder.patch_cosign_compatibility(workflow)
+        self.assertIn("          cosign-release: 'v3.2.0'", workflow)
+        self.assertNotIn("v3.1.2", workflow)
+        self.assertEqual(
+            re.findall(r"cosign-release: .*", workflow),
+            re.findall(r"cosign-release: .*", patched),
+        )
+
     def test_select_repo_manual_entry_recovers_after_missing_repo(self) -> None:
         app = self.make_app()
         app.github_available = True
