@@ -87,7 +87,7 @@ REFUSED_COMMANDS = (
     (">cosign.pub git diff HEAD", "truncates the file with the redirection written first"),
     ("git status; >cosign.pub git diff HEAD", "hides the redirection-first form behind an allowed prefix"),
     ("2>err git log -1", "opens a file for stderr with the redirection written first"),
-    (">> out git show HEAD", "appends with the redirection written first"),
+    (">> out git log HEAD", "appends with the redirection written first"),
     ("FOO=bar >out git diff HEAD", "writes with the redirection between an assignment and git"),
     (">/tmp/anywhere git log", "redirects outside the checkout with the redirection written first"),
     (
@@ -527,6 +527,11 @@ REACH_CORPUS = (
     ("redirection", "just --fmt --check -f - < ./.env", REFUSED, "a - justfile makes just read standard input, and it prints the line it could not parse"),
     ("redirection", "hadolint Containerfile < contrib/aib", ALLOWED, "hadolint reports a position and the offending character, never the source line"),
     ("redirection", "ruff check >cosign.pub", ALLOWED, "its allow row carries no :*, so the redirection makes the string match no rule and Claude Code prompts"),
+    ("redirection", "git commit -m x >cosign.pub", ALLOWED, "no allow row covers git commit, so Claude Code prompts for it and the write is shown there (#537)"),
+    ("redirection", "git show --stdin <.env", ALLOWED, "no allow row covers git show, so the prompt is the gate"),
+    ("redirection", "git diff-tree HEAD >cosign.pub", REFUSED, "a subcommand that starts with diff matches the git diff:* prefix, so it is read as allow-listed"),
+    ("redirection", "git --no-pager commit -m x >cosign.pub", REFUSED, "a global option before the subcommand keeps every check rather than guessing where the subcommand is"),
+    ("redirection", "env -u git git diff HEAD >cosign.pub", REFUSED, "a wrapper operand spelling git does not hide the git diff that runs behind it"),
     ("redirection", "git commit -F - <<'EOF'\nit's fine\nEOF", ALLOWED, "a quoted here-document's body is input data, not shell, so its apostrophe is not a parse failure (#537)"),
     ("redirection", "cat <<'EOF'x\nbody\nEOFx\ngit diff --no-index /dev/null ./cosign.key\nEOF", REFUSED, "bash's delimiter is the whole word EOFx, so the git line after it runs"),
     ("redirection", "cat <<\\EOF.x\nbody\nEOF.x\ngit diff --no-index /dev/null ./cosign.key\nEOF", REFUSED, "the backslash-quoted delimiter runs on to EOF.x"),
@@ -549,6 +554,11 @@ REACH_CORPUS = (
     ("word rewriting", "git diff <(true) ./cosign.key", REFUSED, "a process substitution is a /dev/fd path outside the checkout"),
     ("word rewriting", "podman images >(cat >cosign.pub)", REFUSED, "the inner command of a substitution is held to no rule"),
     ("word rewriting", "hadolint $F", REFUSED, "a word a gated command receives that bash builds at runtime"),
+    ("word rewriting", "git add a && git commit -m \"$(cat <<'EOF'\nFix it\nEOF\n)\"", ALLOWED, "Claude Code's default commit form; no allow row covers git commit, so it prompts on its own (#537)"),
+    ("word rewriting", "git checkout -b fix/$ISSUE", ALLOWED, "the same for git checkout"),
+    ("word rewriting", "git $CMD -m x", REFUSED, "a subcommand bash builds at runtime could be diff, so every check stays"),
+    ("word rewriting", "git 'commit' $X", REFUSED, "a quoted subcommand is not read as a plain one, so every check stays"),
+    ("word rewriting", "git commit --no-index /dev/null ./cosign.key", REFUSED, "only the $ and redirection rules are scoped to the allow-listed subcommands; the option rules still read every git invocation"),
     ("word rewriting", "git diff HEAD@{1}", ALLOWED, "bash expands a brace only with a comma or a .. in it, and git's reflog syntax has neither"),
     ("word rewriting", "git diff HEAD --outp*", REFUSED, "a glob names a file, and a file can be named --output=cosign.pub"),
     ("word rewriting", "env -S* git diff HEAD", REFUSED, "a glob in a wrapper's option becomes a split string that hands git --output"),
@@ -1846,6 +1856,12 @@ class RefusalTests(unittest.TestCase):
             if rule.startswith("Bash(") and rule.endswith(":*)")
         ]
         gated = [prefix for prefix in prefixes if not prefix.startswith("git ")]
+        self.assertEqual(
+            sorted(prefix.split()[1] for prefix in prefixes if prefix.startswith("git ")),
+            sorted(gate.ALLOWED_GIT_SUBCOMMANDS),
+            "ALLOWED_GIT_SUBCOMMANDS and the `git <name>:*` allow rows of "
+            ".claude/settings.json disagree",
+        )
         self.assertGreaterEqual(len(gated), 13, gated)
         self.assertEqual(
             sorted(tuple(prefix.split()) for prefix in gated),

@@ -42,7 +42,12 @@ and the two SSH key patterns. Those two statements are only consistent while
 A `Read(...)` rule gates the Read tool and never sees a path that arrives as
 an argument to Bash, and every form above matches the allowed prefix, so none
 of them raises a prompt. This hook is what makes the deny rules true of the
-whole tool surface rather than of one tool.
+whole tool surface rather than of one tool. The same reasoning bounds the
+redirection and `$` rules: they are read only for the subcommands an allow
+row covers (ALLOWED_GIT_SUBCOMMANDS), because `git commit -m "$(cat <<'EOF'
+...)"` and `git checkout -b fix/$ISSUE` match no allow row and Claude Code
+prompts for them on its own. The option and operand rules still read every
+git invocation.
 
 The redirection is not git's alone. Thirteen other allow rows in
 `.claude/settings.json` carry a trailing `:*` -- "this command with any
@@ -358,6 +363,22 @@ REFUSED_ENVIRONMENT = (
 # them so a `git` call after `&&`, in a pipeline or inside `$(...)` is read as
 # a command rather than as arguments to the first one.
 OPERATORS = frozenset({"&&", "||", ";", "|", "&", "(", ")", "{", "}", "\n"})
+
+# The git subcommands `.claude/settings.json` allows with any arguments, each
+# from a `Bash(git <name>:*)` row. The `$` and redirection refusals in
+# refusal() exist because those rows approve whatever follows the prefix
+# without a prompt, so they hold only for these subcommands: `git commit -m
+# "$(cat <<'EOF' ...)"` and `git checkout -b fix/$ISSUE` match no allow row,
+# and Claude Code prompts for them on its own (#537). A word that only starts
+# with one of these names (`diff-tree`, `logs`) is read as the listed one,
+# since a `:*` row matches on the string's prefix. tests/test_git_diff_gate.py
+# derives the list from the settings file, so a git row added there fails
+# until it is named here.
+ALLOWED_GIT_SUBCOMMANDS = ("diff", "log", "status")
+
+# A subcommand as a plain word: lowercase letters, digits and dashes, typed
+# with no quote, backslash, `$`, glob or brace that bash would rewrite.
+PLAIN_SUBCOMMAND = re.compile(r"[a-z][a-z0-9-]*")
 
 # The allow rows in `.claude/settings.json` that carry a trailing `:*`, other
 # than git's, which refusal() covers above: each is a command prefix the
@@ -1787,6 +1808,37 @@ def git_arguments(invocation: Invocation) -> list[str] | None:
     return None if start is None else invocation.words[start + 1 :]
 
 
+def unlisted_git_subcommand(invocation: Invocation) -> bool:
+    """Does this git invocation run a subcommand no allow row covers?
+
+    True only when every word read as `git` here is followed by a plain
+    subcommand that does not start with an ALLOWED_GIT_SUBCOMMANDS name.
+    Anything less certain is read as allow-listed and keeps every check: a
+    global option before the subcommand (`git -C x diff`, `git --no-pager
+    log`), a subcommand bash builds or rewrites (`git $CMD`, `git 'diff'`,
+    `git {commit,diff}`), and a wrapper whose operands spell `git` in front of
+    the real command (`env -u git git diff`, where the first `git` is a
+    variable name and the second runs `diff`).
+    """
+    positions = [
+        start
+        for start in name_positions(invocation)
+        if bare(invocation.words[start]).rsplit("/", 1)[-1] == "git"
+    ]
+    if not positions:
+        return False
+    for start in positions:
+        following = start + 1
+        if following >= len(invocation.words):
+            return False
+        word = invocation.words[following]
+        if invocation.raws[following] != word or not PLAIN_SUBCOMMAND.fullmatch(word):
+            return False
+        if word.startswith(ALLOWED_GIT_SUBCOMMANDS):
+            return False
+    return True
+
+
 def git_expanding_glob(invocation: Invocation) -> str | None:
     """The first word of a git invocation that bash rewrites into file names
     before it runs -- one with an unquoted `*`, `?` or `[` -- or None.
@@ -2849,7 +2901,13 @@ def refusal(command: str) -> str | None:
                 "pattern so git globs it itself (`git diff -- 'tests/*.py'` is not "
                 "refused, and neither is a glob on another command of the same string)"
             )
-        for index, token in enumerate(segment):
+        # The redirection and `$` rules below are the allow rows' reach: a
+        # subcommand no row covers raises Claude Code's own prompt, so they
+        # would refuse `git commit -m "$(cat <<'EOF' ...)"` for nothing (#537).
+        # The option and operand rules after them still read every git
+        # invocation.
+        listed = not unlisted_git_subcommand(invocation)
+        for index, token in enumerate(segment if listed else ()):
             if not REDIRECTION.match(token):
                 continue
             target = segment[index + 1] if index + 1 < len(segment) else ""
@@ -2868,7 +2926,7 @@ def refusal(command: str) -> str | None:
                     ">&2, an input redirection from a file inside the checkout, and a "
                     "redirection on another command of the same string are not refused)"
                 )
-        target = unsafe_reading_redirection(segment, twins)
+        target = unsafe_reading_redirection(segment, twins) if listed else None
         if target is not None:
             return (
                 f"<{target} hands git a file on standard input, and git log, git diff "
@@ -2881,7 +2939,7 @@ def refusal(command: str) -> str | None:
                 "redirect from a file inside the checkout, spelled out in full "
                 "(</dev/null and a here-string are not refused)"
             )
-        for token, twin in zip(segment, twins, strict=True):
+        for token, twin in zip(segment if listed else (), twins if listed else (), strict=True):
             if expands_at_runtime(twin):
                 return (
                     f"{token} carries a $ or a backtick that bash acts on, so the word "
