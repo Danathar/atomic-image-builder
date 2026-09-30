@@ -290,7 +290,14 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   same string moves the shell first (`cd`, `pushd`, `env -C`). Staging the
   file with `git add`, which asks, is how a new test module reaches a person
   before it runs. Same finding as
-  [#580](https://github.com/Danathar/atomic-image-builder/issues/580).
+  [#580](https://github.com/Danathar/atomic-image-builder/issues/580). The
+  walk behind that check also recurses into every identifier-named
+  subdirectory that has no `__init__` file, because Python still imports
+  such a directory as a namespace package once nothing of that name exists
+  later on `sys.path` -- `from yaml import CSafeLoader` in the test suite
+  loaded an untracked `yaml/CSafeLoader.py` this way on a host without
+  PyYAML, CI among them. Same finding as
+  [#594](https://github.com/Danathar/atomic-image-builder/issues/594).
 - `maintenance_audit.py` fails when a workflow action is not covered by the
   pin tables, or when a pinned SHA disagrees with them. That check is what
   stops an unpinned action reaching generated repositories.
