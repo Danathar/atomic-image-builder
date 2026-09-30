@@ -54,8 +54,8 @@ LABEL org.opencontainers.image.source="https://github.com/Danathar/atomic-image-
 #   Charm       ED92 7B38 BE98 1E53 CA09  153D 03BB F595 D4DF D35C
 #   GitHub CLI  7F38 BBB5 9D06 4DBC B3D8  4D72 5612 B364 6231 3325
 RUN dnf5 -y install curl && \
-    curl -fsSL -o /tmp/RPM-GPG-KEY-charm https://repo.charm.sh/yum/gpg.key && \
-    curl -fsSL -o /tmp/RPM-GPG-KEY-gh-cli https://cli.github.com/packages/githubcli-archive-keyring.asc && \
+    curl -fsSL --retry 3 -o /tmp/RPM-GPG-KEY-charm https://repo.charm.sh/yum/gpg.key && \
+    curl -fsSL --retry 3 -o /tmp/RPM-GPG-KEY-gh-cli https://cli.github.com/packages/githubcli-archive-keyring.asc && \
     printf '%s\n' \
       "bfccddb028d4d6ad5758fc9c9778337fb446a8e5fb270894011616963e9a9c8a  /tmp/RPM-GPG-KEY-charm" \
       "cec6e9ed82d3949ca5f4428cc968b41ef5e7416cb3653cdfc2a421977663bbfd  /tmp/RPM-GPG-KEY-gh-cli" \
@@ -82,7 +82,7 @@ RUN dnf5 -y install curl && \
 # instruction setting pipefail, does not work here: buildah ignores SHELL under
 # the OCI image format this image is built with, so it would satisfy the linter
 # without changing the behaviour. No pipe, no ambiguity, nothing to suppress.
-RUN curl -fsSL -o /tmp/cosign.rpm \
+RUN curl -fsSL --retry 3 -o /tmp/cosign.rpm \
       https://github.com/sigstore/cosign/releases/download/v3.1.2/cosign-3.1.2-1.x86_64.rpm && \
     echo "72382d1ef1cc824e1c10acfbe7f76af76fb294a10b0d16f31b978350ec4bc3e9  /tmp/cosign.rpm" > /tmp/cosign.sha256 && \
     sha256sum -c /tmp/cosign.sha256 && \
