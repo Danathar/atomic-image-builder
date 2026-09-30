@@ -133,7 +133,16 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   `--cpu-profile=cosign.pub`, `podman images --cpu-profil*` reaches podman as
   that option. Otherwise the redirection is the whole
   of the primitive on
-  this list. `tests/test_git_diff_gate.py` derives the list from the
+  this list.
+  The gh rows read rather than write, but not only what they fetch: gh runs
+  its `--jq` (`-q`) filter in gojq, whose `env` builtin and `$ENV` are the
+  whole process environment, so `gh label list --json name --jq env`
+  printed GH_TOKEN with no prompt. The hook refuses a gh filter that names
+  `env` or `$ENV` in any pflag spelling (`--jq V`, `--jq=V`, `-q V`, `-qV`,
+  `-wq=V`), a quoted string included, and a filter bash would rewrite first
+  (a brace, an unquoted glob, a leading `~`); `.env` as a field of the
+  fetched JSON is not refused. Same fix as
+  [aurora-zfs-simple#293](https://github.com/Danathar/aurora-zfs-simple/pull/293). `tests/test_git_diff_gate.py` derives the list from the
   settings file, so a `:*` row added there fails until the hook lists it, and
   shows the truncation in a throwaway directory first. Same fix as
   [zfs-kinoite-complex#224](https://github.com/Danathar/zfs-kinoite-complex/pull/224).
