@@ -649,6 +649,39 @@ class WeeklyAudit(unittest.TestCase):
                 self.assertIn(f".github/workflows/{workflow}", TRACKED)
 
 
+class PullRequestThroughput(unittest.TestCase):
+    """The throughput section sends readers to a command, not a stored count."""
+
+    def setUp(self) -> None:
+        self.section = SECTIONS[THROUGHPUT_SECTION]
+        # Commands and link targets are left out: a dated snapshot's filename
+        # is a pointer to a reading, not a reading.
+        prose = re.sub(r"```.*?```", "", self.section, flags=re.S)
+        self.prose = flatten(re.sub(r"\]\([^)]*\)", "]", prose))
+
+    def test_the_section_quotes_no_dated_reading(self) -> None:
+        # "As of 2026-09-03: 112 merged" sat here for three weeks and several
+        # hundred pull requests, on the page that calls itself the place for
+        # current values. Dated readings belong under docs/metrics/.
+        self.assertNotRegex(
+            self.prose,
+            r"\b\d{4}-\d{2}-\d{2}\b",
+            f"'{THROUGHPUT_SECTION}' carries a dated reading; move it under docs/metrics/",
+        )
+        self.assertNotRegex(
+            self.prose,
+            r"\b\d+ (merged|closed|open)\b",
+            f"'{THROUGHPUT_SECTION}' quotes a count that goes stale with the next merge",
+        )
+
+    def test_the_section_points_at_the_dated_readings(self) -> None:
+        targets = [target for _, target in links(self.section)]
+        self.assertTrue(
+            any(target.startswith("metrics/") for target in targets),
+            f"'{THROUGHPUT_SECTION}' no longer points readers at docs/metrics/",
+        )
+
+
 class Commands(unittest.TestCase):
     """The reproduction commands, and the repository they are run against."""
 
