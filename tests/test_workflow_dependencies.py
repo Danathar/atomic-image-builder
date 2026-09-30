@@ -364,3 +364,54 @@ class ContainerImageTrustRootTests(unittest.TestCase):
             [],
             "a generated COPY names an image that is not the pinned payload",
         )
+
+
+# `--retry <n>` somewhere between `curl` and the URL it fetches. curl takes
+# no `--retry=<n>` form, and `--retry-max-time`/`--retry-delay` alone do not
+# turn retrying on, so neither may satisfy this.
+_RETRY = re.compile(r"\s--retry\s+(?P<count>\d+)\s")
+
+
+def _retry_count(invocation: str) -> int:
+    """The `--retry` count on one `curl … <url>` match, or 0 if absent."""
+    match = _RETRY.search(invocation)
+    return int(match.group("count")) if match else 0
+
+
+class DownloadRetryTests(unittest.TestCase):
+    """Every pinned download retries a transient server error.
+
+    A single HTTP 500 from a release host used to fail the required `test`
+    check on a PR that had nothing to do with it (#593, #604). `--retry`
+    makes curl try again on timeouts and on 408/429/5xx, and the `sha256sum
+    -c` that follows each download (asserted above) means a retry cannot
+    change what is installed. Nothing else fails when the flag is dropped:
+    the download works on a good day, so its loss shows up only as the next
+    unrelated red check.
+    """
+
+    def test_every_workflow_download_retries(self) -> None:
+        missing = []
+        seen = 0
+        for path in _workflows():
+            for match in _CURL.finditer(_joined(path)):
+                seen += 1
+                if _retry_count(match.group(0)) < 1:
+                    missing.append(f"{path.relative_to(ROOT)}: {match.group('url')}")
+        self.assertEqual(missing, [], "a workflow download has no --retry")
+        # hadolint, actionlint and just in ci.yml and ai-fix.yml; actionlint
+        # and just in nightly-compliance.yml. A parser that stops matching
+        # would otherwise pass this by seeing nothing.
+        self.assertEqual(seen, 8)
+
+    def test_every_containerfile_download_retries(self) -> None:
+        missing = []
+        seen = 0
+        for name in _CONTAINERFILES:
+            for match in _CF_CURL.finditer(_containerfile(name)):
+                seen += 1
+                if _retry_count(match.group(0)) < 1:
+                    missing.append(f"{name}: {match.group('url')}")
+        self.assertEqual(missing, [], "a Containerfile download has no --retry")
+        # Two repository keys and the cosign RPM, all in the root Containerfile.
+        self.assertEqual(seen, 3)
