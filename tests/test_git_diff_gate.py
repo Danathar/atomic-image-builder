@@ -25,6 +25,7 @@ rather than assuming.
 from __future__ import annotations
 
 import fnmatch
+import importlib.machinery
 import importlib.util
 import io
 import json
@@ -679,6 +680,13 @@ REACH_CORPUS = (
     ("options", "gh label list --json name --jq '.[].name'", ALLOWED, "a field of the JSON gh fetched"),
     ("options", "gh label list --json name --jq '.[].env'", ALLOWED, "a field named env is the JSON's, not the environment"),
     ("options", "gh search issues env var --json title", ALLOWED, "env as search text, not in a filter"),
+    ("options", "gh label list --json name --jq ~root", REFUSED, "bash replaces a leading ~ with a home directory before gh runs"),
+    ("options", "gh label list --json name,color --jq '.[] | {name: .name, color: .color}'", ALLOWED, "a quoted object constructor: its braces and comma reach gh as they are"),
+    ("options", "gh label list --json name --jq '.[] as $env | $env.name'", ALLOWED, "$env is a variable the filter binds, not the environment"),
+    ("options", "gh label list --json name --jq '.[] | {environment: .name}'", ALLOWED, "env only as the start of a longer name"),
+    ("options", "gh label list --json name --jq '.[] as $ENVIRONMENT | $ENVIRONMENT.name'", ALLOWED, "$ENV only as the start of a longer variable"),
+    ("options", "gh label list --json name --jq '.[] | {Env: .name}'", ALLOWED, "gojq names are case-sensitive; Env is neither builtin"),
+    ("options", "gh search issues --json title --jq '.[].title' env", ALLOWED, "the word after the filter is search text, not a second filter"),
 )
 
 
@@ -3049,6 +3057,30 @@ class UntrackedImportTests(unittest.TestCase):
             subprocess.run([sys.executable, "script.py"], cwd=top, check=False, capture_output=True)
             self.assertTrue(marker.exists(), "a submodule of a namespace directory was not imported")
 
+    def test_python_imports_a_bytecode_file_with_no_source(self) -> None:
+        # A .pyc with no .py beside it is a module of its own, and it stands
+        # ahead of the standard library as a .py would.
+        with tempfile.TemporaryDirectory() as tmp:
+            top = Path(tmp)
+            marker = top / "ran"
+            source = top / "source.py"
+            source.write_text(f"open({str(marker)!r}, 'w').close()\n")
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import py_compile, sys; py_compile.compile(sys.argv[1], sys.argv[2], doraise=True)",
+                    str(source),
+                    str(top / "json.pyc"),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            source.unlink()
+            (top / "script.py").write_text("import json\n")
+            subprocess.run([sys.executable, "script.py"], cwd=top, check=False, capture_output=True)
+            self.assertTrue(marker.exists(), "a json.pyc with no source was not imported")
+
     def test_an_untracked_module_on_the_path_refuses_every_python_row(self) -> None:
         commands = (
             "python3 -m unittest discover -s tests",
@@ -3070,6 +3102,8 @@ class UntrackedImportTests(unittest.TestCase):
             "tests/yaml/CSafeLoader.py",
             "fixtures/data.py",
             "argparse/sub/deeper.py",
+            "argparse.pyc",
+            f"tests/helper{importlib.machinery.EXTENSION_SUFFIXES[0]}",
         )
         with tempfile.TemporaryDirectory() as tmp:
             top = self.repository(tmp)
