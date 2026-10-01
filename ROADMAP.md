@@ -8,10 +8,13 @@ issues and the README.
 ## Current state
 
 - **0.10, beta.** The README says outright: "not fully tested. Review the
-  changes it makes before applying them." Leaving beta — defined as: the
-  scan/carry/build path has enough real-world use across the supported bases
-  that the warning can come off — is the top-level milestone everything
-  else sits under.
+  changes it makes before applying them." Leaving beta is the top-level
+  milestone everything else sits under. **The beta-exit bar (decided
+  2026-10-01, #578):** three consecutive tagged releases with no
+  scan/carry/build regression reported against either build method, the
+  coverage gate holding at or above its current threshold across those
+  releases, and zero open correctness issues against the five-stage runtime
+  at the time of the third release.
 - Supported bases: Universal Blue (Bazzite, Aurora, Bluefin and their
   variants) and Fedora Atomic (Silverblue, Kinoite, Sway, Budgie, COSMIC).
 - Two build methods: Containerfile (from `ublue-os/image-template`) and
@@ -38,20 +41,10 @@ asks:
 
 ## Near-term priorities
 
-1. **Beta exit criteria.** Write down, even roughly, what "not beta" means
-   for this tool (e.g. N releases without a scan/carry regression, coverage
-   gate holding at its current bar, no open correctness issues against the
-   five-stage runtime). Right now the beta label has no stated exit
-   condition, which makes it hard for adopters to judge how far out
-   general-availability is.
-
-   **Candidate bar (proposal, not yet a maintainer decision — see #578):**
-   three consecutive tagged releases with no scan/carry/build regression
-   reported against either build method, the coverage gate holding at or
-   above its current threshold across those releases, and zero open
-   correctness issues against the five-stage runtime at time of the third
-   release. This is one concrete way to satisfy priority #1 above; picking
-   it, adjusting it, or replacing it is the maintainer's call.
+1. **Beta exit criteria: decided.** The bar is recorded under "Current state"
+   above (#578). What's left is meeting it: three regression-free releases in
+   a row, with the coverage gate holding and no open five-stage correctness
+   issues when the third one ships.
 
 ## Longer-term / open questions
 
