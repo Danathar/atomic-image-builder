@@ -298,6 +298,14 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   loaded an untracked `yaml/CSafeLoader.py` this way on a host without
   PyYAML, CI among them. Same finding as
   [#594](https://github.com/Danathar/atomic-image-builder/issues/594).
+- The gate is one of six separate copies across the fleet's repositories, so
+  a bypass fixed here is not fixed anywhere else.
+  [`tests/fixtures/gate-refusal-corpus.json`](../tests/fixtures/gate-refusal-corpus.json)
+  is the table of commands every copy has to decide the same way, and
+  `tests/test_gate_refusal_corpus.py` runs each row this repository's allow
+  list makes reachable through the registered hook.
+  This repository holds the canonical copy; [the corpus guide](gate-refusal-corpus.md)
+  says how to add a row and how the other repositories take it.
 - `maintenance_audit.py` fails when a workflow action is not covered by the
   pin tables, or when a pinned SHA disagrees with them. That check is what
   stops an unpinned action reaching generated repositories.
