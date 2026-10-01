@@ -12,6 +12,12 @@ issues and the README.
   scan/carry/build path has enough real-world use across the supported bases
   that the warning can come off — is the top-level milestone everything
   else sits under.
+- Beta-exit bar, decided by the maintainer in #578: the project leaves
+  beta once all three of these hold: three consecutive tagged releases with no
+  scan/carry/build regression reported against either build method; the
+  coverage gate holding at or above its current threshold across those
+  releases; and zero open correctness issues against the five-stage runtime
+  at the time of the third release.
 - Supported bases: Universal Blue (Bazzite, Aurora, Bluefin and their
   variants) and Fedora Atomic (Silverblue, Kinoite, Sway, Budgie, COSMIC).
 - Two build methods: Containerfile (from `ublue-os/image-template`) and
@@ -38,20 +44,10 @@ asks:
 
 ## Near-term priorities
 
-1. **Beta exit criteria.** Write down, even roughly, what "not beta" means
-   for this tool (e.g. N releases without a scan/carry regression, coverage
-   gate holding at its current bar, no open correctness issues against the
-   five-stage runtime). Right now the beta label has no stated exit
-   condition, which makes it hard for adopters to judge how far out
-   general-availability is.
-
-   **Candidate bar (proposal, not yet a maintainer decision — see #578):**
-   three consecutive tagged releases with no scan/carry/build regression
-   reported against either build method, the coverage gate holding at or
-   above its current threshold across those releases, and zero open
-   correctness issues against the five-stage runtime at time of the third
-   release. This is one concrete way to satisfy priority #1 above; picking
-   it, adjusting it, or replacing it is the maintainer's call.
+1. **Meet the beta-exit bar.** The bar is decided and recorded under
+   Current state above (#578). What remains is shipping against it: three
+   clean releases in a row, the coverage gate holding, and no open
+   five-stage correctness issues when the third one ships.
 
 ## Longer-term / open questions
 
