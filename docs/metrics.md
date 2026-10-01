@@ -51,7 +51,10 @@ gh pr list --state all --limit 1000 --json state \
 recent N and says nothing about the rest. It was 200 until the repository
 passed 200 pull requests, and from then on the command undercounted.
 
-As of 2026-09-03: 112 merged, 1 closed, 3 open.
+This page does not quote a count: one written here is out of date by the next
+merge. Run the command for the current one, or read the latest dated reading in
+[`docs/metrics/`](metrics/2026-09-24.md), which says which pull request it
+counted up to.
 
 ## Review findings per pull request
 
