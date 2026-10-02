@@ -175,5 +175,103 @@ class CorpusVerdictTests(unittest.TestCase):
                 )
 
 
+
+def probe(case: type[unittest.TestCase], name: str, **fixture) -> unittest.TestResult:
+    """Run one test of `case` against `fixture` in place of what setUpClass reads."""
+    result = unittest.TestResult()
+    type("Probe", (case,), fixture)(name).run(result)
+    return result
+
+
+class HarnessContractTests(unittest.TestCase):
+    """The rules docs/gate-refusal-corpus.md states, on inputs this repository lacks.
+
+    The other five repositories copy these rules. Here every row's prefixes
+    are allowed together, the hook answers only with exit status 2, and the
+    table is valid, so the branches below would never run against the real
+    files and could be dropped without a failure.
+    """
+
+    ROW = {"id": "r", "class": "c", "verdict": REFUSE, "requires": ["git diff"],
+           "command": "git diff /dev/null ./.env", "why": "w"}
+
+    def corpus(self, *rows: dict) -> dict:
+        return {"schema": 1, "rows": list(rows)}
+
+    def assertProbeFails(self, result: unittest.TestResult) -> None:
+        self.assertEqual(result.errors, [])
+        self.assertTrue(result.failures, "the guard let a broken input through")
+
+    def test_a_row_runs_only_when_every_prefix_it_requires_is_allowed(self) -> None:
+        row = {**self.ROW, "requires": ["git diff", "git status"]}
+        self.assertFalse(applies(row, ["git status"]))
+        self.assertFalse(applies(row, ["git diff"]))
+        self.assertTrue(applies(row, ["git diff", "git status"]))
+
+    def test_only_bash_rules_cover_a_prefix(self) -> None:
+        settings = {"permissions": {"allow": ["Read(./docs/*)", "WebFetch(domain:*)"]}}
+        self.assertEqual(allow_prefixes(settings), [])
+
+    def test_the_hook_registered_for_bash_is_the_one_run(self) -> None:
+        settings = {"hooks": {"PreToolUse": [
+            {"matcher": "Edit", "hooks": [{"command": "edit-hook"}]},
+            {"matcher": "Bash", "hooks": [{"command": "bash-hook"}]},
+        ]}}
+        self.assertEqual(hook_command(settings), "bash-hook")
+        with self.assertRaises(AssertionError):
+            hook_command({"hooks": {"PreToolUse": settings["hooks"]["PreToolUse"][:1]}})
+
+    def test_a_deny_decision_on_stdout_is_a_refusal(self) -> None:
+        deny = ('{"hookSpecificOutput": {"hookEventName": "PreToolUse",'
+                ' "permissionDecision": "deny"}}')
+        verdict, result = decide("git diff", f"cat >/dev/null; printf '%s' '{deny}'")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(verdict, REFUSE)
+
+    def test_exit_status_decides_when_stdout_is_silent(self) -> None:
+        self.assertEqual(decide("git diff", "cat >/dev/null; exit 2")[0], REFUSE)
+        self.assertEqual(decide("git diff", "cat >/dev/null; exit 0")[0], ALLOW)
+
+    def test_the_hook_reads_the_command_from_a_bash_tool_payload(self) -> None:
+        hook = ("python3 -c 'import json,sys; p=json.load(sys.stdin);"
+                " sys.exit(2 if p[\"tool_name\"] == \"Bash\""
+                " and p[\"tool_input\"][\"command\"] == \"git diff x\" else 0)'")
+        self.assertEqual(decide("git diff x", hook)[0], REFUSE)
+        self.assertEqual(decide("git diff y", hook)[0], ALLOW)
+
+    def test_a_table_of_refusals_alone_is_rejected(self) -> None:
+        self.assertProbeFails(probe(CorpusShapeTests, "test_both_verdicts_are_present",
+                                    corpus=self.corpus(self.ROW)))
+
+    def test_a_row_outside_the_prefix_it_requires_is_rejected(self) -> None:
+        row = {**self.ROW, "command": "cat .env"}
+        self.assertProbeFails(probe(CorpusShapeTests,
+                                    "test_a_row_requires_the_command_it_starts_with",
+                                    corpus=self.corpus(row)))
+
+    def test_too_few_reachable_rows_is_rejected(self) -> None:
+        self.assertProbeFails(probe(CorpusVerdictTests,
+                                    "test_enough_rows_apply_here_to_mean_something",
+                                    rows=[]))
+
+    def test_a_hook_that_crashes_fails_even_an_allow_row(self) -> None:
+        # Exit status 1 is a hook error, which Claude Code does not treat as
+        # a refusal, so an allow row would match it on the verdict alone.
+        row = {**self.ROW, "verdict": ALLOW, "command": "git diff"}
+        self.assertProbeFails(probe(
+            CorpusVerdictTests,
+            "test_every_row_this_repository_allows_is_decided_the_way_it_says",
+            rows=[row], hook="cat >/dev/null; exit 1"))
+
+    def test_the_guards_pass_the_real_table(self) -> None:
+        # The probes above fail for the input they were given, not for how
+        # a test is run outside its suite.
+        corpus = json.loads(CORPUS.read_text(encoding="utf-8"))
+        for name in ("test_both_verdicts_are_present",
+                     "test_a_row_requires_the_command_it_starts_with"):
+            with self.subTest(test=name):
+                self.assertTrue(probe(CorpusShapeTests, name, corpus=corpus).wasSuccessful())
+
+
 if __name__ == "__main__":
     unittest.main()
