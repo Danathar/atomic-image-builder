@@ -59,7 +59,8 @@ count. v0.10.0 (2026-09-21) came before it, so it does not.
 | ------- | ---- | ------------------------- | --------------------- | ------------- | ---------------------------------- | ------ |
 
 No release has been recorded yet. After each tagged release, add a row and
-update the count above:
+update the count above. [docs/strategy.md](docs/strategy.md) has the command
+that reads each column:
 
 - **Release** and **Date**: the tag and the day it was published.
 - **Containerfile regressions** and **BlueBuild regressions**: the issue
