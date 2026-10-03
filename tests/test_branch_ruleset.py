@@ -350,6 +350,19 @@ class DocTests(unittest.TestCase):
         self.assertIn(f"(../.github/workflows/{workflow})", flow)
         self.assertIn("needs no secrets", " ".join(flow.split()))
 
+    def test_contributing_states_the_protection_the_ruleset_gives(self) -> None:
+        # CONTRIBUTING.md is where a new contributor reads how a change
+        # reaches main. It kept saying `main` was not branch-protected after
+        # the ruleset went live, because only docs/branch-protection.md was
+        # checked against the file.
+        text = " ".join((ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8").split())
+        self.assertTrue(f"`{RULESET['name']}` ruleset" in text, "CONTRIBUTING.md no longer names the ruleset")
+        self.assertTrue("(docs/branch-protection.md)" in text, "CONTRIBUTING.md no longer links the branch doc")
+        stale = re.search(r"(?i)\bnot branch-protected|\bunprotected\b|direct fixes", text)
+        self.assertIsNone(stale, f"CONTRIBUTING.md says {stale and stale.group(0)!r}, but main is protected")
+        if RULESET["bypass_actors"] == []:
+            self.assertTrue("nothing can bypass that" in text, "CONTRIBUTING.md no longer says there is no bypass")
+
     def test_the_doc_names_one_ruleset_id(self) -> None:
         # The id in Status is what someone checks the live ruleset against,
         # and the PUT command is how the file reaches it. Two different ids
