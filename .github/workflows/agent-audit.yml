@@ -1,0 +1,155 @@
+---
+name: Agent audit trail
+
+# Reads back the record every agent-authored pull request is supposed to
+# leave, and fails when one did not leave it.
+#
+# The record is GitHub itself: an agent pull request carries a `— hive:`
+# signature line naming the backend and model that wrote it, and every
+# commit carries a Signed-off-by trailer. Nothing checked either after the
+# merge. The DCO app is not a required status check in the `main` ruleset,
+# and an omp-backed run pushes under the maintainer's own identity, so the
+# author login alone cannot say which merged pull requests an agent wrote
+# -- the signature line is the only provenance there is, and this is what
+# notices when it is missing.
+#
+# The job lists every pull request merged in the window, picks out the ones
+# an agent wrote (opened by the Hive app, or carrying the signature line),
+# and writes one row per pull request to the run summary: when it merged,
+# who merged it, which backend and model wrote it, how many commits, and
+# any Tier 4 path it touched (docs/risk-tiers.md). Two things fail the run:
+# a Hive-app pull request with no signature line, and a commit with no
+# Signed-off-by trailer. A Tier 4 path is reported, not failed: an agent is
+# allowed there behind review, and the row is what tells a reader where to
+# look first.
+#
+# This is a check, not a metric. docs/metrics.md keeps every number off a
+# schedule on purpose; this runs on one because its output is red or green,
+# like the weekly audit, and a missing provenance line is not a trend to
+# watch but a gap to close. It never writes: the token reads pull requests
+# and nothing else, and no step touches the checkout, the issue tracker or
+# a package. There is nothing to check out, so no action runs at all.
+on:
+  schedule:
+    - cron: '23 5 1 * *'  # monthly, the 1st at 05:23 UTC, covering the previous 31 days
+  workflow_dispatch:
+    inputs:
+      since:
+        description: Audit pull requests merged on or after this date (YYYY-MM-DD). Blank means the last 31 days.
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  audit:
+    name: Read back the record of every merged agent pull request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Audit merged agent pull requests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SINCE: ${{ inputs.since }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$SINCE" ]; then
+            SINCE="$(date -u -d '31 days ago' +%F)"
+          fi
+          case "$SINCE" in
+            [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+            *)
+              echo "::error::since must be YYYY-MM-DD, got '$SINCE'"
+              exit 2
+              ;;
+          esac
+
+          # `gh pr list` returns the newest N and says nothing about the rest
+          # (docs/metrics.md learnt this at 200), so a window that fills the
+          # cap is refused rather than silently audited in part.
+          limit=500
+          gh pr list --repo "$REPO" --state merged --limit "$limit" \
+            --search "merged:>=$SINCE" \
+            --json number,title,author,mergedAt,mergedBy,body,url > merged.json
+          total="$(jq length merged.json)"
+          if [ "$total" -ge "$limit" ]; then
+            echo "::error::$total pull requests merged since $SINCE reached the $limit cap; audit a narrower window"
+            exit 2
+          fi
+
+          # An agent pull request is one the Hive app opened, or one whose body
+          # carries the signature line. The second clause is what catches the
+          # omp-backed runs, which push under the maintainer's identity.
+          jq -c '[.[] | select(.author.is_bot or ((.body // "") | test("(^|\n)— hive:")))]' \
+            merged.json > agents.json
+
+          # Commits and files are fetched one pull request at a time: asking
+          # `gh pr list` for them alongside the list trips GitHub's GraphQL
+          # node ceiling on any window this repository fills in a week.
+          jq -r '.[].number' agents.json | while read -r number; do
+            gh pr view "$number" --repo "$REPO" --json number,commits,files
+          done | jq -s 'map({(.number | tostring): .}) | add // {}' > details.json
+
+          jq --arg since "$SINCE" --arg total "$total" --slurpfile details details.json '
+            def signature: (.body // "") | split("\n") | map(select(startswith("— hive:"))) | first;
+            # The Tier 4 paths in docs/risk-tiers.md: the release workflows,
+            # the token policy and ruleset, the agent permission table and its
+            # hooks, and what the release path runs.
+            def tier4: test("^(\\.github/workflows/(ci|publish-image|publish-wrapper|update-homebrew-formula)\\.yml$|\\.github/policies/|\\.github/rulesets/|\\.claude/settings\\.json$|\\.claude/hooks/|homebrew_formula\\.py$|coverage_badge\\.py$|Formula/)");
+            def row:
+              . as $pr
+              | ($details[0][$pr.number | tostring]) as $d
+              | if $d == null then error("no commits or files fetched for #\($pr.number)") else . end
+              | {
+                  number: $pr.number,
+                  url: $pr.url,
+                  title: $pr.title,
+                  merged: $pr.mergedAt[:10],
+                  author: $pr.author.login,
+                  merged_by: ($pr.mergedBy.login // "unknown"),
+                  signature: (signature | if . == null then null else ltrimstr("— hive: ") end),
+                  commits: ($d.commits | length),
+                  unsigned: [$d.commits[] | select(.messageBody | test("(^|\n)Signed-off-by: ") | not) | .oid[:7]],
+                  tier4: [$d.files[].path | select(tier4)]
+                };
+            def findings:
+              [ .[]
+                | (if .signature == null then "#\(.number): opened by the Hive app with no `— hive:` signature line, so the backend and model that wrote it are unrecorded" else empty end),
+                  (if (.unsigned | length) > 0 then "#\(.number): commit\(if (.unsigned | length) > 1 then "s" else "" end) \(.unsigned | join(", ")) carr\(if (.unsigned | length) > 1 then "y" else "ies" end) no Signed-off-by trailer" else empty end)
+              ];
+            def cell: tostring | gsub("\\|"; "\\|");
+            map(row)
+            | . as $rows
+            | {
+                findings: ($rows | findings),
+                report: (
+                  [ "### Agent audit trail: pull requests merged since \($since)",
+                    "",
+                    "\($rows | length) of the \($total) pull requests merged in the window were written by an agent.",
+                    ""
+                  ]
+                  + (if ($rows | length) == 0 then [] else
+                      [ "| PR | Merged | Author | Merged by | Backend and model | Commits | Signed-off | Tier 4 paths |",
+                        "| --- | --- | --- | --- | --- | --- | --- | --- |" ]
+                      + [ $rows[]
+                          | "| [#\(.number)](\(.url)) \(.title | cell) | \(.merged) | \(.author) | \(.merged_by) | \(.signature // "**missing**" | cell) | \(.commits) | \(if (.unsigned | length) == 0 then "all" else "**\(.commits - (.unsigned | length)) of \(.commits)**" end) | \(if (.tier4 | length) == 0 then "none" else (.tier4 | map("`\(.)`") | join(", ")) end) |" ]
+                    end)
+                  + [ "" ]
+                  + (if ($rows | findings | length) == 0
+                      then [ "Every agent pull request carries its signature line and every commit its Signed-off-by trailer." ]
+                      else [ "#### Findings", "" ] + ($rows | findings | map("- " + .))
+                    end)
+                  | join("\n")
+                )
+              }' agents.json > result.json
+
+          jq -r .report result.json | tee -a "$GITHUB_STEP_SUMMARY"
+          findings="$(jq '.findings | length' result.json)"
+          if [ "$findings" -gt 0 ]; then
+            echo "::error::$findings agent pull request(s) merged since $SINCE left an incomplete record; see the run summary"
+            exit 1
+          fi

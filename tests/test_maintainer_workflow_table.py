@@ -1,7 +1,7 @@
 """Join `maintainer_docs/MAINTAINER.md`'s *What runs automatically* table to the workflows.
 
 Script: tests/test_maintainer_workflow_table.py
-What: Reads the handbook's eight-row CI index -- which workflows exist, what
+What: Reads the handbook's one-row-per-workflow CI index -- which workflows exist, what
       fires each one, and what each one does -- against `.github/workflows/`,
       `.coverage-thresholds.json`, and the step bodies the rows describe.
 Doing: Parses the table out of the *What runs automatically* section and strips
@@ -69,9 +69,9 @@ TRIGGER_WORDING = {
     "issues": r"\bissue\b|\blabel\b",
 }
 
-# cron day-of-week, as the table spells it. `*` is every day; the numeric forms
-# are only what this repo's two scheduled workflows use, and an unrecognised
-# field fails rather than being skipped.
+# cron day-of-week, as the table spells it, for a cron whose day-of-month is
+# `*`. `*` is every day; the numeric forms are only what this repo's scheduled
+# workflows use, and an unrecognised field fails rather than being skipped.
 CRON_DAYS = {
     "*": "Daily",
     "0": "Sunday",
@@ -82,6 +82,41 @@ CRON_DAYS = {
     "5": "Friday",
     "6": "Saturday",
 }
+
+# cron day-of-month, as the table spells it, for a cron that fixes one. Only
+# the day this repo's monthly workflow uses: a second day is one more row here,
+# not a reason to spell ordinals in general.
+CRON_DAYS_OF_MONTH = {
+    "1": "Monthly on the 1st",
+}
+
+
+def cron_day_wording(fields: list[str]) -> str:
+    """The day phrase the table has to carry for one cron expression.
+
+    A cron fixing a day-of-month is monthly, and its day-of-week has to stay
+    `*`: cron runs on either match, so `23 5 1 * 1` fires every Monday too and
+    no single phrase describes it.
+    """
+    _, _, day_of_month, _, weekday = fields
+    if day_of_month == "*":
+        if weekday not in CRON_DAYS:
+            raise AssertionError(
+                f"cron day-of-week {weekday!r} is not one this test can turn into the "
+                "word the table uses"
+            )
+        return CRON_DAYS[weekday]
+    if weekday != "*":
+        raise AssertionError(
+            f"cron {' '.join(fields)} fixes both a day-of-month and a day-of-week, "
+            "which fires on either and has no single wording"
+        )
+    if day_of_month not in CRON_DAYS_OF_MONTH:
+        raise AssertionError(
+            f"cron day-of-month {day_of_month!r} is not one this test can turn into "
+            "the phrase the table uses"
+        )
+    return CRON_DAYS_OF_MONTH[day_of_month]
 
 
 def _uncommented(text: str) -> list[str]:
@@ -280,19 +315,14 @@ class TriggerTests(unittest.TestCase):
                 f"{name} has {len(fields)} cron expressions; the table states one "
                 "schedule per row",
             )
-            minute, hour, _, _, weekday = fields[0]
-            self.assertIn(
-                weekday,
-                CRON_DAYS,
-                f"{name}'s cron day-of-field is {weekday!r}, which this test cannot "
-                "turn into the word the table uses",
-            )
+            minute, hour, _, _, _ = fields[0]
+            wording = cron_day_wording(fields[0])
             scheduled += 1
             self.assertIn(
-                CRON_DAYS[weekday],
+                wording,
                 row[1],
                 f"{MAINTAINER_RELATIVE}'s {name} row does not say "
-                f"{CRON_DAYS[weekday]}, which its cron {' '.join(fields[0])} sets",
+                f"{wording}, which its cron {' '.join(fields[0])} sets",
             )
             self.assertIn(
                 f"{int(hour):02d}:{int(minute):02d} UTC",
