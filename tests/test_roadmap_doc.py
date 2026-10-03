@@ -8,6 +8,10 @@ What: Reads ROADMAP.md as a subject and checks each claim it makes about the
       file that marks a repo as managed, and the "five-stage runtime" --
       against VERSION, BASE_IMAGES, METHOD_DISPLAY, the template constants,
       STATE_FILE, ARCHITECTURE.md and the README.
+      It also checks the "Beta-exit progress" table: each row's release is
+      one VERSION has reached, its "Counts" cell follows from its other
+      cells and the gate in .coverage-thresholds.json, and the stated
+      "N of 3" is the run of "yes" rows at the bottom.
       It also reads the README's own "Supported bases" line and build-method
       bullet, which ROADMAP.md copies and which no test joined to the code.
 Doing: Parses the base list out of each document's prose and compares it to
@@ -23,13 +27,16 @@ Why: ROADMAP.md (added in #458) is a summary of other documents, and a summary
      would leave it describing a project that no longer exists. The README
      line it copies the bases from was not joined to BASE_IMAGES either.
      `.coveragerc` measures Python modules and ruff does not read Markdown,
-     so no percentage moves when either drifts.
+     so no percentage moves when either drifts. The beta-exit table (#620) is
+     filled in by hand after each release, and a hand-kept tally that nothing
+     recomputes is the first thing to go wrong.
 Goal: Make a version, base, method, template, gap, state file or stage count
       that changes without ROADMAP.md (or the README line it copies) fail here.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import unittest
@@ -52,8 +59,25 @@ SECTIONS = (
     "Current state",
     "Gaps the README already states",
     "Near-term priorities",
+    "Beta-exit progress",
     "Longer-term / open questions",
 )
+
+PROGRESS_SECTION = "Beta-exit progress"
+
+# The columns of the beta-exit table, in order. The checks below read cells by
+# these names, so a renamed or reordered column has to be changed here too.
+PROGRESS_COLUMNS = (
+    "Release",
+    "Date",
+    "Containerfile regressions",
+    "BlueBuild regressions",
+    "Unit coverage",
+    "Open five-stage correctness issues",
+    "Counts",
+)
+
+THRESHOLDS = json.loads((ROOT / ".coverage-thresholds.json").read_text(encoding="utf-8"))
 
 README_GAP_SECTION = "What it does not do"
 
@@ -311,6 +335,106 @@ class Gaps(unittest.TestCase):
     def test_the_adoption_gap_names_the_state_file_the_tool_writes(self) -> None:
         body = squash(section(DOC, "Gaps the README already states"))
         self.assertIn(f"A repo without `{aib.STATE_FILE}` stays untouched", body)
+
+
+def version_tuple(text: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in text.split("."))
+
+
+class BetaExitProgress(unittest.TestCase):
+    def body(self) -> str:
+        return section(DOC, PROGRESS_SECTION)
+
+    def table(self) -> list[dict[str, str]]:
+        lines = [line for line in self.body().splitlines() if line.startswith("|")]
+        self.assertGreaterEqual(len(lines), 2, "the beta-exit section has no table")
+
+        def cells(line: str) -> list[str]:
+            return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+        self.assertEqual(tuple(cells(lines[0])), PROGRESS_COLUMNS)
+        self.assertTrue(all(set(cell) <= set("-:") for cell in cells(lines[1])))
+        rows = []
+        for line in lines[2:]:
+            row = cells(line)
+            self.assertEqual(len(row), len(PROGRESS_COLUMNS), f"short row: {line!r}")
+            rows.append(dict(zip(PROGRESS_COLUMNS, row)))
+        return rows
+
+    def decided(self) -> str:
+        bullet = current_state_bullet("**")
+        match = re.search(r"\(decided (\d{4}-\d{2}-\d{2}), #\d+\)", bullet)
+        self.assertIsNotNone(match, "Current state no longer dates the beta-exit bar")
+        return match.group(1)
+
+    def required(self) -> int:
+        bullet = current_state_bullet("**")
+        match = re.search(r"(\w+) consecutive tagged releases", bullet)
+        self.assertIsNotNone(match, "Current state no longer says how many releases the bar needs")
+        return NUMBER_WORDS[match.group(1)]
+
+    def gate(self) -> int:
+        return int(THRESHOLDS["gated"]["unit"])
+
+    def test_the_section_dates_the_bar_as_current_state_does(self) -> None:
+        self.assertIn(f"decided on {self.decided()}", squash(self.body()))
+
+    def test_the_gate_it_names_is_the_one_ci_enforces(self) -> None:
+        # Named, not quoted: a copied percentage is one more file for the
+        # count in docs/quality.md and one more place a gate change misses.
+        self.assertIn(
+            "the unit threshold in .coverage-thresholds.json", squash(self.body())
+        )
+        self.assertIn("unit", THRESHOLDS["gated"])
+
+    def test_the_excluded_release_predates_the_bar_and_version(self) -> None:
+        match = re.search(r"v(\d+\.\d+\.\d+) \((\d{4}-\d{2}-\d{2})\) came before it", squash(self.body()))
+        self.assertIsNotNone(match, "the beta-exit section no longer names the release before the bar")
+        self.assertLess(match.group(2), self.decided())
+        self.assertLessEqual(version_tuple(match.group(1)), version_tuple(aib.VERSION))
+
+    def test_each_row_is_a_release_after_the_bar_that_version_has_reached(self) -> None:
+        previous: tuple[int, ...] = ()
+        for row in self.table():
+            with self.subTest(release=row["Release"]):
+                tag = re.fullmatch(r"v(\d+\.\d+\.\d+)", row["Release"])
+                self.assertIsNotNone(tag, "a release cell is not a vX.Y.Z tag")
+                version = version_tuple(tag.group(1))
+                self.assertLessEqual(version, version_tuple(aib.VERSION))
+                self.assertGreater(version, previous, "rows are not in release order")
+                previous = version
+                self.assertRegex(row["Date"], r"^\d{4}-\d{2}-\d{2}$")
+                self.assertGreaterEqual(row["Date"], self.decided())
+
+    def test_each_counts_cell_follows_from_its_row(self) -> None:
+        for row in self.table():
+            with self.subTest(release=row["Release"]):
+                coverage = re.fullmatch(r"(\d+(?:\.\d+)?)%", row["Unit coverage"])
+                self.assertIsNotNone(coverage, "unit coverage is not a percentage")
+                self.assertRegex(row["Open five-stage correctness issues"], r"^\d+$")
+                for column in ("Containerfile regressions", "BlueBuild regressions"):
+                    self.assertRegex(row[column], r"^(none|#\d+(, #\d+)*)$")
+                clean = (
+                    row["Containerfile regressions"] == "none"
+                    and row["BlueBuild regressions"] == "none"
+                    and float(coverage.group(1)) >= self.gate()
+                )
+                self.assertEqual(row["Counts"], "yes" if clean else "no")
+
+    def test_the_empty_table_note_goes_once_a_row_is_added(self) -> None:
+        empty = "No release has been recorded yet." in squash(self.body())
+        self.assertEqual(empty, not self.table())
+
+    def test_the_stated_count_is_the_run_of_yes_rows_at_the_bottom(self) -> None:
+        stated = re.search(r"\*\*Clean releases in a row: (\d+) of (\d+)\.\*\*", self.body())
+        self.assertIsNotNone(stated, "the beta-exit section no longer states its count")
+        self.assertEqual(int(stated.group(2)), self.required())
+        run = 0
+        for row in reversed(self.table()):
+            if row["Counts"] != "yes":
+                break
+            run += 1
+        self.assertEqual(int(stated.group(1)), run)
 
 
 class Runtime(unittest.TestCase):
