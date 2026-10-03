@@ -10,7 +10,9 @@ by reading it that way.
 Dated readings of these numbers are kept in
 [`docs/metrics/`](metrics/2026-09-24.md). Each one carries the exact commands
 that produced it, pinned to a fixed range so they reproduce, and is left as it
-was read.
+was read. Who did the work, agent or maintainer, is not a quality number and
+is not measured here; [`docs/agent-tasks/`](agent-tasks/README.md) keeps that
+record in the same dated shape.
 
 ## Unit coverage, and its history
 
