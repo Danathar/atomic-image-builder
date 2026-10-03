@@ -10583,6 +10583,26 @@ class BuilderTests(unittest.TestCase):
                     self.assertIn("Rechunk with Chunkah", restored)
                     self.assertIn("just generate-build-tags", restored)
 
+    def test_write_container_project_files_patches_an_existing_workflow_in_place(self) -> None:
+        # The snapshot restore runs only for a repo that has no build.yml. A
+        # repo repaired before #618 still carries the once-generated shape,
+        # and every update must patch that file, not swap the snapshot in over
+        # it -- the restore test above cannot tell the two apart, because a
+        # seeded repo's build.yml is the snapshot already.
+        for branch in ("main", "master"):
+            with self.subTest(branch=branch):
+                app = self.make_app()
+                existing = legacy_generated_workflow()
+                with tempfile.TemporaryDirectory() as tmp:
+                    repo_dir = Path(tmp)
+                    app.clone_container_template(repo_dir)
+                    (repo_dir / ".github/workflows/build.yml").write_text(existing)
+                    app.write_project_files(repo_dir, include_workflow=True, default_branch=branch)
+                    written = (repo_dir / ".github/workflows/build.yml").read_text()
+                self.assertEqual(written, app.patch_container_workflow(existing, default_branch=branch))
+                self.assertIn("docker/metadata-action", written)
+                self.assertNotIn("Rechunk with Chunkah", written)
+
     def test_write_container_project_files_survives_a_missing_workflow_snapshot(self) -> None:
         # Same best-effort contract as the Justfile restore below: with no
         # bundled snapshot there is nothing to restore, and the rest of the
@@ -15644,6 +15664,22 @@ class BuilderTests(unittest.TestCase):
             self.assertIn(DEFAULT_GITHUB_BUILD_CRON, workflow)
 
 
+    def test_write_bluebuild_project_files_patches_an_existing_workflow_in_place(self) -> None:
+        # The restore above is for a missing file only. A build.yml the user
+        # has edited must come back as that file, patched, not as the snapshot.
+        app = self.make_bluebuild_app()
+        snapshot = (BLUEBUILD_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        existing = snapshot + "# Kept by hand: nightly mirror job lives in mirror.yml.\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            workflow_path = repo_dir / ".github/workflows/build.yml"
+            workflow_path.parent.mkdir(parents=True)
+            workflow_path.write_text(existing)
+            app.write_project_files(repo_dir, include_workflow=True)
+            written = workflow_path.read_text()
+        self.assertEqual(written, app.patch_bluebuild_workflow(existing))
+        self.assertIn("# Kept by hand: nightly mirror job lives in mirror.yml.", written)
+
     # ── manage_removed_packages update flow ──────────────────────────────
 
     def test_manage_removed_packages_add_flow(self) -> None:
@@ -17157,6 +17193,23 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("IMAGE_NAME=test-image", env_text)
         self.assertIn('REPO_ORGANIZATION="example"', env_text)
         self.assertIn('IMAGE_DESC="Test image"', env_text)
+
+    def test_write_project_files_patches_an_existing_env_file_in_place(self) -> None:
+        # image-template.env is restored only when it is missing. One that is
+        # there keeps the fields the tool does not own -- here a keyword list
+        # the user changed -- rather than taking the snapshot's.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.clone_container_template(repo_dir)
+            env_path = repo_dir / "image-template.env"
+            existing = env_path.read_text().replace('IMAGE_KEYWORDS="bootc,oci,linux"', 'IMAGE_KEYWORDS="bootc,gaming,steam"')
+            self.assertNotEqual(existing, env_path.read_text())
+            env_path.write_text(existing)
+            app.write_project_files(repo_dir, include_workflow=True)
+            env_text = env_path.read_text()
+        self.assertEqual(env_text, app.patch_image_template_env(existing))
+        self.assertIn('IMAGE_KEYWORDS="bootc,gaming,steam"', env_text)
 
     # ── patch_image_template_env unit tests ──────────────────────────────
 
