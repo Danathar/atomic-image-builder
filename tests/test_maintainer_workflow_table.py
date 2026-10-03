@@ -67,6 +67,7 @@ TRIGGER_WORDING = {
     "release": r"\brelease\b",
     "schedule": r"\bUTC\b",
     "issues": r"\bissue\b|\blabel\b",
+    "workflow_run": r"\brun finishes\b",
 }
 
 # cron day-of-week, as the table spells it, for a cron whose day-of-month is

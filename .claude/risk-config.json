@@ -31,6 +31,7 @@
         ".github/workflows/triage.yml",
         ".github/workflows/ai-fix.yml",
         ".github/workflows/maintenance-audit.yml",
+        ".github/workflows/auto-issues.yml",
         "snapshot_drift_issue.py"
       ],
       "evidence": [

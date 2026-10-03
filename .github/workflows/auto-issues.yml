@@ -1,0 +1,137 @@
+---
+name: Auto issues
+
+# Turns a red scheduled run into an issue, and closes the issue when the
+# workflow passes again.
+#
+# The gap: the three scheduled workflows below are the only detectors of
+# breakage that no pull request causes -- the world moving under the image,
+# the template snapshots drifting, an agent pull request merging without its
+# provenance -- and a scheduled run that fails tells nobody. No pull request
+# carries its check, and GitHub sends the failure email only to whoever last
+# edited the workflow's cron line. maintenance-audit.yml already keeps an
+# issue for snapshot drift (snapshot_drift_issue.py), because that advisory
+# keeps the job green; a run that actually fails had no issue at all.
+#
+# One issue per workflow, matched by exact title and by author, for the
+# reasons snapshot_drift_issue.py gives: the search index lags, so issues are
+# listed rather than searched, and a title alone is squattable by anyone who
+# can open an issue. A further failure comments on the open issue instead of
+# filing another; the next passing run on main closes it.
+#
+# The filtering is done in the step's shell rather than in a job `if:` so
+# tests/test_auto_issues_workflow.py can execute it. Every run of the watched
+# workflows is a scheduled or dispatched one, so a runner starting only to
+# exit is rare.
+on:
+  workflow_run:
+    # Matched by each workflow's `name:`, not its file name, so renaming one
+    # silently stops tracking it. The test above fails when this list and the
+    # scheduled workflows disagree.
+    workflows: [Nightly compliance, Maintenance Audit, Agent audit trail]
+    types: [completed]
+
+# Opens, comments on and closes issues. It checks nothing out and runs no
+# code from the watched run.
+permissions:
+  issues: write
+
+# Two completions of the same workflow must not both see "no issue open" and
+# file two.
+concurrency:
+  group: auto-issues-${{ github.event.workflow_run.name }}
+  cancel-in-progress: false
+
+jobs:
+  track:
+    name: Track the scheduled run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Open, update or close the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          WORKFLOW: ${{ github.event.workflow_run.name }}
+          EVENT: ${{ github.event.workflow_run.event }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+
+          # A dispatch against another branch is someone trying that branch.
+          # It says nothing about main, so it neither opens nor closes.
+          if [ "$HEAD_BRANCH" != "$DEFAULT_BRANCH" ]; then
+            echo "$WORKFLOW ran on $HEAD_BRANCH, not $DEFAULT_BRANCH; nothing to track."
+            exit 0
+          fi
+          case "$EVENT" in
+            schedule|workflow_dispatch) ;;
+            *)
+              echo "$WORKFLOW ran on a $EVENT event; only scheduled and dispatched runs are tracked."
+              exit 0
+              ;;
+          esac
+
+          # A cancelled or skipped run is neither a pass nor a failure. Closing
+          # on one would hide a failure nobody has fixed.
+          case "$CONCLUSION" in
+            failure|timed_out|startup_failure) failed=true ;;
+            success) failed=false ;;
+            *)
+              echo "$WORKFLOW concluded $CONCLUSION; leaving any tracking issue as it is."
+              exit 0
+              ;;
+          esac
+
+          title="Scheduled run failing: $WORKFLOW"
+
+          # Assigned before it is read so a failed listing fails the step
+          # under `set -e`. Read through process substitution, a gh error
+          # would look like "no issue open" and file a duplicate.
+          open="$(gh issue list --repo "$REPO" --state open --limit 10000 \
+            --json number,title,author \
+            --jq '.[] | [.number, .title, .author.login] | @tsv')"
+          number=""
+          while IFS=$'\t' read -r issue_number issue_title issue_author; do
+            [ "$issue_title" = "$title" ] || continue
+            case "$issue_author" in
+              app/github-actions|github-actions\[bot\]|github-actions)
+                number="$issue_number"
+                break
+                ;;
+            esac
+          done <<< "$open"
+
+          if [ "$failed" = true ]; then
+            if [ -n "$number" ]; then
+              printf '%s\n' \
+                "Failed again (\`$CONCLUSION\`): $RUN_URL" \
+                "" \
+                "Commit: $HEAD_SHA" \
+                | gh issue comment "$number" --repo "$REPO" --body-file -
+              echo "$WORKFLOW failed again; commented on #$number."
+            else
+              printf '%s\n' \
+                "**The scheduled \`$WORKFLOW\` workflow failed on \`$DEFAULT_BRANCH\`.** A red scheduled run notifies nobody but whoever last edited its cron line, so this issue is how it gets seen." \
+                "" \
+                "- Run: $RUN_URL" \
+                "- Conclusion: \`$CONCLUSION\`" \
+                "- Commit: $HEAD_SHA" \
+                "" \
+                "Open the run's failed step to see what broke. The workflow file's header comment says what a failure in it means." \
+                "" \
+                "\`.github/workflows/auto-issues.yml\` opened this issue. It comments here on each further failure, and closes the issue when the next scheduled or dispatched run on \`$DEFAULT_BRANCH\` passes." \
+                | gh issue create --repo "$REPO" --title "$title" --body-file -
+              echo "$WORKFLOW failed; opened a tracking issue."
+            fi
+          elif [ -n "$number" ]; then
+            gh issue close "$number" --repo "$REPO" \
+              --comment "Passed again: $RUN_URL (commit $HEAD_SHA). Closing."
+            echo "$WORKFLOW passed; closed #$number."
+          else
+            echo "$WORKFLOW passed and no tracking issue is open."
+          fi

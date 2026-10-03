@@ -345,6 +345,13 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   notices either gap once the merge is in. Any Tier 4 path the pull request
   touched is listed beside it. The job's token reads pull requests and
   nothing more; its only output is the run summary.
+- A red scheduled run is turned into an issue rather than left in an email.
+  [`.github/workflows/auto-issues.yml`](../.github/workflows/auto-issues.yml)
+  fires when `nightly-compliance.yml`, `maintenance-audit.yml` or
+  `agent-audit.yml` completes, and keeps one issue per workflow open while
+  it fails on `main`. Its token holds `issues: write` and nothing else; it
+  checks nothing out and runs no code from the run it reacts to, and it acts
+  only on scheduled or dispatched runs, which a fork cannot start.
 
 ## Reporting
 

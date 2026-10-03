@@ -9,6 +9,10 @@
       "workflow": {"contents": "read", "issues": "write"},
       "jobs": {}
     },
+    "auto-issues.yml": {
+      "workflow": {"issues": "write"},
+      "jobs": {}
+    },
     "ci.yml": {
       "workflow": null,
       "jobs": {
