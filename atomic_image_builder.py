@@ -1465,22 +1465,15 @@ def pin_action_uses_line(line: str) -> str:
     # ACTION_REF_PINS may name the SHA ACTION_PINS already holds under an
     # older label -- remove-unwanted-software's "v8" entries do, and stay as
     # they are so the freshness audit keeps watching that tag (see
-    # maintenance_notes.txt). The label written into a workflow is the
-    # generator's, though: pinned_action() writes ACTION_PINS' label for this
-    # SHA, and if the ref table's won here, a repository generated from
-    # scratch would have its comment rewritten on its first update with no
-    # upstream change behind it. Same SHA, one label.
+    # maintenance_notes.txt). The label written into a workflow is ACTION_PINS',
+    # though: workflows the tool once generated from scratch carry that label
+    # for this SHA, and if the ref table's won here, such a repository would
+    # have its comment rewritten on its next update with no upstream change
+    # behind it. Same SHA, one label.
     current = ACTION_PINS.get(action)
     if current is not None and current[0] == sha:
         label = current[1]
     return f"{prefix}{quote}{action}@{sha}{quote} # {label}"
-
-
-def pinned_action(action: str) -> str:
-    # New workflows are generated directly from these pinned references instead
-    # of floating tags for the same reason as pin_action_uses_line().
-    sha, label = ACTION_PINS[action]
-    return f"{action}@{sha} # {label}"
 
 
 # Job-level env is set for every step in the job, `uses:` steps included, so a
@@ -7541,10 +7534,17 @@ class App:
 
         if include_workflow:
             workflow_path.parent.mkdir(parents=True, exist_ok=True)
+            if not workflow_path.exists():
+                # Restore from the bundled template snapshot so updates can
+                # recreate a workflow that was manually deleted. A repaired
+                # repository then builds exactly as a new one does: the same
+                # Justfile-driven build, Chunkah rechunk and tags, from the one
+                # patched source rather than a second hand-written workflow.
+                template_workflow = CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml"
+                if template_workflow.exists():
+                    shutil.copy2(template_workflow, workflow_path)
             if workflow_path.exists():
                 workflow_path.write_text(self.patch_container_workflow(workflow_path.read_text(), default_branch=default_branch))
-            else:
-                workflow_path.write_text(self.generate_container_workflow(default_branch=default_branch))
             disk_workflow_path = managed_path(base_dir, ".github/workflows/build-disk.yml")
             if disk_workflow_path.exists():
                 disk_workflow_path.write_text(self.patch_container_disk_workflow(disk_workflow_path.read_text(), default_branch=default_branch))
@@ -7660,163 +7660,6 @@ class App:
             for service in self.config.services:
                 lines.append(f"systemctl enable {shell_quote(service)}")
             lines.append("")
-        return "\n".join(lines).rstrip() + "\n"
-
-    def generate_container_workflow(self, *, default_branch: str = "main") -> str:
-        # This is the GitHub Actions workflow for repos generated from scratch
-        # instead of patched from an existing template copy.
-        # Same guard the patched path uses, and for the same reason: the job
-        # environment reaches every step, so it carries whether a key exists
-        # rather than the key. Keeping the two spellings identical matters --
-        # this generator runs when a managed repository has lost its workflow,
-        # so a divergence here would quietly reintroduce #255 on exactly the
-        # repositories that already had something go wrong.
-        sign_if = f"github.event_name != 'pull_request' && github.ref == format('refs/heads/{{0}}', github.event.repository.default_branch) && env.{SIGNING_ENABLED_ENV[0]} == 'true'"
-        lines = [
-            "---",
-            "name: Build container image",
-            "on:",
-            "  pull_request:",
-            "    branches:",
-            f"      - {yaml_plain_or_scalar(default_branch)}",
-            "  schedule:",
-            f"    - cron: '{DEFAULT_GITHUB_BUILD_CRON}'",
-            "  push:",
-            "    branches:",
-            f"      - {yaml_plain_or_scalar(default_branch)}",
-            f"    paths-ignore: ['**/README.md', '{STATE_FILE}']",
-            "  workflow_dispatch:",
-            "",
-            "env:",
-            f"  IMAGE_DESC: {yaml_scalar(self.config.image_desc)}",
-            '  IMAGE_NAME: "${{ github.event.repository.name }}"',
-            '  IMAGE_REGISTRY: "ghcr.io/${{ github.repository_owner }}"',
-            '  DEFAULT_TAG: "latest"',
-            "",
-            "concurrency:",
-            "  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}",
-            "  cancel-in-progress: true",
-            "",
-            "jobs:",
-            "  build_push:",
-            "    runs-on: ubuntu-26.04",
-            "    permissions:",
-            "      contents: read",
-            # No id-token: this job signs with a key, not keylessly, and no
-            # action it runs asks for an OIDC token. The patched path drops the
-            # same scope from the bundled snapshot, and the two must not
-            # diverge -- see the sign_if note above for why that matters here
-            # in particular.
-            "      packages: write",
-            "    env:",
-            f"      {SIGNING_ENABLED_ENV[0]}: {SIGNING_ENABLED_ENV[1]}",
-            "    steps:",
-            "      - name: Prepare environment",
-            "        run: |",
-            '          echo "IMAGE_REGISTRY=${IMAGE_REGISTRY,,}" >> $GITHUB_ENV',
-            '          echo "IMAGE_NAME=${IMAGE_NAME,,}" >> $GITHUB_ENV',
-            "",
-            "      - name: Checkout",
-            f"        uses: {pinned_action('actions/checkout')}",
-            "",
-            "      - name: Maximize build space",
-            f"        uses: {pinned_action('ublue-os/remove-unwanted-software')}",
-            "",
-            "      - name: Get current date",
-            "        id: date",
-            '        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT',
-            "",
-            "      - name: Image Metadata",
-            f"        uses: {pinned_action('docker/metadata-action')}",
-            "        id: metadata",
-            "        with:",
-            "          tags: |",
-            "            type=raw,value=${{ env.DEFAULT_TAG }}",
-            "            type=raw,value=${{ env.DEFAULT_TAG }}.{{date 'YYYYMMDD'}}",
-            "            type=raw,value={{date 'YYYYMMDD'}}",
-            "            type=sha,enable=${{ github.event_name == 'pull_request' }}",
-            "            type=ref,event=pr",
-            "          labels: |",
-            "            org.opencontainers.image.created=${{ steps.date.outputs.date }}",
-            "            org.opencontainers.image.description=${{ env.IMAGE_DESC }}",
-            "            org.opencontainers.image.title=${{ env.IMAGE_NAME }}",
-            "            containers.bootc=1",
-            '          sep-tags: " "',
-            "",
-            "      - name: Build Image",
-            f"        uses: {pinned_action('redhat-actions/buildah-build')}",
-            "        with:",
-            "          containerfiles: ./Containerfile",
-            "          image: ${{ env.IMAGE_NAME }}",
-            "          tags: ${{ steps.metadata.outputs.tags }}",
-            "          labels: ${{ steps.metadata.outputs.labels }}",
-            "          oci: false",
-            "          squash: false",
-            "",
-            "      - name: Login to GHCR",
-            f"        uses: {pinned_action('docker/login-action')}",
-            "        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)",
-            "        with:",
-            "          registry: ghcr.io",
-            "          username: ${{ github.actor }}",
-            "          password: ${{ secrets.GITHUB_TOKEN }}",
-            "",
-            "      - name: Push to GHCR",
-            # Identified so the signing step below can read the digest this
-            # push produced. Without the id there is no digest to sign and the
-            # only thing left to name the image by is a tag.
-            "        id: push-to-ghcr",
-            f"        uses: {pinned_action('redhat-actions/push-to-registry')}",
-            "        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)",
-            "        with:",
-            "          registry: ${{ env.IMAGE_REGISTRY }}",
-            "          image: ${{ env.IMAGE_NAME }}",
-            "          tags: ${{ steps.metadata.outputs.tags }}",
-            "          username: ${{ github.actor }}",
-            "          password: ${{ github.token }}",
-        ]
-        if self.config.signing_enabled:
-            lines.extend(
-                [
-                    "",
-                    "      - name: Install Cosign",
-                    f"        uses: {pinned_action('sigstore/cosign-installer')}",
-                    f"        if: {sign_if}",
-                    "        with:",
-                    # The floor the patcher raises existing workflows to, so a
-                    # regenerated workflow is never written below it.
-                    f"          cosign-release: '{COSIGN_COMPATIBILITY_FLOOR}'",
-                    "",
-                    # Sign the digest this run pushed, not the tags pointing at
-                    # it. The bundled template signs `@${DIGEST}` and so does
-                    # this repository's own publish workflow, for the reason
-                    # that applies here too: every tag this workflow writes is
-                    # mutable and `latest` is rewritten by the daily rebuild,
-                    # so a tag resolved a second time in the signing step can
-                    # name a different image than the one just built -- which
-                    # signs an image this run did not produce and leaves the
-                    # one it did produce unsigned. One signature on the digest
-                    # covers every tag pointing at it, so the loop is not
-                    # needed either.
-                    "      - name: Sign container image",
-                    f"        if: {sign_if}",
-                    "        env:",
-                    "          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}",
-                    "          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}",
-                    "          DIGEST: ${{ steps.push-to-ghcr.outputs.digest }}",
-                    "        run: |",
-                    "          set -euo pipefail",
-                    # Fails closed. An empty digest would otherwise be signed
-                    # as "<image>@", and the shape of that failure is a red run
-                    # rather than an unsigned image only noticed by whoever
-                    # verifies it later.
-                    '          if [ -z "${DIGEST}" ]; then',
-                    '            echo "The push step reported no digest, so there is nothing to sign." >&2',
-                    "            exit 1",
-                    "          fi",
-                    '          cosign sign -y --new-bundle-format=false --use-signing-config=false --key env://COSIGN_PRIVATE_KEY "${IMAGE_REGISTRY}/${IMAGE_NAME}@${DIGEST}"',
-                ]
-            )
         return "\n".join(lines).rstrip() + "\n"
 
     def generate_readme(self) -> str:

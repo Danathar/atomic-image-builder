@@ -235,8 +235,7 @@ OIDC Token Scope on Generated Builds
 The Containerfile-method workflows are generated without `id-token: write`,
 and this is a deliberate divergence from the bundled snapshots, which do
 declare it.  strip_permission_entries() removes it in patch_container_workflow
-and patch_container_disk_workflow; generate_container_workflow simply does not
-emit it.  The snapshots themselves are NOT edited — template_snapshots/ is a
+and patch_container_disk_workflow.  The snapshots themselves are NOT edited — template_snapshots/ is a
 pinned upstream copy — so the drift is in the patchers, where the snapshot
 refresh will not silently undo it.
 
@@ -484,10 +483,11 @@ would look correct either way.
 
 Sign The Digest, Not The Tag
 -----------------------------
-Both generated paths sign `<registry>/<image>@<digest>`. The bundled snapshot
-reads the digest from `podman push --digestfile`; generate_container_workflow()
-reads it from the push-to-registry step's `digest` output, which is why that
-step carries `id: push-to-ghcr`. publish-image.yml signs this repository's own
+Generated repositories sign `<registry>/<image>@<digest>`. The bundled
+snapshot reads the digest from `podman push --digestfile`. The from-scratch
+workflow the tool wrote until #618 read it from the push-to-registry step's
+`digest` output, which is why that step carries `id: push-to-ghcr` in
+repositories that still have one. publish-image.yml signs this repository's own
 image the same way.
 
 The from-scratch path used to loop over `steps.metadata.outputs.tags` and sign
@@ -529,10 +529,9 @@ the upstream Ubuntu 26.04 GitHub-hosted runners: `ubuntu-26.04` for image
 builds, and `ubuntu-26.04` for disk builds since
 patch_disk_workflow_platform() fixed the disk workflow to the one architecture
 this tool publishes (see the next section; the snapshot still ships the
-`ubuntu-26.04` / `ubuntu-26.04-arm` choice, and the patcher resolves it). The
-from-scratch generate_container_workflow() fallback uses the same image-build
-runner so a missing workflow does not silently restore the older Ubuntu 24.04
-baseline.
+`ubuntu-26.04` / `ubuntu-26.04-arm` choice, and the patcher resolves it). A
+repository that has lost its build.yml gets the snapshot back, patched, on its
+next update (#618), so it lands on the same runner as a new one.
 At this refresh GitHub lists both Ubuntu 26.04 labels as preview images in the
 official actions/runner-images table. actionlint 1.7.12 predates those labels
 and reports them as unknown, so verify that warning against GitHub's current

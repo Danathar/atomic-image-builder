@@ -81,7 +81,7 @@ class BlockYamlTests(unittest.TestCase):
             parse_block_yaml("on: {schedule: nightly}\n")
 
     def test_a_flow_sequence_is_a_list_of_its_items(self) -> None:
-        # generate_container_workflow emits paths-ignore inline. A parser that
+        # Once-generated build workflows carry paths-ignore inline. A parser that
         # handed the line back as the string "['**/README.md', 'x']" would
         # report a one-element list and see a dropped path as unchanged.
         self.assertEqual(

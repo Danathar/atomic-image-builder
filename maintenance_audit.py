@@ -188,12 +188,11 @@ def audit_pin_table_shapes(
     """Check that every pin table value is a commit SHA rather than a ref.
 
     The rest of the pin checking compares a workflow's ref to the table and
-    reports a disagreement, which says nothing about what the table holds. Both
-    consumers -- pinned_action() for generated workflows, pin_action_uses_line()
-    for patched ones -- emit that value verbatim, so a table entry holding a tag
-    or a branch name is a floating ref written into every repository the tool
-    touches, and it is self-consistent: the workflow text would match it and the
-    audit would pass.
+    reports a disagreement, which says nothing about what the table holds. Its
+    consumer, pin_action_uses_line(), emits that value verbatim, so a table
+    entry holding a tag or a branch name is a floating ref written into every
+    repository the tool touches, and it is self-consistent: the workflow text
+    would match it and the audit would pass.
 
     ACTION_REF_PINS matters more here than its size suggests. It exists only for
     the patching path, and most of its targets appear in no workflow this audit
