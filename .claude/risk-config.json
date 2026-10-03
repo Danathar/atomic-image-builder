@@ -1,0 +1,103 @@
+{
+  "$comment": "docs/risk-tiers.md in a form a program can read. Tiers are blast radius, not diff size: a change takes the highest tier any path it touches sits in. `paths` repeats each tier's **Paths:** paragraph literal for literal, in the document's order; tests/test_risk_config.py fails when the two lists differ, when a tier here has no section there, or when a command named under `evidence` points at nothing in the tree. Edit the document and this file together. The prose that says why each path sits where it does lives in the document only.",
+  "source": "docs/risk-tiers.md",
+  "highest_tier_wins": true,
+  "tiers": {
+    "1": {
+      "name": "this repository only",
+      "reaches": "contributors and maintainers; nothing users run",
+      "paths": [
+        "*.md",
+        "docs/",
+        "maintainer_docs/",
+        "tests/",
+        ".editorconfig",
+        ".cursor/rules/atomic-image-builder.mdc",
+        ".claude/risk-config.json",
+        ".gitignore",
+        "LICENSE",
+        "maintenance_notes.txt",
+        "format_markdown_tables.py",
+        "ruff.toml",
+        ".coveragerc",
+        ".coveragerc.e2e",
+        ".coveragerc.maintenance-audit",
+        ".simplecov",
+        ".coverage-thresholds.json",
+        ".github/auto-qa-tuning.json",
+        ".github/ISSUE_TEMPLATE/",
+        ".github/workflows/nightly-compliance.yml",
+        ".github/workflows/triage.yml",
+        ".github/workflows/ai-fix.yml",
+        ".github/workflows/maintenance-audit.yml",
+        "snapshot_drift_issue.py"
+      ],
+      "evidence": [
+        "python3 -m unittest discover -s tests"
+      ]
+    },
+    "2": {
+      "name": "the tool users run",
+      "reaches": "everyone who runs aib-tool or aib, on their own machine, against their own GitHub account",
+      "paths": [
+        "atomic_image_builder.py",
+        "contrib/aib",
+        "container/",
+        "Containerfile"
+      ],
+      "evidence": [
+        "python3 -m unittest discover -s tests",
+        "podman build -t aib-local -f Containerfile .",
+        "tests/e2e/smoke.sh",
+        "tests/test_contrib_aib.sh",
+        "tests/test_entrypoint.sh"
+      ]
+    },
+    "3": {
+      "name": "what every generated repository ships",
+      "reaches": "every repository the tool has created or will create, including other people's",
+      "paths": [
+        "template_snapshots/",
+        "ACTION_PINS",
+        "ACTION_REF_PINS",
+        "atomic_image_builder.py",
+        "patch_*_workflow",
+        "maintenance_audit.py"
+      ],
+      "evidence": [
+        "python3 -m unittest discover -s tests",
+        "podman build -t aib-local -f Containerfile .",
+        "tests/e2e/smoke.sh",
+        "tests/test_contrib_aib.sh",
+        "tests/test_entrypoint.sh",
+        "python3 maintenance_audit.py"
+      ]
+    },
+    "4": {
+      "name": "credentials and the release path",
+      "reaches": "the published image, the release-bound wrapper and its checksum, and the Homebrew formula",
+      "paths": [
+        ".github/workflows/publish-image.yml",
+        ".github/workflows/publish-wrapper.yml",
+        ".github/workflows/update-homebrew-formula.yml",
+        ".github/workflows/ci.yml",
+        "homebrew_formula.py",
+        "coverage_badge.py",
+        "Formula/",
+        ".github/policies/workflow-permissions.json",
+        ".github/rulesets/**",
+        ".claude/settings.json",
+        ".claude/hooks/"
+      ],
+      "evidence": [
+        "python3 -m unittest discover -s tests",
+        "podman build -t aib-local -f Containerfile .",
+        "tests/e2e/smoke.sh",
+        "tests/test_contrib_aib.sh",
+        "tests/test_entrypoint.sh",
+        "python3 maintenance_audit.py"
+      ],
+      "also_state": "what the change can affect and what it deliberately leaves alone"
+    }
+  }
+}
