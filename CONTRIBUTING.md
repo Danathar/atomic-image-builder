@@ -29,9 +29,11 @@ setup:
    questions and a checklist of the local checks — it's a prompt, not a gate,
    so delete whatever doesn't apply to your change.
 
-`main` is not branch-protected, but everything except the maintainer's own
-direct fixes goes through review here — see MAINTAINER.md's *Repo settings
-worth knowing* if you're curious why.
+`main` is protected by the `protect main` ruleset: every change, the
+maintainer's included, reaches `main` as a pull request that passed `test`, and
+nothing can bypass that. The ruleset requires no approval, so review here is a
+practice rather than a gate. [docs/branch-protection.md](docs/branch-protection.md)
+explains each rule and how to check what GitHub is enforcing.
 
 ## Tests
 
