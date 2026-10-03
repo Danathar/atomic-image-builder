@@ -8,12 +8,18 @@ Use this to decide how much evidence a change needs, and what a reviewer
 should look at first. [docs/review-rubric.md](review-rubric.md) is what review
 checks; this is how much of it applies.
 
+[`.claude/risk-config.json`](../.claude/risk-config.json) is the same map in
+a form a program can read: each tier's path claims, reach and evidence
+commands, copied from this page. `tests/test_risk_config.py` fails when the
+two disagree, so a path added or moved here has to move there in the same
+change, and the other way round.
+
 ## Tier 1 — this repository only
 
 **Paths:** `*.md`, `docs/`, `maintainer_docs/`, `tests/`, `.editorconfig`,
-`.cursor/rules/atomic-image-builder.mdc`, `.gitignore`, `LICENSE`,
-`maintenance_notes.txt`, `format_markdown_tables.py`; the lint and coverage
-configuration — `ruff.toml`, `.coveragerc`, `.coveragerc.e2e`,
+`.cursor/rules/atomic-image-builder.mdc`, `.claude/risk-config.json`,
+`.gitignore`, `LICENSE`, `maintenance_notes.txt`, `format_markdown_tables.py`;
+the lint and coverage configuration — `ruff.toml`, `.coveragerc`, `.coveragerc.e2e`,
 `.coveragerc.maintenance-audit`, `.simplecov`, `.coverage-thresholds.json`,
 `.github/auto-qa-tuning.json`; the issue forms in `.github/ISSUE_TEMPLATE/`;
 and the workflows whose token can only read the repository or write to its

@@ -13,6 +13,7 @@ __pycache__/
 !.claude/hooks/
 !.claude/settings.json
 !.claude/checkpoint.md
+!.claude/risk-config.json
 .venv/
 .coverage
 .coverage.*
