@@ -9,7 +9,9 @@ change, and under what instructions". None of them is new; this page is where
 they are written down.
 
 Start from [`.github/copilot-instructions.md`](../../.github/copilot-instructions.md)
-for how the repo works. This directory is a record, not a brief.
+for how the repo works. This directory is a record, not a brief. How the
+agents share the repository while they work is in
+[`docs/multi-agent.md`](../multi-agent.md).
 
 ## The three marks
 
