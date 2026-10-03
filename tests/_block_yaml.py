@@ -7,8 +7,8 @@ unasserted: a package list emitted under ``remove:`` instead of ``install:``,
 a service list under ``masked:`` instead of ``enabled:``, or an indentation
 slip that makes the file unparseable all keep every ``assertIn`` passing.
 
-``generate_container_workflow`` has the same shape and the same exposure, so
-the supported subset covers what it emits too: single-quoted scalars (the
+The build workflows the tests patch have the same shape and the same
+exposure, so the supported subset covers them too: single-quoted scalars (the
 cron expression, ``cosign-release``), flow sequences (``paths-ignore``), and
 plain scalars that carry a quote inside them rather than around them (every
 ``if:`` guard, which spells its literals ``'pull_request'``). Quoting style

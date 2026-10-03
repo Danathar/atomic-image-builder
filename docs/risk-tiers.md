@@ -71,10 +71,10 @@ same applies to `container/entrypoint.sh` and `tests/test_entrypoint.sh`.
 
 **Paths:** `template_snapshots/`, the `ACTION_PINS` / `ACTION_REF_PINS`
 tables, the generated-output writers in `atomic_image_builder.py` — the
-`patch_*_workflow` and `generate_*_workflow` functions and the project writers
-around them — and `maintenance_audit.py`, the audit that is this tier's
-evidence. The writers live in the tool but their output is other people's CI,
-so they belong here rather than in Tier 2. The audit is here because a defect
+`patch_*_workflow` functions and the project writers around them — and
+`maintenance_audit.py`, the audit that is this tier's evidence. The writers
+live in the tool but their output is other people's CI, so they belong here
+rather than in Tier 2. The audit is here because a defect
 in it is what lets a stale pin or a drifted snapshot ship unnoticed: it fails
 towards silence, and silence in this tier reads as green.
 

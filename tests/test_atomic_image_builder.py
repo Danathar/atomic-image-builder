@@ -60,7 +60,6 @@ from atomic_image_builder import (
     SCAN_UNPUBLISHED_ARCHITECTURE,
     SCAN_UNSUPPORTED_BASE,
     SERVICE_TOKEN_RE,
-    SIGNING_ENABLED_ENV,
     STATE_FILE,
     TOOL_NAME,
     TOOL_SLUG,
@@ -88,7 +87,6 @@ from atomic_image_builder import (
     patch_signing_step_block,
     patch_workflow_steps,
     pin_action_uses_line,
-    pinned_action,
     read_os_release_fields,
     remote_replacement_list,
     string_list,
@@ -113,6 +111,24 @@ def parse_with_libyaml(text: str) -> object | None:
     if _LIBYAML_LOADER is None:
         return None
     return _yaml_load(text, Loader=_LIBYAML_LOADER)
+
+
+# The build.yml the tool wrote from nothing, until #618, for a Containerfile
+# repo that had lost its workflow (signing on, default branch main, "Test
+# image"). The tool no longer writes this shape, but repositories repaired that
+# way still carry it and every update patches it, so the patcher tests that
+# start from it keep a frozen copy rather than a generator.
+LEGACY_GENERATED_WORKFLOW = Path(__file__).parent / "fixtures/workflows/container_legacy_generated.yml"
+
+
+def legacy_generated_workflow(*, image_desc_line: str | None = None) -> str:
+    """The frozen once-generated workflow, optionally with its IMAGE_DESC line replaced."""
+    text = LEGACY_GENERATED_WORKFLOW.read_text()
+    if image_desc_line is not None:
+        old = '  IMAGE_DESC: "Test image"\n'
+        assert text.count(old) == 1
+        text = text.replace(old, image_desc_line + "\n")
+    return text
 
 
 class GumStub:
@@ -1148,8 +1164,7 @@ class BuilderTests(unittest.TestCase):
         # further update added another orphan.
         app = self.make_app()
         app.config.image_desc = "My image\u2028line two\u2029end"
-        generated = app.generate_container_workflow()
-        self.assertIn('  IMAGE_DESC: "My image\\u2028line two\\u2029end"', generated)
+        generated = legacy_generated_workflow(image_desc_line='  IMAGE_DESC: "My image\\u2028line two\\u2029end"')
         once = app.patch_container_workflow(generated)
         self.assertNotIn("\u2028", once)
         self.assertNotIn("\u2029", once)
@@ -1909,22 +1924,21 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}", result.splitlines())
         self.assertEqual(app.patch_container_workflow(result), result)
 
-    def test_both_workflow_paths_agree_on_the_signing_guard(self) -> None:
-        """The patched and from-scratch workflows must protect the key alike.
+    def test_both_workflow_shapes_agree_on_the_signing_guard(self) -> None:
+        """The patched snapshot and a once-generated workflow protect the key alike.
 
-        Two code paths produce a build workflow: patch_container_workflow()
-        adapts the bundled snapshot, and generate_container_workflow() writes
-        one from nothing when a managed repository has lost its file. Fixing
-        only the first is exactly what happened while writing #255 -- and the
-        path left behind is the one that runs for repositories where something
-        has already gone wrong.
+        The tool used to write a build workflow from nothing when a managed
+        repository had lost its file (#618). It no longer does, but repositories
+        repaired that way still carry that shape, and every update runs
+        patch_container_workflow() over it. Fixing only the snapshot shape is
+        exactly what happened while writing #255.
         """
         app = self.make_app()
         app.config.signing_enabled = True
         snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
         for label, workflow in (
             ("patched", app.patch_container_workflow(snapshot)),
-            ("from-scratch", app.generate_container_workflow()),
+            ("once-generated", app.patch_container_workflow(legacy_generated_workflow())),
         ):
             with self.subTest(path=label):
                 self.assertEqual(
@@ -2691,9 +2705,6 @@ class BuilderTests(unittest.TestCase):
                 patched = app.patch_workflow_branch_filters(workflow, branch)
                 expected = {"branches": [branch]}
                 self.assertEqual(parse_block_yaml(patched), {"on": {"push": expected, "pull_request": expected}})
-                generated = self.workflow_triggers(app.generate_container_workflow(default_branch=branch))
-                self.assertEqual(generated["pull_request"], expected)
-                self.assertEqual(generated["push"]["branches"], [branch])
         self.assertIn("      - master\n", app.patch_workflow_branch_filters(workflow, "master"))
 
     def test_validate_config_rejects_unsafe_package_token(self) -> None:
@@ -2885,15 +2896,15 @@ class BuilderTests(unittest.TestCase):
                 self.assertEqual(pin_action_uses_line(line), line)
 
     def test_pin_action_uses_line_is_a_fixed_point_on_every_generated_pin(self) -> None:
-        # The generator writes ACTION_PINS' label; the patcher runs over that
-        # same text on every later update. If the two ever disagree on the
-        # label for a SHA, a repository generated from scratch gets a comment
-        # rewritten on its first update with no upstream change behind it --
-        # which is what #349 found for remove-unwanted-software, whose SHA
-        # ACTION_REF_PINS also carries under its older "v8" label.
-        for action in ACTION_PINS:
+        # Workflows the tool once generated from scratch carry ACTION_PINS'
+        # label, and the patcher runs over that text on every later update.
+        # If the two ever disagree on the label for a SHA, such a repository
+        # gets a comment rewritten on its next update with no upstream change
+        # behind it -- which is what #349 found for remove-unwanted-software,
+        # whose SHA ACTION_REF_PINS also carries under its older "v8" label.
+        for action, (sha, label) in ACTION_PINS.items():
             for prefix in ("        uses: ", "      - uses: "):
-                line = f"{prefix}{pinned_action(action)}"
+                line = f"{prefix}{action}@{sha} # {label}"
                 with self.subTest(action=action, line=line):
                     self.assertEqual(pin_action_uses_line(line), line)
 
@@ -3125,7 +3136,7 @@ class BuilderTests(unittest.TestCase):
         defined`), and the repository stopped building until hand-edited.
         """
         app = self.make_app()
-        generated = app.generate_container_workflow()
+        generated = legacy_generated_workflow()
         renamed = generated.replace("secrets.SIGNING_SECRET != ''", "secrets.COSIGN_KEY != ''")
         self.assertNotEqual(renamed, generated)
         patched = app.patch_container_workflow(renamed)
@@ -10546,17 +10557,43 @@ class BuilderTests(unittest.TestCase):
             app.write_project_files(repo_dir, include_workflow=False)
             self.assertEqual((repo_dir / "cosign.pub").read_text(), "BLUEBUILD PUBLIC KEY DATA\n")
 
-    def test_write_container_project_files_generates_workflow_when_missing(self) -> None:
-        # Every other write_project_files(include_workflow=True) test seeds
-        # the repo via clone_container_template() first, so the workflow file
-        # already exists and only the patch branch runs. This covers the
-        # from-scratch generate branch for a repo with no workflow yet.
+    def test_write_container_project_files_restores_a_lost_workflow_from_the_snapshot(self) -> None:
+        # #618: a repo that lost build.yml used to get a second, hand-written
+        # workflow on update -- no Chunkah, no `just check`, its own tags. It
+        # now gets exactly what a new repo gets: the snapshot, patched.
+        snapshot = CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml"
+        for signing in (False, True):
+            for branch in ("main", "master"):
+                with self.subTest(signing=signing, branch=branch):
+                    app = self.make_app()
+                    app.config.signing_enabled = signing
+                    with tempfile.TemporaryDirectory() as seeded, tempfile.TemporaryDirectory() as lost:
+                        seeded_dir, lost_dir = Path(seeded), Path(lost)
+                        app.clone_container_template(seeded_dir)
+                        app.write_project_files(seeded_dir, include_workflow=True, default_branch=branch)
+                        app.clone_container_template(lost_dir)
+                        (lost_dir / ".github/workflows/build.yml").unlink()
+                        app.write_project_files(lost_dir, include_workflow=True, default_branch=branch)
+                        restored = (lost_dir / ".github/workflows/build.yml").read_text()
+                        self.assertEqual(restored, (seeded_dir / ".github/workflows/build.yml").read_text())
+                    self.assertEqual(
+                        restored,
+                        app.patch_container_workflow(snapshot.read_text(), default_branch=branch),
+                    )
+                    self.assertIn("Rechunk with Chunkah", restored)
+                    self.assertIn("just generate-build-tags", restored)
+
+    def test_write_container_project_files_survives_a_missing_workflow_snapshot(self) -> None:
+        # Same best-effort contract as the Justfile restore below: with no
+        # bundled snapshot there is nothing to restore, and the rest of the
+        # update still runs instead of raising.
         app = self.make_app()
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as empty:
             repo_dir = Path(tmp)
-            app.write_project_files(repo_dir, include_workflow=True, default_branch="master")
-            workflow = (repo_dir / ".github/workflows/build.yml").read_text()
-        self.assertEqual(workflow, app.generate_container_workflow(default_branch="master"))
+            with patch("atomic_image_builder.CONTAINERFILE_TEMPLATE_DIR", Path(empty)):
+                app.write_project_files(repo_dir, include_workflow=True)
+            self.assertFalse((repo_dir / ".github/workflows/build.yml").exists())
+            self.assertTrue((repo_dir / "Containerfile").exists())
 
     def test_write_container_project_files_survives_a_missing_justfile_snapshot(self) -> None:
         # The bundled template snapshot can be absent -- a trimmed install, a
@@ -10627,32 +10664,6 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("image-template", iso_toml)
         self.assertNotIn("image-template", iso_gnome)
         self.assertNotIn("image-template", iso_kde)
-
-    def test_generate_container_workflow_uses_default_branch_and_pins_cosign_release(self) -> None:
-        app = self.make_app()
-        app.config.signing_enabled = True
-        workflow = app.generate_container_workflow(default_branch="master")
-        self.assertIn("  pull_request:\n    branches:\n      - master", workflow)
-        self.assertIn("  push:\n    branches:\n      - master", workflow)
-        self.assertIn("    runs-on: ubuntu-26.04", workflow)
-        self.assertNotIn("ubuntu-24.04", workflow)
-        self.assertIn("          cosign-release: 'v3.1.2'", workflow)
-        self.assertIn("--new-bundle-format=false --use-signing-config=false", workflow)
-
-    def test_generate_container_workflow_follows_cosign_compatibility_floor(self) -> None:
-        # A regenerated workflow must land at the same floor the patcher raises
-        # existing workflows to, so a literal in the generator fails here.
-        app = self.make_app()
-        app.config.signing_enabled = True
-        with patch.object(atomic_image_builder, "COSIGN_COMPATIBILITY_FLOOR", "v3.2.0"):
-            workflow = app.generate_container_workflow()
-            patched = atomic_image_builder.patch_cosign_compatibility(workflow)
-        self.assertIn("          cosign-release: 'v3.2.0'", workflow)
-        self.assertNotIn("v3.1.2", workflow)
-        self.assertEqual(
-            re.findall(r"cosign-release: .*", workflow),
-            re.findall(r"cosign-release: .*", patched),
-        )
 
     def test_select_repo_manual_entry_recovers_after_missing_repo(self) -> None:
         app = self.make_app()
@@ -13077,22 +13088,6 @@ class BuilderTests(unittest.TestCase):
         self.assertLess(remove_pos, install_pos)
         self.assertLess(install_pos, clean_pos)
         self.assertLess(clean_pos, enable_pos)
-
-    def test_generate_container_workflow_includes_template_tag_variants(self) -> None:
-        app = self.make_app()
-        workflow = app.generate_container_workflow()
-        self.assertIn("type=raw,value={{date 'YYYYMMDD'}}", workflow)
-        self.assertIn("type=ref,event=pr", workflow)
-        # This used to assert COSIGN_PASSWORD appeared, which held only
-        # because it sat in the job environment unconditionally -- present
-        # even here, where signing is off and there is no step to use it.
-        # That is the exposure #255 removed, so the assertion is now that it
-        # is absent, and the signing paths assert their own env separately.
-        self.assertEqual(
-            self.job_env_entries(workflow),
-            ["SIGNING_ENABLED: ${{ secrets.SIGNING_SECRET != '' }}"],
-        )
-        self.assertNotIn("COSIGN_PASSWORD", workflow)
 
     def test_installer_profile_follows_first_boot_setup_not_desktop(self) -> None:
         # iso-gnome.toml disables Anaconda's Users module because a first-boot
@@ -19196,352 +19191,6 @@ class BuilderTests(unittest.TestCase):
         app = self.make_app()
         app.gum = GumStub()
         self.assertEqual(app.software_status(), "No software changes yet")
-
-    # ------------------------------------------------------------------
-    # generate_container_workflow, asserted as a parsed document.
-    #
-    # Every existing assertion on this generator is substring membership on
-    # the joined text, and the text is one flat string: `assertIn("    if: ...")`
-    # cannot tell which step the guard is attached to, `assertIn("id-token:
-    # write")` cannot tell `contents: read` from `contents: write` further up,
-    # and no containment check sees ordering at all. That is not hypothetical
-    # for this file -- it generates the workflow for a *managed repository
-    # that has lost its own*, so a step guard sliding onto the neighbouring
-    # step publishes from pull requests on exactly the repositories something
-    # already went wrong on. These parse the document and assert its shape.
-    # ------------------------------------------------------------------
-
-    def workflow_document(self, *, signing: bool = False, default_branch: str = "main") -> dict:
-        app = self.make_app()
-        app.config.signing_enabled = signing
-        return parse_block_yaml(app.generate_container_workflow(default_branch=default_branch))
-
-    @staticmethod
-    def workflow_steps(document: dict) -> list[dict]:
-        return document["jobs"]["build_push"]["steps"]
-
-    PUSH_ONLY_GUARD = (
-        "github.event_name != 'pull_request' && github.ref == "
-        "format('refs/heads/{0}', github.event.repository.default_branch)"
-    )
-
-    def test_generated_workflow_triggers_are_exactly_the_four_documented_ones(self) -> None:
-        document = self.workflow_document(default_branch="master")
-        self.assertEqual(
-            list(document["on"]),
-            ["pull_request", "schedule", "push", "workflow_dispatch"],
-        )
-        self.assertEqual(document["on"]["pull_request"], {"branches": ["master"]})
-        self.assertEqual(document["on"]["schedule"], [{"cron": DEFAULT_GITHUB_BUILD_CRON}])
-        self.assertEqual(
-            document["on"]["push"],
-            {"branches": ["master"], "paths-ignore": ["**/README.md", STATE_FILE]},
-        )
-        # `workflow_dispatch:` with no body is a null value, not an empty
-        # mapping and not the absent key that would drop manual runs.
-        self.assertIn("workflow_dispatch", document["on"])
-        self.assertIsNone(document["on"]["workflow_dispatch"])
-
-    def test_generated_workflow_paths_ignore_stays_a_list_of_two_paths(self) -> None:
-        # Emitted as an inline flow sequence, which is the one place in this
-        # document where a missing quote or a stray bracket turns a two-item
-        # list into a single string -- and Actions would then ignore no path
-        # at all, rebuilding the image on every README edit.
-        push = self.workflow_document()["on"]["push"]
-        self.assertIsInstance(push["paths-ignore"], list)
-        self.assertEqual(len(push["paths-ignore"]), 2)
-
-    def test_generated_workflow_job_permissions_are_read_plus_publish_only(self) -> None:
-        # Equality, not membership: `contents: write` contains the substring
-        # "contents:" just as `contents: read` does, so a widened token scope
-        # is invisible to an assertIn.
-        #
-        # No id-token. One job serves pull_request, push and schedule alike,
-        # and on a pull_request event the workflow file is the pull request's
-        # own -- so every scope this block names is a scope a proposed change
-        # can spend. Signing here is key-based and nothing asks GitHub for an
-        # OIDC token, so granting one only widens what a pull request holds.
-        job = self.workflow_document()["jobs"]["build_push"]
-        self.assertEqual(
-            job["permissions"],
-            {"contents": "read", "packages": "write"},
-        )
-        self.assertEqual(job["runs-on"], "ubuntu-26.04")
-
-    def test_generated_and_patched_workflows_grant_the_same_scopes(self) -> None:
-        # #255 was a divergence between these two generators, and the sign_if
-        # comment in generate_container_workflow says to keep them identical
-        # for exactly this reason: the from-scratch path runs when a managed
-        # repository has lost its workflow, so a repository that already had
-        # something go wrong is the one that would get the weaker file.
-        app = self.make_app()
-        snapshot = CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml"
-        patched = self.permission_blocks(app.patch_container_workflow(snapshot.read_text()))
-        generated = self.permission_blocks(app.generate_container_workflow())
-
-        self.assertEqual(patched, generated)
-        self.assertEqual(generated, [{"contents": "read", "packages": "write"}])
-
-    def test_generated_workflow_runs_its_steps_in_the_only_order_that_works(self) -> None:
-        # Login before Push, Build before both, and the date step before the
-        # metadata step that reads its output. Substring assertions see none
-        # of this: every one of these names is present in any order.
-        self.assertEqual(
-            [step["name"] for step in self.workflow_steps(self.workflow_document())],
-            [
-                "Prepare environment",
-                "Checkout",
-                "Maximize build space",
-                "Get current date",
-                "Image Metadata",
-                "Build Image",
-                "Login to GHCR",
-                "Push to GHCR",
-            ],
-        )
-
-    def test_generated_workflow_appends_the_signing_steps_after_the_push(self) -> None:
-        names = [step["name"] for step in self.workflow_steps(self.workflow_document(signing=True))]
-        self.assertEqual(names[-3:], ["Push to GHCR", "Install Cosign", "Sign container image"])
-        self.assertEqual(len(names), 10)
-
-    def test_generated_workflow_guards_only_the_steps_that_publish(self) -> None:
-        # The claim an assertIn on the guard string cannot make: that it is
-        # attached to these steps and no others. A guard that slid onto
-        # "Build Image" instead would leave Push unguarded and publish from
-        # every pull request.
-        guards = {
-            step["name"]: step.get("if") for step in self.workflow_steps(self.workflow_document())
-        }
-        self.assertEqual(
-            {name: guard for name, guard in guards.items() if guard is not None},
-            {
-                "Login to GHCR": self.PUSH_ONLY_GUARD,
-                "Push to GHCR": self.PUSH_ONLY_GUARD,
-            },
-        )
-
-    def test_generated_workflow_signing_steps_also_require_the_secret_to_exist(self) -> None:
-        # Both signing steps carry the stricter guard -- the push-only guard
-        # plus the job-level boolean. Installing cosign without it, or signing
-        # without it, fails the run on any fork that has no signing secret.
-        signing_guard = f"{self.PUSH_ONLY_GUARD} && env.{SIGNING_ENABLED_ENV[0]} == 'true'"
-        guards = {
-            step["name"]: step.get("if")
-            for step in self.workflow_steps(self.workflow_document(signing=True))
-        }
-        self.assertEqual(guards["Install Cosign"], signing_guard)
-        self.assertEqual(guards["Sign container image"], signing_guard)
-        self.assertNotEqual(guards["Install Cosign"], self.PUSH_ONLY_GUARD)
-
-    def test_generated_workflow_keeps_key_material_in_the_signing_step_alone(self) -> None:
-        # #255 structurally: the job env carries a boolean, and the private
-        # key and its password exist only on the step that runs cosign. A
-        # step-level `env:` anywhere else hands the key to a third-party
-        # action, and every substring form of this assertion is defeated by
-        # the same text appearing at a different indent.
-        document = self.workflow_document(signing=True)
-        self.assertEqual(
-            document["jobs"]["build_push"]["env"],
-            {SIGNING_ENABLED_ENV[0]: SIGNING_ENABLED_ENV[1]},
-        )
-        self.assertEqual(
-            {
-                step["name"]: step["env"]
-                for step in self.workflow_steps(document)
-                if "env" in step
-            },
-            {
-                "Sign container image": {
-                    "COSIGN_PRIVATE_KEY": "${{ secrets.SIGNING_SECRET }}",
-                    "COSIGN_PASSWORD": "${{ secrets.COSIGN_PASSWORD }}",
-                    "DIGEST": "${{ steps.push-to-ghcr.outputs.digest }}",
-                }
-            },
-        )
-
-    def test_generated_workflow_has_no_step_env_at_all_without_signing(self) -> None:
-        self.assertEqual(
-            [step["name"] for step in self.workflow_steps(self.workflow_document()) if "env" in step],
-            [],
-        )
-
-    def test_generated_workflow_pins_every_action_it_uses(self) -> None:
-        # Each `uses:` is compared against pinned_action's own output, so an
-        # action that lost its pin -- or gained a different one -- fails here
-        # rather than at whatever the tag happens to point at on the day.
-        expected = {
-            "Checkout": pinned_action("actions/checkout"),
-            "Maximize build space": pinned_action("ublue-os/remove-unwanted-software"),
-            "Image Metadata": pinned_action("docker/metadata-action"),
-            "Build Image": pinned_action("redhat-actions/buildah-build"),
-            "Login to GHCR": pinned_action("docker/login-action"),
-            "Push to GHCR": pinned_action("redhat-actions/push-to-registry"),
-            "Install Cosign": pinned_action("sigstore/cosign-installer"),
-        }
-        # The version label is a YAML comment, so the parsed value -- what
-        # Actions reads -- is the bare SHA ref, and the label can only be
-        # seen on the line as written.
-        used = {
-            step["name"]: step["uses"]
-            for step in self.workflow_steps(self.workflow_document(signing=True))
-            if "uses" in step
-        }
-        self.assertEqual(used, {name: pin.split(" # ")[0] for name, pin in expected.items()})
-        app = self.make_app()
-        app.config.signing_enabled = True
-        uses_lines = [
-            line.strip().removeprefix("- ").removeprefix("uses: ")
-            for line in app.generate_container_workflow(default_branch="main").splitlines()
-            if re.match(r"\s*(- )?uses: ", line)
-        ]
-        self.assertEqual(sorted(uses_lines), sorted(expected.values()))
-        for name, uses in used.items():
-            with self.subTest(step=name):
-                self.assertRegex(uses, r"^[^@ ]+@[0-9a-f]{40}$")
-        for line in uses_lines:
-            with self.subTest(line=line):
-                self.assertRegex(line, r"^[^@]+@[0-9a-f]{40} # \S")
-
-    def test_generated_workflow_metadata_step_emits_every_tag_and_label(self) -> None:
-        # `tags:` and `labels:` are literal blocks, so each is one scalar with
-        # newlines in it. Splitting it back gives the list docker/metadata-action
-        # actually receives -- a dropped daily tag reads as an unchanged
-        # substring match on any of the others.
-        step = next(
-            s for s in self.workflow_steps(self.workflow_document()) if s["name"] == "Image Metadata"
-        )
-        self.assertEqual(step["id"], "metadata")
-        self.assertEqual(
-            step["with"]["tags"].split("\n"),
-            [
-                "type=raw,value=${{ env.DEFAULT_TAG }}",
-                "type=raw,value=${{ env.DEFAULT_TAG }}.{{date 'YYYYMMDD'}}",
-                "type=raw,value={{date 'YYYYMMDD'}}",
-                "type=sha,enable=${{ github.event_name == 'pull_request' }}",
-                "type=ref,event=pr",
-            ],
-        )
-        self.assertEqual(
-            step["with"]["labels"].split("\n"),
-            [
-                "org.opencontainers.image.created=${{ steps.date.outputs.date }}",
-                "org.opencontainers.image.description=${{ env.IMAGE_DESC }}",
-                "org.opencontainers.image.title=${{ env.IMAGE_NAME }}",
-                "containers.bootc=1",
-            ],
-        )
-        # A space, quoted so YAML keeps it; unquoted it would be dropped and
-        # the tags would arrive joined by the action's default separator.
-        self.assertEqual(step["with"]["sep-tags"], " ")
-
-    def test_generated_workflow_build_flags_stay_booleans(self) -> None:
-        # `oci: false` is a boolean and `oci: "false"` is a string; buildah-build
-        # reads the second as truthy. Only a parser that resolves plain scalars
-        # by spelling can tell them apart.
-        step = next(
-            s for s in self.workflow_steps(self.workflow_document()) if s["name"] == "Build Image"
-        )
-        self.assertIs(step["with"]["oci"], False)
-        self.assertIs(step["with"]["squash"], False)
-        self.assertEqual(step["with"]["containerfiles"], "./Containerfile")
-
-    def test_generated_workflow_push_step_targets_the_lowercased_registry(self) -> None:
-        # The Prepare environment step lowercases IMAGE_REGISTRY and IMAGE_NAME
-        # into $GITHUB_ENV because GHCR rejects an uppercase path, and the push
-        # step is what consumes them.
-        steps = self.workflow_steps(self.workflow_document())
-        prepare = steps[0]
-        self.assertEqual(
-            prepare["run"].split("\n"),
-            [
-                'echo "IMAGE_REGISTRY=${IMAGE_REGISTRY,,}" >> $GITHUB_ENV',
-                'echo "IMAGE_NAME=${IMAGE_NAME,,}" >> $GITHUB_ENV',
-            ],
-        )
-        push = next(s for s in steps if s["name"] == "Push to GHCR")
-        self.assertEqual(push["with"]["registry"], "${{ env.IMAGE_REGISTRY }}")
-        self.assertEqual(push["with"]["image"], "${{ env.IMAGE_NAME }}")
-        self.assertEqual(push["with"]["tags"], "${{ steps.metadata.outputs.tags }}")
-        # The signing step names this id to read the pushed digest. An id that
-        # is renamed here and not there resolves to the empty string, which is
-        # exactly the case the signing step refuses to sign.
-        self.assertEqual(push["id"], "push-to-ghcr")
-
-    def test_generated_workflow_top_level_env_carries_the_image_description(self) -> None:
-        app = self.make_app()
-        app.config.image_desc = 'A "quoted" description: with punctuation'
-        document = parse_block_yaml(app.generate_container_workflow())
-        self.assertEqual(document["env"]["IMAGE_DESC"], 'A "quoted" description: with punctuation')
-        self.assertEqual(document["env"]["DEFAULT_TAG"], "latest")
-        self.assertEqual(document["concurrency"]["cancel-in-progress"], True)
-
-    def test_generated_workflow_keeps_an_emoji_in_the_image_description_a_single_scalar(self) -> None:
-        # The recipe's problem (#360) in the other generated document: a
-        # from-scratch build.yml whose IMAGE_DESC carried a surrogate pair was
-        # a workflow file GitHub could not load -- actionlint reports "found
-        # invalid Unicode character escape code" on the env line.
-        app = self.make_app()
-        app.config.image_desc = "My 🚀 image"
-        workflow = app.generate_container_workflow()
-        self.assertIn('  IMAGE_DESC: "My 🚀 image"', workflow)
-        self.assertNotIn("\\u", workflow)
-        self.assertEqual(parse_block_yaml(workflow)["env"]["IMAGE_DESC"], "My 🚀 image")
-        libyaml_document = parse_with_libyaml(workflow)
-        if libyaml_document is not None:
-            self.assertEqual(libyaml_document["env"]["IMAGE_DESC"], "My 🚀 image")
-
-    def test_generated_workflow_escapes_a_control_character_in_the_image_description(self) -> None:
-        # And the limit of writing non-ASCII raw, in the workflow: a C1
-        # control emitted as itself is a stream libyaml (and go-yaml, which
-        # Actions uses) refuses outright, so it has to stay a \u escape.
-        app = self.make_app()
-        app.config.image_desc = "My \x80 image"
-        workflow = app.generate_container_workflow()
-        self.assertIn('  IMAGE_DESC: "My \\u0080 image"', workflow)
-        self.assertNotIn("\x80", workflow)
-        self.assertEqual(parse_block_yaml(workflow)["env"]["IMAGE_DESC"], "My \x80 image")
-        libyaml_document = parse_with_libyaml(workflow)
-        if libyaml_document is not None:
-            self.assertEqual(libyaml_document["env"]["IMAGE_DESC"], "My \x80 image")
-
-    def test_generated_workflow_signing_step_signs_the_pushed_digest(self) -> None:
-        # The digest, not a tag. `latest` is rewritten by the daily rebuild, so
-        # a tag resolved again in this step can name an image other than the
-        # one the push above produced -- signing what this run did not build
-        # and leaving what it did build unsigned. The bundled template and this
-        # repository's own publish workflow both sign the digest for that
-        # reason; the two generated paths have to agree.
-        step = next(
-            s
-            for s in self.workflow_steps(self.workflow_document(signing=True))
-            if s["name"] == "Sign container image"
-        )
-        self.assertEqual(step["env"]["DIGEST"], "${{ steps.push-to-ghcr.outputs.digest }}")
-        self.assertEqual(
-            step["run"].split("\n"),
-            [
-                "set -euo pipefail",
-                'if [ -z "${DIGEST}" ]; then',
-                '  echo "The push step reported no digest, so there is nothing to sign." >&2',
-                "  exit 1",
-                "fi",
-                "cosign sign -y --new-bundle-format=false --use-signing-config=false "
-                '--key env://COSIGN_PRIVATE_KEY "${IMAGE_REGISTRY}/${IMAGE_NAME}@${DIGEST}"',
-            ],
-        )
-        self.assertNotIn("steps.metadata.outputs.tags", step["run"])
-
-    def test_generated_workflow_cosign_release_stays_a_quoted_version(self) -> None:
-        # Single-quoted in the source: unquoted, `v3.1.2` is still a string,
-        # but a release spelled `3.1` would resolve to the float 3.1 and
-        # cosign-installer would be handed the wrong version.
-        step = next(
-            s
-            for s in self.workflow_steps(self.workflow_document(signing=True))
-            if s["name"] == "Install Cosign"
-        )
-        self.assertEqual(step["with"], {"cosign-release": "v3.1.2"})
 
 
 if __name__ == "__main__":
