@@ -27,6 +27,7 @@
         ".github/auto-qa-tuning.json",
         ".github/ISSUE_TEMPLATE/",
         ".github/workflows/nightly-compliance.yml",
+        ".github/workflows/agent-audit.yml",
         ".github/workflows/triage.yml",
         ".github/workflows/ai-fix.yml",
         ".github/workflows/maintenance-audit.yml",
