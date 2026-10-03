@@ -198,6 +198,10 @@ share one group and settle on the newest commit.
 Expect a release to produce **two** image publishes: one from the release, one
 from merging the formula pull request into `main`. Same content, harmless.
 
+When one of these goes red, or a scheduled one stops appearing at all,
+[docs/ai-ops-runbook.md](../docs/ai-ops-runbook.md) says what it means and
+what to do first.
+
 ---
 
 ## Reading the weekly audit

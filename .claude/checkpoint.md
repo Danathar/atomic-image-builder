@@ -66,6 +66,13 @@ key: 70 of 197 signed pull requests were opened under the maintainer's login.
 It is a record, not a fourth learning artifact; `docs/reflections/README.md`'s
 table of three stands.
 
+**2026-10-03 — multi-agent orchestration stays in Hive; the repo writes down
+its side.** The ACMM L6 criterion (#625) looks for a dispatcher workflow or an
+orchestrator directory. Neither was added: no workflow here runs a model, for
+the reasons in `ai-fix.yml` and #442. `docs/multi-agent.md` instead records
+who the agents are and how they avoid each other, including the unstrict
+`test` check that let #632 and #636 break `main` together.
+
 ## Declined, and why it will come back
 
 **2026-09-03 — a committed point-in-time session summary was declined twice**
