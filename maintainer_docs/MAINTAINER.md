@@ -8,7 +8,9 @@ End-user docs are in [README.md](../README.md); development workflows are in
 
 ## Cutting a release
 
-Four steps, all of them yours. Everything after the tag is automated.
+Four steps, all of them yours. Everything after the tag is automated, apart
+from merging the formula pull request and recording the release in
+`ROADMAP.md`, both described at the end.
 
 **A change to `contrib/aib` needs one.** The recommended install fetches the
 wrapper from the latest release, not from `main`, so a wrapper fix merged
@@ -105,6 +107,14 @@ python3 homebrew_formula.py --check
 ```
 
 It should print `Homebrew formula pin is current.`
+
+**Then record the release against the beta-exit bar.** While the project is in
+beta, add a row for the new tag to the
+[Beta-exit progress](../ROADMAP.md#beta-exit-progress) table in `ROADMAP.md`
+and update the count above it. That table is the only place the bar is checked
+release by release, so a release left out of it is one nobody checked.
+`tests/test_roadmap_doc.py` checks the row against `VERSION` and the coverage
+gate.
 
 ### Order matters
 

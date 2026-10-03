@@ -44,7 +44,40 @@ asks:
 1. **Beta exit criteria: decided.** The bar is recorded under "Current state"
    above (#578). What's left is meeting it: three regression-free releases in
    a row, with the coverage gate holding and no open five-stage correctness
-   issues when the third one ships.
+   issues when the third one ships. Each release's result is recorded under
+   "Beta-exit progress" below (#620).
+
+## Beta-exit progress
+
+How close the project is to the bar under "Current state", one row per
+tagged release. Only releases tagged after the bar was decided on 2026-10-01
+count. v0.10.0 (2026-09-21) came before it, so it does not.
+
+**Clean releases in a row: 0 of 3.**
+
+| Release | Date | Containerfile regressions | BlueBuild regressions | Unit coverage | Open five-stage correctness issues | Counts |
+| ------- | ---- | ------------------------- | --------------------- | ------------- | ---------------------------------- | ------ |
+
+No release has been recorded yet. After each tagged release, add a row and
+update the count above:
+
+- **Release** and **Date**: the tag and the day it was published.
+- **Containerfile regressions** and **BlueBuild regressions**: the issue
+  numbers of any scan, carry or build regression reported against that build
+  method in this release, or "none". If one is reported later against a
+  release already in the table, add it to that row.
+- **Unit coverage**: the unit coverage percentage at the tagged commit, from
+  the history described in docs/metrics.md. The gate it has to meet is the
+  unit threshold in .coverage-thresholds.json, the same one CI enforces.
+- **Open five-stage correctness issues**: how many open bug issues there are
+  against the five-stage runtime on the release date.
+- **Counts**: "yes" when both regression columns say "none" and unit coverage
+  is at or above the gate, otherwise "no".
+
+The count above is the number of "yes" rows at the bottom of the table, in a
+row. A "no" sets it back to 0. The bar is met when that count reaches three
+and the newest of those three releases has 0 open five-stage correctness
+issues. Mark this section "met" then, not before.
 
 ## Longer-term / open questions
 
