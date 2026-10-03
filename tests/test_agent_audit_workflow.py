@@ -1,0 +1,309 @@
+"""Execute the `run:` body of .github/workflows/agent-audit.yml.
+
+The audit reads back the record every agent pull request is supposed to leave
+-- the `— hive:` signature line naming its backend and model, and a
+Signed-off-by trailer on every commit -- and fails the run when one did not
+leave it. Nothing else notices either gap after the merge: the DCO check is
+not a required status check in the ruleset, and an omp-backed run pushes under
+the maintainer's identity, so the author login alone cannot say which merged
+pull requests an agent wrote.
+
+What the shell decides, and what fails quietly when it stops deciding it:
+
+* Which merged pull requests count as an agent's. A Hive-app pull request is
+  one by its author; a maintainer-identity pull request is one only by its
+  signature line. Drop the second clause and every omp-backed pull request
+  silently leaves the audit.
+* A Hive-app pull request with no signature line is a finding, and an agent
+  pull request with an unsigned commit is a finding. Either one has to turn
+  the run red, or the audit is a report nobody reads.
+* A Tier 4 path is reported in the row and does not fail the run. The paths
+  are the ones docs/risk-tiers.md names, and the join below reads them out of
+  the document so a path added there has to reach the workflow too.
+* `gh pr list` returns the newest N and nothing about the rest, so a window
+  that fills the cap is refused rather than audited in part.
+
+The step's shell is extracted from the workflow rather than copied here, so
+editing agent-audit.yml re-runs these assertions against the edit. `gh` is a
+stub serving staged JSON and recording its argv; `jq` is the real one, since
+the classification is written in it. Bodies run under a plain `bash -c`, so
+the `set -euo pipefail` the body writes for itself is the thing under test.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from _workflow_steps import step_env, step_run_body
+
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW = ROOT / ".github/workflows/agent-audit.yml"
+RISK_TIERS = ROOT / "docs/risk-tiers.md"
+AUDIT_STEP = "Audit merged agent pull requests"
+REPO = "Danathar/atomic-image-builder"
+
+# Serves `pr list` from merged.json and `pr view N` from pr-N.json in
+# $STUB_DIR, recording every argv so a case can assert on the query sent.
+GH_STUB = r"""#!/usr/bin/env bash
+{ printf '%s\t' gh "$@"; printf '\n'; } >> "$STUB_LOG"
+case "$1 $2" in
+  "pr list") cat "$STUB_DIR/merged.json" ;;
+  "pr view") cat "$STUB_DIR/pr-$3.json" ;;
+  *) echo "gh stub: unexpected command: $*" >&2; exit 97 ;;
+esac
+"""
+
+SIGNATURE = "— hive: backend=claude model=claude-opus-5-5 effort=medium"
+SIGNED = "Hive-Run: Danathar/atomic-image-builder#1\n\nSigned-off-by: Dan <dan@example.com>"
+
+
+def merged(number: int, *, bot: bool, signed_body: bool, title: str = "fix: a thing") -> dict:
+    body = "## What changed\n\nThe thing.\n"
+    if signed_body:
+        body += f"\n{SIGNATURE}\n"
+    return {
+        "number": number,
+        "title": title,
+        "url": f"https://github.com/{REPO}/pull/{number}",
+        "mergedAt": "2026-09-30T12:00:00Z",
+        "mergedBy": {"login": "Danathar"},
+        "author": {"login": "app/danathar-atomic-hive" if bot else "Danathar", "is_bot": bot},
+        "body": body,
+    }
+
+
+def details(number: int, commits: list[str], files: list[str]) -> dict:
+    """`gh pr view --json number,commits,files` for *number*.
+
+    *commits* are message bodies; the oid is derived from the position so a
+    finding can be matched against it.
+    """
+    return {
+        "number": number,
+        "commits": [
+            {"oid": f"{number:03d}{index:04d}" + "a" * 33, "messageBody": body}
+            for index, body in enumerate(commits)
+        ],
+        "files": [{"path": path} for path in files],
+    }
+
+
+def tier_four_literals() -> list[str]:
+    """The backticked paths in Tier 4's **Paths:** paragraph of docs/risk-tiers.md."""
+    text = RISK_TIERS.read_text()
+    section = text.split("## Tier 4")[1].split("\n## ")[0]
+    paragraph = section.split("**Paths:**")[1].split("\n\n")[0]
+    literals = re.findall(r"`([^`]+)`", paragraph)
+    assert literals, "Tier 4's Paths paragraph names no backticked path"
+    return literals
+
+
+def concrete(literal: str) -> str:
+    """A file path the Tier 4 literal covers, for a path that names a directory or glob."""
+    if literal.endswith("/**"):
+        return literal[: -len("**")] + "main.json"
+    if literal.endswith("/"):
+        return literal + "something"
+    return literal
+
+
+class AuditStepRun:
+    """One execution of the audit step over staged pull requests."""
+
+    def __init__(self, tmp: Path, since: str = "2026-09-01") -> None:
+        self.tmp = tmp
+        self.bin = tmp / "bin"
+        self.bin.mkdir()
+        gh = self.bin / "gh"
+        gh.write_text(GH_STUB)
+        gh.chmod(0o755)
+        self.stub_log = tmp / "gh.log"
+        self.summary = tmp / "summary.md"
+        self.summary.write_text("")
+        self.since = since
+        self.work = tmp / "work"
+        self.work.mkdir()
+
+    def stage(self, prs: list[dict], detail: list[dict]) -> None:
+        (self.tmp / "merged.json").write_text(json.dumps(prs))
+        for entry in detail:
+            (self.tmp / f"pr-{entry['number']}.json").write_text(json.dumps(entry))
+
+    def run(self) -> subprocess.CompletedProcess[str]:
+        env = {
+            **os.environ,
+            "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+            "STUB_DIR": str(self.tmp),
+            "STUB_LOG": str(self.stub_log),
+            "GITHUB_STEP_SUMMARY": str(self.summary),
+            "GH_TOKEN": "stub-token",
+            "REPO": REPO,
+            "SINCE": self.since,
+        }
+        return subprocess.run(
+            ["bash", "-c", step_run_body(WORKFLOW, AUDIT_STEP)],
+            cwd=self.work,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+    def gh_calls(self) -> list[list[str]]:
+        if not self.stub_log.exists():
+            return []
+        return [line.split("\t")[:-1] for line in self.stub_log.read_text().splitlines()]
+
+
+class AuditStepTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # jq is on every GitHub runner, as shellcheck is; ci.yml reads the
+        # coverage threshold with it without installing it. Skipped the way
+        # tests/test_git_diff_gate.py skips on shellcheck, rather than with a
+        # `skipUnless` decorator: those are joined to the tools ci.yml pins
+        # from a release, which jq is not.
+        if shutil.which("jq") is None:
+            self.skipTest("jq is not installed")
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.run_ = AuditStepRun(Path(self.tmpdir.name))
+
+    def test_the_step_reads_the_token_and_repository_from_the_workflow_context(self) -> None:
+        env = step_env(WORKFLOW, AUDIT_STEP)
+        self.assertEqual(env["GH_TOKEN"], "${{ github.token }}")
+        self.assertEqual(env["REPO"], "${{ github.repository }}")
+        self.assertEqual(env["SINCE"], "${{ inputs.since }}")
+
+    def test_a_window_where_every_record_is_complete_passes_and_lists_only_agent_pull_requests(self) -> None:
+        self.run_.stage(
+            [
+                merged(10, bot=True, signed_body=True, title="fix: a | b"),
+                merged(11, bot=False, signed_body=True),
+                merged(12, bot=False, signed_body=False, title="docs: by hand"),
+            ],
+            [
+                details(10, [SIGNED], ["docs/using.md"]),
+                details(11, [SIGNED, SIGNED], ["atomic_image_builder.py"]),
+            ],
+        )
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        summary = self.run_.summary.read_text()
+        self.assertIn("2 of the 3 pull requests merged in the window were written by an agent.", summary)
+        self.assertIn("[#10](https://github.com/Danathar/atomic-image-builder/pull/10) fix: a \\| b", summary)
+        self.assertIn("| app/danathar-atomic-hive | Danathar | backend=claude model=claude-opus-5-5 effort=medium | 1 | all | none |", summary)
+        self.assertIn("[#11](https://github.com/Danathar/atomic-image-builder/pull/11)", summary)
+        self.assertIn("| Danathar | Danathar | backend=claude model=claude-opus-5-5 effort=medium | 2 | all | none |", summary)
+        self.assertNotIn("#12", summary)
+        self.assertNotIn("Findings", summary)
+        self.assertIn("Every agent pull request carries its signature line", summary)
+        # The maintainer's own pull request is never fetched in detail.
+        viewed = [call[3] for call in self.run_.gh_calls() if call[1:3] == ["pr", "view"]]
+        self.assertEqual(sorted(viewed), ["10", "11"])
+        self.assertEqual(result.stdout.strip(), summary.strip())
+
+    def test_a_hive_app_pull_request_without_a_signature_line_fails_the_run(self) -> None:
+        self.run_.stage(
+            [merged(20, bot=True, signed_body=False), merged(21, bot=True, signed_body=True)],
+            [details(20, [SIGNED], ["README.md"]), details(21, [SIGNED], ["README.md"])],
+        )
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        summary = self.run_.summary.read_text()
+        self.assertIn("| **missing** | 1 | all | none |", summary)
+        self.assertIn("#### Findings", summary)
+        self.assertIn("- #20: opened by the Hive app with no `— hive:` signature line", summary)
+        self.assertNotIn("- #21:", summary)
+        self.assertIn("::error::1 agent pull request(s) merged since 2026-09-01 left an incomplete record", result.stdout)
+
+    def test_an_unsigned_commit_on_an_agent_pull_request_fails_the_run_and_names_the_commit(self) -> None:
+        unsigned = "Hive-Run: Danathar/atomic-image-builder#1\n"
+        self.run_.stage(
+            [merged(30, bot=False, signed_body=True)],
+            [details(30, [SIGNED, unsigned, "Signed-off-by: Dan <dan@example.com>"], ["README.md"])],
+        )
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        summary = self.run_.summary.read_text()
+        self.assertIn("| 3 | **2 of 3** | none |", summary)
+        self.assertIn("- #30: commit 0300001 carries no Signed-off-by trailer", summary)
+
+    def test_two_unsigned_commits_are_named_together(self) -> None:
+        self.run_.stage(
+            [merged(31, bot=True, signed_body=True)],
+            [details(31, ["", "nothing here", SIGNED], ["README.md"])],
+        )
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("- #31: commits 0310000, 0310001 carry no Signed-off-by trailer", self.run_.summary.read_text())
+
+    def test_every_tier_four_path_the_risk_document_names_is_listed_and_does_not_fail(self) -> None:
+        literals = tier_four_literals()
+        paths = [concrete(literal) for literal in literals] + ["docs/using.md", "tests/test_x.py"]
+        self.run_.stage([merged(40, bot=True, signed_body=True)], [details(40, [SIGNED], paths)])
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        summary = self.run_.summary.read_text()
+        row = next(line for line in summary.splitlines() if line.startswith("| [#40]"))
+        cell = row.rstrip("|").rsplit("|", 1)[1].strip()
+        listed = re.findall(r"`([^`]+)`", cell)
+        self.assertEqual(listed, [concrete(literal) for literal in literals])
+        self.assertNotIn("Findings", summary)
+
+    def test_a_window_that_fills_the_cap_is_refused(self) -> None:
+        prs = [merged(number, bot=False, signed_body=False) for number in range(1, 501)]
+        self.run_.stage(prs, [])
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("::error::500 pull requests merged since 2026-09-01 reached the 500 cap", result.stdout)
+        self.assertEqual(self.run_.summary.read_text(), "")
+
+    def test_the_query_asks_for_merged_pull_requests_since_the_date(self) -> None:
+        self.run_.stage([], [])
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (listing,) = [call for call in self.run_.gh_calls() if call[1:3] == ["pr", "list"]]
+        self.assertIn("--state", listing)
+        self.assertEqual(listing[listing.index("--state") + 1], "merged")
+        self.assertEqual(listing[listing.index("--search") + 1], "merged:>=2026-09-01")
+        self.assertEqual(listing[listing.index("--repo") + 1], REPO)
+        self.assertIn("0 of the 0 pull requests merged in the window", self.run_.summary.read_text())
+
+    def test_a_blank_since_means_the_last_thirty_one_days(self) -> None:
+        self.run_.since = ""
+        self.run_.stage([], [])
+        before = datetime.now(timezone.utc).date()
+        result = self.run_.run()
+        after = datetime.now(timezone.utc).date()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (listing,) = [call for call in self.run_.gh_calls() if call[1:3] == ["pr", "list"]]
+        expected = {f"merged:>={(day - timedelta(days=31)).isoformat()}" for day in (before, after)}
+        self.assertIn(listing[listing.index("--search") + 1], expected)
+
+    def test_a_malformed_since_is_refused_before_any_query(self) -> None:
+        self.run_.since = "last month"
+        self.run_.stage([], [])
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("::error::since must be YYYY-MM-DD, got 'last month'", result.stdout)
+        self.assertEqual(self.run_.gh_calls(), [])
+
+
+class TierFourJoinTests(unittest.TestCase):
+    def test_the_document_names_the_paths_the_join_expects(self) -> None:
+        # The executing test above walks these; if the paragraph's shape moves
+        # the reader returns nothing and that test would pass on an empty list.
+        literals = tier_four_literals()
+        for expected in (".github/workflows/publish-image.yml", ".claude/hooks/", "Formula/"):
+            self.assertIn(expected, literals)
+
+
+if __name__ == "__main__":
+    unittest.main()

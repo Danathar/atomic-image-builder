@@ -334,6 +334,17 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   arrives as a pull request that passed `test`, with no bypass for anyone.
   [Branch protection](branch-protection.md) explains each rule and how to
   check that it is live.
+- The record an agent leaves is read back after the fact.
+  [`.github/workflows/agent-audit.yml`](../.github/workflows/agent-audit.yml)
+  runs monthly and on demand, lists every pull request merged in the window
+  that an agent wrote -- opened by the Hive app, or carrying the `— hive:`
+  signature line that names the backend and model -- and fails when a
+  Hive-app pull request has no signature line or a commit has no
+  Signed-off-by trailer. The DCO check is not required by the ruleset, and an
+  omp-backed run pushes under the maintainer's identity, so nothing else
+  notices either gap once the merge is in. Any Tier 4 path the pull request
+  touched is listed beside it. The job's token reads pull requests and
+  nothing more; its only output is the run summary.
 
 ## Reporting
 
