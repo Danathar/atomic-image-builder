@@ -57,6 +57,15 @@ It is addressed to one model by name and covers conduct rather than
 conventions. It was committed as its author wrote it, with one paragraph added
 naming the boundary between it and the canonical brief.
 
+**2026-10-03 — agent work is traced by signature, branch and trailer, not by
+author.** `docs/agent-tasks/` writes down the three marks an agent change
+already leaves (the `— hive:` line in the PR body, the `<role>/` branch
+prefix, the `Hive-Run:` commit trailer) and keeps dated ledgers of them, in the
+same shape as `docs/metrics/`. The first ledger showed why author is the wrong
+key: 70 of 197 signed pull requests were opened under the maintainer's login.
+It is a record, not a fourth learning artifact; `docs/reflections/README.md`'s
+table of three stands.
+
 ## Declined, and why it will come back
 
 **2026-09-03 — a committed point-in-time session summary was declined twice**
