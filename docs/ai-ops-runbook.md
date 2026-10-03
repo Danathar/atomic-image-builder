@@ -28,6 +28,7 @@ gh run list --workflow maintenance-audit.yml -L 4           # one run a Monday
 gh run list --workflow agent-audit.yml -L 2                 # one run a month
 gh pr list --state open --label hold                        # agent PRs waiting on a person
 gh issue list --state open --label ai-fix-requested         # issues waiting on an agent
+gh issue list --search "in:title Scheduled run failing"     # red scheduled runs
 ```
 
 A run that should be in that list and is not is a signal too. See
@@ -94,6 +95,21 @@ after 60 days with no repository activity.
 2. Open the workflow in the repository's **Actions** tab. A disabled one says
    so and offers **Enable workflow**.
 3. To get a reading now, dispatch it: `gh workflow run nightly-compliance.yml`.
+
+## A *Scheduled run failing* issue opened
+
+`auto-issues.yml` opens `Scheduled run failing: <workflow>` when a
+scheduled or dispatched run of `nightly-compliance.yml`, `maintenance-audit.yml`
+or `agent-audit.yml` fails on `main`. It comments there on each further
+failure and closes the issue when the next run passes. Follow that workflow's
+section in this runbook; the issue links the failed run.
+
+To confirm a fix without waiting for the schedule, dispatch the workflow on
+`main`. A pass closes the issue. Close it by hand only if the workflow was
+removed or renamed, since nothing else will.
+
+If `auto-issues.yml` itself failed, the scheduled run's own result is still in
+[Start here](#start-here)'s run lists; only the issue is missing.
 
 ## The weekly audit failed or advised
 
