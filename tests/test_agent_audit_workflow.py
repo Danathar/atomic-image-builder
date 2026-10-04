@@ -52,11 +52,23 @@ REPO = "Danathar/atomic-image-builder"
 
 # Serves `pr list` from merged.json and `pr view N` from pr-N.json in
 # $STUB_DIR, recording every argv so a case can assert on the query sent.
+# Like the real gh, it returns only the fields `--json` names and, for
+# `pr list`, no more than `--limit` entries (30 when the flag is absent), so
+# a field or the limit dropped from the step's query changes what it reads.
 GH_STUB = r"""#!/usr/bin/env bash
 { printf '%s\t' gh "$@"; printf '\n'; } >> "$STUB_LOG"
+fields="" limit=30
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[i]}" in
+    --json) fields="${args[i + 1]}" ;;
+    --limit) limit="${args[i + 1]}" ;;
+  esac
+done
+project='with_entries(select(.key as $k | $f | split(",") | index($k)))'
 case "$1 $2" in
-  "pr list") cat "$STUB_DIR/merged.json" ;;
-  "pr view") cat "$STUB_DIR/pr-$3.json" ;;
+  "pr list") jq --arg f "$fields" --argjson n "$limit" ".[:\$n] | map($project)" "$STUB_DIR/merged.json" ;;
+  "pr view") jq --arg f "$fields" "$project" "$STUB_DIR/pr-$3.json" ;;
   *) echo "gh stub: unexpected command: $*" >&2; exit 97 ;;
 esac
 """
@@ -294,6 +306,109 @@ class AuditStepTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("::error::since must be YYYY-MM-DD, got 'last month'", result.stdout)
         self.assertEqual(self.run_.gh_calls(), [])
+
+
+class AuditNearMissTests(unittest.TestCase):
+    """Inputs one character from a match, which the cases above never send.
+
+    Every pull request above either carries the record whole or lacks it
+    whole, so an anchor dropped from one of the step's patterns, or a field
+    dropped from its query, still passes them. Each case here sends the input
+    that only the anchor or the field tells apart.
+    """
+
+    def setUp(self) -> None:
+        if shutil.which("jq") is None:
+            self.skipTest("jq is not installed")
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.run_ = AuditStepRun(Path(self.tmpdir.name))
+
+    def row(self, number: int) -> str:
+        summary = self.run_.summary.read_text()
+        return next(line for line in summary.splitlines() if line.startswith(f"| [#{number}]"))
+
+    def test_the_row_carries_every_field_the_listing_returns(self) -> None:
+        pr = merged(50, bot=True, signed_body=True, title="fix: the row")
+        pr["mergedAt"] = "2026-09-28T23:59:59Z"
+        pr["mergedBy"] = {"login": "a-reviewer"}
+        self.run_.stage([pr], [details(50, [SIGNED, SIGNED], ["docs/using.md"])])
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            self.row(50),
+            f"| [#50](https://github.com/{REPO}/pull/50) fix: the row | 2026-09-28 | app/danathar-atomic-hive"
+            " | a-reviewer | backend=claude model=claude-opus-5-5 effort=medium | 2 | all | none |",
+        )
+
+    def test_a_pull_request_merged_by_no_one_recorded_says_unknown(self) -> None:
+        pr = merged(51, bot=True, signed_body=True)
+        pr["mergedBy"] = None
+        self.run_.stage([pr], [details(51, [SIGNED], ["README.md"])])
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("| app/danathar-atomic-hive | unknown | backend=", self.row(51))
+
+    def test_the_listing_is_asked_for_the_cap_it_checks_against(self) -> None:
+        # gh's own default is 30. Without --limit the listing stops there and
+        # the cap check below it never fires, so a busy month is audited in part.
+        self.run_.stage([], [])
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (listing,) = [call for call in self.run_.gh_calls() if call[1:3] == ["pr", "list"]]
+        self.assertEqual(listing[listing.index("--limit") + 1], "500")
+
+    def test_a_maintainer_pull_request_that_only_quotes_the_signature_is_not_an_agents(self) -> None:
+        pr = merged(52, bot=False, signed_body=False, title="docs: describe the signature")
+        pr["body"] = "Every agent pull request ends with a `— hive:` line naming its model.\n"
+        self.run_.stage([pr], [])
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("0 of the 1 pull requests merged in the window were written by an agent.", self.run_.summary.read_text())
+        self.assertEqual([call for call in self.run_.gh_calls() if call[1:3] == ["pr", "view"]], [])
+
+    def test_a_commit_that_only_mentions_the_trailer_is_unsigned(self) -> None:
+        mentions = "Explain why every commit needs a Signed-off-by: trailer\n\nHive-Run: x#1"
+        self.run_.stage([merged(53, bot=True, signed_body=True)], [details(53, [SIGNED, mentions], ["README.md"])])
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("- #53: commit 0530001 carries no Signed-off-by trailer", self.run_.summary.read_text())
+
+    def test_a_path_that_only_contains_a_tier_four_path_is_not_listed(self) -> None:
+        near = [
+            "docs/.github/policies/notes.md",
+            "tests/homebrew_formula.py",
+            "homebrew_formula.pyc",
+            "coverage_badge.pyi",
+            ".github/workflows/ci.yml.orig",
+            ".claude/settings.json.example",
+            "docs/Formula/notes.md",
+        ]
+        self.run_.stage([merged(54, bot=True, signed_body=True)], [details(54, [SIGNED], near)])
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.row(54).endswith("| 1 | all | none |"), self.row(54))
+
+    def test_a_pipe_in_the_signature_does_not_split_the_row(self) -> None:
+        pr = merged(55, bot=True, signed_body=False)
+        pr["body"] += "\n— hive: backend=a|b model=m\n"
+        self.run_.stage([pr], [details(55, [SIGNED], ["README.md"])])
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("| backend=a\\|b model=m | 1 | all | none |", self.row(55))
+
+    def test_a_pull_request_whose_details_cannot_be_read_fails_without_a_report(self) -> None:
+        # pr-56.json is never staged, so the stub fails on it. Two things stop
+        # the run here: errexit inside the loop with pipefail carrying it out,
+        # and the jq program's guard for a pull request with no details. Either
+        # alone is enough, so this pins the outcome rather than which one fired.
+        self.run_.stage(
+            [merged(56, bot=True, signed_body=True), merged(57, bot=True, signed_body=True)],
+            [details(57, [SIGNED], ["README.md"])],
+        )
+        result = self.run_.run()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.run_.summary.read_text(), "")
 
 
 class TierFourJoinTests(unittest.TestCase):
