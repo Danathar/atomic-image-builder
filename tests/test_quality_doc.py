@@ -38,6 +38,8 @@ import unittest
 import urllib.parse
 from pathlib import Path
 
+from _workflow_steps import workflow_paths
+
 ROOT = Path(__file__).resolve().parent.parent
 DOC_PATH = ROOT / "docs/quality.md"
 DOC_RELATIVE = "docs/quality.md"
@@ -197,7 +199,7 @@ def coverage_uploads() -> dict[str, str]:
     out of this map rather than staying in a hand-written list.
     """
     found: dict[str, str] = {}
-    for workflow in sorted(WORKFLOW_DIR.glob("*.yml")):
+    for workflow in workflow_paths():
         lines = uncommented(workflow.read_text()).splitlines()
         for index, line in enumerate(lines):
             uses = re.match(r"^(\s*)uses: actions/upload-artifact@", line)

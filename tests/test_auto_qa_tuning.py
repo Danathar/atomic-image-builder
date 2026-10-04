@@ -38,6 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _block_yaml  # noqa: E402
+from _workflow_steps import workflow_paths
 
 ROOT = Path(__file__).resolve().parents[1]
 DECLARATION_RELATIVE = ".github/auto-qa-tuning.json"
@@ -228,7 +229,7 @@ class AutoQaTuningTests(unittest.TestCase):
         # a variable read from `.gated.*`, never a literal and never another
         # tier's threshold.
         seen = 0
-        for path in sorted(WORKFLOWS.glob("*.yml")):
+        for path in workflow_paths():
             text = re.sub(r"\\\n\s*", " ", path.read_text())
             reads = {var: jq_path for var, jq_path, _src in JQ_READ.findall(text)}
             for line in code_lines(text):
@@ -271,7 +272,7 @@ class AutoQaTuningTests(unittest.TestCase):
         trend_file, data_branch, pushed_branch = match.groups()
 
         writers = []
-        for path in sorted(WORKFLOWS.glob("*.yml")):
+        for path in workflow_paths():
             if trend_file not in path.read_text():
                 continue
             for key, job in workflow(path.name)["jobs"].items():

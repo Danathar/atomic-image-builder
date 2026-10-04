@@ -26,6 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from _workflow_steps import workflow_paths  # noqa: E402
 from test_maintainer_workflow_table import job_step_names  # noqa: E402
 
 RUNBOOK = ROOT / "docs/ai-ops-runbook.md"
@@ -100,7 +101,7 @@ class RunbookTests(unittest.TestCase):
 
     def test_every_workflow_is_named(self) -> None:
         missing = sorted(
-            path.name for path in WORKFLOW_DIR.glob("*.yml") if path.name not in self.text
+            path.name for path in workflow_paths() if path.name not in self.text
         )
         self.assertEqual(
             missing,
@@ -110,7 +111,7 @@ class RunbookTests(unittest.TestCase):
 
     def test_every_named_workflow_exists(self) -> None:
         named = set(re.findall(r"\b([\w-]+\.yml)\b", self.text))
-        on_disk = {path.name for path in WORKFLOW_DIR.glob("*.yml")}
+        on_disk = {path.name for path in workflow_paths()}
         self.assertEqual(sorted(named - on_disk), [], "the runbook names a workflow that is not there")
 
     def test_nightly_step_table_is_the_jobs_checks(self) -> None:

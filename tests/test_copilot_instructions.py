@@ -67,12 +67,13 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from _workflow_steps import workflow_paths
+
 ROOT = Path(__file__).resolve().parent.parent
 
 COPILOT_RELATIVE = ".github/copilot-instructions.md"
 COPILOT = ROOT / COPILOT_RELATIVE
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
-WORKFLOW_DIR = ROOT / ".github/workflows"
 THRESHOLDS = ROOT / ".coverage-thresholds.json"
 COVERAGERC = ROOT / ".coveragerc"
 SETTINGS = ROOT / ".claude/settings.json"
@@ -577,7 +578,7 @@ class BeforeYouPushFenceTests(CopilotDocumentTestCase):
             "ci.yml no longer checksums the hadolint binary",
         )
         uses = set()
-        for workflow in sorted(WORKFLOW_DIR.glob("*.yml")):
+        for workflow in workflow_paths():
             for line in workflow.read_text().splitlines():
                 match = re.match(r"^\s*-?\s*uses:\s*(\S+)", line)
                 if match:

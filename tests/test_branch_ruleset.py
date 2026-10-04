@@ -28,6 +28,8 @@ import re
 import unittest
 from pathlib import Path
 
+from _workflow_steps import workflow_paths
+
 ROOT = Path(__file__).resolve().parents[1]
 RULESET_PATH = ROOT / ".github" / "rulesets" / "main.json"
 RULESET = json.loads(RULESET_PATH.read_text(encoding="utf-8"))
@@ -201,7 +203,7 @@ def skip_reasons(job_id: str, all_jobs: dict, seen: frozenset = frozenset()) -> 
 def providers(context: str) -> dict[str, list[str]]:
     """Every workflow job reporting as `context`, mapped to why it might not run."""
     found = {}
-    for path in sorted(WORKFLOWS.glob("*.y*ml")):
+    for path in workflow_paths():
         text = path.read_text(encoding="utf-8")
         on_pull_request, narrowing = pull_request_trigger(text)
         if not on_pull_request:
@@ -334,7 +336,7 @@ class DocTests(unittest.TestCase):
         # instead; see the doc's "How a release reaches main".
         pushers = [
             path.name
-            for path in sorted(WORKFLOWS.glob("*.y*ml"))
+            for path in workflow_paths()
             if DIRECT_PUSH_TO_MAIN.search(path.read_text(encoding="utf-8"))
         ]
         self.assertEqual(pushers, [], "these workflows push straight to main, which the ruleset refuses")

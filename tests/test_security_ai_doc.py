@@ -40,6 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import maintenance_audit  # noqa: E402
+from _workflow_steps import workflow_paths  # noqa: E402
 
 DOC = ROOT / "docs/SECURITY-AI.md"
 SETTINGS = ROOT / ".claude/settings.json"
@@ -387,17 +388,6 @@ def classify_effect(rule: str) -> str:
             f".claude/settings.json permits {rule!r}, a command COMMAND_EFFECTS does not describe"
         )
     return best[1]
-
-
-def workflow_paths() -> list[Path]:
-    """Every workflow GitHub loads, both extensions.
-
-    GitHub reads `.github/workflows/*.yaml` as well as `*.yml`. A glob over
-    one extension is a blind spot every check built on this function inherits:
-    a `.yaml` workflow taking `contents: write` would not appear in the
-    inventory below, and so would never have to be documented.
-    """
-    return sorted(path for suffix in ("yml", "yaml") for path in WORKFLOWS.glob(f"*.{suffix}"))
 
 
 def mapping_block(lines: list[str], start: int, indent: int) -> dict[str, str]:

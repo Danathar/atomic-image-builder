@@ -46,6 +46,8 @@ import re
 import unittest
 from pathlib import Path
 
+from _workflow_steps import workflow_paths
+
 ROOT = Path(__file__).resolve().parent.parent
 
 MAINTAINER_RELATIVE = "maintainer_docs/MAINTAINER.md"
@@ -246,7 +248,7 @@ class TableShapeTests(unittest.TestCase):
         # the handbook does not know runs; a row with no workflow sends them
         # looking for a file that was deleted or renamed.
         documented = {row[0].strip("`") for row in table_rows()[1:]}
-        on_disk = {path.name for path in WORKFLOW_DIR.glob("*.yml")}
+        on_disk = {path.name for path in workflow_paths()}
         self.assertTrue(on_disk, ".github/workflows/ holds no .yml file")
         self.assertEqual(
             documented,

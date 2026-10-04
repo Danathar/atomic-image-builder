@@ -49,7 +49,7 @@ import unittest
 from importlib.util import find_spec
 from pathlib import Path
 
-from _workflow_steps import step_env, step_if, step_run_body
+from _workflow_steps import step_env, step_if, step_run_body, workflow_paths
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github/workflows"
@@ -552,7 +552,7 @@ class UnitSuiteInvocationTests(unittest.TestCase):
         # contributor to run the command that is supposed to be this one.
         pattern = re.compile(r"unittest discover[^\n\\\"]*")
         found: dict[str, list[str]] = {}
-        sources = [*sorted(WORKFLOWS.glob("*.yml")), ROOT / "CONTRIBUTING.md"]
+        sources = [*workflow_paths(), ROOT / "CONTRIBUTING.md"]
         for path in sources:
             for match in pattern.finditer(path.read_text()):
                 found.setdefault(match.group(0).strip(), []).append(str(path.relative_to(ROOT)))

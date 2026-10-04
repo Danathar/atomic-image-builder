@@ -42,6 +42,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from _workflow_steps import workflow_paths  # noqa: E402
 from coverage_badge import trend_row  # noqa: E402
 
 DOC_PATH = ROOT / "docs/metrics.md"
@@ -49,7 +50,6 @@ DOC = DOC_PATH.read_text()
 
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 AUDIT_WORKFLOW = ROOT / ".github/workflows/maintenance-audit.yml"
-WORKFLOW_DIR = ROOT / ".github/workflows"
 THRESHOLDS_PATH = ROOT / ".coverage-thresholds.json"
 CONTRIBUTING_PATH = ROOT / "CONTRIBUTING.md"
 MAINTAINER_PATH = ROOT / "maintainer_docs/MAINTAINER.md"
@@ -220,7 +220,7 @@ def coverage_uploads() -> list[dict[str, str]]:
     of step names would keep passing after a tier stopped being uploaded.
     """
     found: list[dict[str, str]] = []
-    for workflow in sorted(WORKFLOW_DIR.glob("*.yml")):
+    for workflow in workflow_paths():
         lines = workflow.read_text().splitlines()
         for index, line in enumerate(lines):
             uses = re.match(r"^(\s*)uses: actions/upload-artifact@", line)
