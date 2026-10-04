@@ -52,7 +52,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from _workflow_steps import step_command, step_run_body  # noqa: E402
+from _workflow_steps import step_command, step_run_body, workflow_paths  # noqa: E402
 
 DOC_PATH = ROOT / "docs/review-rubric.md"
 DOC = DOC_PATH.read_text()
@@ -387,7 +387,7 @@ class SingleSourceTests(unittest.TestCase):
 
     def test_the_gated_threshold_is_spelled_in_no_workflow(self) -> None:
         threshold = json.loads(THRESHOLDS_PATH.read_text())["gated"]["unit"]
-        for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        for workflow in workflow_paths():
             text = workflow.read_text()
             if ".coverage-thresholds.json" not in text:
                 continue

@@ -36,7 +36,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _workflow_steps import step_env, step_run_body
+from _workflow_steps import step_env, step_run_body, workflow_paths
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github/workflows"
@@ -93,7 +93,7 @@ def issue(number: int, title: str, author: str = "app/github-actions", state: st
 def scheduled_workflow_names() -> list[str]:
     """The `name:` of every workflow whose `on:` declares a schedule."""
     names = []
-    for path in sorted(WORKFLOWS.glob("*.yml")):
+    for path in workflow_paths():
         text = path.read_text()
         if not re.search(r"^  schedule:", text, re.MULTILINE):
             continue

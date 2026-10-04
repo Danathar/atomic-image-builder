@@ -16,6 +16,19 @@ returning a half-parsed body.
 
 from pathlib import Path
 
+WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
+
+
+def workflow_paths(directory: Path = WORKFLOWS) -> list[Path]:
+    """Every workflow GitHub loads, both extensions.
+
+    GitHub reads `.github/workflows/*.yaml` as well as `*.yml`. A glob over
+    one extension is a blind spot every check built on it inherits: a `.yaml`
+    workflow would be invisible to every scan that is meant to cover all of
+    them. Scans over the repository's workflows read their list from here.
+    """
+    return sorted(path for suffix in ("yml", "yaml") for path in directory.glob(f"*.{suffix}"))
+
 
 def _step_lines(workflow_path: Path, step_name: str) -> tuple[list[str], int, int]:
     """The lines of one `- name: <step_name>` step, with its bounds.

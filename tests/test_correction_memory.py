@@ -35,6 +35,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from _workflow_steps import workflow_paths
 from maintenance_audit import SNAPSHOT_DRIFT_FAILURE_COMMITS
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -282,7 +283,7 @@ class SettledOnTests(unittest.TestCase):
         heading = "A pinned dependency is not pinned if only some of it is"
         self.assertIn("exact versions in the workflow", field(heading, "Settled on"))
         installs = []
-        for workflow in sorted(WORKFLOW_DIR.glob("*.yml")):
+        for workflow in workflow_paths():
             for line in run_bodies(workflow.read_text()):
                 match = re.search(r"\bpip3? install ([^;&|]+)", line)
                 if match:
