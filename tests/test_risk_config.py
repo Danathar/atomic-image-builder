@@ -16,6 +16,7 @@ contributor's disk and nowhere else, so being tracked is asserted too.
 """
 
 import json
+import re
 import shlex
 import sys
 import unittest
@@ -25,7 +26,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from test_risk_tiers_doc import (  # noqa: E402
+    BACKTICKED,
     DOC,
+    doc_text,
     literals,
     paths_paragraph,
     tier_sections,
@@ -35,6 +38,13 @@ from test_risk_tiers_doc import (  # noqa: E402
 
 CONFIG = ROOT / ".claude/risk-config.json"
 CONFIG_RELATIVE = str(CONFIG.relative_to(ROOT))
+
+# The keys a tier entry may carry. `also_state` is Tier 4's "plus stating
+# explicitly ..."; a key outside this set is a claim nothing here checks.
+TIER_KEYS = {"name", "reaches", "paths", "evidence"}
+OPTIONAL_TIER_KEYS = {"also_state"}
+
+TIER_TITLE = re.compile(r"^## Tier (\d+) [-—] (.+)$")
 
 # Evidence commands run under an interpreter or a build tool; the operand
 # that has to exist in the tree is the one after it.
@@ -65,6 +75,60 @@ def evidence_target(command: str) -> str:
     if "-f" in argv:
         return argv[argv.index("-f") + 1]
     return argv[1]
+
+
+def tier_titles() -> dict[int, str]:
+    """`## Tier N -- <title>` headings, mapped to the title."""
+    titles: dict[int, str] = {}
+    for line in doc_text().splitlines():
+        match = TIER_TITLE.match(line)
+        if match:
+            titles[int(match.group(1))] = match.group(2).strip()
+    return titles
+
+
+def labelled_paragraph(body: list[str], label: str) -> str:
+    """The paragraph of a tier section that opens with `**<label>:**`.
+
+    The general form of paths_paragraph: bounded by the blank line that ends
+    it, the label itself left off.
+    """
+    marker = f"**{label}:**"
+    collected: list[str] = []
+    for line in body:
+        if not collected and line.startswith(marker):
+            collected.append(line[len(marker) :])
+        elif collected:
+            if not line.strip():
+                break
+            collected.append(line)
+    if not collected:
+        raise AssertionError(f"a tier section has no {marker} paragraph")
+    return " ".join(part.strip() for part in collected).strip()
+
+
+def prose(text: str) -> str:
+    """Prose reduced to what the config can repeat: no code marks, one space,
+    one case, and a sentence break written the way the config writes it."""
+    text = " ".join(text.replace("`", "").split()).casefold()
+    return text.replace(". ", "; ")
+
+
+def is_build(command: str) -> bool:
+    return shlex.split(command)[:2] == ["podman", "build"]
+
+
+def named_commands(body: list[str]) -> set[str]:
+    """Backticked commands a tier section names: a shell script under tests/
+    or a python3 invocation. Paths paragraph excluded -- those are claims
+    about what the tier covers, not what it runs."""
+    paths = paths_paragraph(body)
+    text = " ".join(line.strip() for line in body).replace(paths, "")
+    return {
+        literal
+        for literal in BACKTICKED.findall(text)
+        if (literal.startswith("tests/") and literal.endswith(".sh")) or literal.startswith("python3 ")
+    }
 
 
 class ConfigShapeTests(unittest.TestCase):
@@ -138,6 +202,87 @@ class TierJoinTests(unittest.TestCase):
     def test_the_config_sits_in_tier_one_only(self) -> None:
         # A copy of a Tier 1 document reaches no further than the document.
         self.assertEqual(tiers_naming(CONFIG_RELATIVE), {1})
+
+
+class TierProseJoinTests(unittest.TestCase):
+    """The config's per-tier name, reach and evidence against the document's
+    own words for them. The path lists were already joined literal for
+    literal; nothing read the rest, so a tier could be renamed, its reach
+    cut short or a named suite dropped from its evidence and every test
+    above stayed green."""
+
+    def test_each_tier_carries_only_keys_something_checks(self) -> None:
+        for tier, entry in sorted(config_tiers().items()):
+            with self.subTest(tier=tier):
+                self.assertLessEqual(TIER_KEYS, set(entry))
+                self.assertLessEqual(set(entry), TIER_KEYS | OPTIONAL_TIER_KEYS)
+
+    def test_each_tier_name_is_the_documents_heading(self) -> None:
+        titles = tier_titles()
+        for tier, entry in sorted(config_tiers().items()):
+            with self.subTest(tier=tier):
+                self.assertEqual(entry["name"], titles[tier])
+
+    def test_each_reach_is_the_opening_of_the_documents_reaches_paragraph(self) -> None:
+        # The config keeps the reach and drops the explanation after it:
+        # Tier 3's "A stale pin becomes ..." and Tier 4's ", which is what
+        # `brew upgrade` installs". So the reach has to be where the
+        # paragraph starts and stop where a sentence does, or where a
+        # non-restrictive "which" clause starts -- not mid-list.
+        sections = tier_sections()
+        for tier, entry in sorted(config_tiers().items()):
+            with self.subTest(tier=tier):
+                paragraph = prose(labelled_paragraph(sections[tier], "Reaches"))
+                reach = prose(entry["reaches"])
+                self.assertTrue(paragraph.startswith(reach), f"{reach!r} does not open {paragraph!r}")
+                rest = paragraph[len(reach) :]
+                self.assertTrue(
+                    rest.startswith((".", ";", ", which ")),
+                    f"Tier {tier}'s reach stops mid-sentence, before {rest[:40]!r}",
+                )
+
+    def test_every_command_a_tier_section_names_is_in_that_tiers_evidence(self) -> None:
+        # Tier 2 names smoke.sh, test_contrib_aib.sh and test_entrypoint.sh as
+        # what proves it; Tier 3 names `python3 maintenance_audit.py`. A
+        # command the document says a tier runs and the config leaves out is
+        # the drift this file exists to catch.
+        sections = tier_sections()
+        tiers = config_tiers()
+        for tier in sorted(tiers):
+            for command in sorted(named_commands(sections[tier])):
+                with self.subTest(tier=tier, command=command):
+                    self.assertIn(command, tiers[tier]["evidence"])
+
+    def test_the_named_commands_are_found_at_all(self) -> None:
+        # Guards the reader above: if it found nothing it would pass vacuously.
+        sections = tier_sections()
+        self.assertEqual(
+            named_commands(sections[2]),
+            {"tests/e2e/smoke.sh", "tests/test_contrib_aib.sh", "tests/test_entrypoint.sh"},
+        )
+        self.assertIn("python3 maintenance_audit.py", named_commands(sections[3]))
+
+    def test_tier_one_is_the_unit_suite_and_nothing_else(self) -> None:
+        # "**Evidence:** the unit suite." A build or an end-to-end run listed
+        # here would tell a documentation change to do work the document says
+        # it does not need.
+        self.assertIn("the unit suite", labelled_paragraph(tier_sections()[1], "Evidence"))
+        self.assertEqual(config_tiers()[1]["evidence"], ["python3 -m unittest discover -s tests"])
+
+    def test_tier_two_adds_the_real_build(self) -> None:
+        # "the unit suite plus a real build" -- the build is what Tier 2 adds.
+        self.assertIn("plus a real build", labelled_paragraph(tier_sections()[2], "Evidence"))
+        self.assertTrue(any(is_build(command) for command in config_tiers()[2]["evidence"]))
+
+    def test_only_tier_four_asks_for_a_statement_and_it_is_the_documents(self) -> None:
+        tiers = config_tiers()
+        self.assertEqual({tier for tier, entry in tiers.items() if "also_state" in entry}, {4})
+        paragraph = prose(labelled_paragraph(tier_sections()[4], "Evidence"))
+        statement = "stating explicitly " + prose(tiers[4]["also_state"])
+        self.assertIn(statement, paragraph)
+        # The whole of what the document asks for, not the first half of it.
+        rest = paragraph[paragraph.index(statement) + len(statement) :]
+        self.assertTrue(rest.startswith((".", ";")), f"the statement stops before {rest[:40]!r}")
 
 
 class EvidenceTargetTests(unittest.TestCase):
