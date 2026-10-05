@@ -53,12 +53,13 @@ How close the project is to the bar under "Current state", one row per
 tagged release. Only releases tagged after the bar was decided on 2026-10-01
 count. v0.10.0 (2026-09-21) came before it, so it does not.
 
-**Clean releases in a row: 0 of 3.**
+**Clean releases in a row: 1 of 3.**
 
 | Release | Date | Containerfile regressions | BlueBuild regressions | Unit coverage | Open five-stage correctness issues | Counts |
 | ------- | ---- | ------------------------- | --------------------- | ------------- | ---------------------------------- | ------ |
+| v0.11.0 | 2026-10-05 | none | none | 99% | 0 | yes |
 
-No release has been recorded yet. After each tagged release, add a row and
+After each tagged release, add a row and
 update the count above. [docs/strategy.md](docs/strategy.md) has the command
 that reads each column:
 
