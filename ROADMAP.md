@@ -55,9 +55,9 @@ count. v0.10.0 (2026-09-21) came before it, so it does not.
 
 **Clean releases in a row: 1 of 3.**
 
-| Release | Date | Containerfile regressions | BlueBuild regressions | Unit coverage | Open five-stage correctness issues | Counts |
-| ------- | ---- | ------------------------- | --------------------- | ------------- | ---------------------------------- | ------ |
-| v0.11.0 | 2026-10-05 | none | none | 99% | 0 | yes |
+| Release | Date       | Containerfile regressions | BlueBuild regressions | Unit coverage | Open five-stage correctness issues | Counts |
+| ------- | ---------- | ------------------------- | --------------------- | ------------- | ---------------------------------- | ------ |
+| v0.11.0 | 2026-10-05 | none                      | none                  | 99%           | 0                                  | yes    |
 
 After each tagged release, add a row and
 update the count above. [docs/strategy.md](docs/strategy.md) has the command
