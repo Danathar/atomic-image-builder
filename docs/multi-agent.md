@@ -21,16 +21,16 @@ its role, and names its branches `<role>/<slug>`.
 [`docs/agent-tasks/`](agent-tasks/README.md) explains both marks and how to
 read them back.
 
-| Role        | Signature           | Branch      | What it does                                                                                      |
-| ----------- | ------------------- | ----------- | ------------------------------------------------------------------------------------------------- |
-| quality     | `agent=quality`     | `quality/`  | Finds behaviour no test pins, files it, and adds the test.                                        |
-| scanner     | `agent=scanner`     | `scanner/`  | Finds bugs, files them, and fixes some.                                                           |
-| security    | `agent=sec-check`   | `sec/`      | Finds security problems, files them, and fixes some.                                              |
-| architect   | `agent=architect`   | `arch/`     | Writes RFCs and opens structural refactors.                                                       |
-| strategist  | `agent=strategist`  | `strategy/` | Keeps `ROADMAP.md` and coordinates work across the other agents.                                  |
-| guide       | `agent=guide`       | `guide/`    | Documents behaviour that already exists but is not written down.                                  |
-| contributor | no `agent=` field   | `fix/`      | Works one issue end to end. Also branches as `docs/`, `feat/` or `secfix/` to match the change.   |
-| reviewer    | none, it opens none | none        | Reviews open pull requests and backs each finding with a file and line. Never merges or approves. |
+| Role        | Signature           | Branch      | What it does                                                                                                |
+| ----------- | ------------------- | ----------- | ----------------------------------------------------------------------------------------------------------- |
+| quality     | `agent=quality`     | `quality/`  | Finds behaviour no test pins, files it, and adds the test.                                                  |
+| scanner     | `agent=scanner`     | `scanner/`  | Finds bugs, files them, and fixes some.                                                                     |
+| security    | `agent=sec-check`   | `sec/`      | Finds security problems, files them, and fixes some.                                                        |
+| architect   | `agent=architect`   | `arch/`     | Writes RFCs and opens structural refactors.                                                                 |
+| strategist  | `agent=strategist`  | `strategy/` | Keeps `ROADMAP.md` and coordinates work across the other agents.                                            |
+| guide       | `agent=guide`       | `guide/`    | Documents behaviour that already exists but is not written down.                                            |
+| contributor | no `agent=` field   | `fix/`      | Works one issue end to end. Also branches as `docs/`, `feat/`, `refresh/` or `secfix/` to match the change. |
+| reviewer    | none, it opens none | none        | Reviews open pull requests and backs each finding with a file and line. Never merges or approves.           |
 
 An issue an agent files carries an `agent/<role>` label, so the issue list
 answers "who found this" the same way the branch answers "who changed this".

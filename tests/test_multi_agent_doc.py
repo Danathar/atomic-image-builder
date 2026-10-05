@@ -2,7 +2,8 @@
 
 Script: tests/test_multi_agent_doc.py
 What: Reads the page as a SUBJECT. The roster's branch prefixes are compared
-      with docs/agent-tasks/README.md's list, the ruleset sentence with
+      with docs/agent-tasks/README.md's list and with the prefixes each dated
+      ledger there counted on signed pull requests, the ruleset sentence with
       .github/rulesets/main.json, the intake steps with the two workflows they
       name, and every repository path the page names with `git ls-files`.
 Why: The page describes machinery it does not own. A ruleset made strict, a
@@ -21,6 +22,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DOC = (ROOT / "docs/multi-agent.md").read_text()
 AGENT_TASKS = (ROOT / "docs/agent-tasks/README.md").read_text()
+LEDGERS = sorted((ROOT / "docs/agent-tasks").glob("[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md"))
+LEDGER_PREFIXES = "Which branch prefix the signed ones used"
 RULESET = json.loads((ROOT / ".github/rulesets/main.json").read_text())
 AI_FIX = (ROOT / ".github/workflows/ai-fix.yml").read_text()
 TRIAGE = (ROOT / ".github/workflows/triage.yml").read_text()
@@ -56,13 +59,34 @@ def table_rows(body: str) -> list[list[str]]:
     return [[cell.strip() for cell in row.strip("|").split("|")] for row in rows[2:]]
 
 
-def roster_prefixes() -> set[str]:
+PREFIX = r"`([a-z-]+/)`"
+
+
+def also_branches_as(what_it_does: str) -> set[str]:
+    """The extra prefixes a roster row's last cell names after "Also branches as"."""
+    also = re.search(r"Also branches as (.*?)(?: to match|\.|$)", what_it_does)
+    return set(re.findall(PREFIX, also.group(1))) if also else set()
+
+
+def roster_prefixes(role: str | None = None) -> set[str]:
+    """Every prefix the roster gives a role: its Branch cell and any it also uses."""
     prefixes = set()
     for row in table_rows(SECTIONS[ROSTER]):
+        if role is not None and row[0] != role:
+            continue
         branch = row[2]
         if branch != "none":
             prefixes.add(branch.strip("`"))
+        prefixes |= also_branches_as(row[3])
     return prefixes
+
+
+def trace_paragraph(lead: str) -> str:
+    """The flattened paragraph of docs/agent-tasks/README.md that opens with **lead**."""
+    found = re.search(rf"\*\*{re.escape(lead)}\*\*(.*?)(?:\n\n|\Z)", AGENT_TASKS, re.S)
+    if found is None:
+        raise AssertionError(f"docs/agent-tasks/README.md has no **{lead}** paragraph")
+    return flatten(found.group(1))
 
 
 def tracked_files() -> set[str]:
@@ -89,11 +113,45 @@ class Roster(unittest.TestCase):
     def test_the_branch_prefixes_are_the_ones_the_trace_page_lists(self) -> None:
         # docs/agent-tasks/README.md tells a reader which prefixes mark agent
         # work; this table says which role owns each. A role added to one and
-        # not the other leaves a branch nobody can attribute.
-        listed = re.search(r"the role is the one in its signature: (.*?)\. The maintainer", flatten(AGENT_TASKS))
+        # not the other leaves a branch nobody can attribute. The contributor's
+        # "Also branches as" prefixes count: docs/strategy.md groups merged
+        # work by prefix and sends the reader to the trace page to read it.
+        listed = re.search(r"the prefix names the role: (.*?)\. The contributor", trace_paragraph("The branch prefix."))
         self.assertIsNotNone(listed, "docs/agent-tasks/README.md no longer lists the role prefixes")
-        trace_prefixes = set(re.findall(r"`([a-z-]+/)`", listed.group(1)))
-        self.assertEqual(roster_prefixes(), trace_prefixes)
+        self.assertEqual(roster_prefixes(), set(re.findall(PREFIX, listed.group(1))))
+
+    def test_the_trace_page_gives_the_contributor_the_prefixes_the_roster_does(self) -> None:
+        owned = re.search(r"The contributor owns \w+ of them, (.*?), and picks", trace_paragraph("The branch prefix."))
+        self.assertIsNotNone(owned, "docs/agent-tasks/README.md no longer says which prefixes the contributor uses")
+        named = set(re.findall(PREFIX, owned.group(1)))
+        self.assertEqual(named, roster_prefixes("contributor"))
+        self.assertGreater(len(named), 1, "the contributor row lost its Also branches as list")
+
+    def test_every_prefix_a_ledger_counted_is_a_role_s(self) -> None:
+        # A ledger records which prefixes signed pull requests really used. One
+        # the roster has no role for is a branch the trace page cannot attribute.
+        self.assertTrue(LEDGERS, "docs/agent-tasks/ has no dated ledger")
+        known = roster_prefixes()
+        for ledger in LEDGERS:
+            body = sections(ledger.read_text()).get(LEDGER_PREFIXES)
+            if body is None:
+                continue
+            counted = set(re.findall(PREFIX, body))
+            with self.subTest(ledger=ledger.name):
+                self.assertGreaterEqual(len(counted), 5, "the ledger prefix scan found almost nothing")
+                self.assertEqual(counted - known, set())
+
+    def test_the_trace_page_says_which_signatures_name_no_role(self) -> None:
+        # Its signature paragraph is the "reliable signal". Saying every
+        # signature names the role sends a reader to an agent= field that the
+        # contributor's pull requests do not have.
+        signature = trace_paragraph("The pull request signature.")
+        unnamed = [row[0] for row in table_rows(SECTIONS[ROSTER]) if row[1] == "no `agent=` field"]
+        self.assertTrue(unnamed, "the roster no longer has a role without agent=")
+        for role in unnamed:
+            with self.subTest(role=role):
+                self.assertIn(f"except the {role}", signature)
+                self.assertIn("no `agent=` field", signature)
 
     def test_every_role_with_a_signature_names_it_as_the_signature_writes_it(self) -> None:
         for row in table_rows(SECTIONS[ROSTER]):

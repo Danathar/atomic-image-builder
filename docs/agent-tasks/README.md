@@ -16,19 +16,27 @@ agents share the repository while they work is in
 ## The three marks
 
 **The pull request signature.** An agent-written pull request body ends with
-a line beginning `— hive:` that names the agent role, the backend, and the
-model. This is the reliable signal: the pull request *author* is not. An
-agent that pushes with the maintainer's token opens its pull request as
-`Danathar`, so counting the app account alone undercounts agent work by
-about a third (see the first ledger below).
+a line beginning `— hive:` that names the backend and the model, and for every
+role except the contributor the role too, as `agent=<role>`. The contributor's
+signature has no `agent=` field (see the roster in
+[`docs/multi-agent.md`](../multi-agent.md#who-works-here)), so for its pull
+requests the branch prefix below is what names the role. This is the reliable
+signal: the pull request *author* is not. An agent that pushes with the
+maintainer's token opens its pull request as `Danathar`, so counting the app
+account alone undercounts agent work by about a third (see the first ledger
+below).
 
 ```bash
 gh pr view <n> --repo Danathar/atomic-image-builder --json body --jq '.body | capture("— hive: (?<sig>.*)").sig'
 ```
 
-**The branch prefix.** An agent's branch is named `<role>/<slug>`, where the
-role is the one in its signature: `quality/`, `scanner/`, `sec/`, `fix/`,
-`arch/`, `guide/`, `strategy/`. The maintainer's own branches carry no role.
+**The branch prefix.** An agent's branch is named `<prefix>/<slug>`, where the
+prefix names the role: `quality/`, `scanner/`, `sec/`, `fix/`, `docs/`,
+`feat/`, `refresh/`, `secfix/`, `arch/`, `guide/`, `strategy/`. The contributor
+owns five of them, `fix/`, `docs/`, `feat/`, `refresh/` and `secfix/`, and
+picks the one that matches the change. The maintainer's own branches carry no role, but some of them start
+with the same word (`fix/`, `docs/`), so a prefix counts as agent work only
+when the pull request also has a signature.
 
 ```bash
 gh pr list --repo Danathar/atomic-image-builder --state all --limit 1000 --json headRefName \
