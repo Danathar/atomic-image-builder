@@ -31,7 +31,7 @@ body:
     attributes:
       label: Version
       description: "Output of `aib-tool --version`, or `aib --version`, or the commit you ran from."
-      placeholder: "aib-tool 0.10.x"
+      placeholder: "aib-tool 0.11.x"
     validations:
       required: true
 

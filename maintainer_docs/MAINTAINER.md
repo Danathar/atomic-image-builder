@@ -44,7 +44,12 @@ would make a stray `git pull` merge `main` into it.
 VERSION = "0.9.1"
 ```
 
-That is the only file to edit. Everything else derives from it:
+For a patch release that is the only file to edit. A new minor series (0.10
+to 0.11) also changes the series named in three places, and `test` fails until
+they match: the README's beta warning, the "Current state" line in
+`ROADMAP.md`, and the version placeholder in
+`.github/ISSUE_TEMPLATE/bug_report.yml`. Everything else derives from the
+constant:
 
 | Consumer                                         | How                                                                          |
 | ------------------------------------------------ | ---------------------------------------------------------------------------- |

@@ -7,7 +7,7 @@ issues and the README.
 
 ## Current state
 
-- **0.10, beta.** The README says outright: "not fully tested. Review the
+- **0.11, beta.** The README says outright: "not fully tested. Review the
   changes it makes before applying them." Leaving beta is the top-level
   milestone everything else sits under. **The beta-exit bar (decided
   2026-10-01, #578):** three consecutive tagged releases with no
