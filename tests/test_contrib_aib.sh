@@ -73,9 +73,15 @@ PODMAN
 
     # A cosign that verifies anything, and records what it was asked to
     # verify. Absent by definition on a host without cosign, which is its own
-    # scenario below.
+    # scenario below. `version` answers with the JSON shape cosign 2 and 3
+    # both print, as a 3.x unless a scenario says otherwise, and is not
+    # logged: the log is for the verify call.
     cat >"$stub_dir/cosign" <<COSIGN
 #!/usr/bin/env bash
+if [ "\$1" = "version" ]; then
+    printf '%s\n' "\${AIB_TEST_COSIGN_VERSION-{\"gitVersion\": \"v3.1.3\", \"gitCommit\": \"abc\"\}}"
+    exit 0
+fi
 printf '%s ' "\$@" > "$cosign_log"
 exit \${AIB_TEST_COSIGN_STATUS:-0}
 COSIGN
@@ -211,6 +217,47 @@ test_verify_failure_refuses_to_run() {
     assert_contains "$out" "SIGNATURE VERIFICATION FAILED" "verify failure: says so plainly"
     assert_contains "$out" "refusing to run" "verify failure: refuses rather than warns"
     assert_eq "$(cat "$podman_log" 2>/dev/null)" "" "verify failure: podman run never happens"
+    cleanup_stubs
+}
+
+# --- cosign too old for the signature format: say so, not "tampered" ------
+# The image is signed by cosign 3 in the new bundle format, which cosign 2
+# does not find by default. Without this check a cosign 2 host reaches the
+# tamper message for an image that is fine (#659), which teaches people the
+# one alarming warning in the wrapper is noise.
+test_cosign_older_than_3_names_the_version() {
+    setup_stubs
+    local out status
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" \
+        AIB_TEST_COSIGN_VERSION='{"gitVersion": "v2.6.1", "gitCommit": "abc"}' "$aib" 2>&1)"
+    status=$?
+    assert_eq "$status" "1" "cosign 2: exit status"
+    assert_contains "$out" "aib needs cosign 3 or newer to check this image (found v2.6.1)" "cosign 2: names the version problem and the version found"
+    assert_contains "$out" "brew upgrade cosign" "cosign 2: names the upgrade command"
+    assert_not_contains "$out" "SIGNATURE VERIFICATION FAILED" "cosign 2: not reported as tampering"
+    assert_not_contains "$out" "tampered" "cosign 2: does not suggest tampering"
+    assert_eq "$(cat "$cosign_log" 2>/dev/null)" "" "cosign 2: verify is not attempted"
+    assert_eq "$(cat "$podman_log" 2>/dev/null)" "" "cosign 2: podman run never happens"
+    cleanup_stubs
+}
+
+# --- a version that cannot be read is left to the verify -------------------
+# Refusing on a guess would lock out a cosign that is fine but prints its
+# version differently (a dev build, a future format). The verify still
+# decides, so nothing unchecked runs either way.
+test_unreadable_cosign_version_still_verifies() {
+    setup_stubs
+    local out status
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_TEST_COSIGN_VERSION='(devel)' "$aib" 2>&1)"
+    status=$?
+    assert_eq "$status" "0" "unreadable cosign version: verified run still happens"
+    assert_not_contains "$out" "needs cosign 3" "unreadable cosign version: not refused on a guess"
+    assert_contains "$(cat "$cosign_log")" "ghcr.io/danathar/atomic-image-builder@$test_digest" "unreadable cosign version: verify still runs"
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_TEST_COSIGN_VERSION='{"gitVersion": "v10.0.0"}' "$aib" 2>&1)"
+    assert_not_contains "$out" "needs cosign 3" "cosign 10: a two-digit major is newer, not older"
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_TEST_COSIGN_STATUS=1 \
+        AIB_TEST_COSIGN_VERSION='{"gitVersion": "v3.0.0"}' "$aib" 2>&1)"
+    assert_contains "$out" "SIGNATURE VERIFICATION FAILED" "cosign 3: a failed verify is still reported as one"
     cleanup_stubs
 }
 
@@ -930,6 +977,8 @@ test_unverified_path_keeps_pull_newer
 test_verify_runs_the_digest_it_verified
 test_verify_uses_the_publisher_identity
 test_verify_failure_refuses_to_run
+test_cosign_older_than_3_names_the_version
+test_unreadable_cosign_version_still_verifies
 test_verify_requires_cosign
 test_cosign_missing_with_brew_names_only_the_command
 test_skip_verify_warns_and_runs

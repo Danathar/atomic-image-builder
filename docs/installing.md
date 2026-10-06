@@ -205,6 +205,7 @@ Two things follow from that, both deliberate:
 | Situation                            | What happens                                                                     |
 | ------------------------------------ | -------------------------------------------------------------------------------- |
 | `cosign` not installed               | The wrapper refuses to run and says so, naming `brew install cosign`.            |
+| `cosign` older than 3                | The wrapper refuses to run and says so, naming `brew upgrade cosign`.            |
 | Offline, or you want to opt out      | `AIB_SKIP_VERIFY=1 aib` runs the image unverified, and warns loudly that it did. |
 | `AIB_IMAGE` points at your own build | Not verified — your build cannot satisfy this repository's certificate identity. |
 
@@ -268,8 +269,13 @@ that — the same reason the wrapper runs the digest it verified rather than the
 tag that produced it. The `&&` does the rest of the work: if `cosign verify`
 exits non-zero nothing runs, and `gh auth token` is never even called.
 
-That command needs `cosign`; `brew install cosign` if you do not have it. The
-plain `podman run` above deliberately does without both the check and the
+That command needs cosign 3 or newer; `brew install cosign` if you do not have
+it, `brew upgrade cosign` if `cosign version` reports 2.x. The image is signed
+in the bundle format cosign 3 writes, and cosign 2 does not look for that
+format by default, so with cosign 2 the command above reports `no signatures
+found` for an image that is fine.
+
+The plain `podman run` above deliberately does without both the check and the
 token, and is the right shape when you do not want either.
 
 The `refs/(heads/main|tags/.+)` alternation matters: `latest` is signed from a
