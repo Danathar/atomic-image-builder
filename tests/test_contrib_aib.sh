@@ -73,12 +73,23 @@ PODMAN
 
     # A cosign that verifies anything, and records what it was asked to
     # verify. Absent by definition on a host without cosign, which is its own
-    # scenario below. `version` answers with the JSON shape cosign 2 and 3
-    # both print, as a 3.x unless a scenario says otherwise, and is not
-    # logged: the log is for the verify call.
+    # scenario below. `version --json` answers with the JSON shape cosign 2
+    # and 3 both print, as a 3.x unless a scenario says otherwise, and is not
+    # logged: the log is for the verify call. Plain `version` prints the text
+    # table instead, as the real one does, so a wrapper that stopped asking
+    # for JSON would no longer see a version at all. A scenario can also make
+    # the version call fail, the way a cosign without --json would.
     cat >"$stub_dir/cosign" <<COSIGN
 #!/usr/bin/env bash
 if [ "\$1" = "version" ]; then
+    if [ "\${2-}" != "--json" ]; then
+        printf 'GitVersion:    v3.1.3\n'
+        exit 0
+    fi
+    if [ -n "\${AIB_TEST_COSIGN_VERSION_ERROR-}" ]; then
+        printf '%s\n' "\$AIB_TEST_COSIGN_VERSION_ERROR" >&2
+        exit 1
+    fi
     printf '%s\n' "\${AIB_TEST_COSIGN_VERSION-{\"gitVersion\": \"v3.1.3\", \"gitCommit\": \"abc\"\}}"
     exit 0
 fi
@@ -258,6 +269,80 @@ test_unreadable_cosign_version_still_verifies() {
     out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_TEST_COSIGN_STATUS=1 \
         AIB_TEST_COSIGN_VERSION='{"gitVersion": "v3.0.0"}' "$aib" 2>&1)"
     assert_contains "$out" "SIGNATURE VERIFICATION FAILED" "cosign 3: a failed verify is still reported as one"
+    cleanup_stubs
+}
+
+# --- the version check's edges ---------------------------------------------
+# The two scenarios above pin the main split: a 2.x is refused by name, and a
+# version that cannot be read is left to the verify. These pin the ways that
+# split can go wrong without either of them noticing.
+
+# A failing `cosign version --json` is also "cannot read the version". aib
+# runs under `set -e`, so without the `|| true` that failure would end the
+# wrapper on the spot, with no message and no verify. Its stderr is not the
+# wrapper's to show either: the verify that follows is what decides.
+test_failing_cosign_version_still_verifies() {
+    setup_stubs
+    local out status
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" \
+        AIB_TEST_COSIGN_VERSION_ERROR='Error: unknown flag: --json' "$aib" 2>&1)"
+    status=$?
+    assert_eq "$status" "0" "failing cosign version: verified run still happens"
+    assert_contains "$(cat "$cosign_log" 2>/dev/null)" "ghcr.io/danathar/atomic-image-builder@$test_digest" "failing cosign version: verify still runs"
+    assert_contains "$(cat "$podman_log" 2>/dev/null)" "ghcr.io/danathar/atomic-image-builder@$test_digest" "failing cosign version: the verified digest runs"
+    assert_not_contains "$out" "unknown flag" "failing cosign version: its error is not shown"
+    assert_not_contains "$out" "needs cosign 3" "failing cosign version: not refused on a guess"
+    cleanup_stubs
+}
+
+# The pattern takes the leading v as optional, so a cosign built without one
+# in its version string is still read. Every other scenario prints a v.
+test_cosign_2_without_a_leading_v_is_still_refused() {
+    setup_stubs
+    local out status
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" \
+        AIB_TEST_COSIGN_VERSION='{"gitVersion": "2.6.1", "gitCommit": "abc"}' "$aib" 2>&1)"
+    status=$?
+    assert_eq "$status" "1" "cosign 2.6.1 (no v): exit status"
+    assert_contains "$out" "aib needs cosign 3 or newer to check this image (found 2.6.1)" "cosign 2.6.1 (no v): read and named"
+    assert_eq "$(cat "$cosign_log" 2>/dev/null)" "" "cosign 2.6.1 (no v): verify is not attempted"
+    cleanup_stubs
+}
+
+# Like every other refusal, the old-cosign one goes to stderr. stdout is the
+# tool's own, and the scenario above reads both streams together.
+test_old_cosign_refusal_is_on_stderr() {
+    setup_stubs
+    local stdout stderr
+    stdout="$(PATH="$stub_dir" HOME="$stub_dir/home" \
+        AIB_TEST_COSIGN_VERSION='{"gitVersion": "v2.6.1"}' "$aib" 2>"$stub_dir/stderr")"
+    stderr="$(cat "$stub_dir/stderr")"
+    assert_eq "$stdout" "" "old cosign: nothing on stdout"
+    assert_contains "$stderr" "needs cosign 3 or newer" "old cosign: refusal on stderr"
+    assert_contains "$stderr" "brew upgrade cosign" "old cosign: upgrade command on stderr"
+    cleanup_stubs
+}
+
+# The version only matters to the verify. A run that skips the verify, or an
+# image that is never verified because it is someone's own build, must not be
+# turned away for having cosign 2: that would tell an offline user, who was
+# just pointed at AIB_SKIP_VERIFY=1, to upgrade a tool the run does not use.
+test_old_cosign_does_not_block_unverified_runs() {
+    setup_stubs
+    local out status
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_SKIP_VERIFY=1 \
+        AIB_TEST_COSIGN_VERSION='{"gitVersion": "v2.6.1"}' "$aib" 2>&1)"
+    status=$?
+    assert_eq "$status" "0" "old cosign, skip verify: exit status"
+    assert_not_contains "$out" "needs cosign 3" "old cosign, skip verify: not refused"
+    assert_contains "$(cat "$podman_log" 2>/dev/null)" "run" "old cosign, skip verify: the image runs"
+    rm -f "$podman_log"
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_IMAGE="localhost/my-own-build:dev" \
+        AIB_TEST_COSIGN_VERSION='{"gitVersion": "v2.6.1"}' "$aib" 2>&1)"
+    status=$?
+    assert_eq "$status" "0" "old cosign, own build: exit status"
+    assert_not_contains "$out" "needs cosign 3" "old cosign, own build: not refused"
+    assert_contains "$(cat "$podman_log" 2>/dev/null)" "localhost/my-own-build:dev" "old cosign, own build: the image runs"
     cleanup_stubs
 }
 
@@ -979,6 +1064,10 @@ test_verify_uses_the_publisher_identity
 test_verify_failure_refuses_to_run
 test_cosign_older_than_3_names_the_version
 test_unreadable_cosign_version_still_verifies
+test_failing_cosign_version_still_verifies
+test_cosign_2_without_a_leading_v_is_still_refused
+test_old_cosign_refusal_is_on_stderr
+test_old_cosign_does_not_block_unverified_runs
 test_verify_requires_cosign
 test_cosign_missing_with_brew_names_only_the_command
 test_skip_verify_warns_and_runs
