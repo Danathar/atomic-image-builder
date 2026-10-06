@@ -343,9 +343,12 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   Signed-off-by trailer. A merge of `main` into the branch, which "Update
   branch" writes with no trailer, is exempt: what it brings in was audited
   when it reached `main`. It must be a real merge (two or more parents, from
-  the REST commits list) and carry git's own wording for a merge from `main`,
-  so neither a one-parent commit titled like one nor a merge of another
-  branch escapes the trailer. The DCO check is not required by the ruleset, and an
+  the REST commits list), one of those parents must already have been on
+  `main` when the pull request merged, and it must carry git's own wording
+  for a merge from `main`, so neither a one-parent commit titled like one
+  nor a merge of another branch escapes the trailer, whatever it is titled.
+  What the merge itself changes, such as a conflict resolution, is still
+  not audited. The DCO check is not required by the ruleset, and an
   omp-backed run pushes under the maintainer's identity, so nothing else
   notices either gap once the merge is in. Any Tier 4 path the pull request
   touched is listed beside it. The job's token reads pull requests and

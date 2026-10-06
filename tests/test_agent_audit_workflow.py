@@ -17,6 +17,11 @@ What the shell decides, and what fails quietly when it stops deciding it:
 * A Hive-app pull request with no signature line is a finding, and an agent
   pull request with an unsigned commit is a finding. Either one has to turn
   the run red, or the audit is a report nobody reads.
+* A merge of main into the branch needs no trailer, and only that merge: it
+  must have two or more parents, git's wording for a merge from main, and a
+  parent that was on main as it stood just before the pull request merged.
+  Asking today's main instead would pass every merge, since merging the pull
+  request put both sides of each one there.
 * A Tier 4 path is reported in the row and does not fail the run. The paths
   are the ones docs/risk-tiers.md names, and the join below reads them out of
   the document so a path added there has to reach the workflow too.
@@ -50,13 +55,16 @@ RISK_TIERS = ROOT / "docs/risk-tiers.md"
 AUDIT_STEP = "Audit merged agent pull requests"
 REPO = "Danathar/atomic-image-builder"
 
-# Serves `pr list` from merged.json, `pr view N` from pr-N.json and
-# `api repos/<repo>/pulls/N/commits` from commits-N.json in $STUB_DIR,
+# Serves `pr list` from merged.json, `pr view N` from pr-N.json,
+# `api repos/<repo>/pulls/N/commits` from commits-N.json,
+# `api repos/<repo>/commits/SHA` from commit-SHA.json and
+# `api repos/<repo>/compare/A...B` from compare-A...B.json in $STUB_DIR,
 # recording every argv so a case can assert on the query sent. Like the real
 # gh, it returns only the fields `--json` names, for `pr list` no more than
 # `--limit` entries (30 when the flag is absent), and for `api` the REST
 # response passed through the step's own `--jq`, so a field, the limit or the
-# filter dropped from the step's query changes what it reads.
+# filter dropped from the step's query changes what it reads. A path with no
+# staged file fails the run, the way a 404 does.
 GH_STUB = r"""#!/usr/bin/env bash
 { printf '%s\t' gh "$@"; printf '\n'; } >> "$STUB_LOG"
 fields="" limit=30 filter="." path=""
@@ -74,14 +82,36 @@ case "$1 $2" in
   "pr list") jq --arg f "$fields" --argjson n "$limit" ".[:\$n] | map($project)" "$STUB_DIR/merged.json" ;;
   "pr view") jq --arg f "$fields" "$project" "$STUB_DIR/pr-$3.json" ;;
   api\ *)
-    [[ "$path" =~ ^repos/[^/]+/[^/]+/pulls/([0-9]+)/commits$ ]] || { echo "gh stub: unexpected api path: $path" >&2; exit 97; }
-    jq -c "$filter" "$STUB_DIR/commits-${BASH_REMATCH[1]}.json" ;;
+    if [[ "$path" =~ ^repos/[^/]+/[^/]+/pulls/([0-9]+)/commits$ ]]; then file="commits-${BASH_REMATCH[1]}.json"
+    elif [[ "$path" =~ ^repos/[^/]+/[^/]+/commits/([0-9a-f]{40})$ ]]; then file="commit-${BASH_REMATCH[1]}.json"
+    elif [[ "$path" =~ ^repos/[^/]+/[^/]+/compare/([0-9a-f]{40}\.\.\.[0-9a-f]{40})$ ]]; then file="compare-${BASH_REMATCH[1]}.json"
+    else echo "gh stub: unexpected api path: $path" >&2; exit 97
+    fi
+    [ -f "$STUB_DIR/$file" ] || { echo "gh stub: HTTP 404 for $path" >&2; exit 1; }
+    jq -cr "$filter" "$STUB_DIR/$file" ;;
   *) echo "gh stub: unexpected command: $*" >&2; exit 97 ;;
 esac
 """
 
 SIGNATURE = "— hive: backend=claude model=claude-opus-5-5 effort=medium"
 SIGNED = "Hive-Run: Danathar/atomic-image-builder#1\n\nSigned-off-by: Dan <dan@example.com>"
+
+# Parent commits a case can give a merge. BEFORE is main as it stood just
+# before the pull request merged, the first parent of its merge commit; MAIN
+# is an older commit on main; BRANCH is the pull request's own last commit;
+# ELSEWHERE is a commit on some other branch that never reached main. Once a
+# pull request merges, every one of them but ELSEWHERE is on today's main, so
+# the stub answers a comparison only against BEFORE: asking today's main
+# instead fails the run.
+BEFORE = "e" * 40
+MAIN = "d" * 40
+BRANCH = "b" * 40
+ELSEWHERE = "c" * 40
+# What `compare/<sha>...BEFORE` reports for each: `ahead` when BEFORE has the
+# commit in its history, `identical` when it is the commit.
+COMPARE_WITH_BEFORE = {BEFORE: "identical", MAIN: "ahead", BRANCH: "diverged", ELSEWHERE: "diverged"}
+ONE_PARENT = [BRANCH]
+FROM_MAIN = [BRANCH, MAIN]
 
 
 def merged(number: int, *, bot: bool, signed_body: bool, title: str = "fix: a thing") -> dict:
@@ -99,33 +129,38 @@ def merged(number: int, *, bot: bool, signed_body: bool, title: str = "fix: a th
     }
 
 
+def merge_commit(number: int) -> str:
+    return f"{number:03d}" + "f" * 37
+
+
 def details(
     number: int,
     commits: list[str],
     files: list[str],
     headlines: list[str] | None = None,
-    parents: list[int] | None = None,
+    parents: list[list[str]] | None = None,
 ) -> dict:
-    """`gh pr view --json number,files` for *number*, plus its REST commits list.
+    """`gh pr view --json number,files,mergeCommit` for *number*, plus its REST commits list.
 
     *commits* are message bodies, *headlines* their first lines when a case
-    needs them, and *parents* each commit's parent count (1 unless a case
-    makes it a merge). The sha is derived from the position so a finding can
-    be matched against it. The REST commits go under `rest_commits`, which
+    needs them, and *parents* each commit's parent shas (ONE_PARENT unless a
+    case makes it a merge). The sha is derived from the position so a finding
+    can be matched against it. The REST commits go under `rest_commits`, which
     `stage` writes to commits-N.json.
     """
     headlines = headlines or ["test: a change"] * len(commits)
-    parents = parents or [1] * len(commits)
+    parents = parents or [ONE_PARENT] * len(commits)
     return {
         "number": number,
         "files": [{"path": path} for path in files],
+        "mergeCommit": {"oid": merge_commit(number)},
         "rest_commits": [
             {
                 "sha": f"{number:03d}{index:04d}" + "a" * 33,
                 "commit": {"message": f"{headline}\n\n{body}" if body else headline},
-                "parents": [{"sha": "b" * 40}] * count,
+                "parents": [{"sha": sha} for sha in shas],
             }
-            for index, (headline, body, count) in enumerate(zip(headlines, commits, parents, strict=True))
+            for index, (headline, body, shas) in enumerate(zip(headlines, commits, parents, strict=True))
         ],
     }
 
@@ -167,11 +202,20 @@ class AuditStepRun:
         self.work.mkdir()
 
     def stage(self, prs: list[dict], detail: list[dict]) -> None:
+        """Stage the listing and each pull request's view and commits.
+
+        Every merge commit's first parent is BEFORE, and each known parent
+        compares against BEFORE as COMPARE_WITH_BEFORE says.
+        """
         (self.tmp / "merged.json").write_text(json.dumps(prs))
         for entry in detail:
             view = {key: value for key, value in entry.items() if key != "rest_commits"}
             (self.tmp / f"pr-{entry['number']}.json").write_text(json.dumps(view))
             (self.tmp / f"commits-{entry['number']}.json").write_text(json.dumps(entry["rest_commits"]))
+            oid = entry["mergeCommit"]["oid"]
+            (self.tmp / f"commit-{oid}.json").write_text(json.dumps({"sha": oid, "parents": [{"sha": BEFORE}]}))
+        for sha, status in COMPARE_WITH_BEFORE.items():
+            (self.tmp / f"compare-{sha}...{BEFORE}.json").write_text(json.dumps({"status": status}))
 
     def run(self) -> subprocess.CompletedProcess[str]:
         env = {
@@ -401,7 +445,7 @@ class AuditNearMissTests(unittest.TestCase):
         headlines = ["fix: the change", "Merge branch 'main' into docs/626-strategy", "fix: the other change"]
         self.run_.stage(
             [merged(58, bot=True, signed_body=True)],
-            [details(58, [SIGNED, "", ""], ["README.md"], headlines, parents=[1, 2, 1])],
+            [details(58, [SIGNED, "", ""], ["README.md"], headlines, parents=[ONE_PARENT, FROM_MAIN, ONE_PARENT])],
         )
         result = self.run_.run()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
@@ -409,13 +453,74 @@ class AuditNearMissTests(unittest.TestCase):
         self.assertIn("- #58: commit 0580002 carries no Signed-off-by trailer", self.run_.summary.read_text())
 
     def test_a_signed_branch_updated_from_main_passes(self) -> None:
+        # The main side may be either parent, and may be main's tip at the
+        # moment the pull request merged as well as an older commit on it.
+        headlines = ["fix: the change", "Merge branch 'main' into x", "Merge origin/main into x", "Merge main into x"]
         self.run_.stage(
             [merged(60, bot=True, signed_body=True)],
-            [details(60, [SIGNED, ""], ["README.md"], ["fix: the change", "Merge branch 'main' into x"], parents=[1, 2])],
+            [
+                details(
+                    60,
+                    [SIGNED, "", "", ""],
+                    ["README.md"],
+                    headlines,
+                    parents=[ONE_PARENT, FROM_MAIN, [MAIN, BRANCH], [BRANCH, BEFORE]],
+                )
+            ],
         )
         result = self.run_.run()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertTrue(self.row(60).endswith("| 2 | all | none |"), self.row(60))
+        self.assertTrue(self.row(60).endswith("| 4 | all | none |"), self.row(60))
+
+    def test_a_merge_titled_from_main_with_no_parent_on_main_still_needs_a_trailer(self) -> None:
+        # Merging another branch and titling it as a merge from main: two
+        # parents and git's own wording, but neither parent was on main.
+        headlines = ["Merge branch 'main' into docs/x", "Merge remote-tracking branch 'origin/main' into docs/x"]
+        self.run_.stage(
+            [merged(62, bot=True, signed_body=True)],
+            [details(62, ["", ""], ["README.md"], headlines, parents=[[BRANCH, ELSEWHERE], [ELSEWHERE, BRANCH]])],
+        )
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue(self.row(62).endswith("| 2 | **0 of 2** | none |"), self.row(62))
+        self.assertIn("- #62: commits 0620000, 0620001 carry no Signed-off-by trailer", self.run_.summary.read_text())
+
+    def test_merge_parents_are_compared_with_main_as_it_stood_when_the_pull_request_merged(self) -> None:
+        # Merging the pull request put both sides of every merge on its branch
+        # onto today's main, so a comparison with today's main passes any
+        # merge. The base is the first parent of the pull request's own merge
+        # commit, and each distinct merge parent is asked about once; a pull
+        # request with no merge on it asks nothing more.
+        self.run_.stage(
+            [merged(63, bot=True, signed_body=True), merged(64, bot=True, signed_body=True)],
+            [
+                details(63, ["", ""], ["README.md"], ["Merge main into x", "Merge main into x"], parents=[FROM_MAIN, FROM_MAIN]),
+                details(64, [SIGNED], ["README.md"]),
+            ],
+        )
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        paths = [next(arg for arg in call if arg.startswith("repos/")) for call in self.run_.gh_calls() if call[1] == "api"]
+        api = [path for path in paths if "/pulls/" not in path]
+        self.assertEqual(
+            sorted(api),
+            sorted(
+                [
+                    f"repos/{REPO}/commits/{merge_commit(63)}",
+                    f"repos/{REPO}/compare/{BRANCH}...{BEFORE}",
+                    f"repos/{REPO}/compare/{MAIN}...{BEFORE}",
+                ]
+            ),
+        )
+
+    def test_a_merge_on_a_pull_request_with_no_merge_commit_fails_the_run(self) -> None:
+        entry = details(65, [""], ["README.md"], ["Merge main into x"], parents=[FROM_MAIN])
+        self.run_.stage([merged(65, bot=True, signed_body=True)], [entry])
+        (self.run_.tmp / "pr-65.json").write_text(json.dumps({"number": 65, "files": [], "mergeCommit": None}))
+        result = self.run_.run()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("::error::#65 has no merge commit", result.stderr)
+        self.assertEqual(self.run_.summary.read_text(), "")
 
     def test_a_one_parent_commit_titled_like_a_merge_still_needs_a_trailer(self) -> None:
         # The headline is the author's to write, so it cannot be the test.
@@ -445,7 +550,7 @@ class AuditNearMissTests(unittest.TestCase):
         ]
         self.run_.stage(
             [merged(61, bot=True, signed_body=True)],
-            [details(61, [""] * len(near), ["README.md"], near, parents=[2] * len(near))],
+            [details(61, [""] * len(near), ["README.md"], near, parents=[FROM_MAIN] * len(near))],
         )
         result = self.run_.run()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
