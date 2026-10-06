@@ -92,17 +92,19 @@ def merged(number: int, *, bot: bool, signed_body: bool, title: str = "fix: a th
     }
 
 
-def details(number: int, commits: list[str], files: list[str]) -> dict:
+def details(number: int, commits: list[str], files: list[str], headlines: list[str] | None = None) -> dict:
     """`gh pr view --json number,commits,files` for *number*.
 
-    *commits* are message bodies; the oid is derived from the position so a
-    finding can be matched against it.
+    *commits* are message bodies, and *headlines* their first lines when a
+    case needs them; the oid is derived from the position so a finding can be
+    matched against it.
     """
+    headlines = headlines or ["test: a change"] * len(commits)
     return {
         "number": number,
         "commits": [
-            {"oid": f"{number:03d}{index:04d}" + "a" * 33, "messageBody": body}
-            for index, body in enumerate(commits)
+            {"oid": f"{number:03d}{index:04d}" + "a" * 33, "messageHeadline": headline, "messageBody": body}
+            for index, (headline, body) in enumerate(zip(headlines, commits, strict=True))
         ],
         "files": [{"path": path} for path in files],
     }
@@ -366,6 +368,42 @@ class AuditNearMissTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("0 of the 1 pull requests merged in the window were written by an agent.", self.run_.summary.read_text())
         self.assertEqual([call for call in self.run_.gh_calls() if call[1:3] == ["pr", "view"]], [])
+
+    def test_a_merge_of_main_into_the_branch_needs_no_trailer(self) -> None:
+        # docs/multi-agent.md tells a contributor to update a pull request from
+        # main before it merges. GitHub's "Update branch" writes the first
+        # merge headline, a local `git merge origin/main` the second, and an
+        # agent naming its own merge the third (all three are in this
+        # repository's history). None carries a trailer, and what they bring
+        # in was audited when it reached main.
+        headlines = [
+            "fix: the change",
+            "Merge branch 'main' into docs/626-strategy",
+            "Merge remote-tracking branch 'origin/main' into scanner/fix-510-repo-list-limit",
+            "Merge origin/main into quality/issue-111-shell-coverage",
+        ]
+        self.run_.stage([merged(58, bot=True, signed_body=True)], [details(58, [SIGNED, "", "", ""], ["README.md"], headlines)])
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.row(58).endswith("| 4 | all | none |"), self.row(58))
+
+    def test_a_merge_that_is_not_main_into_the_branch_still_needs_a_trailer(self) -> None:
+        near = [
+            "Merge branch 'feature' into docs/x",
+            "Merge branch 'maintenance' into docs/x",
+            "Merge pull request #1 from Danathar/main",
+            "fix: Merge branch 'main' into docs/x",
+            "Merge branch 'main' of github.com:Danathar/atomic-image-builder",
+            "Merge mainline into docs/x",
+        ]
+        self.run_.stage(
+            [merged(59, bot=True, signed_body=True)],
+            [details(59, [""] * len(near), ["README.md"], near)],
+        )
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        oids = ", ".join(f"059{index:04d}" for index in range(len(near)))
+        self.assertIn(f"- #59: commits {oids} carry no Signed-off-by trailer", self.run_.summary.read_text())
 
     def test_a_commit_that_only_mentions_the_trailer_is_unsigned(self) -> None:
         mentions = "Explain why every commit needs a Signed-off-by: trailer\n\nHive-Run: x#1"

@@ -19,9 +19,12 @@ name: Agent audit trail
 # who merged it, which backend and model wrote it, how many commits, and
 # any Tier 4 path it touched (docs/risk-tiers.md). Two things fail the run:
 # a Hive-app pull request with no signature line, and a commit with no
-# Signed-off-by trailer. A Tier 4 path is reported, not failed: an agent is
-# allowed there behind review, and the row is what tells a reader where to
-# look first.
+# Signed-off-by trailer. A merge of `main` into the branch is the one commit
+# exempt from the trailer: docs/multi-agent.md asks for that update, GitHub's
+# "Update branch" button writes it with no trailer, and what it brings in
+# was audited when it reached `main`. A Tier 4 path is reported, not failed:
+# an agent is allowed there behind review, and the row is what tells a
+# reader where to look first.
 #
 # This is a check, not a metric. docs/metrics.md keeps every number off a
 # schedule on purpose; this runs on one because its output is red or green,
@@ -100,6 +103,14 @@ jobs:
             # the token policy and ruleset, the agent permission table and its
             # hooks, and what the release path runs.
             def tier4: test("^(\\.github/workflows/(ci|publish-image|publish-wrapper|update-homebrew-formula)\\.yml$|\\.github/policies/|\\.github/rulesets/|\\.claude/settings\\.json$|\\.claude/hooks/|homebrew_formula\\.py$|coverage_badge\\.py$|Formula/)");
+            # A merge of main into the branch. The "Update branch" button and
+            # a local `git merge` write the `branch` forms; an agent that named
+            # its own merge wrote the bare `origin/main` form. The headline is
+            # the signal, because `gh pr view` returns no parents. It is
+            # anchored so another merge, or a commit whose title only quotes
+            # one, still needs its trailer. The quote is spelled \x27 because
+            # this program sits inside a single-quoted shell string.
+            def from_main: (.messageHeadline // "") | test("^Merge ((remote-tracking )?branch \\x27(origin/)?main\\x27|(origin/)?main) into ");
             def row:
               . as $pr
               | ($details[0][$pr.number | tostring]) as $d
@@ -113,7 +124,7 @@ jobs:
                   merged_by: ($pr.mergedBy.login // "unknown"),
                   signature: (signature | if . == null then null else ltrimstr("— hive: ") end),
                   commits: ($d.commits | length),
-                  unsigned: [$d.commits[] | select(.messageBody | test("(^|\n)Signed-off-by: ") | not) | .oid[:7]],
+                  unsigned: [$d.commits[] | select(from_main | not) | select(.messageBody | test("(^|\n)Signed-off-by: ") | not) | .oid[:7]],
                   tier4: [$d.files[].path | select(tier4)]
                 };
             def findings:

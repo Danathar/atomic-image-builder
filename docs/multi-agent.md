@@ -107,7 +107,10 @@ nobody bypass `test`, so a red pull request cannot land whoever merges it.
 The record each merged
 agent pull request leaves is read back every month by
 [`.github/workflows/agent-audit.yml`](../.github/workflows/agent-audit.yml),
-which fails when a signature line or a Signed-off-by trailer is missing.
+which fails when a signature line or a Signed-off-by trailer is missing. The
+merge commit that updating a pull request from `main` writes is the one
+exception: it carries no trailer, and what it brings in was audited when it
+reached `main`.
 
 ## What every agent shares
 
