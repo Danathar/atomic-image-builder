@@ -19,9 +19,12 @@ name: Agent audit trail
 # who merged it, which backend and model wrote it, how many commits, and
 # any Tier 4 path it touched (docs/risk-tiers.md). Two things fail the run:
 # a Hive-app pull request with no signature line, and a commit with no
-# Signed-off-by trailer. A Tier 4 path is reported, not failed: an agent is
-# allowed there behind review, and the row is what tells a reader where to
-# look first.
+# Signed-off-by trailer. A merge of `main` into the branch is the one commit
+# exempt from the trailer: docs/multi-agent.md asks for that update, GitHub's
+# "Update branch" button writes it with no trailer, and what it brings in
+# was audited when it reached `main`. A Tier 4 path is reported, not failed:
+# an agent is allowed there behind review, and the row is what tells a
+# reader where to look first.
 #
 # This is a check, not a metric. docs/metrics.md keeps every number off a
 # schedule on purpose; this runs on one because its output is red or green,
@@ -90,8 +93,13 @@ jobs:
           # Commits and files are fetched one pull request at a time: asking
           # `gh pr list` for them alongside the list trips GitHub's GraphQL
           # node ceiling on any window this repository fills in a week.
+          # Commits come from the REST list because it carries each commit's
+          # parents, which `gh pr view` does not; a merge is told apart by
+          # its parent count, not by its headline, which anyone can write.
           jq -r '.[].number' agents.json | while read -r number; do
-            gh pr view "$number" --repo "$REPO" --json number,commits,files
+            commits="$(gh api --paginate "repos/$REPO/pulls/$number/commits" \
+              --jq '.[] | {oid: .sha, message: .commit.message, parents: (.parents | length)}' | jq -s .)"
+            gh pr view "$number" --repo "$REPO" --json number,files | jq --argjson commits "$commits" '. + {commits: $commits}'
           done | jq -s 'map({(.number | tostring): .}) | add // {}' > details.json
 
           jq --arg since "$SINCE" --arg total "$total" --slurpfile details details.json '
@@ -100,6 +108,17 @@ jobs:
             # the token policy and ruleset, the agent permission table and its
             # hooks, and what the release path runs.
             def tier4: test("^(\\.github/workflows/(ci|publish-image|publish-wrapper|update-homebrew-formula)\\.yml$|\\.github/policies/|\\.github/rulesets/|\\.claude/settings\\.json$|\\.claude/hooks/|homebrew_formula\\.py$|coverage_badge\\.py$|Formula/)");
+            # A merge of main into the branch needs no trailer: "Update
+            # branch", a local `git merge origin/main` and an agent naming its
+            # own merge write one, and what it brings in was audited when it
+            # reached main. Both tests must hold: two or more parents, so a
+            # one-parent commit titled like a merge still needs its trailer,
+            # and the wording git itself writes for a merge from main, anchored, so a merge
+            # of any other branch does too. The quote is spelled \x27 because
+            # this program sits inside a single-quoted shell string.
+            def is_merge:
+              (.parents // 1) > 1
+              and ((.message // "") | test("^Merge ((remote-tracking )?branch \\x27(origin/)?main\\x27|(origin/)?main) into "));
             def row:
               . as $pr
               | ($details[0][$pr.number | tostring]) as $d
@@ -113,7 +132,8 @@ jobs:
                   merged_by: ($pr.mergedBy.login // "unknown"),
                   signature: (signature | if . == null then null else ltrimstr("— hive: ") end),
                   commits: ($d.commits | length),
-                  unsigned: [$d.commits[] | select(.messageBody | test("(^|\n)Signed-off-by: ") | not) | .oid[:7]],
+                  authored: ([$d.commits[] | select(is_merge | not)] | length),
+                  unsigned: [$d.commits[] | select(is_merge | not) | select(.message | test("(^|\n)Signed-off-by: ") | not) | .oid[:7]],
                   tier4: [$d.files[].path | select(tier4)]
                 };
             def findings:
@@ -136,7 +156,7 @@ jobs:
                       [ "| PR | Merged | Author | Merged by | Backend and model | Commits | Signed-off | Tier 4 paths |",
                         "| --- | --- | --- | --- | --- | --- | --- | --- |" ]
                       + [ $rows[]
-                          | "| [#\(.number)](\(.url)) \(.title | cell) | \(.merged) | \(.author) | \(.merged_by) | \(.signature // "**missing**" | cell) | \(.commits) | \(if (.unsigned | length) == 0 then "all" else "**\(.commits - (.unsigned | length)) of \(.commits)**" end) | \(if (.tier4 | length) == 0 then "none" else (.tier4 | map("`\(.)`") | join(", ")) end) |" ]
+                          | "| [#\(.number)](\(.url)) \(.title | cell) | \(.merged) | \(.author) | \(.merged_by) | \(.signature // "**missing**" | cell) | \(.commits) | \(if (.unsigned | length) == 0 then "all" else "**\(.authored - (.unsigned | length)) of \(.authored)**" end) | \(if (.tier4 | length) == 0 then "none" else (.tier4 | map("`\(.)`") | join(", ")) end) |" ]
                     end)
                   + [ "" ]
                   + (if ($rows | findings | length) == 0

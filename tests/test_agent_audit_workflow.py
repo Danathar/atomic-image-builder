@@ -50,25 +50,32 @@ RISK_TIERS = ROOT / "docs/risk-tiers.md"
 AUDIT_STEP = "Audit merged agent pull requests"
 REPO = "Danathar/atomic-image-builder"
 
-# Serves `pr list` from merged.json and `pr view N` from pr-N.json in
-# $STUB_DIR, recording every argv so a case can assert on the query sent.
-# Like the real gh, it returns only the fields `--json` names and, for
-# `pr list`, no more than `--limit` entries (30 when the flag is absent), so
-# a field or the limit dropped from the step's query changes what it reads.
+# Serves `pr list` from merged.json, `pr view N` from pr-N.json and
+# `api repos/<repo>/pulls/N/commits` from commits-N.json in $STUB_DIR,
+# recording every argv so a case can assert on the query sent. Like the real
+# gh, it returns only the fields `--json` names, for `pr list` no more than
+# `--limit` entries (30 when the flag is absent), and for `api` the REST
+# response passed through the step's own `--jq`, so a field, the limit or the
+# filter dropped from the step's query changes what it reads.
 GH_STUB = r"""#!/usr/bin/env bash
 { printf '%s\t' gh "$@"; printf '\n'; } >> "$STUB_LOG"
-fields="" limit=30
+fields="" limit=30 filter="." path=""
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
   case "${args[i]}" in
     --json) fields="${args[i + 1]}" ;;
     --limit) limit="${args[i + 1]}" ;;
+    --jq) filter="${args[i + 1]}" ;;
+    repos/*) path="${args[i]}" ;;
   esac
 done
 project='with_entries(select(.key as $k | $f | split(",") | index($k)))'
 case "$1 $2" in
   "pr list") jq --arg f "$fields" --argjson n "$limit" ".[:\$n] | map($project)" "$STUB_DIR/merged.json" ;;
   "pr view") jq --arg f "$fields" "$project" "$STUB_DIR/pr-$3.json" ;;
+  api\ *)
+    [[ "$path" =~ ^repos/[^/]+/[^/]+/pulls/([0-9]+)/commits$ ]] || { echo "gh stub: unexpected api path: $path" >&2; exit 97; }
+    jq -c "$filter" "$STUB_DIR/commits-${BASH_REMATCH[1]}.json" ;;
   *) echo "gh stub: unexpected command: $*" >&2; exit 97 ;;
 esac
 """
@@ -92,19 +99,34 @@ def merged(number: int, *, bot: bool, signed_body: bool, title: str = "fix: a th
     }
 
 
-def details(number: int, commits: list[str], files: list[str]) -> dict:
-    """`gh pr view --json number,commits,files` for *number*.
+def details(
+    number: int,
+    commits: list[str],
+    files: list[str],
+    headlines: list[str] | None = None,
+    parents: list[int] | None = None,
+) -> dict:
+    """`gh pr view --json number,files` for *number*, plus its REST commits list.
 
-    *commits* are message bodies; the oid is derived from the position so a
-    finding can be matched against it.
+    *commits* are message bodies, *headlines* their first lines when a case
+    needs them, and *parents* each commit's parent count (1 unless a case
+    makes it a merge). The sha is derived from the position so a finding can
+    be matched against it. The REST commits go under `rest_commits`, which
+    `stage` writes to commits-N.json.
     """
+    headlines = headlines or ["test: a change"] * len(commits)
+    parents = parents or [1] * len(commits)
     return {
         "number": number,
-        "commits": [
-            {"oid": f"{number:03d}{index:04d}" + "a" * 33, "messageBody": body}
-            for index, body in enumerate(commits)
-        ],
         "files": [{"path": path} for path in files],
+        "rest_commits": [
+            {
+                "sha": f"{number:03d}{index:04d}" + "a" * 33,
+                "commit": {"message": f"{headline}\n\n{body}" if body else headline},
+                "parents": [{"sha": "b" * 40}] * count,
+            }
+            for index, (headline, body, count) in enumerate(zip(headlines, commits, parents, strict=True))
+        ],
     }
 
 
@@ -147,7 +169,9 @@ class AuditStepRun:
     def stage(self, prs: list[dict], detail: list[dict]) -> None:
         (self.tmp / "merged.json").write_text(json.dumps(prs))
         for entry in detail:
-            (self.tmp / f"pr-{entry['number']}.json").write_text(json.dumps(entry))
+            view = {key: value for key, value in entry.items() if key != "rest_commits"}
+            (self.tmp / f"pr-{entry['number']}.json").write_text(json.dumps(view))
+            (self.tmp / f"commits-{entry['number']}.json").write_text(json.dumps(entry["rest_commits"]))
 
     def run(self) -> subprocess.CompletedProcess[str]:
         env = {
@@ -366,6 +390,67 @@ class AuditNearMissTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("0 of the 1 pull requests merged in the window were written by an agent.", self.run_.summary.read_text())
         self.assertEqual([call for call in self.run_.gh_calls() if call[1:3] == ["pr", "view"]], [])
+
+    def test_a_merge_commit_needs_no_trailer_and_is_left_out_of_the_count(self) -> None:
+        # docs/multi-agent.md tells a contributor to update a pull request from
+        # main before it merges. "Update branch" and `git merge origin/main`
+        # write a two-parent commit with no trailer, and what it brings in was
+        # audited when it reached main. The Signed-off cell counts only the
+        # commits that need a trailer, so an unsigned commit next to a merge
+        # reads "1 of 2", not "2 of 3".
+        headlines = ["fix: the change", "Merge branch 'main' into docs/626-strategy", "fix: the other change"]
+        self.run_.stage(
+            [merged(58, bot=True, signed_body=True)],
+            [details(58, [SIGNED, "", ""], ["README.md"], headlines, parents=[1, 2, 1])],
+        )
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue(self.row(58).endswith("| 3 | **1 of 2** | none |"), self.row(58))
+        self.assertIn("- #58: commit 0580002 carries no Signed-off-by trailer", self.run_.summary.read_text())
+
+    def test_a_signed_branch_updated_from_main_passes(self) -> None:
+        self.run_.stage(
+            [merged(60, bot=True, signed_body=True)],
+            [details(60, [SIGNED, ""], ["README.md"], ["fix: the change", "Merge branch 'main' into x"], parents=[1, 2])],
+        )
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.row(60).endswith("| 2 | all | none |"), self.row(60))
+
+    def test_a_one_parent_commit_titled_like_a_merge_still_needs_a_trailer(self) -> None:
+        # The headline is the author's to write, so it cannot be the test.
+        spoofs = [
+            "Merge branch 'main' into docs/x",
+            "Merge remote-tracking branch 'origin/main' into docs/x",
+            "Merge origin/main into docs/x",
+        ]
+        self.run_.stage(
+            [merged(59, bot=True, signed_body=True)],
+            [details(59, [""] * len(spoofs), ["README.md"], spoofs)],
+        )
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        oids = ", ".join(f"059{index:04d}" for index in range(len(spoofs)))
+        self.assertIn(f"- #59: commits {oids} carry no Signed-off-by trailer", self.run_.summary.read_text())
+
+    def test_a_merge_that_is_not_main_into_the_branch_still_needs_a_trailer(self) -> None:
+        # Real two-parent merges, so only the headline rule can catch them.
+        near = [
+            "Merge branch 'feature' into docs/x",
+            "Merge branch 'maintenance' into docs/x",
+            "Merge pull request #1 from Danathar/main",
+            "fix: Merge branch 'main' into docs/x",
+            "Merge branch 'main' of github.com:Danathar/atomic-image-builder",
+            "Merge mainline into docs/x",
+        ]
+        self.run_.stage(
+            [merged(61, bot=True, signed_body=True)],
+            [details(61, [""] * len(near), ["README.md"], near, parents=[2] * len(near))],
+        )
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        oids = ", ".join(f"061{index:04d}" for index in range(len(near)))
+        self.assertIn(f"- #61: commits {oids} carry no Signed-off-by trailer", self.run_.summary.read_text())
 
     def test_a_commit_that_only_mentions_the_trailer_is_unsigned(self) -> None:
         mentions = "Explain why every commit needs a Signed-off-by: trailer\n\nHive-Run: x#1"
