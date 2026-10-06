@@ -205,6 +205,21 @@ else
         exit 1
     fi
 
+    # The image is signed by cosign 3, which writes the signature in the newer
+    # Sigstore bundle format. cosign 2 does not look for that format by
+    # default, so on a host with cosign 2 the verify below finds "no
+    # signatures" and would land in the tamper message for an image that is
+    # fine. Asking first turns that into the version problem it is. Both 2 and
+    # 3 answer `cosign version --json`; a version this cannot read is left to
+    # the verify itself rather than refused on a guess.
+    cosign_version="$(cosign version --json 2>/dev/null || true)"
+    if [[ "$cosign_version" =~ \"gitVersion\"[[:space:]]*:[[:space:]]*\"(v?([0-9]+)\.[^\"]*)\" ]] &&
+        [ "${BASH_REMATCH[2]}" -lt 3 ]; then
+        echo "aib: aib needs cosign 3 or newer to check this image (found ${BASH_REMATCH[1]}). Run:" >&2
+        echo "aib:   brew upgrade cosign" >&2
+        exit 1
+    fi
+
     # Pull first so there is a concrete digest to verify, then run that exact
     # digest. Failing closed here is deliberate: a pull failure is also how an
     # offline run arrives, and running an unverified image is not the right
