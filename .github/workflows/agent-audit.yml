@@ -22,9 +22,11 @@ name: Agent audit trail
 # Signed-off-by trailer. A merge of `main` into the branch is the one commit
 # exempt from the trailer: docs/multi-agent.md asks for that update, GitHub's
 # "Update branch" button writes it with no trailer, and what it brings in
-# was audited when it reached `main`. A Tier 4 path is reported, not failed:
-# an agent is allowed there behind review, and the row is what tells a
-# reader where to look first.
+# was audited when it reached `main`. Everything it merges in has to come
+# from outside the pull request, which for a pull request into `main` means
+# from `main`, so a merge of another branch titled like one still needs its
+# trailer. A Tier 4 path is reported, not failed: an agent is allowed there
+# behind review, and the row is what tells a reader where to look first.
 #
 # This is a check, not a metric. docs/metrics.md keeps every number off a
 # schedule on purpose; this runs on one because its output is red or green,
@@ -96,10 +98,26 @@ jobs:
           # Commits come from the REST list because it carries each commit's
           # parents, which `gh pr view` does not; a merge is told apart by
           # its parent count, not by its headline, which anyone can write.
+          #
+          # That list is what the branch held and its base did not when the
+          # pull request merged, so a merge parent missing from it was on the
+          # base already: `main` as it stood then, for a pull request into
+          # `main`. Asking today's main would prove nothing, because merging
+          # the pull request put every commit on its branch, both sides of
+          # any merge included, on main; and the list costs no call beyond
+          # the one already made. It stops at 250 commits without saying so,
+          # and a commit cut off it would read as a parent from outside, so
+          # a pull request that reaches the cap is refused.
           jq -r '.[].number' agents.json | while read -r number; do
+            view="$(gh pr view "$number" --repo "$REPO" --json number,files,baseRefName)"
             commits="$(gh api --paginate "repos/$REPO/pulls/$number/commits" \
-              --jq '.[] | {oid: .sha, message: .commit.message, parents: (.parents | length)}' | jq -s .)"
-            gh pr view "$number" --repo "$REPO" --json number,files | jq --argjson commits "$commits" '. + {commits: $commits}'
+              --jq '.[] | {oid: .sha, message: .commit.message, parents: [.parents[].sha]}' | jq -s .)"
+            if [ "$(jq length <<<"$commits")" -ge 250 ]; then
+              # stderr: stdout here feeds the jq below the loop.
+              echo "::error::#$number reached the REST list's 250-commit cap, so its commits cannot all be read" >&2
+              exit 2
+            fi
+            jq --argjson commits "$commits" '. + {commits: $commits}' <<<"$view"
           done | jq -s 'map({(.number | tostring): .}) | add // {}' > details.json
 
           jq --arg since "$SINCE" --arg total "$total" --slurpfile details details.json '
@@ -111,18 +129,30 @@ jobs:
             # A merge of main into the branch needs no trailer: "Update
             # branch", a local `git merge origin/main` and an agent naming its
             # own merge write one, and what it brings in was audited when it
-            # reached main. Both tests must hold: two or more parents, so a
-            # one-parent commit titled like a merge still needs its trailer,
-            # and the wording git itself writes for a merge from main, anchored, so a merge
-            # of any other branch does too. The quote is spelled \x27 because
-            # this program sits inside a single-quoted shell string.
-            def is_merge:
-              (.parents // 1) > 1
+            # reached main. Every test must hold. The pull request is into
+            # main, since a parent from outside one into another branch came
+            # from that branch, which nothing audits. Two or more parents, so
+            # a one-parent commit titled like a merge still needs its trailer.
+            # Every parent after the first, which is what the merge brought
+            # in, is outside the commits the pull request lists, so it was on
+            # main (see above): a merge of another branch that never reached
+            # main puts the commits of that branch on the pull request, even
+            # when the branch had no commit of its own yet and main is the
+            # first parent, so it still needs the trailer whatever it is
+            # titled. And the wording git itself writes for a merge from
+            # main, anchored, so a merge of any other branch does too. The
+            # quote is spelled \x27 because this program sits inside a
+            # single-quoted shell string.
+            def is_merge($own; $base):
+              $base == "main"
+              and (.parents | length) > 1
+              and all(.parents[1:][]; IN($own[]) | not)
               and ((.message // "") | test("^Merge ((remote-tracking )?branch \\x27(origin/)?main\\x27|(origin/)?main) into "));
             def row:
               . as $pr
               | ($details[0][$pr.number | tostring]) as $d
               | if $d == null then error("no commits or files fetched for #\($pr.number)") else . end
+              | [$d.commits[].oid] as $own
               | {
                   number: $pr.number,
                   url: $pr.url,
@@ -132,8 +162,8 @@ jobs:
                   merged_by: ($pr.mergedBy.login // "unknown"),
                   signature: (signature | if . == null then null else ltrimstr("— hive: ") end),
                   commits: ($d.commits | length),
-                  authored: ([$d.commits[] | select(is_merge | not)] | length),
-                  unsigned: [$d.commits[] | select(is_merge | not) | select(.message | test("(^|\n)Signed-off-by: ") | not) | .oid[:7]],
+                  authored: ([$d.commits[] | select(is_merge($own; $d.baseRefName) | not)] | length),
+                  unsigned: [$d.commits[] | select(is_merge($own; $d.baseRefName) | not) | select(.message | test("(^|\n)Signed-off-by: ") | not) | .oid[:7]],
                   tier4: [$d.files[].path | select(tier4)]
                 };
             def findings:
