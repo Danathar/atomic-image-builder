@@ -466,6 +466,25 @@ class AuditNearMissTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(self.row(60).endswith("| 4 | all | none |"), self.row(60))
 
+    def test_each_wording_the_headline_rule_accepts_for_a_merge_from_main_passes(self) -> None:
+        # A local `git merge origin/main` writes "Merge remote-tracking branch
+        # 'origin/main' into ...", and the rule also takes a branch spelled
+        # 'origin/main'. Neither is sent as a real merge above, so an
+        # alternative dropped from the pattern would still pass there while
+        # every such update reported an unsigned commit here.
+        headlines = [
+            "fix: the change",
+            "Merge remote-tracking branch 'origin/main' into docs/x",
+            "Merge branch 'origin/main' into docs/x",
+        ]
+        self.run_.stage(
+            [merged(69, bot=True, signed_body=True)],
+            [details(69, [SIGNED, "", ""], ["README.md"], headlines, parents=[ONE_PARENT, FROM_MAIN, FROM_MAIN])],
+        )
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.row(69).endswith("| 3 | all | none |"), self.row(69))
+
     def test_a_merge_of_another_branch_titled_from_main_still_needs_a_trailer(self) -> None:
         # Merging another branch puts its commits on the pull request, so the
         # merged-in parent is one of them: git's own wording and two parents,
@@ -574,6 +593,7 @@ class AuditNearMissTests(unittest.TestCase):
             "fix: Merge branch 'main' into docs/x",
             "Merge branch 'main' of github.com:Danathar/atomic-image-builder",
             "Merge mainline into docs/x",
+            'Merge branch "main" into docs/x',
         ]
         self.run_.stage(
             [merged(61, bot=True, signed_body=True)],
