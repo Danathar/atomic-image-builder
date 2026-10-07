@@ -123,6 +123,8 @@ Every agent, whatever model it runs on, works from the same documents:
   path needs.
 - [`docs/SECURITY-AI.md`](SECURITY-AI.md): what an agent must never do, and
   which of those rules a tool enforces.
+- [`docs/agent-boundaries.md`](agent-boundaries.md): which limits a tool or
+  GitHub enforces, which are only asked, and which bind every backend.
 
 The agents do not all run on the same backend: the `backend=` field of the
 signature line names it. [`.claude/settings.json`](../.claude/settings.json)
