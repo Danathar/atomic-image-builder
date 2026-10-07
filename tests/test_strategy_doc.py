@@ -4,9 +4,11 @@ Script: tests/test_strategy_doc.py
 What: Reads docs/strategy.md and checks the claims a reader acts on without
       noticing they are wrong: that it has one entry per column of ROADMAP.md's
       beta-exit table, that its links land, that every list command names the
-      repository and a limit high enough to see everything, that the bug label
-      it filters on is the one the bug form applies, and that the coverage
-      lookup can match the history the CI job writes.
+      repository and a limit high enough to see everything, that each list
+      asks for the state and date window its entry's prose describes, that the
+      merged-work grouping turns branch names into prefix counts, that the bug
+      label it filters on is the one the bug form applies, and that the
+      coverage lookup can match the history the CI job writes.
 Doing: Reuses tests/test_metrics_doc.py's section, link and fence parsers and
        tests/test_roadmap_doc.py's column list, so the three documents are read
        the same way.
@@ -15,9 +17,13 @@ Why: The page is commands rather than numbers, and a stale command does not
      (docs/metrics.md records this happening), a renamed label returns no
      issues, and a coverage history that stopped writing full SHAs would make
      the tag lookup print nothing -- which the page tells the reader to read
-     as "no push ended on that commit".
+     as "no push ended on that commit". gh lists only open items unless told
+     otherwise, so a dropped `--state` turns "every bug since the release"
+     into "the ones still open", and a `created:` where `merged:` belongs
+     drops work that was opened before the release and merged after it.
 Goal: Make a new beta-exit column, a moved heading, a renamed label, a dropped
-      `--limit` or a change to the trend file's SHA fail here.
+      `--limit` or `--state`, a shifted date window or a change to the trend
+      file's SHA fail here.
 """
 
 from __future__ import annotations
@@ -25,6 +31,8 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import shutil
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -70,6 +78,28 @@ LIST_LIMIT = 1000
 LABEL_SOURCES = {"bug": BUG_FORM}
 EXTERNAL_LABELS = {"needs-decision"}
 
+# Each issue and pr list, keyed by the bold name its entry opens with, as
+# (kind, --state, --search, --json). gh's own default state is `open`, so every
+# entry that counts closed or merged items has to say so. The search windows
+# are inclusive on <date>: a bug filed on release day counts against that
+# release, and one closed on release day was not open at its end.
+LIST_QUERIES = {
+    # "every bug issue opened since the release", fixed or not.
+    "Containerfile regressions": ("issue", "all", "created:>=<date>", "number,title,state"),
+    # "still open at the end of the release day": filed by then, not closed by
+    # then. Its state today does not matter, so it has to be `all`.
+    "Open five-stage correctness issues": (
+        "issue",
+        "all",
+        "created:<=<date> -closed:<=<date>",
+        "number,title",
+    ),
+    # "merged since the newest release", whenever the PR was opened.
+    "What has merged since the newest release": ("pr", "merged", "merged:>=<date>", "headRefName"),
+    # Waiting now, so open now; no date window.
+    "What is waiting on the maintainer": ("issue", "open", None, None),
+}
+
 
 def commands() -> list[list[str]]:
     """Every `gh` command in the page's fences, as argv, continuations joined."""
@@ -83,6 +113,29 @@ def commands() -> list[list[str]]:
 
 def option(argv: list[str], name: str) -> str | None:
     return argv[argv.index(name) + 1] if name in argv else None
+
+
+def led_lists() -> list[tuple[str | None, list[str]]]:
+    """Every `gh issue list` and `gh pr list`, with the bold name its entry opens with."""
+    found = []
+    lead = None
+    fence: list[str] | None = None
+    for line in DOC.splitlines():
+        if line.startswith("```"):
+            if fence is None:
+                fence = []
+                continue
+            for command in "\n".join(fence).replace("\\\n", " ").splitlines():
+                if command.startswith("gh "):
+                    argv = shlex.split(command)
+                    if argv[1] in {"issue", "pr"} and argv[2] == "list":
+                        found.append((lead, argv))
+            fence = None
+        elif fence is not None:
+            fence.append(line)
+        elif lead_match := re.match(r"^\*\*(.+?)\*\*", line):
+            lead = lead_match.group(1)
+    return found
 
 
 class Outline(unittest.TestCase):
@@ -155,6 +208,44 @@ class Commands(unittest.TestCase):
         for argv in lists:
             with self.subTest(command=" ".join(argv)):
                 self.assertEqual(option(argv, "--limit"), str(LIST_LIMIT))
+
+    def test_each_list_asks_for_the_state_and_window_its_entry_describes(self) -> None:
+        found = {
+            lead: (argv[1], option(argv, "--state"), option(argv, "--search"), option(argv, "--json"))
+            for lead, argv in led_lists()
+        }
+        self.assertEqual(len(found), len(led_lists()), "two lists sit under one entry")
+        self.assertEqual(found, LIST_QUERIES)
+
+    def test_the_merged_work_grouping_counts_branch_prefixes(self) -> None:
+        # Feed the --jq filter the shape --json asks gh for and check it does
+        # what the prose says: one count per branch prefix.
+        if shutil.which("jq") is None:
+            self.skipTest("jq is not installed")
+        (argv,) = [argv for lead, argv in led_lists() if argv[1] == "pr"]
+        fields = option(argv, "--json").split(",")
+        sample = [
+            {"headRefName": "quality/test-one"},
+            {"headRefName": "fix/two"},
+            {"headRefName": "quality/three"},
+            {"headRefName": "renovate/four"},
+        ]
+        result = subprocess.run(
+            ["jq", "-c", option(argv, "--jq")],
+            input=json.dumps([{key: row[key] for key in fields if key in row} for row in sample]),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            [
+                {"prefix": "fix", "count": 1},
+                {"prefix": "quality", "count": 2},
+                {"prefix": "renovate", "count": 1},
+            ],
+        )
 
     def test_every_label_is_one_something_applies(self) -> None:
         labels = {option(argv, "--label") for argv in commands()} - {None}
