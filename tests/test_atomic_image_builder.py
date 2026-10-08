@@ -662,6 +662,42 @@ class BuilderTests(unittest.TestCase):
             with self.assertRaisesRegex(CommandError, "saved settings file"):
                 app.load_repo_config(repo_dir)
 
+    def test_load_repo_config_refuses_newer_tool_version_before_any_write(self) -> None:
+        major, minor, patch_no = (int(part) for part in VERSION.split("."))
+        for newer in (f"{major}.{minor + 1}.0", f"{major}.{minor}.{patch_no + 1}", f"{major + 1}.0.0"):
+            app = self.make_app()
+            payload = app.state_payload()
+            payload["tool_version"] = newer
+            with tempfile.TemporaryDirectory() as tmp:
+                repo_dir = Path(tmp)
+                (repo_dir / STATE_FILE).write_text(json.dumps(payload))
+                with patch.object(app, "write_project_files") as write_files:
+                    with self.assertRaisesRegex(CommandError, rf"{re.escape(newer)}.*{re.escape(VERSION)}.*brew upgrade.*podman pull"):
+                        app.load_repo_config(repo_dir)
+                        app.write_project_files(repo_dir)
+                write_files.assert_not_called()
+
+    def test_load_repo_config_accepts_same_older_missing_or_unparsable_tool_version(self) -> None:
+        major, minor, _patch = (int(part) for part in VERSION.split("."))
+        for recorded in (VERSION, f"{major}.{max(minor - 1, 0)}.0", "0.9.0", "garbage", "1.2", 7, None, "__missing__"):
+            app = self.make_app()
+            payload = app.state_payload()
+            if recorded == "__missing__":
+                payload.pop("tool_version", None)
+            else:
+                payload["tool_version"] = recorded
+            with tempfile.TemporaryDirectory() as tmp:
+                repo_dir = Path(tmp)
+                (repo_dir / STATE_FILE).write_text(json.dumps(payload))
+                app.load_repo_config(repo_dir)
+
+    def test_tool_version_compares_numerically_not_as_text(self) -> None:
+        with patch.object(atomic_image_builder, "VERSION", "0.9.0"):
+            with self.assertRaises(CommandError):
+                atomic_image_builder.refuse_newer_tool_version({"tool_version": "0.10.0"})
+        with patch.object(atomic_image_builder, "VERSION", "0.10.0"):
+            atomic_image_builder.refuse_newer_tool_version({"tool_version": "0.9.0"})
+
     def test_patch_container_workflow_pins_actions_and_ignores_state_file(self) -> None:
         app = self.make_app()
         app.config.signing_enabled = True
