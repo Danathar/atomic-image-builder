@@ -4679,37 +4679,33 @@ class App:
         proc = run(["gh", "api", f"/repos/{owner}/{repo}/contents/{path}"], check=False)
         return proc.returncode == 0
 
-    def repo_carried_scan_customizations(self, owner: str, repo: str) -> bool:
-        # Reads the flag out of a managed repo's state file without cloning it.
-        # Any failure means "do not know", and the caller stays quiet rather
-        # than guessing -- a wrong migration reminder is worse than none.
+    def remote_state_payload(self, owner: str, repo: str) -> dict[str, object] | None:
+        # Reads a managed repo's state file without cloning it. Any failure
+        # means "do not know" (None), and callers treat every flag as unset.
         try:
             proc = run(
                 ["gh", "api", f"repos/{owner}/{repo}/contents/{STATE_FILE}", "--jq", ".content"],
                 check=False,
             )
             if proc.returncode != 0 or not proc.stdout.strip():
-                return False
+                return None
             payload = json.loads(base64.b64decode(proc.stdout.strip()).decode("utf-8"))
         except (OSError, ValueError, json.JSONDecodeError):
-            return False
-        return isinstance(payload, dict) and payload.get("scan_customizations_carried") is True
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def repo_carried_scan_customizations(self, owner: str, repo: str) -> bool:
+        # Any failure means "do not know", and the caller stays quiet rather
+        # than guessing -- a wrong migration reminder is worse than none.
+        payload = self.remote_state_payload(owner, repo)
+        return payload is not None and payload.get("scan_customizations_carried") is True
 
     def repo_signing_enabled(self, owner: str, repo: str) -> bool:
         # Like the scan flag above, this screen is reached through the picker
         # without loading the selected repo into self.config. Read the persisted
         # flag rather than assuming every historical managed repo has signing.
-        try:
-            proc = run(
-                ["gh", "api", f"repos/{owner}/{repo}/contents/{STATE_FILE}", "--jq", ".content"],
-                check=False,
-            )
-            if proc.returncode != 0 or not proc.stdout.strip():
-                return False
-            payload = json.loads(base64.b64decode(proc.stdout.strip()).decode("utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError):
-            return False
-        return isinstance(payload, dict) and payload.get("signing_enabled") is True
+        payload = self.remote_state_payload(owner, repo)
+        return payload is not None and payload.get("signing_enabled") is True
 
     def repo_has_state_file(self, owner: str, repo: str) -> bool:
         return self.repo_file_exists(owner, repo, STATE_FILE)
