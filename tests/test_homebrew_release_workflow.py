@@ -57,6 +57,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from _workflow_steps import step_env, step_if, step_run_body
 from atomic_image_builder import VERSION
@@ -250,6 +251,10 @@ class _StepHarness(unittest.TestCase):
         # file, and the system config is not read at all.
         env["GIT_CONFIG_GLOBAL"] = str(self.gitconfig)
         env["GIT_CONFIG_NOSYSTEM"] = "1"
+        # The identity variables outrank any `git config user.*` the step
+        # sets, so a shell that exports them would author the step's commit.
+        for name in [n for n in env if n.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))]:
+            del env[name]
         env.update(overrides)
         return env
 
@@ -553,6 +558,26 @@ class PushStepTests(_StepHarness):
         self.assertEqual(
             _git(origin, "log", "-1", "--format=%an|%ae|%cn", self.branch()),
             "github-actions[bot]|41898282+github-actions[bot]@users.noreply.github.com|github-actions[bot]",
+        )
+
+    def test_the_commit_is_the_bot_s_even_when_the_runner_exports_an_identity(self) -> None:
+        # GIT_AUTHOR_* and GIT_COMMITTER_* outrank the `git config user.*` the
+        # step sets. A runner never exports them, but a developer's or an
+        # agent's shell often does; the harness must not let that through.
+        identity = {
+            f"GIT_{role}_{field}": f"someone-else{'@example.invalid' if field == 'EMAIL' else ''}"
+            for role in ("AUTHOR", "COMMITTER")
+            for field in ("NAME", "EMAIL")
+        }
+        origin, clone = self.set_up_clone()
+        self.edit_formula(clone)
+        with mock.patch.dict(os.environ, identity):
+            proc = self.run_push_step(clone)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            _git(origin, "log", "-1", "--format=%an|%ae|%cn|%ce", self.branch()),
+            "github-actions[bot]|41898282+github-actions[bot]@users.noreply.github.com|"
+            "github-actions[bot]|41898282+github-actions[bot]@users.noreply.github.com",
         )
 
     def test_the_branch_starts_from_the_main_the_release_ended_on(self) -> None:
