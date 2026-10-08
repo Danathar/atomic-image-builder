@@ -8375,6 +8375,40 @@ class BuilderTests(unittest.TestCase):
             with patch("atomic_image_builder.run", return_value=proc):
                 self.assertFalse(app.repo_signing_enabled("owner", "repo"))
 
+    def test_remote_state_payload_is_the_one_reader_of_the_remote_state_file(self) -> None:
+        import base64
+        app = self.make_app()
+        state = {"signing_enabled": True, "scan_customizations_carried": True}
+        encoded = base64.b64encode(json.dumps(state).encode()).decode()
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, encoded, "")) as run_mock:
+            self.assertEqual(app.remote_state_payload("owner", "repo"), state)
+        self.assertEqual(
+            run_mock.call_args.args[0],
+            ["gh", "api", f"repos/owner/repo/contents/{STATE_FILE}", "--jq", ".content"],
+        )
+        # Unreadable, or valid JSON that is not an object: "do not know".
+        for proc in (
+            subprocess.CompletedProcess([], 1, "", "boom"),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "not-base64!!", ""),
+            subprocess.CompletedProcess([], 0, base64.b64encode(b"\xff").decode(), ""),
+            subprocess.CompletedProcess([], 0, base64.b64encode(b"[true]").decode(), ""),
+        ):
+            with patch("atomic_image_builder.run", return_value=proc):
+                self.assertIsNone(app.remote_state_payload("owner", "repo"))
+        # Both flag readers go through it, so neither re-implements the fetch.
+        for reader, key in (
+            (app.repo_signing_enabled, "signing_enabled"),
+            (app.repo_carried_scan_customizations, "scan_customizations_carried"),
+        ):
+            with patch.object(app, "remote_state_payload", return_value={key: True}) as fetch:
+                self.assertTrue(reader("owner", "repo"))
+            fetch.assert_called_once_with("owner", "repo")
+            with patch.object(app, "remote_state_payload", return_value=None):
+                self.assertFalse(reader("owner", "repo"))
+            with patch.object(app, "remote_state_payload", return_value={key: "true"}):
+                self.assertFalse(reader("owner", "repo"))
+
     def test_open_url_in_browser_discards_output_and_does_not_wait(self) -> None:
         # A GUI browser is chatty on stderr. Inheriting the terminal writes
         # Mesa and EGL warnings straight over the running TUI -- seen for real
