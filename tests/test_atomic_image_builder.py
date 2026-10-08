@@ -720,6 +720,34 @@ class BuilderTests(unittest.TestCase):
         with patch.object(atomic_image_builder, "VERSION", "0.10.0"):
             atomic_image_builder.refuse_newer_tool_version({"tool_version": "0.9.0"})
 
+    def test_tool_version_tolerates_v_prefix_and_whitespace_and_reports_bare_number(self) -> None:
+        # parse_release_version strips whitespace and accepts a leading `v`, so
+        # a hand-edited `v0.12.0` or `" 0.12.0\n"` still counts as newer. The
+        # message names the bare number, without the `v`.
+        with patch.object(atomic_image_builder, "VERSION", "0.11.0"):
+            for recorded in ("v0.12.0", " 0.12.0\n", "\tv0.12.0 "):
+                with self.subTest(recorded=recorded):
+                    with self.assertRaisesRegex(CommandError, rf"{re.escape(TOOL_NAME)} 0\.12\.0, which is newer than the 0\.11\.0"):
+                        atomic_image_builder.refuse_newer_tool_version({"tool_version": recorded})
+
+    def test_tool_version_ignores_strings_that_are_not_plain_releases(self) -> None:
+        # Only a whole `X.Y.Z` string is a release: a suffix, a fourth part or
+        # a leading prefix makes it unparsable, which keeps the old behaviour.
+        with patch.object(atomic_image_builder, "VERSION", "0.11.0"):
+            for recorded in ("0.12.0-rc1", "0.12.0.1", "0.12.0 beta", "x0.12.0", "0.12.0v", "vv0.12.0"):
+                with self.subTest(recorded=recorded):
+                    self.assertIsNone(atomic_image_builder.parse_release_version(recorded))
+                    atomic_image_builder.refuse_newer_tool_version({"tool_version": recorded})
+
+    def test_tool_version_check_is_skipped_when_running_version_is_not_a_release(self) -> None:
+        # A development build whose VERSION is not plain `X.Y.Z` cannot be
+        # compared, so it must neither refuse nor crash on any recorded value.
+        for running in ("0.12.0.dev0", "dev", ""):
+            with patch.object(atomic_image_builder, "VERSION", running):
+                for recorded in ("0.11.0", "99.0.0"):
+                    with self.subTest(running=running, recorded=recorded):
+                        atomic_image_builder.refuse_newer_tool_version({"tool_version": recorded})
+
     def test_patch_container_workflow_pins_actions_and_ignores_state_file(self) -> None:
         app = self.make_app()
         app.config.signing_enabled = True
