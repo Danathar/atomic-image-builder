@@ -3006,6 +3006,38 @@ class Gum:
             pass
 
 
+def parse_release_version(text: object) -> tuple[int, int, int] | None:
+    """Parse a plain `X.Y.Z` release string; anything else is None."""
+    if not isinstance(text, str):
+        return None
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", text.strip())
+    if match is None:
+        return None
+    return int(match[1]), int(match[2]), int(match[3])
+
+
+def refuse_newer_tool_version(state: object) -> None:
+    """Stop when the repo was last written by a newer copy of this tool.
+
+    Older tools would silently overwrite files that a newer release generated.
+    A missing or unparsable `tool_version` keeps the old behaviour.
+    """
+    if not isinstance(state, dict):
+        return
+    recorded_text = state.get("tool_version")
+    recorded = parse_release_version(recorded_text)
+    running = parse_release_version(VERSION)
+    if recorded is None or running is None or recorded <= running:
+        return
+    raise CommandError(
+        f"This repo was last updated by {TOOL_NAME} {str(recorded_text).strip().lstrip('v')}, "
+        f"which is newer than the {VERSION} you are running. "
+        "Updating it with this older version could overwrite newer generated files. "
+        "Upgrade first: `brew upgrade` (Homebrew install) or `podman pull` "
+        "(container image), then run this again."
+    )
+
+
 class App:
     def __init__(self) -> None:
         # The app keeps a small amount of session state beyond Config:
@@ -6059,6 +6091,13 @@ class App:
             )
         try:
             data = json.loads(state_path.read_text())
+        except (json.JSONDecodeError, TypeError, OSError) as exc:
+            raise CommandError(
+                f"This repo's saved settings file `{STATE_FILE}` is missing or broken. "
+                "Restore it from Git, or stop using this tool for this repo."
+            ) from exc
+        refuse_newer_tool_version(data)
+        try:
             cfg = config_from_state_payload(data)
         except ValueError as exc:
             raise CommandError(
