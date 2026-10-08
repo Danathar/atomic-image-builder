@@ -50,6 +50,7 @@ import tempfile
 import unittest
 from importlib.util import find_spec
 from pathlib import Path
+from unittest import mock
 
 import coverage_badge
 from _workflow_steps import step_env, step_if, step_run_body
@@ -136,6 +137,10 @@ def _step_env(tmp: Path, *, stub_date: bool = False, **extra: str) -> dict[str, 
     # The steps must not pick up this process's own coverage run.
     env.pop("COVERAGE_PROCESS_START", None)
     env.pop("COVERAGE_FILE", None)
+    # Nor the identity of whoever runs them: these variables outrank the
+    # `git config user.*` the publish step sets for its own commit.
+    for name in [n for n in env if n.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))]:
+        del env[name]
     env.update(extra)
     return env
 
@@ -464,6 +469,26 @@ class PublishCoverageDataStepTests(unittest.TestCase):
             )
             self.assertEqual(
                 _git_out(origin, "log", "-1", "--format=%an <%ae>", "coverage-data"),
+                "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>",
+            )
+
+    def test_the_commit_is_the_bot_s_even_when_the_runner_exports_an_identity(self) -> None:
+        # GIT_AUTHOR_* and GIT_COMMITTER_* outrank `git config user.*`. A runner
+        # never sets them, but a developer's or an agent's shell often does,
+        # and the step's own commit must not be credited to whoever runs this.
+        identity = {
+            f"GIT_{role}_{field}": f"someone-else{'@example.invalid' if field == 'EMAIL' else ''}"
+            for role in ("AUTHOR", "COMMITTER")
+            for field in ("NAME", "EMAIL")
+        }
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, identity):
+            tmp_path = Path(tmp)
+            origin, checkout = _init_origin(tmp_path)
+            proc = run_publish_step(tmp_path, checkout, percent="87")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(
+                _git_out(origin, "log", "-1", "--format=%an <%ae>|%cn <%ce>", "coverage-data"),
+                "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>|"
                 "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>",
             )
 
