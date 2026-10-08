@@ -6091,6 +6091,13 @@ class App:
             )
         try:
             data = json.loads(state_path.read_text())
+        except (json.JSONDecodeError, TypeError, OSError) as exc:
+            raise CommandError(
+                f"This repo's saved settings file `{STATE_FILE}` is missing or broken. "
+                "Restore it from Git, or stop using this tool for this repo."
+            ) from exc
+        refuse_newer_tool_version(data)
+        try:
             cfg = config_from_state_payload(data)
         except ValueError as exc:
             raise CommandError(
@@ -6102,7 +6109,6 @@ class App:
                 f"This repo's saved settings file `{STATE_FILE}` is missing or broken. "
                 "Restore it from Git, or stop using this tool for this repo."
             ) from exc
-        refuse_newer_tool_version(data)
         self.config = cfg
         if not self.github_user:
             self.github_user = cfg.github_user

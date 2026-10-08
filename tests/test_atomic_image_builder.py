@@ -677,6 +677,17 @@ class BuilderTests(unittest.TestCase):
                         app.write_project_files(repo_dir)
                 write_files.assert_not_called()
 
+    def test_load_repo_config_refuses_newer_tool_version_even_with_newer_state_version(self) -> None:
+        app = self.make_app()
+        payload = app.state_payload()
+        payload["tool_version"] = "99.0.0"
+        payload["state_version"] = 999
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / STATE_FILE).write_text(json.dumps(payload))
+            with self.assertRaisesRegex(CommandError, rf"99\.0\.0.*{re.escape(VERSION)}.*brew upgrade.*podman pull"):
+                app.load_repo_config(repo_dir)
+
     def test_load_repo_config_accepts_same_older_missing_or_unparsable_tool_version(self) -> None:
         major, minor, _patch = (int(part) for part in VERSION.split("."))
         for recorded in (VERSION, f"{major}.{max(minor - 1, 0)}.0", "0.9.0", "garbage", "1.2", 7, None, "__missing__"):
