@@ -6091,7 +6091,7 @@ class App:
             )
         try:
             data = json.loads(state_path.read_text())
-        except (json.JSONDecodeError, TypeError, OSError) as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, OSError) as exc:
             raise CommandError(
                 f"This repo's saved settings file `{STATE_FILE}` is missing or broken. "
                 "Restore it from Git, or stop using this tool for this repo."

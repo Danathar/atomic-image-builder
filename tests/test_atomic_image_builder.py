@@ -652,6 +652,17 @@ class BuilderTests(unittest.TestCase):
                 with self.assertRaisesRegex(CommandError, "saved settings file"):
                     app.load_repo_config(repo_dir)
 
+    def test_load_repo_config_wraps_state_file_that_is_not_utf8(self) -> None:
+        # A state file with undecodable bytes makes read_text raise
+        # UnicodeDecodeError (a ValueError, not a JSONDecodeError); it must
+        # become the friendly CommandError, not a traceback.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / STATE_FILE).write_bytes(b'{"tool_version": "\xff\xfe"}')
+            with self.assertRaisesRegex(CommandError, "saved settings file"):
+                app.load_repo_config(repo_dir)
+
     def test_load_repo_config_wraps_state_payload_value_errors(self) -> None:
         # Valid JSON, but not an object: config_from_state_payload rejects it
         # with a ValueError, which load_repo_config must also wrap.
