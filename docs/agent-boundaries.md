@@ -44,11 +44,11 @@ Review is what catches it.
   monthly audit find a pull request pushed under the maintainer's identity.
   Nothing makes an agent write it, and the audit cannot see the one that
   leaves it out.
-- **A person merges.** The ruleset needs no approval, because a sole
+- **Who merges.** The ruleset needs no approval, because a sole
   maintainer cannot approve their own pull request. So a token that can write
   contents could merge a green pull request through the API. The `hold` label
   and the merge policy in [`multi-agent.md`](multi-agent.md#who-merges) are
-  what keep it a person's decision.
+  what let a person stop a merge.
 - **Evidence in proportion to reach.** [`risk-tiers.md`](risk-tiers.md) and
   [`.claude/risk-config.json`](../.claude/risk-config.json) classify every
   path. They say how much proof a change needs; they do not block one that

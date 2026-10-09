@@ -93,14 +93,13 @@ runs on the pair.
 
 ## Who merges
 
-Merging is a maintainer's decision. The README's
-[*Maintained with Hive*](../README.md#maintained-with-hive-acmm-l5) section
-states the policy: nothing an agent opens merges on its own, and a maintainer
-reviews agent pull requests in batches and merges the ones that should land.
-An agent never merges its own pull request, and the reviewer never merges,
-approves or closes one.
+At ACMM L6, agent pull requests auto-merge when checks pass. The README's
+[*Maintained with Hive*](../README.md#maintained-with-hive-acmm-l6) section
+states the policy: non-outreach pull requests have no level hold, outreach pull
+requests stay held for human review, and a maintainer can hold any pull
+request. The reviewer never merges, approves or closes one.
 
-The `hold` label is how that shows on a pull request: one that carries it does
+The `hold` label is how a hold shows on a pull request: one that carries it does
 not merge until a person removes it. The ruleset needs no approval and lets
 nobody bypass `test`, so a red pull request cannot land whoever merges it.
 

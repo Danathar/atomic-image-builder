@@ -45,8 +45,8 @@ class TriageWorkflowTests(unittest.TestCase):
 
     def test_an_unknown_acmm_level_matches_no_rule(self) -> None:
         # The case arms are literal, so a level the table does not list must
-        # fall through rather than produce an acmm-l5 label nobody defined.
-        result = self.run_label_step(title="[ACMM L5] Something", body="Body.")
+        # fall through rather than produce an acmm-l6 label nobody defined.
+        result = self.run_label_step(title="[ACMM L6] Something", body="Body.")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.applied_labels(), [])
         self.assertIn("No label rule matched issue #42.", result.stdout)

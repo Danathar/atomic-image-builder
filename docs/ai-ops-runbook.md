@@ -152,9 +152,10 @@ To check only merges after a fix, dispatch with a start date:
 
 ## An agent pull request looks wrong
 
-Every agent pull request carries a `hold` label, and nothing merges on its
-own (README's *Maintained with Hive*). Leaving it unmerged is always safe.
-Comment with what is wrong, or close it.
+At ACMM L6 a non-outreach agent pull request auto-merges when checks pass, and
+only outreach pull requests are held for review (README's *Maintained with
+Hive*). If one looks wrong, add a `hold` label to stop it merging, then
+comment with what is wrong, or close it.
 
 - **Which task made it:** the three marks in
   [docs/agent-tasks/README.md](agent-tasks/README.md). Do not go by author: an
