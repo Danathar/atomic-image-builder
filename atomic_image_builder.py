@@ -766,15 +766,34 @@ def is_valid_repo_name(value: str) -> bool:
     return True
 
 
+def file_lines(text: str) -> list[str]:
+    """Split file text on line endings only, as YAML, sh and Dockerfile do.
+
+    Every patcher that edits a file in place splits it with this and joins it
+    back with "\\n". str.splitlines() would also break on \\v, \\f,
+    \\x1c-\\x1e, U+0085, U+2028 and U+2029, so re-joining its output turned
+    those characters into real line breaks in text the tool did not write --
+    an owner's comment, or a description from before #527 -- and could leave
+    the workflow unparseable (#689). For text whose only boundaries are \\n,
+    \\r\\n and \\r the result is the same as str.splitlines(), so CRLF files
+    still come back as LF.
+    """
+    lines = re.split(r"\r\n|\r|\n", text)
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 # What json.dumps(ensure_ascii=False) leaves raw but YAML forbids in a
 # document: DEL and the C1 controls (U+007F-U+009F) and the two noncharacters
 # U+FFFE/U+FFFF. YAML 1.2's c-printable production stops there -- C0 controls
 # are already escaped by json.dumps, and everything else up to U+10FFFF is
 # printable. U+0085 (NEL) is technically printable but a 1.1 line break, which
 # PyYAML folds to a space, so it is escaped along with its neighbours. U+2028
-# and U+2029 are the other two 1.1 line breaks, and also line boundaries to
-# str.splitlines(): the workflow patchers re-split build.yml with it, so a raw
-# one comes back as a real newline that orphans the rest of the value (#527).
+# and U+2029 are the other two 1.1 line breaks, so a YAML 1.1 reader would fold
+# a raw one too; escaping them keeps the value the same to every reader. (They
+# once also orphaned the rest of the value on the next update, when the
+# patchers split files with str.splitlines() -- #527; file_lines() removed that.)
 _YAML_UNPRINTABLE_RE = re.compile("[\x7f-\x9f\u2028\u2029￾￿]")
 
 
@@ -1502,7 +1521,7 @@ def strip_job_env_entries(workflow_text: str, names: Sequence[str]) -> str:
     exposed to every step in the job (#524). A value continued on deeper
     lines goes with its key.
     """
-    lines = workflow_text.splitlines()
+    lines = file_lines(workflow_text)
     drop: set[int] = set()
     for _, start, end in workflow_job_ranges(lines):
         job = lines[start:end]
@@ -1570,7 +1589,7 @@ def strip_legacy_signing_job_env(workflow_text: str) -> str:
     stripped = strip_job_env_entries(workflow_text, LEGACY_SIGNING_ENV_KEYS)
     if stripped == ensure_trailing_newline(workflow_text):
         return stripped
-    lines = workflow_text.splitlines()
+    lines = file_lines(workflow_text)
     still_defined = workflow_level_env_keys(lines)
 
     def removed_names(scope: Sequence[str]) -> set[str]:
@@ -1640,7 +1659,7 @@ def strip_permission_entries(workflow_text: str, names: Sequence[str]) -> str:
     that happens to print `permissions:` is left as written.
     """
     entry_re = re.compile(r"^\s*([A-Za-z0-9_-]+):\s*\S")
-    lines = workflow_text.splitlines()
+    lines = file_lines(workflow_text)
     scalar_body = block_scalar_body_indexes(lines)
     output: list[str] = []
     block_indent: int | None = None
@@ -1768,7 +1787,7 @@ def patch_workflow_steps(workflow_text: str, patch_step: Callable[[list[str]], l
         output.extend(patch_step(current_step))
         current_step = []
 
-    for line in workflow_text.splitlines():
+    for line in file_lines(workflow_text):
         stripped = line.strip()
         indent = len(line) - len(line.lstrip())
         is_item = stripped == "-" or stripped.startswith("- ")
@@ -2349,7 +2368,7 @@ def ensure_workflow_job_env_entries(workflow_text: str, entries: Sequence[tuple[
     cannot see is a reader that never gets its definition. A workflow in
     which no job reads the variable needs nothing and is returned untouched.
     """
-    lines = workflow_text.splitlines()
+    lines = file_lines(workflow_text)
     changed = False
     for name, value in entries:
         entry = f"{name}: {value}"
@@ -6537,7 +6556,7 @@ class App:
         # comments where possible.
         if not existing_text:
             return self.generate_containerfile()
-        lines = existing_text.splitlines()
+        lines = file_lines(existing_text)
         from_indices = containerfile_from_indices(lines)
         if not from_indices:
             return ensure_trailing_newline(existing_text)
@@ -6766,12 +6785,13 @@ class App:
             # rewrite regexes below are per-line, so an embedded line break
             # would otherwise make this patcher silently stop matching that
             # field on every subsequent update. "Line break" is every boundary
-            # str.splitlines() recognises, not only \n and \r: the pin loop
-            # below re-splits the file with it, so a U+2028 (or \v, \f, U+0085)
-            # left in the value is written out as a real newline (#527).
+            # str.splitlines() recognises, not only \n and \r: the file itself
+            # is split on real line endings only (file_lines), but a U+2028 (or
+            # \v, \f, U+0085) in a value the tool writes is still a line break
+            # to some readers of this file, so it is dropped (#527).
             for char in ('"', "\\", "$", "`"):
                 value = value.replace(char, "")
-            return "".join(value.splitlines())
+            return re.sub("[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]", "", value)
 
         repo_name = self.config.repo_name
         github_user = sanitize_env_value(self.config.github_user)
@@ -6802,7 +6822,7 @@ class App:
         # build-qcow2` path -- see patch_disk_builder_image(). Anchored at the
         # line start like the three above.
         output: list[str] = []
-        for line in text.splitlines():
+        for line in file_lines(text):
             pinned = None if line[:1].isspace() else pin_disk_builder_image_line(line)
             output.append(line if pinned is None else pinned)
         return ensure_trailing_newline("\n".join(output))
@@ -6815,7 +6835,7 @@ class App:
         # - wire in image description and signing conditions safely
         branch_if = "github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
         sign_if = f"{branch_if} && env.{SIGNING_ENABLED_ENV[0]} == 'true'"
-        lines = existing_text.splitlines()
+        lines = file_lines(existing_text)
         if STATE_FILE not in existing_text:
             lines = add_paths_ignore_entry(lines, f"'{STATE_FILE}'", ("- '**/README.md'", '- "**/README.md"'))
         scalar_body = block_scalar_body_indexes(lines)
@@ -6875,7 +6895,7 @@ class App:
         # file-wide substitution would silently rewrite that user's step too.
         # "Rechunk with Chunkah" counts as an in-scope step name so a workflow
         # left half-switched by an older tool version heals on its next update.
-        lines = workflow_text.splitlines()
+        lines = file_lines(workflow_text)
         output: list[str] = []
         in_rechunk_step = False
         step_indent = 0
@@ -6914,7 +6934,7 @@ class App:
         return patched
 
     def patch_container_disk_workflow(self, existing_text: str, *, default_branch: str = "main") -> str:
-        lines = [pin_action_uses_line(line) for line in existing_text.splitlines()]
+        lines = [pin_action_uses_line(line) for line in file_lines(existing_text)]
         text = self.patch_workflow_path_filters("\n".join(lines))
         text = self.patch_disk_artifact_names(text)
         text = self.patch_disk_workflow_platform(text)
@@ -6937,7 +6957,7 @@ class App:
         # under a paths: key, and to a paths: key inside the `on:` block. An
         # action input happens to be able to be called "paths" too, and its
         # values are not GitHub filter patterns.
-        lines = workflow_text.splitlines()
+        lines = file_lines(workflow_text)
         output: list[str] = []
         in_triggers = False
         filter_indent: int | None = None
@@ -7031,7 +7051,7 @@ class App:
         # actually publishes. Offering the other one is not a runner label away
         # -- it needs the image workflow to build and publish the variant
         # first. See #236.
-        lines = self.strip_disk_platform_input(workflow_text.splitlines())
+        lines = self.strip_disk_platform_input(file_lines(workflow_text))
         output: list[str] = []
         for line in lines:
             match = DISK_RUNNER_CHOICE_RE.match(line)
@@ -7105,7 +7125,7 @@ class App:
         # Scoped to the top-level env: block. The value is read once, as
         # `${{ env.BIB_IMAGE }}`, and a step-level key that happened to share
         # the name would not be the one the action reads.
-        lines = workflow_text.splitlines()
+        lines = file_lines(workflow_text)
         output: list[str] = []
         in_env = False
         for line in lines:
@@ -7184,7 +7204,7 @@ class App:
             ]
             return [*block[:key_index], key_line, f"{entry_indent}- {entry}", *kept, *block[value_end:]]
 
-        lines = workflow_text.splitlines()
+        lines = file_lines(workflow_text)
         output: list[str] = []
         in_triggers = False
         trigger_indent: int | None = None
@@ -7310,7 +7330,7 @@ class App:
         # The BlueBuild workflow is simpler than the Containerfile one: a single
         # monolithic action handles the build. We pin the action, update the
         # schedule, add state-file ignore, and fix branch filters.
-        lines = existing_text.splitlines()
+        lines = file_lines(existing_text)
         if STATE_FILE not in existing_text:
             lines = add_paths_ignore_entry(lines, f"'{STATE_FILE}'", ('- "**.md"', "- '**.md'"))
         output: list[str] = []
@@ -7345,7 +7365,7 @@ class App:
         return f"iso-{self.installer_profile()}.toml"
 
     def patch_installer_config(self, existing_text: str) -> str:
-        lines = existing_text.splitlines()
+        lines = file_lines(existing_text)
         image_ref = self.published_image_ref()
         for index, line in enumerate(lines):
             match = INSTALLER_SWITCH_RE.match(line)
@@ -7490,7 +7510,7 @@ class App:
 
         readme_path.write_text(self.generate_readme())
 
-        existing_gitignore = gitignore_path.read_text().splitlines() if gitignore_path.exists() else []
+        existing_gitignore = file_lines(gitignore_path.read_text()) if gitignore_path.exists() else []
         for entry in ["cosign.key", "cosign.private"]:
             if entry not in existing_gitignore:
                 existing_gitignore.append(entry)
@@ -7526,7 +7546,7 @@ class App:
 
         readme_path.write_text(self.generate_readme())
 
-        existing_gitignore = gitignore_path.read_text().splitlines() if gitignore_path.exists() else []
+        existing_gitignore = file_lines(gitignore_path.read_text()) if gitignore_path.exists() else []
         for entry in ["cosign.key", "_build*/", "output/", "*_chunkah_*"]:
             if entry not in existing_gitignore:
                 existing_gitignore.append(entry)

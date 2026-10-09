@@ -1,3 +1,4 @@
+import ast
 import contextlib
 import dataclasses
 import fcntl
@@ -78,6 +79,7 @@ from atomic_image_builder import (
     ensure_workflow_job_env_entries,
     extend_flow_sequence_line,
     fedora_atomic_image_for_classic_origin,
+    file_lines,
     format_daily_rebuild_note,
     image_reference_tag_and_digest,
     is_valid_repo_name,
@@ -445,11 +447,47 @@ class BuilderTests(unittest.TestCase):
             yaml_scalar("a\x7fb\x80c\x85d\x9fe￾f￿g"),
             '"a\\u007fb\\u0080c\\u0085d\\u009fe\\ufffef\\uffffg"',
         )
-        # U+2028/U+2029 are the other YAML 1.1 line breaks and line boundaries
-        # to str.splitlines(), which the workflow patchers re-split with (#527).
+        # U+2028/U+2029 are the other YAML 1.1 line breaks, which a 1.1 reader
+        # would fold just like U+0085 (#527).
         self.assertEqual(yaml_scalar("a\u2028b\u2029c"), '"a\\u2028b\\u2029c"')
         # The neighbours on either side of each escaped range stay raw.
         self.assertEqual(yaml_scalar("~\xa0\u2027\u202a�\U0010ffff"), '"~\xa0\u2027\u202a�\U0010ffff"')
+
+    def test_file_lines_matches_splitlines_on_real_line_endings(self) -> None:
+        # Every patcher splits the file it edits with file_lines(). On text
+        # whose only boundaries are \n, \r\n and \r it must give exactly what
+        # str.splitlines() gave before #689, CRLF files included.
+        for text in ("", "a", "a\n", "a\r\nb\r\n", "a\rb\r", "\n\n", "a\n\nb", "a\r\n\r\nb\n"):
+            with self.subTest(text=text):
+                self.assertEqual(file_lines(text), text.splitlines())
+
+    def test_file_lines_keeps_other_splitlines_boundaries_inside_the_line(self) -> None:
+        # YAML 1.2 (what Actions reads), sh and Dockerfile break lines on \n
+        # and \r only. str.splitlines() also breaks on these, so the patchers
+        # used to write each one back out as a real newline (#689).
+        for char in ("\x85", "\u2028", "\u2029", "\v", "\f", "\x1c", "\x1d", "\x1e"):
+            with self.subTest(char=repr(char)):
+                self.assertEqual(file_lines(f"a{char}b\nc\n"), [f"a{char}b", "c"])
+
+    def test_file_patchers_do_not_split_with_str_splitlines(self) -> None:
+        # A patcher that splits with str.splitlines() and joins with "\n"
+        # turns U+2028 and friends in the owner's file into real line breaks
+        # (#689). file_lines() is the splitter for anything written back.
+        tree = ast.parse(Path(atomic_image_builder.__file__).read_text(encoding="utf-8"))
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not (node.name.startswith(("patch_", "strip_", "ensure_")) or node.name == "render_containerfile"):
+                continue
+            for inner in ast.walk(node):
+                if (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr == "splitlines"
+                ):
+                    offenders.append(f"{node.name} (line {inner.lineno})")
+        self.assertEqual(offenders, [])
 
     def test_repository_status_omits_description_separator_when_unset(self) -> None:
         app = self.make_app()
@@ -1263,6 +1301,33 @@ class BuilderTests(unittest.TestCase):
         updated = app.patch_container_workflow(once)
         self.assertEqual(parse_block_yaml(updated)["env"]["IMAGE_DESC"], "A plain new description")
         self.assertNotIn("line two", updated)
+
+    def test_patch_container_workflow_keeps_a_raw_line_separator_inside_its_line(self) -> None:
+        # #689: a build.yml from before #527 can carry U+2028 raw inside the
+        # description. Splitting it with str.splitlines() rewrote only the
+        # first half and left 'line two"' at column 0, which YAML cannot parse.
+        app = self.make_app()
+        app.config.image_desc = "new desc"
+        old = legacy_generated_workflow(image_desc_line='  IMAGE_DESC: "line one\u2028line two"')
+        patched = app.patch_container_workflow(old)
+        self.assertNotIn("line two", patched)
+        self.assertEqual(parse_block_yaml(patched)["env"]["IMAGE_DESC"], "new desc")
+        libyaml_document = parse_with_libyaml(patched)
+        if libyaml_document is not None:
+            self.assertEqual(libyaml_document["env"]["IMAGE_DESC"], "new desc")
+        self.assertEqual(app.patch_container_workflow(patched), patched)
+
+    def test_patch_container_workflow_keeps_an_owner_comment_with_a_line_separator(self) -> None:
+        # #689: text pasted from a web page or word processor can carry
+        # U+2028. It is an ordinary character to YAML, so an owner comment
+        # holding one must come back from an update byte-for-byte.
+        app = self.make_app()
+        comment = "  # pasted note\u2028still the same comment"
+        old = legacy_generated_workflow(image_desc_line=comment + '\n  IMAGE_DESC: "Test image"')
+        patched = app.patch_container_workflow(old)
+        self.assertIn(comment + "\n", patched)
+        self.assertFalse(any(line.startswith("still the same") for line in patched.split("\n")))
+        self.assertEqual(app.patch_container_workflow(patched), patched)
 
     def test_patch_container_workflow_adds_state_ignore_only_once(self) -> None:
         # Both the key branch and the README anchor can match the same
