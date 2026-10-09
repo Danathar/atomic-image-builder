@@ -478,7 +478,7 @@ class BuilderTests(unittest.TestCase):
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            if not (node.name.startswith(("patch_", "strip_", "ensure_")) or node.name == "render_containerfile"):
+            if not (node.name.startswith(("patch_", "strip_", "ensure_", "write_")) or node.name == "render_containerfile"):
                 continue
             for inner in ast.walk(node):
                 if (
@@ -15750,6 +15750,20 @@ class BuilderTests(unittest.TestCase):
             gitignore = (repo_dir / ".gitignore").read_text()
             self.assertIn("cosign.key", gitignore)
             self.assertIn("cosign.private", gitignore)
+
+    def test_write_project_files_keeps_a_line_separator_inside_a_gitignore_line(self) -> None:
+        # #691: both writers split the owner's .gitignore and join it back
+        # with "\n". A comment pasted with U+2028 in it must come back as one
+        # line, not as a second line git would read as an ignore pattern.
+        comment = "# pasted note\u2028still the same comment"
+        for make_app in (self.make_app, self.make_bluebuild_app):
+            with self.subTest(method=make_app.__name__), tempfile.TemporaryDirectory() as tmp:
+                repo_dir = Path(tmp)
+                (repo_dir / ".gitignore").write_text(f"{comment}\n*.pyc\n", encoding="utf-8")
+                make_app().write_project_files(repo_dir, include_workflow=False)
+                lines = (repo_dir / ".gitignore").read_text(encoding="utf-8").split("\n")
+                self.assertEqual(lines[:2], [comment, "*.pyc"])
+                self.assertIn("cosign.key", lines)
 
     def test_write_bluebuild_project_files_roundtrips_config(self) -> None:
         """State file written by BlueBuild write_project_files survives load_repo_config."""
