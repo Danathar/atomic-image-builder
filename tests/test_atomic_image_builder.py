@@ -8227,6 +8227,20 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("every later bootc upgrade", hints)
         self.assertIn("dropping it disables both checks", hints.lower())
 
+    def test_build_status_lowercases_the_repo_in_the_image_reference(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        runs = json.dumps([{"conclusion": "success", "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+            with patch.object(app, "repo_carried_scan_customizations", return_value=True):
+                with patch.object(app, "repo_signing_enabled", return_value=True):
+                    with redirect_stdout(io.StringIO()):
+                        app.render_build_status("Example", "My-Image")
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertIn("ghcr.io/example/my-image:latest", hints)
+        self.assertNotIn("My-Image:latest", hints)
+
     def test_build_status_says_a_green_build_is_not_yet_readable(self) -> None:
         # A green build is not a switchable image: the package it published is
         # private, and `gh repo create --public` does not change that -- package
@@ -10747,6 +10761,28 @@ class BuilderTests(unittest.TestCase):
             app.write_project_files(repo_dir, include_workflow=False)
             self.assertEqual((repo_dir / "cosign.pub").read_text(), "PUBLIC KEY DATA\n")
 
+    def test_write_project_files_regenerated_containerfile_keeps_the_system_files_overlay(self) -> None:
+        # #701: a Containerfile regenerated after deletion staged only
+        # build_files, so build.sh's guarded system_files copy silently did
+        # nothing and the user's overlay stopped reaching the image.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.write_project_files(repo_dir, include_workflow=False)
+            (repo_dir / "system_files/etc").mkdir(parents=True)
+            (repo_dir / "system_files/etc/motd").write_text("hello\n")
+            (repo_dir / "Containerfile").unlink()
+            app.write_project_files(repo_dir, include_workflow=False)
+            self.assertIn("COPY system_files /system_files", (repo_dir / "Containerfile").read_text())
+            self.assertEqual((repo_dir / "system_files/etc/motd").read_text(), "hello\n")
+
+    def test_write_project_files_creates_system_files_for_a_from_scratch_repo(self) -> None:
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.write_project_files(repo_dir, include_workflow=False)
+            self.assertTrue((repo_dir / "system_files").is_dir())
+
     def test_write_bluebuild_project_files_writes_generated_cosign_pub(self) -> None:
         # The Containerfile-method write path has its own cosign.pub write
         # (test_write_project_files_writes_generated_cosign_pub above); the
@@ -10925,6 +10961,21 @@ class BuilderTests(unittest.TestCase):
                     owner, repo = app.select_repo(require_state_file=True)
 
         self.assertEqual((owner, repo), ("example", "managed-repo"))
+
+    def test_select_repo_lowercases_a_picked_repo_renamed_with_capitals(self) -> None:
+        # GitHub names are case-insensitive, but the tool's repo-name rule is
+        # lowercase, so a picked "My-Image" must come back as "my-image".
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        stub = GumStub()
+        stub.filter = lambda options, **_kwargs: options[0]
+        app.gum = stub
+        with patch.object(app, "gh_json_with_spinner", return_value=[{"name": "My-Image"}]):
+            with redirect_stdout(io.StringIO()):
+                owner, repo = app.select_repo()
+
+        self.assertEqual((owner, repo), ("example", "my-image"))
 
     def test_select_repo_allows_manual_entry_when_repo_list_payload_is_null(self) -> None:
         app = self.make_app()
@@ -12247,8 +12298,11 @@ class BuilderTests(unittest.TestCase):
     def test_contrib_wrapper_does_not_put_github_token_in_podman_argv(self) -> None:
         wrapper = (Path(__file__).resolve().parents[1] / "contrib/aib").read_text()
         self.assertIn("podman_args+=(-e GH_TOKEN)", wrapper)
-        self.assertIn('GH_TOKEN="$(gh auth token)"', wrapper)
-        self.assertNotIn('GH_TOKEN=$(gh auth token)', wrapper)
+        self.assertIn('GH_TOKEN="$(gh auth token --hostname github.com 2>/dev/null)"', wrapper)
+        self.assertNotIn('GH_TOKEN=$(gh auth token', wrapper)
+        # Pinned to github.com like the login probe: bare `gh auth token`
+        # follows $GH_HOST, and would fetch a GitHub Enterprise token (#705).
+        self.assertNotIn('gh auth token)', wrapper)
 
     def test_contrib_wrapper_checks_for_a_newer_image_on_every_run(self) -> None:
         # Podman's default (--pull=missing) would pin wrapper users to whatever
@@ -12527,11 +12581,30 @@ class BuilderTests(unittest.TestCase):
         )
         # cosign is handed $ref, and the run is chained off its exit status.
         self.assertIn('  "$ref" &&\n', verifying)
-        self.assertIn('podman run --rm -it -e GH_TOKEN="$(gh auth token)" "$ref"', verifying)
+        # Pinned to github.com: bare `gh auth token` follows $GH_HOST (#705).
+        # The value goes in the environment, only the name in argv, so `ps`
+        # cannot show the token (#714).
+        self.assertIn(
+            'GH_TOKEN="$(gh auth token --hostname github.com)" podman run --rm -it -e GH_TOKEN "$ref"',
+            verifying,
+        )
+        self.assertNotIn('-e GH_TOKEN="', verifying)
         # Not the tag: that is the shape this replaced, where cosign checked
         # one resolution of `latest` and podman then went and asked for
         # another.
         self.assertNotIn("  ghcr.io/danathar/atomic-image-builder:latest\n```", verifying)
+
+    def test_install_docs_state_architecture_and_fedora_packaging_accurately(self) -> None:
+        # #715: git, gh and gum are Fedora packages; only cosign is not.
+        # #716: the image and wrapper are x86_64 only and the docs say so.
+        root = Path(__file__).resolve().parents[1]
+        installing = (root / "docs/installing.md").read_text()
+        formula = (root / "Formula/atomic-image-builder.rb").read_text()
+        self.assertNotIn("none of which are in Fedora's own repositories", installing)
+        self.assertNotIn("None of them are in", formula)
+        self.assertIn("Only `cosign` is missing from Fedora's own", installing)
+        self.assertIn("Only cosign is missing", formula)
+        self.assertIn("x86_64 only", installing.split("\n## ", 1)[0])
 
     def test_readme_coverage_badge_links_to_the_explainer(self) -> None:
         # Clicking the badge used to land on the raw trend CSV -- a wall of
@@ -13435,7 +13508,6 @@ class BuilderTests(unittest.TestCase):
         app.config.brew_enabled = False
         cf = app.generate_containerfile()
         self.assertNotIn("brew", cf.lower())
-        self.assertNotIn("system_files", cf)
 
     def test_generate_containerfile_builds_the_image_from_the_ctx_stage(self) -> None:
         # The Containerfile is the build contract, and the two assertions above
@@ -13449,13 +13521,16 @@ class BuilderTests(unittest.TestCase):
         app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
         app.config.brew_enabled = False
         instructions = parse_containerfile(app.generate_containerfile())
-        self.assertEqual([item.keyword for item in instructions], ["FROM", "COPY", "FROM", "RUN", "RUN"])
-        ctx, fill, base, build, lint = instructions
+        self.assertEqual([item.keyword for item in instructions], ["FROM", "COPY", "COPY", "FROM", "RUN", "RUN"])
+        ctx, fill, overlay, base, build, lint = instructions
         self.assertEqual(ctx.image, "scratch")
         self.assertEqual(ctx.stage, "ctx")
         # The context stage carries build_files, which is what /ctx/build.sh is.
         self.assertEqual(fill.sources, ("build_files",))
         self.assertEqual(fill.destination, "/")
+        # So does the system_files overlay that build.sh copies onto the image (#701).
+        self.assertEqual(overlay.sources, ("system_files",))
+        self.assertEqual(overlay.destination, "/system_files")
         self.assertEqual(base.image, "quay.io/fedora-ostree-desktops/silverblue:43")
         self.assertIsNone(base.stage, "the base stage is the final image, so it is unnamed")
         bind, *caches = build.mounts()
@@ -13488,9 +13563,9 @@ class BuilderTests(unittest.TestCase):
         instructions = parse_containerfile(app.generate_containerfile())
         self.assertEqual(
             [item.keyword for item in instructions],
-            ["FROM", "COPY", "FROM", "COPY", "RUN", "RUN", "RUN", "RUN", "RUN"],
+            ["FROM", "COPY", "COPY", "FROM", "COPY", "RUN", "RUN", "RUN", "RUN", "RUN"],
         )
-        brew_copy, brew_preset = instructions[3], instructions[4]
+        brew_copy, brew_preset = instructions[4], instructions[5]
         self.assertEqual(brew_copy.flag("from"), UNIVERSAL_BLUE_BREW_IMAGE)
         self.assertEqual(brew_copy.sources, ("/system_files",))
         self.assertEqual(brew_copy.destination, "/")
@@ -13505,11 +13580,11 @@ class BuilderTests(unittest.TestCase):
         # The two steps that fix what the COPY brought in sit between the
         # preset and the build: the login-shell sweep, then the drop-in that
         # confines brew-setup.service's staging to a private /tmp.
-        self.assertTrue(instructions[5].argument.startswith("rm -f "), instructions[5].argument)
-        self.assertIn(f"> {BREW_SETUP_DROPIN}", instructions[6].argument)
+        self.assertTrue(instructions[6].argument.startswith("rm -f "), instructions[6].argument)
+        self.assertIn(f"> {BREW_SETUP_DROPIN}", instructions[7].argument)
         # Presetting runs before the user's build.sh, not after it.
-        self.assertEqual(instructions[7].argument, "/ctx/build.sh")
-        self.assertEqual(instructions[8].argument, "bootc container lint")
+        self.assertEqual(instructions[8].argument, "/ctx/build.sh")
+        self.assertEqual(instructions[9].argument, "bootc container lint")
 
     def test_generate_containerfile_strips_the_brew_payloads_login_fragments(self) -> None:
         # The COPY above brings in three fragments this repository does not
@@ -13523,7 +13598,7 @@ class BuilderTests(unittest.TestCase):
         app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
         app.config.brew_enabled = True
         instructions = parse_containerfile(app.generate_containerfile())
-        brew_copy, _preset, sweep = instructions[3], instructions[4], instructions[5]
+        brew_copy, _preset, sweep = instructions[4], instructions[5], instructions[6]
         self.assertEqual(brew_copy.flag("from"), UNIVERSAL_BLUE_BREW_IMAGE)
         self.assertLess(brew_copy.line, sweep.line)
         self.assertTrue(sweep.argument.startswith("rm -f "), sweep.argument)
@@ -15132,6 +15207,19 @@ class BuilderTests(unittest.TestCase):
         self.assertIn(DEFAULT_GITHUB_BUILD_CRON, patched)
         self.assertNotIn("00 06", patched)
 
+    def test_patch_bluebuild_workflow_drops_the_comment_explaining_the_old_cron(self) -> None:
+        app = self.make_bluebuild_app()
+        template = (
+            '    - cron: "00 06 * * *" # build at 06:00 UTC every day\n'
+            "      # (20 minutes after last ublue images start building)\n"
+            "  push:\n"
+        )
+        patched = app.patch_bluebuild_workflow(template)
+        self.assertIn(DEFAULT_GITHUB_BUILD_CRON, patched)
+        self.assertNotIn("20 minutes", patched)
+        self.assertNotIn("06:00", patched)
+        self.assertIn("  push:", patched)
+
     def test_patch_bluebuild_workflow_adds_state_file_ignore(self) -> None:
         app = self.make_bluebuild_app()
         template = '    paths-ignore:\n      - "**.md"\n'
@@ -15986,6 +16074,31 @@ class BuilderTests(unittest.TestCase):
             app.choose_method(step=1, total_steps=5)
         self.assertEqual(app.config.method, "bluebuild")
         self.assertTrue(any(level == "success" and "BlueBuild" in msg for level, msg in stub.messages))
+
+    def test_choose_method_offers_the_tag_when_bluebuild_meets_a_digest_pin(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = "ghcr.io/ublue-os/bazzite:stable@sha256:" + "0" * 64
+        stub = GumStub()
+        stub.choose = lambda options, **_kwargs: [options[1]]
+        stub.confirm = lambda prompt, default=False: True
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.choose_method(step=1, total_steps=5)
+        self.assertEqual(app.config.method, "bluebuild")
+        self.assertNotIn("@", app.config.base_image_uri)
+
+    def test_choose_method_falls_back_to_containerfile_when_digest_pin_is_kept(self) -> None:
+        app = self.make_app()
+        digest_uri = "ghcr.io/ublue-os/bazzite:stable@sha256:" + "0" * 64
+        app.config.base_image_uri = digest_uri
+        stub = GumStub()
+        stub.choose = lambda options, **_kwargs: [options[1]]
+        stub.confirm = lambda prompt, default=False: False
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.choose_method(step=1, total_steps=5)
+        self.assertEqual(app.config.method, "containerfile")
+        self.assertEqual(app.config.base_image_uri, digest_uri)
 
     def test_choose_method_defaults_to_containerfile_on_empty_choice(self) -> None:
         app = self.make_app()
