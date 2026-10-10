@@ -1381,6 +1381,17 @@ def validate_string_list(value: object, field_name: str) -> list[str]:
     return list(value)
 
 
+def require_encodable_state_string(value: str, field_name: str) -> None:
+    # json.loads accepts a lone-surrogate escape such as "\\udc80" and returns a
+    # str Python cannot encode, so it would load, validate, and then crash with
+    # UnicodeEncodeError at the first file write (#700). Refuse it here, where
+    # the "state file is damaged" message is produced.
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(f"{field_name} contains a character that is not valid text") from None
+
+
 def config_from_state_payload(data: object) -> Config:
     # Older repo updates depend on this loader being defensive. If the state
     # file is wrong, we would rather fail loudly with a helpful message than
@@ -1397,12 +1408,16 @@ def config_from_state_payload(data: object) -> Config:
     cfg = Config()
     for name in CONFIG_LIST_FIELDS:
         if name in data:
-            setattr(cfg, name, validate_string_list(data[name], name))
+            items = validate_string_list(data[name], name)
+            for item in items:
+                require_encodable_state_string(item, name)
+            setattr(cfg, name, items)
     for name in CONFIG_STRING_FIELDS:
         if name in data:
             value = data[name]
             if not isinstance(value, str):
                 raise ValueError(f"{name} must be a string")
+            require_encodable_state_string(value, name)
             setattr(cfg, name, value)
     for bool_field in CONFIG_BOOL_FIELDS:
         if bool_field in data:
@@ -5088,7 +5103,9 @@ class App:
         *,
         source_label: str,
     ) -> bool:
-        packages = unique(candidates)
+        # Same as add_packages_to_config (#521): a name already listed adds
+        # nothing, so drop it before the lookup and the "Added N" count.
+        packages = [package for package in unique(candidates) if package not in self.config.removed_packages]
         if not packages:
             return False
         try:
