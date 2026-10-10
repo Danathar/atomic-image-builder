@@ -44,13 +44,11 @@ jobs:
           # ACMM issues announce their level in the title. Recording it as a
           # label is what makes "which level are we working" answerable
           # without opening each one.
-          case "$title" in
-            *"[ACMM L0]"*) labels+=("acmm-l0") ;;
-            *"[ACMM L1]"*) labels+=("acmm-l1") ;;
-            *"[ACMM L2]"*) labels+=("acmm-l2") ;;
-            *"[ACMM L3]"*) labels+=("acmm-l3") ;;
-            *"[ACMM L4]"*) labels+=("acmm-l4") ;;
-          esac
+          # The digit is read out of the title rather than listed, so a level
+          # added later (the Hive files L6 issues) is labelled without an edit.
+          if [[ "$title" =~ \[ACMM\ L([0-9]+)\] ]]; then
+            labels+=("acmm-l${BASH_REMATCH[1]}")
+          fi
 
           # A report naming a security-sensitive part of this project should
           # be looked at before the queue, whoever filed it. `security` is an

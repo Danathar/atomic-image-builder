@@ -43,10 +43,17 @@ class TriageWorkflowTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.applied_labels(), [f"acmm-l{level}"])
 
-    def test_an_unknown_acmm_level_matches_no_rule(self) -> None:
-        # The case arms are literal, so a level the table does not list must
-        # fall through rather than produce an acmm-l6 label nobody defined.
-        result = self.run_label_step(title="[ACMM L6] Something", body="Body.")
+    def test_a_level_beyond_l4_is_labelled_from_its_digit(self) -> None:
+        # The Hive files [ACMM L6] issues; the level is read from the title,
+        # not looked up in a fixed list.
+        for level in (5, 6, 10):
+            with self.subTest(level=level):
+                result = self.run_label_step(title=f"[ACMM L{level}] Something", body="Body.")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.applied_labels(), [f"acmm-l{level}"])
+
+    def test_a_title_without_a_level_marker_gets_no_level_label(self) -> None:
+        result = self.run_label_step(title="[ACMM LX] Something", body="Body.")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.applied_labels(), [])
         self.assertIn("No label rule matched issue #42.", result.stdout)
