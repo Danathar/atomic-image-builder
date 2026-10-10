@@ -529,6 +529,14 @@ class TierOneEvidenceTests(unittest.TestCase):
         # covered".
         self.assertIn("tests/e2e/", container_build_pathspec())
 
+    def test_contributing_lists_every_path_that_triggers_the_container_build(self) -> None:
+        # CONTRIBUTING.md names the paths that fire `container-build`; the
+        # pathspec in ci.yml is the authority, so each entry must be named.
+        text = (ROOT / "CONTRIBUTING.md").read_text()
+        sentence = next(line for line in text.splitlines() if "`container-build` job builds" in line)
+        for path in container_build_pathspec():
+            self.assertIn(f"`{path}`", sentence, f"CONTRIBUTING.md no longer names the {path} trigger")
+
 
 class TierTwoEvidenceTests(unittest.TestCase):
     def test_the_wrapper_is_not_in_the_image_the_smoke_test_proves(self) -> None:
