@@ -85,7 +85,7 @@ _TOOL_REPOS = {
     "hadolint": "hadolint/hadolint",
 }
 # On every GitHub runner image already; nothing for a workflow to download.
-_PREINSTALLED = {"bash", "sh", "jq"}
+_PREINSTALLED = {"bash", "sh", "jq", "shellcheck"}
 
 
 def _unit_suite_tools() -> set[str]:
@@ -433,10 +433,10 @@ class DownloadRetryTests(unittest.TestCase):
                 if _retry_count(match.group(0)) < 1:
                     missing.append(f"{path.relative_to(ROOT)}: {match.group('url')}")
         self.assertEqual(missing, [], "a workflow download has no --retry")
-        # hadolint, actionlint and just in ci.yml and ai-fix.yml; actionlint
-        # and just in nightly-compliance.yml. A parser that stops matching
-        # would otherwise pass this by seeing nothing.
-        self.assertEqual(seen, 8)
+        # hadolint, actionlint, just and gum in each of ci.yml, ai-fix.yml and
+        # nightly-compliance.yml. A parser that stops matching would otherwise
+        # pass this by seeing nothing.
+        self.assertEqual(seen, 12)
 
     def test_every_containerfile_download_retries(self) -> None:
         missing = []

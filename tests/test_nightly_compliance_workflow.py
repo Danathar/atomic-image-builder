@@ -76,9 +76,9 @@ _SKIP_GATE = re.compile(
     r"|shutil\.which\(\s*\"([^\"]+)\"\s*\)\s+is\s+None\s*:\s*self\.skipTest\("
 )
 
-# Present on every GitHub runner and in every container this repo builds, so
-# there is nothing for a workflow to install and nothing to assert.
-ALWAYS_PRESENT = {"bash", "sh", "jq"}
+# Present on every GitHub runner image (shellcheck included), so there is
+# nothing for a workflow to install and nothing to assert.
+ALWAYS_PRESENT = {"bash", "sh", "jq", "shellcheck"}
 
 PYTHON3_SHIM = f"""#!/usr/bin/env bash
 exec "{sys.executable}" "$@"
@@ -174,7 +174,7 @@ def run_tooling_step(tmp: Path, *, payloads: dict[str, bytes] | None = None, rea
     if payloads is None:
         _tool_tarball(payload_dir / "actionlint.tar.gz", "actionlint")
         _tool_tarball(payload_dir / "just.tar.gz", "just")
-        _tool_tarball(payload_dir / "gum.tar.gz", "gum", "gum_2.0.2_Linux_x86_64/gum")
+        _tool_tarball(payload_dir / "gum.tar.gz", "gum", "gum_0.17.0_Linux_x86_64/gum")
         (payload_dir / "hadolint").write_text("#!/usr/bin/env bash\necho hadolint\n")
     else:
         for name, data in payloads.items():

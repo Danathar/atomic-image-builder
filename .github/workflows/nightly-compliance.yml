@@ -65,9 +65,9 @@ jobs:
           echo "45b548094283cb9739af8f13273b8cddeee869f5b4ef2bb631b1f311cb566155  $RUNNER_TEMP/just.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/just.tar.gz" -C "$RUNNER_TEMP/bin" just
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/gum.tar.gz" \
-            https://github.com/charmbracelet/gum/releases/download/v2.0.2/gum_2.0.2_Linux_x86_64.tar.gz
-          echo "d842e06d93dbed90af48cb8dd10698db6f22e331fc40346bb37bbc753109edc2  $RUNNER_TEMP/gum.tar.gz" | sha256sum -c -
-          tar -xzf "$RUNNER_TEMP/gum.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/bin" gum_2.0.2_Linux_x86_64/gum
+            https://github.com/charmbracelet/gum/releases/download/v0.17.0/gum_0.17.0_Linux_x86_64.tar.gz
+          echo "69ee169bd6387331928864e94d47ed01ef649fbfe875baed1bbf27b5377a6fdb  $RUNNER_TEMP/gum.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gum.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/bin" gum_0.17.0_Linux_x86_64/gum
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       # The offline half. These cannot break from outside, so a failure here

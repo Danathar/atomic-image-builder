@@ -57,7 +57,7 @@ and `systemd-vmspawn` are stubbed.
 
 Ten more tests drive the real [`gum`](https://github.com/charmbracelet/gum)
 binary (Esc and Ctrl-J handling, table width, spinner stderr), and one runs
-`hadolint` against an unparseable Containerfile line. CI pins gum v2.0.2 and
+`hadolint` against an unparseable Containerfile line. CI pins gum v0.17.0 and
 hadolint v2.14.0 by sha256 in `ci.yml`, `nightly-compliance.yml` and
 `ai-fix.yml`, so these run there; without the binaries they skip locally.
 
