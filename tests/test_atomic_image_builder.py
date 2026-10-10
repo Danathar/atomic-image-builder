@@ -4645,6 +4645,14 @@ class BuilderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "repo_name must be a string"):
             atomic_image_builder.config_from_state_payload({"repo_name": 42})
 
+    def test_config_from_state_payload_rejects_a_lone_surrogate(self) -> None:
+        # json.loads accepts the escape; the first file write would then raise
+        # UnicodeEncodeError (#700).
+        for payload in ('{"image_desc": "bad \\udc80 desc"}', '{"packages": ["tmux", "\\udc80"]}'):
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ValueError, "not valid text"):
+                    atomic_image_builder.config_from_state_payload(json.loads(payload))
+
     def test_config_from_state_payload_reads_every_config_field(self) -> None:
         # state_payload() writes Config with asdict(), so every field reaches the
         # state file. A field the loader cannot read would be dropped on the next
@@ -4992,6 +5000,19 @@ class BuilderTests(unittest.TestCase):
         self.assertFalse(added)
         self.assertEqual(app.config.removed_packages, [])
         self.assertTrue(any(level == "error" and "not found" in message for level, message in app.gum.messages))
+
+    def test_add_removed_packages_to_config_skips_names_already_listed(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        app.config.removed_packages = ["firefox"]
+        with patch.object(app, "lookup_installed_host_packages") as installed_mock:
+            with patch.object(app, "lookup_host_packages") as lookup_mock:
+                added = app.add_removed_packages_to_config(["firefox"], source_label="manual entry")
+        installed_mock.assert_not_called()
+        lookup_mock.assert_not_called()
+        self.assertFalse(added)
+        self.assertEqual(app.config.removed_packages, ["firefox"])
+        self.assertFalse(any(level == "success" for level, _message in app.gum.messages))
 
     def test_add_services_manually_accepts_valid_tokens(self) -> None:
         app = self.make_app()
