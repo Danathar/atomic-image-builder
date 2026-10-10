@@ -8,9 +8,11 @@ class AtomicImageBuilder < Formula
   license "GPL-3.0-only"
 
   # The tool shells out to all four of these and refuses to start without them,
-  # so they are real dependencies rather than suggestions. None of them are in
-  # Fedora's own repositories, which is the reason the container image exists;
-  # here Homebrew supplies them instead. All four have x86_64_linux bottles.
+  # so they are real dependencies rather than suggestions. Only cosign is missing
+  # from Fedora's own repositories, but on an atomic desktop none of the four
+  # can be layered without a reboot, so Homebrew supplies them instead. All
+  # four have x86_64_linux bottles, and x86_64 is the only architecture
+  # supported.
   depends_on "cosign"
   depends_on "gh"
   depends_on "git"

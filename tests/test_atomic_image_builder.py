@@ -12582,14 +12582,29 @@ class BuilderTests(unittest.TestCase):
         # cosign is handed $ref, and the run is chained off its exit status.
         self.assertIn('  "$ref" &&\n', verifying)
         # Pinned to github.com: bare `gh auth token` follows $GH_HOST (#705).
+        # The value goes in the environment, only the name in argv, so `ps`
+        # cannot show the token (#714).
         self.assertIn(
-            'podman run --rm -it -e GH_TOKEN="$(gh auth token --hostname github.com)" "$ref"',
+            'GH_TOKEN="$(gh auth token --hostname github.com)" podman run --rm -it -e GH_TOKEN "$ref"',
             verifying,
         )
+        self.assertNotIn('-e GH_TOKEN="', verifying)
         # Not the tag: that is the shape this replaced, where cosign checked
         # one resolution of `latest` and podman then went and asked for
         # another.
         self.assertNotIn("  ghcr.io/danathar/atomic-image-builder:latest\n```", verifying)
+
+    def test_install_docs_state_architecture_and_fedora_packaging_accurately(self) -> None:
+        # #715: git, gh and gum are Fedora packages; only cosign is not.
+        # #716: the image and wrapper are x86_64 only and the docs say so.
+        root = Path(__file__).resolve().parents[1]
+        installing = (root / "docs/installing.md").read_text()
+        formula = (root / "Formula/atomic-image-builder.rb").read_text()
+        self.assertNotIn("none of which are in Fedora's own repositories", installing)
+        self.assertNotIn("None of them are in", formula)
+        self.assertIn("Only `cosign` is missing from Fedora's own", installing)
+        self.assertIn("Only cosign is missing", formula)
+        self.assertIn("x86_64 only", installing.split("\n## ", 1)[0])
 
     def test_readme_coverage_badge_links_to_the_explainer(self) -> None:
         # Clicking the badge used to land on the raw trend CSV -- a wall of
