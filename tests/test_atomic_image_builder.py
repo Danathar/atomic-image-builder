@@ -46,6 +46,8 @@ from atomic_image_builder import (
     CONTAINERFILE_TEMPLATE_DIR,
     CONTROLS_COLOR,
     COPR_REPO_RE,
+    COSIGN_COMPATIBILITY_FLOOR,
+    COSIGN_RELEASE_LINE_RE,
     DEFAULT_GITHUB_BUILD_CRON,
     DEFAULT_REPO_NAME,
     FEDORA_ATOMIC_DEFAULT_TAG,
@@ -1438,6 +1440,20 @@ class BuilderTests(unittest.TestCase):
             with self.subTest(release=release):
                 text = self.cosign_installer_step(f"          cosign-release: '{release}'")
                 self.assertEqual(patch_cosign_compatibility(text), text)
+
+    def test_snapshot_cosign_release_is_the_compatibility_floor(self) -> None:
+        # A new repository gets the snapshot's pin; an existing one is raised
+        # to the floor. The comment on COSIGN_COMPATIBILITY_FLOOR says the two
+        # are the same version. Raising the floor without the snapshot would
+        # generate new repositories below it, which nothing else catches: the
+        # rest of the suite passes with the snapshot pinned to v3.0.0.
+        build_workflow = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        releases = [
+            match.group("quoted") or match.group("plain")
+            for match in map(COSIGN_RELEASE_LINE_RE.match, build_workflow.splitlines())
+            if match is not None
+        ]
+        self.assertEqual(releases, [COSIGN_COMPATIBILITY_FLOOR])
 
     def test_patch_cosign_compatibility_leaves_non_version_pins_alone(self) -> None:
         # A branch name or a partial version is not something the floor can be
