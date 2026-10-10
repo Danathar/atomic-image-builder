@@ -4648,7 +4648,7 @@ class BuilderTests(unittest.TestCase):
     def test_config_from_state_payload_rejects_a_lone_surrogate(self) -> None:
         # json.loads accepts the escape; the first file write would then raise
         # UnicodeEncodeError (#700).
-        for payload in ('{"description": "bad \\udc80 desc"}', '{"packages": ["tmux", "\\udc80"]}'):
+        for payload in ('{"image_desc": "bad \\udc80 desc"}', '{"packages": ["tmux", "\\udc80"]}'):
             with self.subTest(payload=payload):
                 with self.assertRaisesRegex(ValueError, "not valid text"):
                     atomic_image_builder.config_from_state_payload(json.loads(payload))
