@@ -47,9 +47,10 @@ dependency until the `coverage combine` step.
 
 ## What is reachable end to end, and what is not
 
-Four scenarios, and that is genuinely all of them: `--version`, its `-V` short
-form, `--help`, and the preflight failure. The guided wizard needs a TTY, so
-none of it can run here.
+Six scenarios, and that is genuinely all of them: `--version`, its `-V` short
+form, `--help`, its `-h` short form, an unrecognised argument (usage on stderr,
+exit 2, the path a TTY-less `podman run` with a stray argument reaches), and the
+preflight failure. The guided wizard needs a TTY, so none of it can run here.
 
 That is why the end-to-end coverage number is low and is **not** gated. It
 exists so a coverage gap can be classified honestly rather than inferred from

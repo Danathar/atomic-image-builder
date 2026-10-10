@@ -1381,6 +1381,17 @@ def validate_string_list(value: object, field_name: str) -> list[str]:
     return list(value)
 
 
+def require_encodable_state_string(value: str, field_name: str) -> None:
+    # json.loads accepts a lone-surrogate escape such as "\\udc80" and returns a
+    # str Python cannot encode, so it would load, validate, and then crash with
+    # UnicodeEncodeError at the first file write (#700). Refuse it here, where
+    # the "state file is damaged" message is produced.
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(f"{field_name} contains a character that is not valid text") from None
+
+
 def config_from_state_payload(data: object) -> Config:
     # Older repo updates depend on this loader being defensive. If the state
     # file is wrong, we would rather fail loudly with a helpful message than
@@ -1397,12 +1408,16 @@ def config_from_state_payload(data: object) -> Config:
     cfg = Config()
     for name in CONFIG_LIST_FIELDS:
         if name in data:
-            setattr(cfg, name, validate_string_list(data[name], name))
+            items = validate_string_list(data[name], name)
+            for item in items:
+                require_encodable_state_string(item, name)
+            setattr(cfg, name, items)
     for name in CONFIG_STRING_FIELDS:
         if name in data:
             value = data[name]
             if not isinstance(value, str):
                 raise ValueError(f"{name} must be a string")
+            require_encodable_state_string(value, name)
             setattr(cfg, name, value)
     for bool_field in CONFIG_BOOL_FIELDS:
         if bool_field in data:
@@ -3850,6 +3865,17 @@ class App:
             self.config.method = "bluebuild"
         else:
             self.config.method = "containerfile"
+        if self.config.method == "bluebuild" and "@" in self.config.base_image_uri:
+            # A scan keeps the digest the host booted on, and BlueBuild cannot
+            # express one. The scanned wizard has no base-image step to change
+            # it, so settle it here rather than at "Start GitHub build".
+            matched = self.match_base_image(self.config.base_image_uri)
+            self.gum.warn("BlueBuild cannot use a digest-pinned base image, and your system is pinned to one.")
+            if matched and self.gum.confirm(f"Use the tagged {matched.image_uri} instead?", default=True):
+                self.config.base_image_uri = matched.image_uri
+            else:
+                self.config.method = "containerfile"
+                self.gum.hint("Using the Containerfile method instead, which supports digest pins.")
         self.gum.success(f"Build method: {METHOD_DISPLAY[self.config.method]}")
 
     def choose_base_image(self, *, step: int | None = None, total_steps: int | None = None) -> None:
@@ -5199,7 +5225,9 @@ class App:
         *,
         source_label: str,
     ) -> bool:
-        packages = unique(candidates)
+        # Same as add_packages_to_config (#521): a name already listed adds
+        # nothing, so drop it before the lookup and the "Added N" count.
+        packages = [package for package in unique(candidates) if package not in self.config.removed_packages]
         if not packages:
             return False
         try:
@@ -6008,7 +6036,7 @@ class App:
                     description = description[:37] + "..."
                 label = f"{item['name']:<30} {description}"
                 labels.append(label)
-                mapping[label] = (self.github_user, item["name"])
+                mapping[label] = (self.github_user, item["name"].lower())
             manual_label = "Type a repository name manually"
             labels.append(manual_label)
             self.gum.controls("Type to search", "Up/Down move", "Enter choose", "Esc back", "Ctrl+C quit")
@@ -6184,7 +6212,7 @@ class App:
             )
         if latest_succeeded and self.repo_carried_scan_customizations(owner, repo):
             signing_enabled = self.repo_signing_enabled(owner, repo)
-            image_ref = f"ghcr.io/{owner.lower()}/{repo}:latest"
+            image_ref = f"ghcr.io/{owner.lower()}/{repo.lower()}:latest"
             print()
             self.menu_section(
                 "Switching This Machine",
@@ -6629,7 +6657,9 @@ class App:
             raise CommandError(
                 "BlueBuild cannot use a digest-pinned base image "
                 f"({self.config.base_image_uri}). Choose a tagged base image, or use the "
-                "Containerfile method, which supports digest pins."
+                "Containerfile method, which supports digest pins. If the base was detected "
+                "from your system, switch the build method to Containerfile or re-run the scan "
+                "and accept the recommended tag."
             )
         self.validate_token_list(self.config.packages, PACKAGE_TOKEN_RE, "package")
         self.validate_token_list(self.config.removed_packages, PACKAGE_TOKEN_RE, "removed package")
@@ -7445,12 +7475,22 @@ class App:
         if STATE_FILE not in existing_text:
             lines = add_paths_ignore_entry(lines, f"'{STATE_FILE}'", ('- "**.md"', "- '**.md'"))
         output: list[str] = []
+        replaced_cron_indent: int | None = None
         for line in lines:
             line = pin_action_uses_line(line)
             stripped = line.strip()
+            if replaced_cron_indent is not None:
+                # Upstream explains its own schedule in a comment under the
+                # cron entry; once the entry is replaced it describes a time
+                # the file no longer uses, so drop it (#706).
+                line_indent = len(line) - len(line.lstrip())
+                if stripped.startswith("#") and line_indent > replaced_cron_indent:
+                    continue
+                replaced_cron_indent = None
             if stripped.startswith("- cron:"):
                 indent = line[: len(line) - len(line.lstrip())]
                 output.append(f"{indent}- cron: '{DEFAULT_GITHUB_BUILD_CRON}'")
+                replaced_cron_indent = len(indent)
                 continue
             output.append(line)
         text = "\n".join(output)
@@ -7664,6 +7704,9 @@ class App:
         gitignore_path.write_text(ensure_trailing_newline("\n".join(existing_gitignore)))
 
         managed_path(base_dir, "build_files").mkdir(parents=True, exist_ok=True)
+        # A regenerated Containerfile COPYs system_files into ctx, so the
+        # directory has to exist even when the user has no overlay yet.
+        managed_path(base_dir, "system_files").mkdir(parents=True, exist_ok=True)
         existing_containerfile = containerfile_path.read_text() if containerfile_path.exists() else None
         containerfile_path.write_text(self.render_containerfile(existing_containerfile))
         build_sh = managed_path(base_dir, "build_files/build.sh")
@@ -7732,6 +7775,7 @@ class App:
         lines = [
             "FROM scratch AS ctx",
             "COPY build_files /",
+            "COPY system_files /system_files",
             "",
             f"FROM {self.config.base_image_uri}",
             "",

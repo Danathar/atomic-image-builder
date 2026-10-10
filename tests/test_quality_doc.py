@@ -412,6 +412,12 @@ class QualityDocTests(unittest.TestCase):
             readme = urllib.parse.unquote((ROOT / "README.md").read_text())
             self.assertIn(f"/{branches[0]}/coverage-unit.json", readme, "README's badge no longer reads that branch")
 
+    def test_the_unit_row_quotes_no_current_value(self) -> None:
+        # The page's rule is not to quote current values; "Flat at 100%" went
+        # stale when the trend CSV moved to 99.
+        row = next(row for row in ROWS[1:] if row[0] == TIER_ROWS["unit"])
+        self.assertNotRegex(row[3], r"\d+\s*%", f"the unit row's Worth cell quotes a value: {row[3]!r}")
+
     def test_the_weekly_audit_row_names_a_weekly_workflow(self) -> None:
         row = next(row for row in ROWS[1:] if row[0] == "Weekly audit")
         named = re.findall(r"`([\w.-]+\.yml)`", row[2])

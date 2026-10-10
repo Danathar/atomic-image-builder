@@ -565,6 +565,17 @@ class AuditNearMissTests(unittest.TestCase):
         self.assertIn("::error::#68 reached the REST list's 250-commit cap", result.stderr)
         self.assertEqual(self.run_.summary.read_text(), "")
 
+    def test_a_pull_request_at_the_file_list_cap_fails_the_run(self) -> None:
+        # `gh pr view` stops at 100 files without saying so, and a Tier 4 path
+        # past it would read as "none".
+        files = [f"docs/f{i}.md" for i in range(99)] + [".github/workflows/ci.yml"]
+        entry = details(69, [SIGNED], files)
+        self.run_.stage([merged(69, bot=True, signed_body=True)], [entry])
+        result = self.run_.run()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("::error::#69 reached the 100-file cap", result.stderr)
+        self.assertEqual(self.run_.summary.read_text(), "")
+
     def test_a_one_parent_commit_titled_like_a_merge_still_needs_a_trailer(self) -> None:
         # The headline is the author's to write, so it cannot be the test.
         # Each one's only parent is the commit before it, so the parent count
