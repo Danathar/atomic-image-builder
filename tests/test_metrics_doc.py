@@ -498,6 +498,13 @@ class UnitCoverageHistory(unittest.TestCase):
             len(THRESHOLDS["gated"]) + len(ADVISORY_TIERS),
         )
 
+    def test_contributing_does_not_restate_a_different_count_elsewhere(self) -> None:
+        # "the most easily misread of the four" outlived the fifth measurement
+        # because only the "There are N" sentence was checked.
+        total = len(THRESHOLDS["gated"]) + len(ADVISORY_TIERS)
+        for word in re.findall(r"misread of the (\w+)", CONTRIBUTING_PATH.read_text()):
+            self.assertEqual(NUMBER_WORDS[word], total)
+
 
 class AdvisoryTiers(unittest.TestCase):
     """The four advisory tiers, their artifacts, and how to download them."""
