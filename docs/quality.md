@@ -11,7 +11,7 @@ There is no dashboard, and that is a decision rather than a gap. See
 
 | Signal                                         | Gated?       | Where                                | Worth                                                        |
 | ---------------------------------------------- | ------------ | ------------------------------------ | ------------------------------------------------------------ |
-| Unit coverage                                  | **Yes**, 90% | README badge, `coverage-data` branch | Says the gate is not the binding constraint. Flat at 100%.   |
+| Unit coverage                                  | **Yes**, 90% | README badge, `coverage-data` branch | Says the gate is not the binding constraint. Not a target.   |
 | `ruff`, `shellcheck`, `actionlint`, `hadolint` | **Yes**      | `ci.yml` `test` job                  | Binary. Either clean or the build is red.                    |
 | End-to-end coverage                            | No           | `coverage-e2e` artifact              | The most informative number here, and near 10% by design.    |
 | Shell-entrypoint coverage                      | No           | `coverage-shell` artifact            | Line, not branch. Read the quirks first.                     |

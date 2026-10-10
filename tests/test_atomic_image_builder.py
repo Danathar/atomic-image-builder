@@ -12276,8 +12276,11 @@ class BuilderTests(unittest.TestCase):
     def test_contrib_wrapper_does_not_put_github_token_in_podman_argv(self) -> None:
         wrapper = (Path(__file__).resolve().parents[1] / "contrib/aib").read_text()
         self.assertIn("podman_args+=(-e GH_TOKEN)", wrapper)
-        self.assertIn('GH_TOKEN="$(gh auth token)"', wrapper)
-        self.assertNotIn('GH_TOKEN=$(gh auth token)', wrapper)
+        self.assertIn('GH_TOKEN="$(gh auth token --hostname github.com 2>/dev/null)"', wrapper)
+        self.assertNotIn('GH_TOKEN=$(gh auth token', wrapper)
+        # Pinned to github.com like the login probe: bare `gh auth token`
+        # follows $GH_HOST, and would fetch a GitHub Enterprise token (#705).
+        self.assertNotIn('gh auth token)', wrapper)
 
     def test_contrib_wrapper_checks_for_a_newer_image_on_every_run(self) -> None:
         # Podman's default (--pull=missing) would pin wrapper users to whatever
@@ -12556,7 +12559,11 @@ class BuilderTests(unittest.TestCase):
         )
         # cosign is handed $ref, and the run is chained off its exit status.
         self.assertIn('  "$ref" &&\n', verifying)
-        self.assertIn('podman run --rm -it -e GH_TOKEN="$(gh auth token)" "$ref"', verifying)
+        # Pinned to github.com: bare `gh auth token` follows $GH_HOST (#705).
+        self.assertIn(
+            'podman run --rm -it -e GH_TOKEN="$(gh auth token --hostname github.com)" "$ref"',
+            verifying,
+        )
         # Not the tag: that is the shape this replaced, where cosign checked
         # one resolution of `latest` and podman then went and asked for
         # another.
