@@ -8227,6 +8227,20 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("every later bootc upgrade", hints)
         self.assertIn("dropping it disables both checks", hints.lower())
 
+    def test_build_status_lowercases_the_repo_in_the_image_reference(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        runs = json.dumps([{"conclusion": "success", "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+            with patch.object(app, "repo_carried_scan_customizations", return_value=True):
+                with patch.object(app, "repo_signing_enabled", return_value=True):
+                    with redirect_stdout(io.StringIO()):
+                        app.render_build_status("Example", "My-Image")
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertIn("ghcr.io/example/my-image:latest", hints)
+        self.assertNotIn("My-Image:latest", hints)
+
     def test_build_status_says_a_green_build_is_not_yet_readable(self) -> None:
         # A green build is not a switchable image: the package it published is
         # private, and `gh repo create --public` does not change that -- package
@@ -10925,6 +10939,21 @@ class BuilderTests(unittest.TestCase):
                     owner, repo = app.select_repo(require_state_file=True)
 
         self.assertEqual((owner, repo), ("example", "managed-repo"))
+
+    def test_select_repo_lowercases_a_picked_repo_renamed_with_capitals(self) -> None:
+        # GitHub names are case-insensitive, but the tool's repo-name rule is
+        # lowercase, so a picked "My-Image" must come back as "my-image".
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        stub = GumStub()
+        stub.filter = lambda options, **_kwargs: options[0]
+        app.gum = stub
+        with patch.object(app, "gh_json_with_spinner", return_value=[{"name": "My-Image"}]):
+            with redirect_stdout(io.StringIO()):
+                owner, repo = app.select_repo()
+
+        self.assertEqual((owner, repo), ("example", "my-image"))
 
     def test_select_repo_allows_manual_entry_when_repo_list_payload_is_null(self) -> None:
         app = self.make_app()
@@ -15986,6 +16015,31 @@ class BuilderTests(unittest.TestCase):
             app.choose_method(step=1, total_steps=5)
         self.assertEqual(app.config.method, "bluebuild")
         self.assertTrue(any(level == "success" and "BlueBuild" in msg for level, msg in stub.messages))
+
+    def test_choose_method_offers_the_tag_when_bluebuild_meets_a_digest_pin(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = "ghcr.io/ublue-os/bazzite:stable@sha256:" + "0" * 64
+        stub = GumStub()
+        stub.choose = lambda options, **_kwargs: [options[1]]
+        stub.confirm = lambda prompt, default=False: True
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.choose_method(step=1, total_steps=5)
+        self.assertEqual(app.config.method, "bluebuild")
+        self.assertNotIn("@", app.config.base_image_uri)
+
+    def test_choose_method_falls_back_to_containerfile_when_digest_pin_is_kept(self) -> None:
+        app = self.make_app()
+        digest_uri = "ghcr.io/ublue-os/bazzite:stable@sha256:" + "0" * 64
+        app.config.base_image_uri = digest_uri
+        stub = GumStub()
+        stub.choose = lambda options, **_kwargs: [options[1]]
+        stub.confirm = lambda prompt, default=False: False
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.choose_method(step=1, total_steps=5)
+        self.assertEqual(app.config.method, "containerfile")
+        self.assertEqual(app.config.base_image_uri, digest_uri)
 
     def test_choose_method_defaults_to_containerfile_on_empty_choice(self) -> None:
         app = self.make_app()
