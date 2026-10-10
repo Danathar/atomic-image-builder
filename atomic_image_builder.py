@@ -3739,6 +3739,17 @@ class App:
             self.config.method = "bluebuild"
         else:
             self.config.method = "containerfile"
+        if self.config.method == "bluebuild" and "@" in self.config.base_image_uri:
+            # A scan keeps the digest the host booted on, and BlueBuild cannot
+            # express one. The scanned wizard has no base-image step to change
+            # it, so settle it here rather than at "Start GitHub build".
+            matched = self.match_base_image(self.config.base_image_uri)
+            self.gum.warn("BlueBuild cannot use a digest-pinned base image, and your system is pinned to one.")
+            if matched and self.gum.confirm(f"Use the tagged {matched.image_uri} instead?", default=True):
+                self.config.base_image_uri = matched.image_uri
+            else:
+                self.config.method = "containerfile"
+                self.gum.hint("Using the Containerfile method instead, which supports digest pins.")
         self.gum.success(f"Build method: {METHOD_DISPLAY[self.config.method]}")
 
     def choose_base_image(self, *, step: int | None = None, total_steps: int | None = None) -> None:
@@ -5897,7 +5908,7 @@ class App:
                     description = description[:37] + "..."
                 label = f"{item['name']:<30} {description}"
                 labels.append(label)
-                mapping[label] = (self.github_user, item["name"])
+                mapping[label] = (self.github_user, item["name"].lower())
             manual_label = "Type a repository name manually"
             labels.append(manual_label)
             self.gum.controls("Type to search", "Up/Down move", "Enter choose", "Esc back", "Ctrl+C quit")
@@ -6073,7 +6084,7 @@ class App:
             )
         if latest_succeeded and self.repo_carried_scan_customizations(owner, repo):
             signing_enabled = self.repo_signing_enabled(owner, repo)
-            image_ref = f"ghcr.io/{owner.lower()}/{repo}:latest"
+            image_ref = f"ghcr.io/{owner.lower()}/{repo.lower()}:latest"
             print()
             self.menu_section(
                 "Switching This Machine",
@@ -6518,7 +6529,9 @@ class App:
             raise CommandError(
                 "BlueBuild cannot use a digest-pinned base image "
                 f"({self.config.base_image_uri}). Choose a tagged base image, or use the "
-                "Containerfile method, which supports digest pins."
+                "Containerfile method, which supports digest pins. If the base was detected "
+                "from your system, switch the build method to Containerfile or re-run the scan "
+                "and accept the recommended tag."
             )
         self.validate_token_list(self.config.packages, PACKAGE_TOKEN_RE, "package")
         self.validate_token_list(self.config.removed_packages, PACKAGE_TOKEN_RE, "removed package")
