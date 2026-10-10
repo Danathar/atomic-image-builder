@@ -324,8 +324,8 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   release. No workflow pushes to `main`. The formula update,
   `update-homebrew-formula.yml` / `update`, uses no secret and no token but
   its own `GITHUB_TOKEN`, which holds `contents: write` and `issues: write`
-  and nothing else. On a published release it pushes a single
-  machine-generated sha256, which it verifies before pushing, to a
+  and nothing else. On a published release it pushes a
+  machine-generated `url` and sha256, which it verifies before pushing, to a
   `formula/<tag>` branch, and opens a reminder issue with a link that opens
   the pull request. A person opens that pull request, so it has to pass
   `test` like any other. Treat a change to the formula workflow as Tier 4.
