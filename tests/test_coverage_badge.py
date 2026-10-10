@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from coverage_badge import badge_color, badge_payload, main, trend_row
+from coverage_badge import DEFAULT_HIGH, badge_color, badge_payload, main, trend_row
 
 
 class BadgeColorTests(unittest.TestCase):
@@ -40,6 +40,19 @@ class BadgePayloadTests(unittest.TestCase):
 
     def test_uses_the_same_thresholds_as_badge_color(self) -> None:
         self.assertEqual(badge_payload(50)["color"], "red")
+
+
+class GateSourceTests(unittest.TestCase):
+    def test_the_green_cutoff_is_the_gate_in_the_thresholds_file(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        gate = json.loads((root / ".coverage-thresholds.json").read_text())["gated"]["unit"]
+        self.assertEqual(DEFAULT_HIGH, gate)
+        self.assertEqual(badge_color(gate), "brightgreen")
+        self.assertNotEqual(badge_color(gate - 1), "brightgreen")
+
+    def test_the_script_does_not_spell_the_gate_as_a_literal(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        self.assertNotRegex((root / "coverage_badge.py").read_text(), r"DEFAULT_HIGH\s*=\s*\d")
 
 
 class TrendRowTests(unittest.TestCase):
