@@ -878,6 +878,106 @@ class BuilderTests(unittest.TestCase):
                     [*step[:2], f"        {key} {sign_if}"],
                 )
 
+    def test_patch_signing_step_block_reads_the_key_column_of_a_bare_or_wide_dash_item(self) -> None:
+        # A bare `-` carries its keys on the lines below, and `-   name:`
+        # puts them past one space. Read from the dash line, the bare item's
+        # own `if:` was missed and a second one inserted, which Actions
+        # rejects, and the wide item's guard landed two columns short of its
+        # keys, which does not parse (#697).
+        branch_if = "github.ref == 'refs/heads/main'"
+        sign_if = f"{branch_if} && env.SIGNING_ENABLED == 'true'"
+        bare = ["      -", "        name: Install Cosign", "        uses: sigstore/cosign-installer@v3"]
+        cases = {
+            "bare dash with if": (
+                [*bare, f"        if: {branch_if}"],
+                [*bare, f"        if: {sign_if}"],
+            ),
+            "bare dash without if": (bare, [bare[0], f"        if: {sign_if}", *bare[1:]]),
+            "three spaces after the dash": (
+                ["      -   name: Install Cosign", "          uses: sigstore/cosign-installer@v3"],
+                [
+                    "      -   name: Install Cosign",
+                    f"          if: {sign_if}",
+                    "          uses: sigstore/cosign-installer@v3",
+                ],
+            ),
+        }
+        for label, (step, expected) in cases.items():
+            with self.subTest(shape=label):
+                self.assertEqual(patch_signing_step_block(step, branch_if=branch_if, sign_if=sign_if), expected)
+
+    def test_patch_signing_step_block_refuses_a_block_scalar_if_it_cannot_rewrite(self) -> None:
+        # yamlfmt and prettier fold a long condition into `if: >-`. Taken as
+        # the step's condition but never rewritten, it left the step on the
+        # branch guard alone and nothing read SIGNING_ENABLED (#699). One
+        # already carrying the guard is left as it is.
+        branch_if = "github.ref == 'refs/heads/main'"
+        sign_if = f"{branch_if} && env.SIGNING_ENABLED == 'true'"
+        head = ["      - name: Install Cosign", "        uses: sigstore/cosign-installer@v3", "        if: >-"]
+        guarded = [*head, "          github.ref == 'refs/heads/main' &&", "          env.SIGNING_ENABLED == 'true'"]
+        self.assertEqual(patch_signing_step_block(guarded, branch_if=branch_if, sign_if=sign_if), guarded)
+        for header in ("if: >-", "if: |", "if: >"):
+            with self.subTest(header=header):
+                step = [*head[:2], f"        {header}", f"          {branch_if}"]
+                with self.assertRaisesRegex(CommandError, r"'Install Cosign'.*block scalar"):
+                    patch_signing_step_block(step, branch_if=branch_if, sign_if=sign_if)
+
+    def test_patch_container_workflow_refuses_a_folded_if_on_a_cosign_step(self) -> None:
+        # The bundled snapshot with Install Cosign's condition folded the way
+        # yamlfmt writes it. Patched as before, it shipped with no
+        # SIGNING_ENABLED anywhere and nothing reported (#699).
+        app = self.make_app()
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        branch_if = "github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+        uses = "        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2\n"
+        original = f"      - name: Install Cosign\n{uses}        if: {branch_if}\n"
+        self.assertIn(original, snapshot)
+        folded = snapshot.replace(
+            original,
+            f"      - name: Install Cosign\n{uses}        if: >-\n"
+            "          github.event_name != 'pull_request' &&\n"
+            "          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)\n",
+        )
+        with self.assertRaisesRegex(CommandError, r"'Install Cosign'.*block scalar"):
+            app.patch_container_workflow(folded)
+
+    def test_patch_workflow_signing_steps_reads_past_a_steps_line_in_a_script(self) -> None:
+        # A `run: |` that writes a manifest with its own `steps:` restarted
+        # the step walk inside the script, and the real cosign steps after
+        # it were left unguarded with nothing reported (#696).
+        branch_if = "github.event_name != 'pull_request'"
+        sign_if = f"{branch_if} && env.SIGNING_ENABLED == 'true'"
+        script = [
+            "        run: |",
+            "          cat > task.yml <<'EOF'",
+            "          steps:",
+            "            - name: hello",
+            "              image: alpine",
+            "          EOF",
+        ]
+        workflow = "\n".join(
+            [
+                "jobs:",
+                "  build_push:",
+                "    steps:",
+                "      - name: Write task",
+                *script,
+                "      - name: Install Cosign",
+                "        uses: sigstore/cosign-installer@v3",
+                f"        if: {branch_if}",
+                "      - name: Sign container image",
+                "        run: cosign sign -y ghcr.io/example/test:latest",
+                "",
+            ]
+        )
+        patched = atomic_image_builder.patch_workflow_signing_steps(workflow, branch_if=branch_if, sign_if=sign_if)
+        lines = patched.splitlines()
+        self.assertEqual(lines[4 : 4 + len(script)], script)
+        self.assertIn(f"        if: {sign_if}", lines[lines.index("      - name: Install Cosign") :])
+        sign_at = lines.index("      - name: Sign container image")
+        self.assertEqual(lines[sign_at + 1], f"        if: {sign_if}")
+        self.assertEqual(patched.count("env.SIGNING_ENABLED == 'true'"), 2)
+
     def test_patch_container_workflow_guards_a_sign_step_whose_script_reads_like_an_if_key(self) -> None:
         """A `run: |` line that parses as an `if` key is script, not the step's condition.
 
@@ -1103,10 +1203,9 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.patch_container_workflow(patched), patched)
 
     def test_patch_container_workflow_anchors_state_ignore_to_readme_entry(self) -> None:
-        # Fallback for a workflow whose paths-ignore key is written in a form
-        # the key match does not see (YAML permits a quoted key). Without it
-        # the state file would never be added and every state-only commit
-        # would trigger a rebuild.
+        # A quoted paths-ignore key is the same key (#698), and once the
+        # anchor entry is in its list either route adds the state file.
+        # Without it every state-only commit would trigger a rebuild.
         app = self.make_app()
         workflow = textwrap.dedent(
             """\
@@ -1930,6 +2029,53 @@ class BuilderTests(unittest.TestCase):
                 self.assertEqual(migrated.count("&& env.SIGNING_ENABLED == 'true'"), 2)
                 self.assertIn("        if: env.COSIGN_PRIVATE_KEY != ''", migrated.splitlines())
 
+    def test_legacy_migration_fails_closed_for_a_job_key_in_any_spelling_or_indent(self) -> None:
+        # The check deciding what the strip removed matched one literal
+        # six-space, bare, same-line spelling. The strip itself reads the key
+        # by name at the block's own indent, so at eight, quoted, spaced or
+        # with its value on the next line the key went, the check saw
+        # nothing removed, and the surviving read was false forever (#695).
+        app = self.make_app()
+        job_env = (
+            "      BUILD_FLAVOR: main\n"
+            "      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}\n"
+            "      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}\n"
+        )
+        self.assertIn(job_env, self.LEGACY_SIGNING_JOB)
+        reader = "\n".join(
+            ["      - name: Report signing", "        if: env.COSIGN_PRIVATE_KEY != ''", "        run: echo signed", ""]
+        )
+        shapes = {
+            "eight": textwrap.indent(job_env, "  "),
+            "quoted": job_env.replace("      COSIGN_PRIVATE_KEY:", '      "COSIGN_PRIVATE_KEY":'),
+            "space before colon": job_env.replace("      COSIGN_PRIVATE_KEY:", "      COSIGN_PRIVATE_KEY :"),
+            "value on next line": job_env.replace(
+                "      COSIGN_PRIVATE_KEY: ${{", "      COSIGN_PRIVATE_KEY:\n        ${{"
+            ),
+        }
+        for label, env in shapes.items():
+            with self.subTest(shape=label):
+                legacy = self.LEGACY_SIGNING_JOB.replace(job_env, env, 1) + reader
+                with self.assertRaisesRegex(CommandError, r"if: env\.COSIGN_PRIVATE_KEY != ''.*published unsigned"):
+                    app.patch_container_workflow(legacy)
+
+    def test_strip_job_env_entries_leaves_an_emptied_env_as_an_empty_mapping(self) -> None:
+        # A bare `env:` is null. Removing the last entry leaves `env: {}`,
+        # the way strip_permission_entries() leaves `permissions: {}` (#695).
+        workflow = (
+            "jobs:\n"
+            "  build:\n"
+            "    env:\n"
+            "        # legacy signing\n"
+            "        COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}\n"
+            "        COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}\n"
+            "    steps: []\n"
+        )
+        self.assertEqual(
+            atomic_image_builder.strip_job_env_entries(workflow, ["COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD"]),
+            "jobs:\n  build:\n    env: {}\n        # legacy signing\n    steps: []\n",
+        )
+
     @staticmethod
     def job_env_entries_by_job(workflow: str) -> dict[str, list[str]]:
         """Job-level env entries keyed by job name, compared by whole line.
@@ -2253,6 +2399,72 @@ class BuilderTests(unittest.TestCase):
             atomic_image_builder.strip_permission_entries(workflow, ["id-token"]),
             "jobs:\n  build:\n    permissions: {}\n      # OIDC for signing\n    # scopes below\n    steps: []\n",
         )
+
+    def test_strip_permission_entries_reads_the_scope_in_any_spelling(self) -> None:
+        # `"id-token": write`, `'id-token': write` and `id-token : write` are
+        # the one scope to YAML. Matched by spelling, each survived and the
+        # unused OIDC grant stayed (#698). A value on the next line goes with
+        # its key.
+        for entry in ('"id-token": write', "'id-token': write", "id-token : write", "id-token:\n        write"):
+            with self.subTest(entry=entry):
+                workflow = f"jobs:\n  build:\n    permissions:\n      contents: read\n      {entry}\n    steps: []\n"
+                self.assertEqual(
+                    atomic_image_builder.strip_permission_entries(workflow, ["id-token"]),
+                    "jobs:\n  build:\n    permissions:\n      contents: read\n    steps: []\n",
+                )
+
+    def test_add_signing_step_password_reads_the_key_in_any_spelling(self) -> None:
+        # A quoted or spaced COSIGN_PRIVATE_KEY is the same key. Missed, the
+        # signing step got no password and cosign could not decrypt the key
+        # (#698). A quoted COSIGN_PASSWORD already there is not doubled.
+        password = "          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}"
+        for key in ('"COSIGN_PRIVATE_KEY":', "'COSIGN_PRIVATE_KEY':", "COSIGN_PRIVATE_KEY :"):
+            with self.subTest(key=key):
+                step = ["      - name: Sign", "        env:", f"          {key} ${{{{ secrets.SIGNING_SECRET }}}}", "        run: cosign sign"]
+                self.assertEqual(
+                    atomic_image_builder.add_signing_step_password(step),
+                    [*step[:3], password, step[3]],
+                )
+        step = [
+            "      - name: Sign",
+            "        env:",
+            "          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}",
+            '          "COSIGN_PASSWORD": ${{ secrets.COSIGN_PASSWORD }}',
+            "        run: cosign sign",
+        ]
+        self.assertEqual(atomic_image_builder.add_signing_step_password(step), step)
+
+    def test_add_paths_ignore_entry_reads_the_key_in_any_spelling(self) -> None:
+        # Matched by spelling, a quoted or spaced key with no anchor entry in
+        # its list was skipped, and every state-file commit rebuilt (#698).
+        for key in ('"paths-ignore":', "'paths-ignore':", "paths-ignore :"):
+            with self.subTest(key=key):
+                self.assertEqual(
+                    atomic_image_builder.add_paths_ignore_entry(
+                        ["on:", "  push:", f"    {key}", "      - 'docs/**'"], "'x'", ("- '**/README.md'",)
+                    ),
+                    ["on:", "  push:", f"    {key}", "      - 'x'", "      - 'docs/**'"],
+                )
+                self.assertEqual(
+                    atomic_image_builder.add_paths_ignore_entry(
+                        ["on:", "  push:", f"    {key} ['docs/**']"], "'x'", ("- '**/README.md'",)
+                    ),
+                    ["on:", "  push:", f"    {key} ['docs/**', 'x']"],
+                )
+
+    def test_add_paths_ignore_entry_ignores_an_anchor_in_another_list(self) -> None:
+        # The anchor was tested on every line ahead of the key, so one in a
+        # positive `paths:` filter won: the state file joined the pull
+        # request's paths and push.paths-ignore was untouched (#698).
+        anchors = ("- '**/README.md'",)
+        pull_request = ["on:", "  pull_request:", "    paths:", "      - '**/README.md'", "      - 'docs/**'"]
+        self.assertEqual(
+            atomic_image_builder.add_paths_ignore_entry(
+                [*pull_request, "  push:", "    paths-ignore:", "      - '**/README.md'"], "'x'", anchors
+            ),
+            [*pull_request, "  push:", "    paths-ignore:", "      - 'x'", "      - '**/README.md'"],
+        )
+        self.assertEqual(atomic_image_builder.add_paths_ignore_entry(pull_request, "'x'", anchors), pull_request)
 
     def test_strip_permission_entries_leaves_a_block_scalar_alone(self) -> None:
         # A `run: |` script that prints a permissions block is text, and the
@@ -15139,9 +15351,9 @@ class BuilderTests(unittest.TestCase):
         self.assertIn(STATE_FILE, patched)
 
     def test_patch_bluebuild_workflow_anchors_state_ignore_to_md_entry(self) -> None:
-        # Fallback for a paths-ignore key written in a form the key match does
-        # not see. Without it the state file is never ignored and every
-        # state-only commit triggers a rebuild.
+        # A quoted paths-ignore key is the same key (#698). Without the
+        # entry the state file is never ignored and every state-only commit
+        # triggers a rebuild.
         app = self.make_bluebuild_app()
         template = '    "paths-ignore":\n      - "**.md"\n'
         patched = app.patch_bluebuild_workflow(template)
