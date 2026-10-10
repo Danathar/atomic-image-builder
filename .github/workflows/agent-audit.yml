@@ -107,11 +107,17 @@ jobs:
           # any merge included, on main; and the list costs no call beyond
           # the one already made. It stops at 250 commits without saying so,
           # and a commit cut off it would read as a parent from outside, so
-          # a pull request that reaches the cap is refused.
+          # a pull request that reaches the cap is refused. `gh pr view`
+          # lists at most 100 files without saying so, and a Tier 4 path cut
+          # off that would read as "none", so one that reaches 100 is refused.
           jq -r '.[].number' agents.json | while read -r number; do
             view="$(gh pr view "$number" --repo "$REPO" --json number,files,baseRefName)"
             commits="$(gh api --paginate "repos/$REPO/pulls/$number/commits" \
               --jq '.[] | {oid: .sha, message: .commit.message, parents: [.parents[].sha]}' | jq -s .)"
+            if [ "$(jq '.files | length' <<<"$view")" -ge 100 ]; then
+              echo "::error::#$number reached the 100-file cap of \`gh pr view\`, so its files cannot all be read" >&2
+              exit 2
+            fi
             if [ "$(jq length <<<"$commits")" -ge 250 ]; then
               # stderr: stdout here feeds the jq below the loop.
               echo "::error::#$number reached the REST list's 250-commit cap, so its commits cannot all be read" >&2
