@@ -1,9 +1,8 @@
 # Containerfile for the atomic-image-builder tool image, published to
 # ghcr.io/danathar/atomic-image-builder. This packages the beginner TUI and
 # all of its runtime dependencies so it can be run with `podman run` or
-# distrobox without a local clone. The primary install method is still
-# `git clone` + run the script directly (see README.md); this image is an
-# alternative for people who would rather not install the dependencies on
+# distrobox without a local clone. Homebrew and running from a
+# clone are covered in docs/installing.md; this image is an alternative for people who would rather not install the dependencies on
 # their host.
 FROM registry.fedoraproject.org/fedora:44
 
@@ -21,7 +20,7 @@ LABEL org.opencontainers.image.source="https://github.com/Danathar/atomic-image-
 # would otherwise *attempt* a nested "Test build locally" build (unsupported
 # here, and it fails) instead of degrading. We set AIB_DISABLE_LOCAL_BUILD
 # below so that option shows a clean "not available" message instead. Local
-# test builds remain a clone-and-run feature — see the README limitations.
+# test builds remain a clone-and-run feature — see docs/installing.md#limitations-of-running-in-a-container.
 #
 # Both signing keys are pinned by sha256, checked before anything is imported
 # or installed, and each repo file points at the *verified local copy* rather
@@ -79,9 +78,11 @@ RUN dnf5 -y install curl && \
 # Under the default /bin/sh a pipeline reports only its LAST command's status,
 # so anything added ahead of sha256sum in that pipe would fail silently --
 # which is what hadolint DL4006 warns about. The usual answer, a SHELL
-# instruction setting pipefail, does not work here: buildah ignores SHELL under
-# the OCI image format this image is built with, so it would satisfy the linter
-# without changing the behaviour. No pipe, no ambiguity, nothing to suppress.
+# instruction setting pipefail, is format-dependent: buildah honours SHELL in
+# Docker format but ignores it (with a warning) in OCI format, and a local
+# `podman build` defaults to OCI. A SHELL line would therefore satisfy the
+# linter while behaving differently depending on how the image was built. No
+# pipe, no ambiguity, nothing to suppress.
 RUN curl -fsSL --retry 3 -o /tmp/cosign.rpm \
       https://github.com/sigstore/cosign/releases/download/v3.1.2/cosign-3.1.2-1.x86_64.rpm && \
     echo "72382d1ef1cc824e1c10acfbe7f76af76fb294a10b0d16f31b978350ec4bc3e9  /tmp/cosign.rpm" > /tmp/cosign.sha256 && \

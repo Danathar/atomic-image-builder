@@ -215,8 +215,9 @@ One hadolint finding needed a real fix rather than a suppression: DL4006 on
 the cosign checksum, which was `echo "<sha>  <file>" | sha256sum -c -`. Under
 `/bin/sh` a pipeline reports only its last command's status. Note that the
 usual remedy — a `SHELL` instruction setting `pipefail` — is a trap here:
-buildah ignores `SHELL` under the OCI image format this image is built with
-(it warns and carries on), so it silences the linter while changing nothing.
+buildah honours `SHELL` in Docker format but ignores it (with a warning) in
+OCI format, which a plain local `podman build` defaults to, so the behaviour
+would depend on how the image was built.
 The checksum goes through a file instead, which removes the pipe. Keep it
 that way; do not reintroduce a pipe in a `RUN` expecting pipefail to catch it.
 
