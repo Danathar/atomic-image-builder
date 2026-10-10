@@ -17,6 +17,7 @@ import argparse
 import re
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 SKIP_PREFIXES = ("template_snapshots/",)
@@ -84,46 +85,15 @@ def html_block(text: str, paragraph: bool) -> re.Pattern[str] | None:
     return None
 
 
-def backtick_run(text: str, start: int) -> int:
-    """The length of the backtick run beginning at ``text[start]``."""
-    end = start
-    while end < len(text) and text[end] == "`":
-        end += 1
-    return end - start
-
-
-def code_span_end(text: str, start: int, length: int) -> int | None:
-    """Where a code span opened by ``length`` backticks ends, or None.
-
-    ``start`` is the first character after the opening run. CommonMark closes
-    a code span only on a backtick run of exactly the opening length, so a
-    shorter or longer run inside it is content -- that is how ``` `` ` `` ```
-    spells a literal backtick. Backslashes are literal inside a code span, so
-    they are not skipped as escapes here.
-    """
-    index = start
-    while index < len(text):
-        if text[index] != "`":
-            index += 1
-            continue
-        run = backtick_run(text, index)
-        if run == length:
-            return index + run
-        index += run
-    return None
-
-
 def split_row(line: str) -> list[str] | None:
     """Split a table row into cells, or None if it is not a table row.
 
-    Pipes inside backtick code spans and pipes escaped as ``\\|`` are cell
-    content, not separators -- getting either wrong would corrupt the text
-    rather than merely misalign it.
-
-    A code span runs between backtick runs of equal length, and a run with no
-    match is literal text. Toggling on every single backtick instead read
-    ``` `` ` `` ``` as an open span that swallowed the next separator, so each
-    pass merged two cells and appended another empty column.
+    Only a pipe escaped as ``\\|`` is cell content. A pipe inside a backtick
+    code span still separates cells: GFM splits a row on unescaped pipes
+    before it parses inline code, so GitHub renders ``| `x|y` | z |`` as
+    three cells. Mirroring that lets a contributor see the column-count
+    mismatch locally instead of having the formatter certify a table GitHub
+    renders broken. Backticks are ordinary text here.
     """
     stripped = line.strip()
     if "|" not in stripped:
@@ -136,13 +106,6 @@ def split_row(line: str) -> list[str] | None:
         if char == "\\" and index + 1 < len(stripped):
             current.append(stripped[index : index + 2])
             index += 2
-            continue
-        if char == "`":
-            run = backtick_run(stripped, index)
-            end = code_span_end(stripped, index + run, run)
-            stop = index + run if end is None else end
-            current.append(stripped[index:stop])
-            index = stop
             continue
         if char == "|":
             cells.append("".join(current))
@@ -158,6 +121,20 @@ def split_row(line: str) -> list[str] | None:
     if cells and not cells[-1].strip():
         cells = cells[:-1]
     return [cell.strip() for cell in cells] if cells else None
+
+
+def display_width(text: str) -> int:
+    """Columns ``text`` occupies in a fixed-width viewer.
+
+    East Asian wide and fullwidth characters take two columns; combining marks
+    and format characters (zero-width joiners, variation selectors) take none.
+    """
+    width = 0
+    for char in text:
+        if unicodedata.category(char) in ("Mn", "Me", "Cf"):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+    return width
 
 
 def is_delimiter(cells: list[str]) -> bool:
@@ -463,7 +440,7 @@ def render_table(rows: list[str]) -> list[str]:
     # output is also a fixed point, so re-running never repairs it.
     widths = [
         max(
-            max(len(row[column]) for i, row in enumerate(block) if i != 1),
+            max(display_width(row[column]) for i, row in enumerate(block) if i != 1),
             delimiter_width(block[1][column]),
         )
         for column in range(columns)
@@ -481,7 +458,10 @@ def render_table(rows: list[str]) -> list[str]:
         if i == 1:
             cells = [render_delimiter(row[c], widths[c]) for c in range(columns)]
         else:
-            cells = [row[c].ljust(widths[c]) for c in range(columns)]
+            cells = [
+                row[c] + " " * (widths[c] - display_width(row[c]))
+                for c in range(columns)
+            ]
         # No rstrip: the trailing pad is what makes the closing pipes line
         # up, which is the entire point in a fixed-width viewer.
         out.append(prefix + "| " + " | ".join(cells) + " |")
@@ -489,7 +469,11 @@ def render_table(rows: list[str]) -> list[str]:
 
 
 def format_text(text: str) -> str:
-    lines = text.split("\n")
+    # Split on real line endings and keep them, so CRLF input is not left with
+    # a stray carriage return on prose lines and none on the rebuilt rows.
+    raw = text.split("\n")
+    endings = ["\r" if line.endswith("\r") else "" for line in raw]
+    lines = [line[:-1] if line.endswith("\r") else line for line in raw]
     out: list[str] = []
     done = 0
     for span in table_spans(lines):
@@ -497,7 +481,8 @@ def format_text(text: str) -> str:
         out.extend(render_table(lines[span.start : span.stop]))
         done = span.stop
     out.extend(lines[done:])
-    return "\n".join(out)
+    # Row counts are unchanged by rendering, so endings line up by index.
+    return "\n".join(line + ending for line, ending in zip(out, endings))
 
 
 def tracked_markdown(root: Path) -> list[Path]:

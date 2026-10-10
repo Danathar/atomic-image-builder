@@ -13,8 +13,11 @@ branch after a run on main; this script only produces the files.
 import argparse
 import json
 import sys
+from pathlib import Path
 
-DEFAULT_HIGH = 90
+# The gate lives only in .coverage-thresholds.json; the badge turns green at
+# the same number the build fails below, so it is read rather than repeated.
+DEFAULT_HIGH = int(json.loads(Path(__file__).resolve().with_name(".coverage-thresholds.json").read_text(encoding="utf-8"))["gated"]["unit"])
 DEFAULT_LOW = 75
 
 

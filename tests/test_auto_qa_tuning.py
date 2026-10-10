@@ -212,6 +212,14 @@ class AutoQaTuningTests(unittest.TestCase):
                 remainder = re.sub(
                     rf"\$\(jq -er '[^']+' {re.escape(source)}\)", "", line
                 )
+                # Python's equivalent of the `jq -er` read: the whole file
+                # parsed straight from read_text, with no handle kept to write.
+                remainder = re.sub(
+                    rf"json\.loads\(Path\(__file__\)\.resolve\(\)\.with_name\(\"{re.escape(source)}\"\)"
+                    r"\.read_text\(encoding=\"utf-8\"\)\)",
+                    "",
+                    remainder,
+                )
                 if source in remainder and not remainder.lstrip().startswith("echo "):
                     self.fail(
                         f"{name} touches {source} other than by reading it: {line.strip()!r}"
