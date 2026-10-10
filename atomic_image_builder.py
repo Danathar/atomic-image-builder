@@ -7347,12 +7347,22 @@ class App:
         if STATE_FILE not in existing_text:
             lines = add_paths_ignore_entry(lines, f"'{STATE_FILE}'", ('- "**.md"', "- '**.md'"))
         output: list[str] = []
+        replaced_cron_indent: int | None = None
         for line in lines:
             line = pin_action_uses_line(line)
             stripped = line.strip()
+            if replaced_cron_indent is not None:
+                # Upstream explains its own schedule in a comment under the
+                # cron entry; once the entry is replaced it describes a time
+                # the file no longer uses, so drop it (#706).
+                line_indent = len(line) - len(line.lstrip())
+                if stripped.startswith("#") and line_indent > replaced_cron_indent:
+                    continue
+                replaced_cron_indent = None
             if stripped.startswith("- cron:"):
                 indent = line[: len(line) - len(line.lstrip())]
                 output.append(f"{indent}- cron: '{DEFAULT_GITHUB_BUILD_CRON}'")
+                replaced_cron_indent = len(indent)
                 continue
             output.append(line)
         text = "\n".join(output)
@@ -7566,6 +7576,9 @@ class App:
         gitignore_path.write_text(ensure_trailing_newline("\n".join(existing_gitignore)))
 
         managed_path(base_dir, "build_files").mkdir(parents=True, exist_ok=True)
+        # A regenerated Containerfile COPYs system_files into ctx, so the
+        # directory has to exist even when the user has no overlay yet.
+        managed_path(base_dir, "system_files").mkdir(parents=True, exist_ok=True)
         existing_containerfile = containerfile_path.read_text() if containerfile_path.exists() else None
         containerfile_path.write_text(self.render_containerfile(existing_containerfile))
         build_sh = managed_path(base_dir, "build_files/build.sh")
@@ -7634,6 +7647,7 @@ class App:
         lines = [
             "FROM scratch AS ctx",
             "COPY build_files /",
+            "COPY system_files /system_files",
             "",
             f"FROM {self.config.base_image_uri}",
             "",
