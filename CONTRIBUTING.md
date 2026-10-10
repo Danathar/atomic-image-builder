@@ -55,6 +55,12 @@ notices a wrong binding; only running it does (see
 it exists to catch. Nothing is built and no VM starts: both the nested `just`
 and `systemd-vmspawn` are stubbed.
 
+Ten more tests drive the real [`gum`](https://github.com/charmbracelet/gum)
+binary (Esc and Ctrl-J handling, table width, spinner stderr), and one runs
+`hadolint` against an unparseable Containerfile line. CI pins gum v0.17.0 and
+hadolint v2.14.0 by sha256 in `ci.yml`, `nightly-compliance.yml` and
+`ai-fix.yml`, so these run there; without the binaries they skip locally.
+
 Run the test suite with `unittest`:
 
 ```bash
@@ -94,7 +100,7 @@ those two builds produce, and take an image tag as their first argument, which
 is how CI points them at its own. `tests/e2e/README.md` covers what is
 reachable end to end and what adding a scenario involves.
 
-End-to-end coverage is deliberately low and is **not** gated: the guided wizard needs a TTY, so the only end-to-end reachable paths are `--version`, `--help`, and the preflight failure. It exists so coverage gaps can be classified honestly rather than inferred from the unit run alone.
+End-to-end coverage is deliberately low and is **not** gated: the guided wizard needs a TTY, so the only end-to-end reachable paths are `--version`/`-V`, `--help`/`-h`, the unrecognised-argument exit, and the preflight failure. It exists so coverage gaps can be classified honestly rather than inferred from the unit run alone.
 
 **Shell-entrypoint coverage** measures executable lines in `contrib/aib` and `container/entrypoint.sh`. The same behavioral suites used by CI run under Bashcov, which follows the child Bash processes they launch. `.simplecov` restricts the report to those two user-facing scripts so the test harnesses and temporary command stubs do not inflate the denominator. To reproduce it locally with the version used by CI:
 

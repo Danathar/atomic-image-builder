@@ -215,9 +215,11 @@ def _init_origin(tmp: Path) -> tuple[Path, Path]:
     subprocess.run(["git", "init", "-q", "--bare", str(origin)], **run)
     checkout = tmp / "checkout"
     subprocess.run(["git", "clone", "-q", str(origin), str(checkout)], **run)
-    (checkout / "coverage_badge.py").write_bytes((ROOT / "coverage_badge.py").read_bytes())
+    # The script reads its green threshold from the gate file beside it.
+    for name in ("coverage_badge.py", ".coverage-thresholds.json"):
+        (checkout / name).write_bytes((ROOT / name).read_bytes())
     git = ["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid", "-C", str(checkout)]
-    subprocess.run([*git, "add", "coverage_badge.py"], **run)
+    subprocess.run([*git, "add", "coverage_badge.py", ".coverage-thresholds.json"], **run)
     subprocess.run([*git, "commit", "-q", "-m", "initial"], **run)
     return origin, checkout
 

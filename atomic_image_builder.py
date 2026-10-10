@@ -1381,6 +1381,17 @@ def validate_string_list(value: object, field_name: str) -> list[str]:
     return list(value)
 
 
+def require_encodable_state_string(value: str, field_name: str) -> None:
+    # json.loads accepts a lone-surrogate escape such as "\\udc80" and returns a
+    # str Python cannot encode, so it would load, validate, and then crash with
+    # UnicodeEncodeError at the first file write (#700). Refuse it here, where
+    # the "state file is damaged" message is produced.
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(f"{field_name} contains a character that is not valid text") from None
+
+
 def config_from_state_payload(data: object) -> Config:
     # Older repo updates depend on this loader being defensive. If the state
     # file is wrong, we would rather fail loudly with a helpful message than
@@ -1397,12 +1408,16 @@ def config_from_state_payload(data: object) -> Config:
     cfg = Config()
     for name in CONFIG_LIST_FIELDS:
         if name in data:
-            setattr(cfg, name, validate_string_list(data[name], name))
+            items = validate_string_list(data[name], name)
+            for item in items:
+                require_encodable_state_string(item, name)
+            setattr(cfg, name, items)
     for name in CONFIG_STRING_FIELDS:
         if name in data:
             value = data[name]
             if not isinstance(value, str):
                 raise ValueError(f"{name} must be a string")
+            require_encodable_state_string(value, name)
             setattr(cfg, name, value)
     for bool_field in CONFIG_BOOL_FIELDS:
         if bool_field in data:
@@ -1520,9 +1535,15 @@ def strip_job_env_entries(workflow_text: str, names: Sequence[str]) -> str:
     put at eight. That update then succeeded and left the signing key
     exposed to every step in the job (#524). A value continued on deeper
     lines goes with its key.
+
+    Removing the last entry would leave a bare `env:`, which YAML reads as
+    null, so the block collapses to `env: {}` instead, the way
+    strip_permission_entries() collapses `permissions:`. A comment is not an
+    entry.
     """
     lines = file_lines(workflow_text)
     drop: set[int] = set()
+    emptied: set[int] = set()
     for _, start, end in workflow_job_ranges(lines):
         job = lines[start:end]
         env_at = workflow_job_level_key_index(job, "env")
@@ -1530,6 +1551,8 @@ def strip_job_env_entries(workflow_text: str, names: Sequence[str]) -> str:
             continue
         entry_indent = len(block_mapping_entry_indent(job, env_at))
         dropping = False
+        dropped_any = False
+        kept_any = False
         for offset in range(env_at + 1, len(job)):
             stripped = job[offset].strip()
             if not stripped:
@@ -1544,7 +1567,16 @@ def strip_job_env_entries(workflow_text: str, names: Sequence[str]) -> str:
             dropping = indent == entry_indent and workflow_key(stripped) in names
             if dropping:
                 drop.add(start + offset)
-    kept = [line for index, line in enumerate(lines) if index not in drop]
+                dropped_any = True
+            elif not stripped.startswith("#"):
+                kept_any = True
+        if dropped_any and not kept_any:
+            emptied.add(start + env_at)
+    kept = [
+        f"{line[: len(line) - len(line.lstrip())]}env: {{}}" if index in emptied else line
+        for index, line in enumerate(lines)
+        if index not in drop
+    ]
     return ensure_trailing_newline("\n".join(kept))
 
 
@@ -1581,10 +1613,13 @@ def strip_legacy_signing_job_env(workflow_text: str) -> str:
     Only a read the removal actually breaks counts: one inside a job whose
     job-level entry for that name is removed, and not also defined in the
     workflow-level `env:`, which this leaves alone and which would still
-    answer it. A removed entry outside every job the parser recognizes has no
-    scope it can judge, so there any read in the file counts. A workflow with
-    no legacy job-level entry is returned as it is: this update cannot be
-    what breaks it.
+    answer it. What was removed is read from the same block, at the same
+    indent and by the same parsed key name, as strip_job_env_entries()
+    removes it: matching one literal six-space spelling missed an env at
+    eight or a quoted key, skipped the check, and the migration published
+    unsigned (#695). The strip only ever reaches jobs the parser recognizes,
+    so nothing outside them is removed. A workflow with no legacy job-level
+    entry is returned as it is: this update cannot be what breaks it.
     """
     stripped = strip_job_env_entries(workflow_text, LEGACY_SIGNING_ENV_KEYS)
     if stripped == ensure_trailing_newline(workflow_text):
@@ -1592,17 +1627,13 @@ def strip_legacy_signing_job_env(workflow_text: str) -> str:
     lines = file_lines(workflow_text)
     still_defined = workflow_level_env_keys(lines)
 
-    def removed_names(scope: Sequence[str]) -> set[str]:
-        return {
-            name
-            for name in LEGACY_SIGNING_ENV_KEYS
-            if name not in still_defined and any(line.startswith(f"      {name}: ") for line in scope)
-        }
+    def removed_names(job: Sequence[str]) -> set[str]:
+        env_at = workflow_job_level_key_index(job, "env")
+        if env_at is None:
+            return set()
+        return (set(LEGACY_SIGNING_ENV_KEYS) & workflow_job_env_keys(job, env_at)) - still_defined
 
-    ranges = workflow_job_ranges(lines)
-    covered = {index for _, start, end in ranges for index in range(start, end)}
-    outside = removed_names([line for index, line in enumerate(lines) if index not in covered])
-    scopes = [(lines, outside)] + [(lines[start:end], removed_names(lines[start:end])) for _, start, end in ranges]
+    scopes = [(lines[start:end], removed_names(lines[start:end])) for _, start, end in workflow_job_ranges(lines)]
     for scope, names in scopes:
         if not names:
             continue
@@ -1658,13 +1689,15 @@ def strip_permission_entries(workflow_text: str, names: Sequence[str]) -> str:
     Lines of a block scalar are the owner's script, not keys, so a `run: |`
     that happens to print `permissions:` is left as written.
     """
-    entry_re = re.compile(r"^\s*([A-Za-z0-9_-]+):\s*\S")
     lines = file_lines(workflow_text)
     scalar_body = block_scalar_body_indexes(lines)
     output: list[str] = []
     block_indent: int | None = None
     header_index = 0
     kept_any = False
+    # The indent of the entry being dropped, so a value it continues on
+    # deeper lines goes with it.
+    dropping_at: int | None = None
 
     def close_block() -> None:
         if not kept_any:
@@ -1683,9 +1716,14 @@ def strip_permission_entries(workflow_text: str, names: Sequence[str]) -> str:
                 output.append(line)
                 continue
             if indent > block_indent:
-                match = entry_re.match(line)
-                if match and match.group(1) in names:
+                if dropping_at is not None and indent > dropping_at:
                     continue
+                # By parsed name, so `"id-token": write` and `id-token : write`
+                # go too (#525, #698).
+                if workflow_key(stripped) in names:
+                    dropping_at = indent
+                    continue
+                dropping_at = None
                 kept_any = True
                 output.append(line)
                 continue
@@ -1695,6 +1733,7 @@ def strip_permission_entries(workflow_text: str, names: Sequence[str]) -> str:
             block_indent = indent
             header_index = len(output)
             kept_any = False
+            dropping_at = None
         output.append(line)
     if block_indent is not None:
         close_block()
@@ -1716,10 +1755,27 @@ def patch_signing_step_block(step_lines: Sequence[str], *, branch_if: str, sign_
     # shell line such as `if : ; then` parses as an `if` key when read on its
     # own. Counting that as the step's condition meant no guard was inserted,
     # and the step signed on pull requests or with no key configured.
+    #
+    # A bare `-` item, or one whose first line holds only a comment, carries
+    # its keys on the lines below, and they set the column. Reading it from
+    # the dash line found no key there, so the step's own `if:` was missed
+    # and a second one inserted, which Actions rejects (#697).
     first_stripped = step_lines[0].lstrip()
     dash = re.match(r"-\s+", first_stripped)
     first_key_text = first_stripped[dash.end() :] if dash else first_stripped
-    key_column = len(step_lines[0]) - len(first_key_text)
+    if first_key_text.rstrip() in ("", "-") or first_key_text.startswith("#"):
+        first_key_text = ""
+        dash_indent = len(step_lines[0]) - len(first_stripped)
+        key_column = next(
+            (
+                len(line) - len(line.lstrip())
+                for line in step_lines[1:]
+                if line.strip() and not line.strip().startswith("#")
+            ),
+            dash_indent + 2,
+        )
+    else:
+        key_column = len(step_lines[0]) - len(first_key_text)
     patched: list[str] = []
     has_if = False
     for index, line in enumerate(step_lines):
@@ -1736,6 +1792,27 @@ def patch_signing_step_block(step_lines: Sequence[str], *, branch_if: str, sign_
             key_text = ""
         if key_text and workflow_key(key_text) == "if":
             has_if = True
+            # A block scalar `if: >-` holds its condition on the lines below,
+            # which this does not rewrite. Taking it as handled left the step
+            # on the branch guard alone, with no SIGNING_ENABLED written
+            # anywhere (#699). Already guarded, it is left as it is;
+            # otherwise the owner folds it back onto one line.
+            if BLOCK_SCALAR_HEADER_RE.match(key_text):
+                folded: list[str] = []
+                for later in step_lines[index + 1 :]:
+                    if later.strip() and len(later) - len(later.lstrip()) <= key_column:
+                        break
+                    folded.append(later.strip())
+                body = " ".join(part for part in folded if part)
+                if sign_if in body and LEGACY_SIGN_CONDITION.strip() not in body:
+                    patched.append(line)
+                    continue
+                raise CommandError(
+                    f"The signing step {signing_step_label(step_lines)!r} writes its 'if:' as a block "
+                    f"scalar ({stripped.strip()!r}), which this tool cannot rewrite, so it cannot add "
+                    f"the guard that keeps signing off pull requests and repositories without a key. "
+                    f"Put that condition on one line after 'if:', then run this update again."
+                )
             # Drop the legacy clause first. Rewriting around it would leave
             # "... && env.SIGNING_ENABLED == 'true' && env.COSIGN_PRIVATE_KEY != ''",
             # whose second half tests a job-level variable that no longer
@@ -1752,9 +1829,18 @@ def patch_signing_step_block(step_lines: Sequence[str], *, branch_if: str, sign_
     if has_if or not patched:
         return patched
 
-    first_line = patched[0]
-    indent = first_line[: len(first_line) - len(first_line.lstrip())] + "  "
-    return [patched[0], f"{indent}if: {sign_if}", *patched[1:]]
+    # At the step's own key column: `indent + "  "` put it two columns
+    # short of `-   name:`'s keys, and the step no longer parsed (#697).
+    return [patched[0], f"{' ' * key_column}if: {sign_if}", *patched[1:]]
+
+
+def signing_step_label(step_lines: Sequence[str]) -> str:
+    """The step's `name:`, or its first line when it has none, for an error."""
+    for line in step_lines:
+        stripped = line.strip().removeprefix("-").strip()
+        if workflow_key(stripped) == "name":
+            return stripped.split(":", 1)[1].strip()
+    return step_lines[0].strip()
 
 
 def patch_workflow_steps(workflow_text: str, patch_step: Callable[[list[str]], list[str]]) -> list[str]:
@@ -1773,6 +1859,11 @@ def patch_workflow_steps(workflow_text: str, patch_step: Callable[[list[str]], l
     Both workflow patchers walked their own byte-identical copy of this state
     machine, so a correction to the step-boundary rules reached only one of
     them. Returns the output lines; the caller decides how to join them.
+
+    A block scalar's body is the owner's script, not keys. A `run: |` that
+    writes a manifest with its own `steps:` restarted the walk inside the
+    script, and every real step after it went unpatched (#696). Those lines
+    go with whatever step holds them and decide nothing.
     """
     output: list[str] = []
     current_step: list[str] = []
@@ -1787,10 +1878,16 @@ def patch_workflow_steps(workflow_text: str, patch_step: Callable[[list[str]], l
         output.extend(patch_step(current_step))
         current_step = []
 
-    for line in file_lines(workflow_text):
+    lines = file_lines(workflow_text)
+    scalar_body = block_scalar_body_indexes(lines)
+    for index, line in enumerate(lines):
         stripped = line.strip()
         indent = len(line) - len(line.lstrip())
         is_item = stripped == "-" or stripped.startswith("- ")
+
+        if index in scalar_body:
+            (current_step if current_step else output).append(line)
+            continue
 
         if in_steps and stripped and not stripped.startswith("#"):
             if item_indent is None:
@@ -1836,11 +1933,13 @@ def add_signing_step_password(step_lines: Sequence[str]) -> list[str]:
     a failure that would only appear on someone else's first push.
     """
     lines = list(step_lines)
-    if any(line.strip().startswith("COSIGN_PASSWORD:") for line in lines):
+    # By parsed key name, so a quoted or spaced `"COSIGN_PRIVATE_KEY":` is
+    # the same key (#525, #698).
+    if any(workflow_key(line.strip()) == "COSIGN_PASSWORD" for line in lines):
         return lines
     for index, line in enumerate(lines):
         stripped = line.strip()
-        if stripped.startswith("COSIGN_PRIVATE_KEY:"):
+        if workflow_key(stripped) == "COSIGN_PRIVATE_KEY":
             indent = line[: len(line) - len(line.lstrip())]
             return lines[: index + 1] + [f"{indent}COSIGN_PASSWORD: ${{{{ secrets.COSIGN_PASSWORD }}}}"] + lines[index + 1 :]
     # No key in this step's own env means the shape is not the one this
@@ -2076,22 +2175,24 @@ def add_paths_ignore_entry(lines: list[str], item: str, anchors: Iterable[str]) 
       before `]` is valid YAML.
 
     Any other value -- a scalar, an alias, a tag -- is not a list this can
-    extend, so the lines come back unchanged, like any patcher's no-op. A
-    workflow with no `paths-ignore:` key gets the entry after the first
-    ``anchors`` line instead, the snapshot's own list item.
+    extend, so the lines come back unchanged, like any patcher's no-op.
+
+    The key is matched by its parsed name, so `"paths-ignore":` and
+    `paths-ignore :` are the same key (#525, #698). A workflow with no key
+    this reads gets the entry after the first ``anchors`` line instead, the
+    snapshot's own list item -- but only one that no other key holds. Tested
+    line by line ahead of the key, an anchor in `pull_request.paths:` won,
+    and the state file landed in a positive filter instead (#698).
     """
-    anchor_set = set(anchors)
     for index, line in enumerate(lines):
         stripped = line.strip()
-        if stripped in anchor_set:
-            indent = line[: len(line) - len(line.lstrip())]
-            return [*lines[: index + 1], f"{indent}- {item}", *lines[index + 1 :]]
-        if not stripped.startswith("paths-ignore:"):
+        key = WORKFLOW_KEY_RE.match(stripped)
+        if key is None or workflow_key_name(key) != "paths-ignore":
             continue
         extended = extend_flow_sequence_line(line, item)
         if extended is not None:
             return [*lines[:index], extended, *lines[index + 1 :]]
-        value = stripped.removeprefix("paths-ignore:").lstrip()
+        value = stripped[key.end() :].lstrip()
         opener = index
         if not value or value.startswith("#"):
             key_indent = len(line) - len(line.lstrip())
@@ -2113,7 +2214,32 @@ def add_paths_ignore_entry(lines: list[str], item: str, anchors: Iterable[str]) 
         rest = opened[bracket + 1 :].lstrip()
         patched = f"{opened[: bracket + 1]}{item}," + (f" {rest}" if rest else "")
         return [*lines[:opener], patched, *lines[opener + 1 :]]
+    anchor_set = set(anchors)
+    for index, line in enumerate(lines):
+        if line.strip() not in anchor_set or enclosing_workflow_key(lines, index) not in (None, "paths-ignore"):
+            continue
+        indent = line[: len(line) - len(line.lstrip())]
+        return [*lines[: index + 1], f"{indent}- {item}", *lines[index + 1 :]]
     return lines
+
+
+def enclosing_workflow_key(lines: Sequence[str], item_index: int) -> str | None:
+    """The key whose block sequence holds the `- ` item at ``lines[item_index]``.
+
+    That is the nearest line above with content that is shallower than the
+    item, or at its indent and not itself an item: YAML lets a sequence sit
+    at its key's own indent. None when that line is not a key this reads.
+    """
+    item = lines[item_index]
+    item_indent = len(item) - len(item.lstrip())
+    for line in reversed(lines[:item_index]):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent < item_indent or (indent == item_indent and not stripped.startswith("-")):
+            return workflow_key(stripped)
+    return None
 
 
 # The oldest Cosign release the generated signing step works with. Workflows
@@ -5099,7 +5225,9 @@ class App:
         *,
         source_label: str,
     ) -> bool:
-        packages = unique(candidates)
+        # Same as add_packages_to_config (#521): a name already listed adds
+        # nothing, so drop it before the lookup and the "Added N" count.
+        packages = [package for package in unique(candidates) if package not in self.config.removed_packages]
         if not packages:
             return False
         try:
