@@ -17,8 +17,7 @@ from pathlib import Path
 
 # The gate lives only in .coverage-thresholds.json; the badge turns green at
 # the same number the build fails below, so it is read rather than repeated.
-THRESHOLDS_FILE = Path(__file__).resolve().with_name(".coverage-thresholds.json")
-DEFAULT_HIGH = int(json.loads(THRESHOLDS_FILE.read_text(encoding="utf-8"))["gated"]["unit"])
+DEFAULT_HIGH = int(json.loads(Path(__file__).resolve().with_name(".coverage-thresholds.json").read_text(encoding="utf-8"))["gated"]["unit"])
 DEFAULT_LOW = 75
 
 
