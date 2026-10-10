@@ -259,7 +259,7 @@ cosign verify \
   --certificate-identity-regexp '^https://github\.com/Danathar/atomic-image-builder/\.github/workflows/publish-image\.yml@refs/(heads/main|tags/.+)$' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   "$ref" &&
-  podman run --rm -it -e GH_TOKEN="$(gh auth token)" "$ref"
+  podman run --rm -it -e GH_TOKEN="$(gh auth token --hostname github.com)" "$ref"
 ```
 
 Verifying `:latest` and then running `:latest` would be two lookups of a
