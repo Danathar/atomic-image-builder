@@ -2,9 +2,9 @@
 #
 # Behavioural end-to-end tests for the packaged container image.
 #
-# Every non-interactive path the packaged entrypoint has. The guided wizard
-# needs a TTY, so the only other end-to-end reachable behaviour is the
-# preflight failure, which is checked last.
+# Every non-interactive path the packaged entrypoint has: --version and -V,
+# --help and -h, the unrecognised-argument exit, and the preflight failure.
+# The guided wizard needs a TTY, so nothing else is reachable end to end.
 #
 # Usage: tests/e2e/smoke.sh [IMAGE]
 #
@@ -30,6 +30,17 @@ echo "e2e: smoke testing $image"
 podman run --rm "$image" --version | grep -F "aib-tool"
 podman run --rm "$image" -V | grep -F "aib-tool"
 podman run --rm "$image" --help | grep -F -- "--version"
+podman run --rm "$image" -h | grep -F -- "--version"
+
+# An unrecognised argument list must fail with usage on stderr and exit 2,
+# not clear the screen and wait at a prompt. This is the path a TTY-less
+# `podman run` with a stray argument reaches.
+status=0
+bogus_stderr="$(podman run --rm "$image" --bogus 2>&1 >/dev/null)" || status=$?
+if [ "$status" -ne 2 ]; then
+    e2e_fail "--bogus exited $status, expected 2"
+fi
+printf '%s\n' "$bogus_stderr" | grep -F "unrecognized arguments"
 
 # The image exposes the same command name the Homebrew formula does.
 podman run --rm --entrypoint aib-tool "$image" --version | grep -F "aib-tool"

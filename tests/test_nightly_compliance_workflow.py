@@ -11,7 +11,7 @@ job's failure mode is silence: a dropped or weakened run produces no red.
 Three steps carry a `run: |` block and this module executes all three:
 
 * *Install test tooling* is what makes this job's gate comparable to ci.yml's.
-  The suite skips tests when `actionlint` or `just` are missing, and a skipped
+  The suite skips tests when `hadolint`, `actionlint`, `just` or `gum` are missing, and a skipped
   test is still counted in "Ran N tests" -- so a tarball that arrives corrupt,
   a `tar` member renamed, or a `$GITHUB_PATH` line that publishes the wrong
   directory all leave the job reporting the same gate under the same name
@@ -69,11 +69,16 @@ UNIT_SUITE = "unittest discover -s tests"
 # The skipUnless gates that decide whether this suite measures what it claims
 # to: a tool name looked up with shutil.which. Written as a pattern rather than
 # quoted in a comment so this file's own prose cannot match it.
-_SKIP_GATE = re.compile(r"skipUnless\(\s*shutil\.which\(\s*\"([^\"]+)\"")
+# Two spellings exist: the decorator, and the inline `which(...) is None` guard
+# followed by skipTest. The inline form hid gum and hadolint from this scan.
+_SKIP_GATE = re.compile(
+    r"skipUnless\(\s*shutil\.which\(\s*\"([^\"]+)\""
+    r"|shutil\.which\(\s*\"([^\"]+)\"\s*\)\s+is\s+None\s*:\s*self\.skipTest\("
+)
 
-# Present on every GitHub runner and in every container this repo builds, so
-# there is nothing for a workflow to install and nothing to assert.
-ALWAYS_PRESENT = {"bash"}
+# Present on every GitHub runner image (shellcheck included), so there is
+# nothing for a workflow to install and nothing to assert.
+ALWAYS_PRESENT = {"bash", "sh", "jq", "shellcheck"}
 
 PYTHON3_SHIM = f"""#!/usr/bin/env bash
 exec "{sys.executable}" "$@"
@@ -129,14 +134,17 @@ def _write_stub(bin_dir: Path, name: str, body: str) -> None:
     path.chmod(0o755)
 
 
-def _tool_tarball(path: Path, member: str) -> None:
-    """A gzipped tarball holding one executable named *member* at its root."""
+def _tool_tarball(path: Path, member: str, arcname: str | None = None) -> None:
+    """A gzipped tarball holding one executable named *member*.
+
+    It sits at the root unless *arcname* gives its path inside the archive.
+    """
     with tempfile.TemporaryDirectory() as staging:
         binary = Path(staging) / member
         binary.write_text(f"#!/usr/bin/env bash\necho {member}\n")
         binary.chmod(0o755)
         with tarfile.open(path, "w:gz") as archive:
-            archive.add(binary, arcname=member)
+            archive.add(binary, arcname=arcname or member)
 
 
 class _ToolingRun:
@@ -166,6 +174,8 @@ def run_tooling_step(tmp: Path, *, payloads: dict[str, bytes] | None = None, rea
     if payloads is None:
         _tool_tarball(payload_dir / "actionlint.tar.gz", "actionlint")
         _tool_tarball(payload_dir / "just.tar.gz", "just")
+        _tool_tarball(payload_dir / "gum.tar.gz", "gum", "gum_0.17.0_Linux_x86_64/gum")
+        (payload_dir / "hadolint").write_text("#!/usr/bin/env bash\necho hadolint\n")
     else:
         for name, data in payloads.items():
             (payload_dir / name).write_bytes(data)
@@ -368,7 +378,7 @@ class InstallTestToolingStepTests(unittest.TestCase):
             run = run_tooling_step(Path(tmp), real_sha256sum=False)
             self.assertEqual(run.proc.returncode, 0, run.proc.stderr)
             self.assertEqual(run.published, [str(run.bin_dir)])
-            for tool in ("actionlint", "just"):
+            for tool in ("hadolint", "actionlint", "just", "gum"):
                 with self.subTest(tool=tool):
                     binary = Path(run.published[0]) / tool
                     self.assertTrue(binary.is_file(), f"{tool} is not on the published PATH entry")
@@ -389,7 +399,7 @@ class InstallTestToolingStepTests(unittest.TestCase):
                 for argv in run.commands
                 if argv[0].endswith("curl") and "-o" in argv
             ]
-            self.assertEqual(len(downloaded), 2, run.commands)
+            self.assertEqual(len(downloaded), 4, run.commands)
             checked = []
             for line in run.checksum_lines:
                 digest, _, path = line.partition("  ")
@@ -413,7 +423,7 @@ class InstallTestToolingStepTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run = run_tooling_step(Path(tmp), real_sha256sum=False)
             curls = [argv for argv in run.commands if argv[0].endswith("curl")]
-            self.assertEqual(len(curls), 2, run.commands)
+            self.assertEqual(len(curls), 4, run.commands)
             for argv in curls:
                 with self.subTest(argv=argv):
                     flags = "".join(arg for arg in argv if arg.startswith("-") and not arg.startswith("--"))
@@ -436,10 +446,10 @@ class InstallTestToolingStepTests(unittest.TestCase):
 class SuiteToolingIsNotUnderstatedTests(unittest.TestCase):
     """Every tool the suite skips without has to be one this job installs.
 
-    The job's comment says `actionlint` and `just` are there "because the unit
+    The job's comment says `hadolint`, `actionlint`, `just` and `gum` are there "because the unit
     suite skips tests without them, and a skipped test is still counted in `Ran
     N tests`". tests/test_workflow_dependencies.py enforces that against a
-    hand-written set of two repositories -- so the day a test starts skipping
+    hand-written set of repositories -- so the day a test starts skipping
     on a third tool, the list does not grow, this job installs two of three,
     and it reports ci.yml's gate under ci.yml's name while running less of it.
     Nothing joins that list to the suite's own skip gates. This does, by
@@ -450,13 +460,14 @@ class SuiteToolingIsNotUnderstatedTests(unittest.TestCase):
     def _required_tools(self) -> set[str]:
         gates: set[str] = set()
         for path in sorted(Path(__file__).resolve().parent.glob("*.py")):
-            gates.update(_SKIP_GATE.findall(path.read_text()))
+            for decorated, inline in _SKIP_GATE.findall(path.read_text()):
+                gates.add(decorated or inline)
         return gates - ALWAYS_PRESENT
 
     def test_the_suite_gates_on_at_least_one_installed_tool(self) -> None:
         # If the regex above ever stops matching, every assertion in this class
         # passes by finding nothing. Fail loudly instead.
-        self.assertTrue(self._required_tools(), "no `skipUnless(shutil.which(...))` gate found")
+        self.assertTrue(self._required_tools(), "no `shutil.which(...)` skip gate found")
 
     def test_the_nightly_job_installs_every_tool_the_suite_skips_without(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

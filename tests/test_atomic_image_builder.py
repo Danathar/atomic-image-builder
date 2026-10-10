@@ -878,6 +878,106 @@ class BuilderTests(unittest.TestCase):
                     [*step[:2], f"        {key} {sign_if}"],
                 )
 
+    def test_patch_signing_step_block_reads_the_key_column_of_a_bare_or_wide_dash_item(self) -> None:
+        # A bare `-` carries its keys on the lines below, and `-   name:`
+        # puts them past one space. Read from the dash line, the bare item's
+        # own `if:` was missed and a second one inserted, which Actions
+        # rejects, and the wide item's guard landed two columns short of its
+        # keys, which does not parse (#697).
+        branch_if = "github.ref == 'refs/heads/main'"
+        sign_if = f"{branch_if} && env.SIGNING_ENABLED == 'true'"
+        bare = ["      -", "        name: Install Cosign", "        uses: sigstore/cosign-installer@v3"]
+        cases = {
+            "bare dash with if": (
+                [*bare, f"        if: {branch_if}"],
+                [*bare, f"        if: {sign_if}"],
+            ),
+            "bare dash without if": (bare, [bare[0], f"        if: {sign_if}", *bare[1:]]),
+            "three spaces after the dash": (
+                ["      -   name: Install Cosign", "          uses: sigstore/cosign-installer@v3"],
+                [
+                    "      -   name: Install Cosign",
+                    f"          if: {sign_if}",
+                    "          uses: sigstore/cosign-installer@v3",
+                ],
+            ),
+        }
+        for label, (step, expected) in cases.items():
+            with self.subTest(shape=label):
+                self.assertEqual(patch_signing_step_block(step, branch_if=branch_if, sign_if=sign_if), expected)
+
+    def test_patch_signing_step_block_refuses_a_block_scalar_if_it_cannot_rewrite(self) -> None:
+        # yamlfmt and prettier fold a long condition into `if: >-`. Taken as
+        # the step's condition but never rewritten, it left the step on the
+        # branch guard alone and nothing read SIGNING_ENABLED (#699). One
+        # already carrying the guard is left as it is.
+        branch_if = "github.ref == 'refs/heads/main'"
+        sign_if = f"{branch_if} && env.SIGNING_ENABLED == 'true'"
+        head = ["      - name: Install Cosign", "        uses: sigstore/cosign-installer@v3", "        if: >-"]
+        guarded = [*head, "          github.ref == 'refs/heads/main' &&", "          env.SIGNING_ENABLED == 'true'"]
+        self.assertEqual(patch_signing_step_block(guarded, branch_if=branch_if, sign_if=sign_if), guarded)
+        for header in ("if: >-", "if: |", "if: >"):
+            with self.subTest(header=header):
+                step = [*head[:2], f"        {header}", f"          {branch_if}"]
+                with self.assertRaisesRegex(CommandError, r"'Install Cosign'.*block scalar"):
+                    patch_signing_step_block(step, branch_if=branch_if, sign_if=sign_if)
+
+    def test_patch_container_workflow_refuses_a_folded_if_on_a_cosign_step(self) -> None:
+        # The bundled snapshot with Install Cosign's condition folded the way
+        # yamlfmt writes it. Patched as before, it shipped with no
+        # SIGNING_ENABLED anywhere and nothing reported (#699).
+        app = self.make_app()
+        snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
+        branch_if = "github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+        uses = "        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2\n"
+        original = f"      - name: Install Cosign\n{uses}        if: {branch_if}\n"
+        self.assertIn(original, snapshot)
+        folded = snapshot.replace(
+            original,
+            f"      - name: Install Cosign\n{uses}        if: >-\n"
+            "          github.event_name != 'pull_request' &&\n"
+            "          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)\n",
+        )
+        with self.assertRaisesRegex(CommandError, r"'Install Cosign'.*block scalar"):
+            app.patch_container_workflow(folded)
+
+    def test_patch_workflow_signing_steps_reads_past_a_steps_line_in_a_script(self) -> None:
+        # A `run: |` that writes a manifest with its own `steps:` restarted
+        # the step walk inside the script, and the real cosign steps after
+        # it were left unguarded with nothing reported (#696).
+        branch_if = "github.event_name != 'pull_request'"
+        sign_if = f"{branch_if} && env.SIGNING_ENABLED == 'true'"
+        script = [
+            "        run: |",
+            "          cat > task.yml <<'EOF'",
+            "          steps:",
+            "            - name: hello",
+            "              image: alpine",
+            "          EOF",
+        ]
+        workflow = "\n".join(
+            [
+                "jobs:",
+                "  build_push:",
+                "    steps:",
+                "      - name: Write task",
+                *script,
+                "      - name: Install Cosign",
+                "        uses: sigstore/cosign-installer@v3",
+                f"        if: {branch_if}",
+                "      - name: Sign container image",
+                "        run: cosign sign -y ghcr.io/example/test:latest",
+                "",
+            ]
+        )
+        patched = atomic_image_builder.patch_workflow_signing_steps(workflow, branch_if=branch_if, sign_if=sign_if)
+        lines = patched.splitlines()
+        self.assertEqual(lines[4 : 4 + len(script)], script)
+        self.assertIn(f"        if: {sign_if}", lines[lines.index("      - name: Install Cosign") :])
+        sign_at = lines.index("      - name: Sign container image")
+        self.assertEqual(lines[sign_at + 1], f"        if: {sign_if}")
+        self.assertEqual(patched.count("env.SIGNING_ENABLED == 'true'"), 2)
+
     def test_patch_container_workflow_guards_a_sign_step_whose_script_reads_like_an_if_key(self) -> None:
         """A `run: |` line that parses as an `if` key is script, not the step's condition.
 
@@ -1103,10 +1203,9 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(app.patch_container_workflow(patched), patched)
 
     def test_patch_container_workflow_anchors_state_ignore_to_readme_entry(self) -> None:
-        # Fallback for a workflow whose paths-ignore key is written in a form
-        # the key match does not see (YAML permits a quoted key). Without it
-        # the state file would never be added and every state-only commit
-        # would trigger a rebuild.
+        # A quoted paths-ignore key is the same key (#698), and once the
+        # anchor entry is in its list either route adds the state file.
+        # Without it every state-only commit would trigger a rebuild.
         app = self.make_app()
         workflow = textwrap.dedent(
             """\
@@ -1930,6 +2029,53 @@ class BuilderTests(unittest.TestCase):
                 self.assertEqual(migrated.count("&& env.SIGNING_ENABLED == 'true'"), 2)
                 self.assertIn("        if: env.COSIGN_PRIVATE_KEY != ''", migrated.splitlines())
 
+    def test_legacy_migration_fails_closed_for_a_job_key_in_any_spelling_or_indent(self) -> None:
+        # The check deciding what the strip removed matched one literal
+        # six-space, bare, same-line spelling. The strip itself reads the key
+        # by name at the block's own indent, so at eight, quoted, spaced or
+        # with its value on the next line the key went, the check saw
+        # nothing removed, and the surviving read was false forever (#695).
+        app = self.make_app()
+        job_env = (
+            "      BUILD_FLAVOR: main\n"
+            "      COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}\n"
+            "      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}\n"
+        )
+        self.assertIn(job_env, self.LEGACY_SIGNING_JOB)
+        reader = "\n".join(
+            ["      - name: Report signing", "        if: env.COSIGN_PRIVATE_KEY != ''", "        run: echo signed", ""]
+        )
+        shapes = {
+            "eight": textwrap.indent(job_env, "  "),
+            "quoted": job_env.replace("      COSIGN_PRIVATE_KEY:", '      "COSIGN_PRIVATE_KEY":'),
+            "space before colon": job_env.replace("      COSIGN_PRIVATE_KEY:", "      COSIGN_PRIVATE_KEY :"),
+            "value on next line": job_env.replace(
+                "      COSIGN_PRIVATE_KEY: ${{", "      COSIGN_PRIVATE_KEY:\n        ${{"
+            ),
+        }
+        for label, env in shapes.items():
+            with self.subTest(shape=label):
+                legacy = self.LEGACY_SIGNING_JOB.replace(job_env, env, 1) + reader
+                with self.assertRaisesRegex(CommandError, r"if: env\.COSIGN_PRIVATE_KEY != ''.*published unsigned"):
+                    app.patch_container_workflow(legacy)
+
+    def test_strip_job_env_entries_leaves_an_emptied_env_as_an_empty_mapping(self) -> None:
+        # A bare `env:` is null. Removing the last entry leaves `env: {}`,
+        # the way strip_permission_entries() leaves `permissions: {}` (#695).
+        workflow = (
+            "jobs:\n"
+            "  build:\n"
+            "    env:\n"
+            "        # legacy signing\n"
+            "        COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}\n"
+            "        COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}\n"
+            "    steps: []\n"
+        )
+        self.assertEqual(
+            atomic_image_builder.strip_job_env_entries(workflow, ["COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD"]),
+            "jobs:\n  build:\n    env: {}\n        # legacy signing\n    steps: []\n",
+        )
+
     @staticmethod
     def job_env_entries_by_job(workflow: str) -> dict[str, list[str]]:
         """Job-level env entries keyed by job name, compared by whole line.
@@ -2253,6 +2399,72 @@ class BuilderTests(unittest.TestCase):
             atomic_image_builder.strip_permission_entries(workflow, ["id-token"]),
             "jobs:\n  build:\n    permissions: {}\n      # OIDC for signing\n    # scopes below\n    steps: []\n",
         )
+
+    def test_strip_permission_entries_reads_the_scope_in_any_spelling(self) -> None:
+        # `"id-token": write`, `'id-token': write` and `id-token : write` are
+        # the one scope to YAML. Matched by spelling, each survived and the
+        # unused OIDC grant stayed (#698). A value on the next line goes with
+        # its key.
+        for entry in ('"id-token": write', "'id-token': write", "id-token : write", "id-token:\n        write"):
+            with self.subTest(entry=entry):
+                workflow = f"jobs:\n  build:\n    permissions:\n      contents: read\n      {entry}\n    steps: []\n"
+                self.assertEqual(
+                    atomic_image_builder.strip_permission_entries(workflow, ["id-token"]),
+                    "jobs:\n  build:\n    permissions:\n      contents: read\n    steps: []\n",
+                )
+
+    def test_add_signing_step_password_reads_the_key_in_any_spelling(self) -> None:
+        # A quoted or spaced COSIGN_PRIVATE_KEY is the same key. Missed, the
+        # signing step got no password and cosign could not decrypt the key
+        # (#698). A quoted COSIGN_PASSWORD already there is not doubled.
+        password = "          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}"
+        for key in ('"COSIGN_PRIVATE_KEY":', "'COSIGN_PRIVATE_KEY':", "COSIGN_PRIVATE_KEY :"):
+            with self.subTest(key=key):
+                step = ["      - name: Sign", "        env:", f"          {key} ${{{{ secrets.SIGNING_SECRET }}}}", "        run: cosign sign"]
+                self.assertEqual(
+                    atomic_image_builder.add_signing_step_password(step),
+                    [*step[:3], password, step[3]],
+                )
+        step = [
+            "      - name: Sign",
+            "        env:",
+            "          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}",
+            '          "COSIGN_PASSWORD": ${{ secrets.COSIGN_PASSWORD }}',
+            "        run: cosign sign",
+        ]
+        self.assertEqual(atomic_image_builder.add_signing_step_password(step), step)
+
+    def test_add_paths_ignore_entry_reads_the_key_in_any_spelling(self) -> None:
+        # Matched by spelling, a quoted or spaced key with no anchor entry in
+        # its list was skipped, and every state-file commit rebuilt (#698).
+        for key in ('"paths-ignore":', "'paths-ignore':", "paths-ignore :"):
+            with self.subTest(key=key):
+                self.assertEqual(
+                    atomic_image_builder.add_paths_ignore_entry(
+                        ["on:", "  push:", f"    {key}", "      - 'docs/**'"], "'x'", ("- '**/README.md'",)
+                    ),
+                    ["on:", "  push:", f"    {key}", "      - 'x'", "      - 'docs/**'"],
+                )
+                self.assertEqual(
+                    atomic_image_builder.add_paths_ignore_entry(
+                        ["on:", "  push:", f"    {key} ['docs/**']"], "'x'", ("- '**/README.md'",)
+                    ),
+                    ["on:", "  push:", f"    {key} ['docs/**', 'x']"],
+                )
+
+    def test_add_paths_ignore_entry_ignores_an_anchor_in_another_list(self) -> None:
+        # The anchor was tested on every line ahead of the key, so one in a
+        # positive `paths:` filter won: the state file joined the pull
+        # request's paths and push.paths-ignore was untouched (#698).
+        anchors = ("- '**/README.md'",)
+        pull_request = ["on:", "  pull_request:", "    paths:", "      - '**/README.md'", "      - 'docs/**'"]
+        self.assertEqual(
+            atomic_image_builder.add_paths_ignore_entry(
+                [*pull_request, "  push:", "    paths-ignore:", "      - '**/README.md'"], "'x'", anchors
+            ),
+            [*pull_request, "  push:", "    paths-ignore:", "      - 'x'", "      - '**/README.md'"],
+        )
+        self.assertEqual(atomic_image_builder.add_paths_ignore_entry(pull_request, "'x'", anchors), pull_request)
 
     def test_strip_permission_entries_leaves_a_block_scalar_alone(self) -> None:
         # A `run: |` script that prints a permissions block is text, and the
@@ -4645,6 +4857,14 @@ class BuilderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "repo_name must be a string"):
             atomic_image_builder.config_from_state_payload({"repo_name": 42})
 
+    def test_config_from_state_payload_rejects_a_lone_surrogate(self) -> None:
+        # json.loads accepts the escape; the first file write would then raise
+        # UnicodeEncodeError (#700).
+        for payload in ('{"image_desc": "bad \\udc80 desc"}', '{"packages": ["tmux", "\\udc80"]}'):
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ValueError, "not valid text"):
+                    atomic_image_builder.config_from_state_payload(json.loads(payload))
+
     def test_config_from_state_payload_reads_every_config_field(self) -> None:
         # state_payload() writes Config with asdict(), so every field reaches the
         # state file. A field the loader cannot read would be dropped on the next
@@ -4992,6 +5212,19 @@ class BuilderTests(unittest.TestCase):
         self.assertFalse(added)
         self.assertEqual(app.config.removed_packages, [])
         self.assertTrue(any(level == "error" and "not found" in message for level, message in app.gum.messages))
+
+    def test_add_removed_packages_to_config_skips_names_already_listed(self) -> None:
+        app = self.make_app()
+        app.gum = GumStub()
+        app.config.removed_packages = ["firefox"]
+        with patch.object(app, "lookup_installed_host_packages") as installed_mock:
+            with patch.object(app, "lookup_host_packages") as lookup_mock:
+                added = app.add_removed_packages_to_config(["firefox"], source_label="manual entry")
+        installed_mock.assert_not_called()
+        lookup_mock.assert_not_called()
+        self.assertFalse(added)
+        self.assertEqual(app.config.removed_packages, ["firefox"])
+        self.assertFalse(any(level == "success" for level, _message in app.gum.messages))
 
     def test_add_services_manually_accepts_valid_tokens(self) -> None:
         app = self.make_app()
@@ -8227,6 +8460,20 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("every later bootc upgrade", hints)
         self.assertIn("dropping it disables both checks", hints.lower())
 
+    def test_build_status_lowercases_the_repo_in_the_image_reference(self) -> None:
+        app = self.make_app()
+        stub = GumStub()
+        app.gum = stub
+        runs = json.dumps([{"conclusion": "success", "workflowName": "build", "displayTitle": "t", "url": "u"}])
+        with patch("atomic_image_builder.run", return_value=subprocess.CompletedProcess([], 0, runs, "")):
+            with patch.object(app, "repo_carried_scan_customizations", return_value=True):
+                with patch.object(app, "repo_signing_enabled", return_value=True):
+                    with redirect_stdout(io.StringIO()):
+                        app.render_build_status("Example", "My-Image")
+        hints = " ".join(m for level, m in stub.messages if level == "hint")
+        self.assertIn("ghcr.io/example/my-image:latest", hints)
+        self.assertNotIn("My-Image:latest", hints)
+
     def test_build_status_says_a_green_build_is_not_yet_readable(self) -> None:
         # A green build is not a switchable image: the package it published is
         # private, and `gh repo create --public` does not change that -- package
@@ -10747,6 +10994,28 @@ class BuilderTests(unittest.TestCase):
             app.write_project_files(repo_dir, include_workflow=False)
             self.assertEqual((repo_dir / "cosign.pub").read_text(), "PUBLIC KEY DATA\n")
 
+    def test_write_project_files_regenerated_containerfile_keeps_the_system_files_overlay(self) -> None:
+        # #701: a Containerfile regenerated after deletion staged only
+        # build_files, so build.sh's guarded system_files copy silently did
+        # nothing and the user's overlay stopped reaching the image.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.write_project_files(repo_dir, include_workflow=False)
+            (repo_dir / "system_files/etc").mkdir(parents=True)
+            (repo_dir / "system_files/etc/motd").write_text("hello\n")
+            (repo_dir / "Containerfile").unlink()
+            app.write_project_files(repo_dir, include_workflow=False)
+            self.assertIn("COPY system_files /system_files", (repo_dir / "Containerfile").read_text())
+            self.assertEqual((repo_dir / "system_files/etc/motd").read_text(), "hello\n")
+
+    def test_write_project_files_creates_system_files_for_a_from_scratch_repo(self) -> None:
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            app.write_project_files(repo_dir, include_workflow=False)
+            self.assertTrue((repo_dir / "system_files").is_dir())
+
     def test_write_bluebuild_project_files_writes_generated_cosign_pub(self) -> None:
         # The Containerfile-method write path has its own cosign.pub write
         # (test_write_project_files_writes_generated_cosign_pub above); the
@@ -10925,6 +11194,21 @@ class BuilderTests(unittest.TestCase):
                     owner, repo = app.select_repo(require_state_file=True)
 
         self.assertEqual((owner, repo), ("example", "managed-repo"))
+
+    def test_select_repo_lowercases_a_picked_repo_renamed_with_capitals(self) -> None:
+        # GitHub names are case-insensitive, but the tool's repo-name rule is
+        # lowercase, so a picked "My-Image" must come back as "my-image".
+        app = self.make_app()
+        app.github_available = True
+        app.github_user = "example"
+        stub = GumStub()
+        stub.filter = lambda options, **_kwargs: options[0]
+        app.gum = stub
+        with patch.object(app, "gh_json_with_spinner", return_value=[{"name": "My-Image"}]):
+            with redirect_stdout(io.StringIO()):
+                owner, repo = app.select_repo()
+
+        self.assertEqual((owner, repo), ("example", "my-image"))
 
     def test_select_repo_allows_manual_entry_when_repo_list_payload_is_null(self) -> None:
         app = self.make_app()
@@ -12531,14 +12815,29 @@ class BuilderTests(unittest.TestCase):
         # cosign is handed $ref, and the run is chained off its exit status.
         self.assertIn('  "$ref" &&\n', verifying)
         # Pinned to github.com: bare `gh auth token` follows $GH_HOST (#705).
+        # The value goes in the environment, only the name in argv, so `ps`
+        # cannot show the token (#714).
         self.assertIn(
-            'podman run --rm -it -e GH_TOKEN="$(gh auth token --hostname github.com)" "$ref"',
+            'GH_TOKEN="$(gh auth token --hostname github.com)" podman run --rm -it -e GH_TOKEN "$ref"',
             verifying,
         )
+        self.assertNotIn('-e GH_TOKEN="', verifying)
         # Not the tag: that is the shape this replaced, where cosign checked
         # one resolution of `latest` and podman then went and asked for
         # another.
         self.assertNotIn("  ghcr.io/danathar/atomic-image-builder:latest\n```", verifying)
+
+    def test_install_docs_state_architecture_and_fedora_packaging_accurately(self) -> None:
+        # #715: git, gh and gum are Fedora packages; only cosign is not.
+        # #716: the image and wrapper are x86_64 only and the docs say so.
+        root = Path(__file__).resolve().parents[1]
+        installing = (root / "docs/installing.md").read_text()
+        formula = (root / "Formula/atomic-image-builder.rb").read_text()
+        self.assertNotIn("none of which are in Fedora's own repositories", installing)
+        self.assertNotIn("None of them are in", formula)
+        self.assertIn("Only `cosign` is missing from Fedora's own", installing)
+        self.assertIn("Only cosign is missing", formula)
+        self.assertIn("x86_64 only", installing.split("\n## ", 1)[0])
 
     def test_readme_coverage_badge_links_to_the_explainer(self) -> None:
         # Clicking the badge used to land on the raw trend CSV -- a wall of
@@ -13442,7 +13741,6 @@ class BuilderTests(unittest.TestCase):
         app.config.brew_enabled = False
         cf = app.generate_containerfile()
         self.assertNotIn("brew", cf.lower())
-        self.assertNotIn("system_files", cf)
 
     def test_generate_containerfile_builds_the_image_from_the_ctx_stage(self) -> None:
         # The Containerfile is the build contract, and the two assertions above
@@ -13456,13 +13754,16 @@ class BuilderTests(unittest.TestCase):
         app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
         app.config.brew_enabled = False
         instructions = parse_containerfile(app.generate_containerfile())
-        self.assertEqual([item.keyword for item in instructions], ["FROM", "COPY", "FROM", "RUN", "RUN"])
-        ctx, fill, base, build, lint = instructions
+        self.assertEqual([item.keyword for item in instructions], ["FROM", "COPY", "COPY", "FROM", "RUN", "RUN"])
+        ctx, fill, overlay, base, build, lint = instructions
         self.assertEqual(ctx.image, "scratch")
         self.assertEqual(ctx.stage, "ctx")
         # The context stage carries build_files, which is what /ctx/build.sh is.
         self.assertEqual(fill.sources, ("build_files",))
         self.assertEqual(fill.destination, "/")
+        # So does the system_files overlay that build.sh copies onto the image (#701).
+        self.assertEqual(overlay.sources, ("system_files",))
+        self.assertEqual(overlay.destination, "/system_files")
         self.assertEqual(base.image, "quay.io/fedora-ostree-desktops/silverblue:43")
         self.assertIsNone(base.stage, "the base stage is the final image, so it is unnamed")
         bind, *caches = build.mounts()
@@ -13495,9 +13796,9 @@ class BuilderTests(unittest.TestCase):
         instructions = parse_containerfile(app.generate_containerfile())
         self.assertEqual(
             [item.keyword for item in instructions],
-            ["FROM", "COPY", "FROM", "COPY", "RUN", "RUN", "RUN", "RUN", "RUN"],
+            ["FROM", "COPY", "COPY", "FROM", "COPY", "RUN", "RUN", "RUN", "RUN", "RUN"],
         )
-        brew_copy, brew_preset = instructions[3], instructions[4]
+        brew_copy, brew_preset = instructions[4], instructions[5]
         self.assertEqual(brew_copy.flag("from"), UNIVERSAL_BLUE_BREW_IMAGE)
         self.assertEqual(brew_copy.sources, ("/system_files",))
         self.assertEqual(brew_copy.destination, "/")
@@ -13512,11 +13813,11 @@ class BuilderTests(unittest.TestCase):
         # The two steps that fix what the COPY brought in sit between the
         # preset and the build: the login-shell sweep, then the drop-in that
         # confines brew-setup.service's staging to a private /tmp.
-        self.assertTrue(instructions[5].argument.startswith("rm -f "), instructions[5].argument)
-        self.assertIn(f"> {BREW_SETUP_DROPIN}", instructions[6].argument)
+        self.assertTrue(instructions[6].argument.startswith("rm -f "), instructions[6].argument)
+        self.assertIn(f"> {BREW_SETUP_DROPIN}", instructions[7].argument)
         # Presetting runs before the user's build.sh, not after it.
-        self.assertEqual(instructions[7].argument, "/ctx/build.sh")
-        self.assertEqual(instructions[8].argument, "bootc container lint")
+        self.assertEqual(instructions[8].argument, "/ctx/build.sh")
+        self.assertEqual(instructions[9].argument, "bootc container lint")
 
     def test_generate_containerfile_strips_the_brew_payloads_login_fragments(self) -> None:
         # The COPY above brings in three fragments this repository does not
@@ -13530,7 +13831,7 @@ class BuilderTests(unittest.TestCase):
         app.config.base_image_uri = "quay.io/fedora-ostree-desktops/silverblue:43"
         app.config.brew_enabled = True
         instructions = parse_containerfile(app.generate_containerfile())
-        brew_copy, _preset, sweep = instructions[3], instructions[4], instructions[5]
+        brew_copy, _preset, sweep = instructions[4], instructions[5], instructions[6]
         self.assertEqual(brew_copy.flag("from"), UNIVERSAL_BLUE_BREW_IMAGE)
         self.assertLess(brew_copy.line, sweep.line)
         self.assertTrue(sweep.argument.startswith("rm -f "), sweep.argument)
@@ -15139,6 +15440,19 @@ class BuilderTests(unittest.TestCase):
         self.assertIn(DEFAULT_GITHUB_BUILD_CRON, patched)
         self.assertNotIn("00 06", patched)
 
+    def test_patch_bluebuild_workflow_drops_the_comment_explaining_the_old_cron(self) -> None:
+        app = self.make_bluebuild_app()
+        template = (
+            '    - cron: "00 06 * * *" # build at 06:00 UTC every day\n'
+            "      # (20 minutes after last ublue images start building)\n"
+            "  push:\n"
+        )
+        patched = app.patch_bluebuild_workflow(template)
+        self.assertIn(DEFAULT_GITHUB_BUILD_CRON, patched)
+        self.assertNotIn("20 minutes", patched)
+        self.assertNotIn("06:00", patched)
+        self.assertIn("  push:", patched)
+
     def test_patch_bluebuild_workflow_adds_state_file_ignore(self) -> None:
         app = self.make_bluebuild_app()
         template = '    paths-ignore:\n      - "**.md"\n'
@@ -15146,9 +15460,9 @@ class BuilderTests(unittest.TestCase):
         self.assertIn(STATE_FILE, patched)
 
     def test_patch_bluebuild_workflow_anchors_state_ignore_to_md_entry(self) -> None:
-        # Fallback for a paths-ignore key written in a form the key match does
-        # not see. Without it the state file is never ignored and every
-        # state-only commit triggers a rebuild.
+        # A quoted paths-ignore key is the same key (#698). Without the
+        # entry the state file is never ignored and every state-only commit
+        # triggers a rebuild.
         app = self.make_bluebuild_app()
         template = '    "paths-ignore":\n      - "**.md"\n'
         patched = app.patch_bluebuild_workflow(template)
@@ -15993,6 +16307,31 @@ class BuilderTests(unittest.TestCase):
             app.choose_method(step=1, total_steps=5)
         self.assertEqual(app.config.method, "bluebuild")
         self.assertTrue(any(level == "success" and "BlueBuild" in msg for level, msg in stub.messages))
+
+    def test_choose_method_offers_the_tag_when_bluebuild_meets_a_digest_pin(self) -> None:
+        app = self.make_app()
+        app.config.base_image_uri = "ghcr.io/ublue-os/bazzite:stable@sha256:" + "0" * 64
+        stub = GumStub()
+        stub.choose = lambda options, **_kwargs: [options[1]]
+        stub.confirm = lambda prompt, default=False: True
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.choose_method(step=1, total_steps=5)
+        self.assertEqual(app.config.method, "bluebuild")
+        self.assertNotIn("@", app.config.base_image_uri)
+
+    def test_choose_method_falls_back_to_containerfile_when_digest_pin_is_kept(self) -> None:
+        app = self.make_app()
+        digest_uri = "ghcr.io/ublue-os/bazzite:stable@sha256:" + "0" * 64
+        app.config.base_image_uri = digest_uri
+        stub = GumStub()
+        stub.choose = lambda options, **_kwargs: [options[1]]
+        stub.confirm = lambda prompt, default=False: False
+        app.gum = stub
+        with redirect_stdout(io.StringIO()):
+            app.choose_method(step=1, total_steps=5)
+        self.assertEqual(app.config.method, "containerfile")
+        self.assertEqual(app.config.base_image_uri, digest_uri)
 
     def test_choose_method_defaults_to_containerfile_on_empty_choice(self) -> None:
         app = self.make_app()

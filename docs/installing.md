@@ -2,6 +2,13 @@
 
 Three ways to run Atomic Image Builder. Pick one; they are the same tool.
 
+> [!NOTE]
+> **x86_64 only.** The published container image is built for x86_64 and
+> nothing else, and the Homebrew dependencies are installed from x86_64 Linux
+> bottles. On an aarch64 host (Fedora Asahi Remix, aarch64 Bluefin) the `aib`
+> wrapper would pull and verify the image and then fail to start it with an
+> "exec format error".
+
 | Path                   | Command                     | Tracks                      | Needs                                     |
 | ---------------------- | --------------------------- | --------------------------- | ----------------------------------------- |
 | [Homebrew](#homebrew)  | `aib-tool`                  | Tagged releases             | `brew`, plus host `dnf5` and `rpm-ostree` |
@@ -43,7 +50,9 @@ If you already have [Homebrew](https://brew.sh/) — Universal Blue images such 
 [Bazzite](https://bazzite.gg), [Bluefin](https://projectbluefin.io), and [Aurora](https://getaurora.dev) ship with it —
 this is the shortest path. It
 installs the tool as an ordinary command and brings `gum`, `git`, `gh`, and
-`cosign` along with it, none of which are in Fedora's own repositories:
+`cosign` along with it. Only `cosign` is missing from Fedora's own
+repositories, but on an atomic desktop none of the four can be layered without
+a reboot, so Homebrew supplies them:
 
 ```bash
 brew tap danathar/aib https://github.com/Danathar/atomic-image-builder
@@ -259,7 +268,7 @@ cosign verify \
   --certificate-identity-regexp '^https://github\.com/Danathar/atomic-image-builder/\.github/workflows/publish-image\.yml@refs/(heads/main|tags/.+)$' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   "$ref" &&
-  podman run --rm -it -e GH_TOKEN="$(gh auth token --hostname github.com)" "$ref"
+  GH_TOKEN="$(gh auth token --hostname github.com)" podman run --rm -it -e GH_TOKEN "$ref"
 ```
 
 Verifying `:latest` and then running `:latest` would be two lookups of a
@@ -267,7 +276,11 @@ mutable tag with a check in between, and it is the second one that decides what
 runs. Resolving the digest once and handing the same `$ref` to both closes
 that — the same reason the wrapper runs the digest it verified rather than the
 tag that produced it. The `&&` does the rest of the work: if `cosign verify`
-exits non-zero nothing runs, and `gh auth token` is never even called.
+exits non-zero nothing runs, and `gh auth token` is never even called. The
+token is set in `podman`'s environment and only its name (`-e GH_TOKEN`) is
+passed on the command line, the same way the wrapper does it: a value written
+into the command line can be read by any local user with `ps` for as long as
+the session lasts.
 
 That command needs cosign 3 or newer; `brew install cosign` if you do not have
 it, `brew upgrade cosign` if `cosign version` reports 2.x. The image is signed

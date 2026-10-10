@@ -49,7 +49,11 @@ entries; that shape raises CommandError rather than writing a second env: key
 into the same job.  strip_job_env_entries, which removes the legacy
 COSIGN_PRIVATE_KEY/COSIGN_PASSWORD, reads the same block at the same indent.
 Matched only at six, an update of a job env at eight would succeed and leave
-the signing key exposed to every step in the job.
+the signing key exposed to every step in the job.  strip_legacy_signing_job_env
+decides what was removed from that same block too (workflow_job_env_keys), so
+an entry at eight, quoted or with its value on the next line still trips the
+fail-closed check for a surviving env.COSIGN_PRIVATE_KEY read (#695).  An env:
+left with no entries collapses to env: {} rather than a null env:.
 
 Key identity is the parsed key name, never its spelling (#525).  workflow_key
 and workflow_block_key read a key bare, single- or double-quoted, and with
@@ -59,7 +63,13 @@ own "- " item, so a key-sorted "- if: ..." step is rewritten rather than given
 a second if:.  It reads only the step's own keys -- that first key and lines
 at its column -- so a run: | line such as "if : ; then", which parses as an if
 key on its own, is not taken for the step's condition and the guard still goes
-in.  Action pinning and the Cosign floor go through
+in.  A bare "-" item takes that column from its first key below, and the guard
+is written at it, so "-   name:" gets it beside its keys (#697).  An if: whose
+value is a block scalar (if: >-) is refused with CommandError unless it already
+reads env.SIGNING_ENABLED, since the condition is on lines it does not rewrite
+(#699).  strip_permission_entries, add_signing_step_password and
+add_paths_ignore_entry match their keys through workflow_key too (#698).
+Action pinning and the Cosign floor go through
 yaml_key_pattern and accept a quoted uses: value and a plain (unquoted)
 cosign-release: value, and write the owner's quoting back.  Each missed
 spelling was a duplicate key GitHub rejects, a floating tag with nothing
@@ -82,8 +92,10 @@ joins (#524):
     a folded plain scalar) is dropped with it rather than orphaned.
 
 A line inside a block scalar (run: |) is the owner's script, not a key.
-block_scalar_body_indexes finds those lines, and the IMAGE_DESC rewrite and
-strip_permission_entries skip them.  strip_permission_entries also does not
+block_scalar_body_indexes finds those lines, and the IMAGE_DESC rewrite,
+strip_permission_entries and the patch_workflow_steps walker skip them; a
+script's own "steps:" restarted the walk and left the real cosign steps
+unguarded (#696).  strip_permission_entries also does not
 count a comment as a kept entry, and lets neither comments nor blank lines end
 a permissions: block, so removing its last real entry collapses it to
 permissions: {} rather than a bare, null permissions: key.
@@ -97,7 +109,8 @@ a trailing comma (#358).  A list spread over lines -- prettier's
 "paths-ignore: [" or "[" on the next line, items, then "]" -- takes the entry
 straight after its "[", the one position whose syntax is known without
 finding the matching bracket (#524).  Any other value (a scalar, an alias) is
-left alone.
+left alone.  The snapshot's anchor entry is a fallback for a workflow with no
+paths-ignore key, and only when no other key (a positive paths:) holds it.
 
 patch_workflow_branch_filters has the same exposure and runs on every update
 of both workflow types: it replaces a trigger's branches: entries with the
