@@ -17,7 +17,7 @@ fail=0
 skip=0
 
 # The stub dir isolates aib's PATH; this isolates its environment, for the
-# same reason. aib does `GH_TOKEN="$(gh auth token)"` and then `export
+# same reason. aib does `GH_TOKEN="$(gh auth token ...)"` and then `export
 # GH_TOKEN`, and bash keeps a variable exported if it was already in the
 # environment -- so on a host that exports GH_TOKEN (anyone using `gh` via a
 # token rather than a login, and most CI), the assignment alone leaves the
@@ -40,6 +40,12 @@ setup_stubs() {
     # stub actually received.
     podman_env_log="$stub_dir/podman-env.log"
     cosign_log="$stub_dir/cosign.log"
+    # What `pull` and `image inspect` were asked for. The verify scenarios
+    # assert cosign got the digest inspect answered, which it would for any
+    # image; these say which image that digest was asked about, so a wrapper
+    # that pulled and inspected :latest for a pinned AIB_IMAGE fails (#711).
+    pull_log="$stub_dir/pull.log"
+    inspect_log="$stub_dir/inspect.log"
     # A fixed, well-formed digest so scenarios can assert the exact reference
     # that reaches podman run rather than merely that one is present.
     test_digest="sha256:1111111111111111111111111111111111111111111111111111111111111111"
@@ -51,17 +57,20 @@ setup_stubs() {
     done
 
     # aib now calls podman three times on the verified path -- pull, image
-    # inspect, run -- so only `run` is logged; the others would overwrite it.
+    # inspect, run -- so each goes to a log of its own; one shared log would
+    # be overwritten by whichever came last.
     # The digest answered here is what the cosign stub is expected to be asked
     # about, which is how the "runs the digest it verified" scenario can tell
     # a real hand-off from a coincidence.
     cat >"$stub_dir/podman" <<PODMAN
 #!/usr/bin/env bash
 if [ "\$1" = "pull" ]; then
+    printf '%s ' "\$@" > "$pull_log"
     [ -n "\${AIB_TEST_PULL_ERROR-}" ] && printf '%s\n' "\$AIB_TEST_PULL_ERROR" >&2
     exit \${AIB_TEST_PULL_STATUS:-0}
 fi
 if [ "\$1" = "image" ] && [ "\$2" = "inspect" ]; then
+    printf '%s ' "\$@" > "$inspect_log"
     printf '%s' "\${AIB_TEST_DIGEST-$test_digest}"
     exit 0
 fi
@@ -99,7 +108,7 @@ COSIGN
     chmod +x "$stub_dir/cosign"
 }
 
-# A logged-in `gh`. Six scenarios need one, and they need the same one: the
+# A logged-in `gh`. Seven scenarios need one, and they need the same one: the
 # token's value is asserted by several of them, so a per-scenario copy that
 # drifted would weaken the assertion rather than fail it.
 install_gh_stub() {
@@ -509,6 +518,33 @@ test_published_release_tag_is_verified() {
     setup_stubs
     PATH="$stub_dir" HOME="$stub_dir/home" AIB_IMAGE="ghcr.io/danathar/atomic-image-builder:0.9.5" "$aib" >/dev/null 2>&1
     assert_contains "$(cat "$cosign_log")" "ghcr.io/danathar/atomic-image-builder@$test_digest" "release tag: verified like latest"
+    # The digest cosign checked is only the pinned release's if the pinned
+    # release is what was pulled and inspected. Exact, so a wrapper that
+    # fetched :latest instead -- running :latest for everyone who pinned a
+    # release -- cannot pass on a substring (#711).
+    assert_eq "$(cat "$pull_log" 2>/dev/null)" "pull --quiet ghcr.io/danathar/atomic-image-builder:0.9.5 " "release tag: the pinned tag is what gets pulled"
+    assert_eq "$(cat "$inspect_log" 2>/dev/null)" "image inspect --format {{.Digest}} ghcr.io/danathar/atomic-image-builder:0.9.5 " "release tag: the pinned tag is what gets inspected"
+    assert_contains "$(cat "$podman_log")" "ghcr.io/danathar/atomic-image-builder@$test_digest" "release tag: the verified digest is what runs"
+    cleanup_stubs
+}
+
+# --- a digest pin of the published repo is verified, and is what runs -----
+# The `@*` arm of the publisher match is what lets a digest pin through the
+# check; without it a digest pin would run unverified and logged out. No
+# scenario pinned by digest, so dropping that arm was invisible (#711).
+test_published_digest_pin_is_verified() {
+    setup_stubs
+    install_gh_stub
+    local pinned="ghcr.io/danathar/atomic-image-builder@$test_digest" out forwarded
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN AIB_IMAGE="$pinned" "$aib" 2>&1)"
+    forwarded="$(cat "$podman_env_log")"
+    assert_eq "$(cat "$pull_log" 2>/dev/null)" "pull --quiet $pinned " "digest pin: the pinned digest is what gets pulled"
+    assert_eq "$(cat "$inspect_log" 2>/dev/null)" "image inspect --format {{.Digest}} $pinned " "digest pin: the pinned digest is what gets inspected"
+    assert_contains "$(cat "$cosign_log" 2>/dev/null)" "$pinned" "digest pin: cosign verifies it"
+    assert_contains "$(cat "$podman_log")" "$pinned" "digest pin: the verified digest is what runs"
+    assert_not_contains "$(cat "$podman_log")" "--pull=newer" "digest pin: takes the verified path, not the unverified one"
+    assert_eq "$forwarded" "fake-token-123" "digest pin: a verified pin keeps the GitHub login"
+    assert_not_contains "$out" "not published by this project" "digest pin: not mistaken for somebody else's image"
     cleanup_stubs
 }
 
@@ -574,6 +610,89 @@ GH
     args="$(cat "$podman_log")"
     assert_contains "$args" "-e GH_TOKEN" "stale other host: GH_TOKEN still forwarded"
     assert_not_contains "$args" "aib-gh:/root/.config/gh" "stale other host: aib-gh volume not mounted"
+    cleanup_stubs
+}
+
+# --- GH_HOST does not decide which token is forwarded ---------------------
+# Anyone who also uses a GitHub Enterprise server exports GH_HOST, and bare
+# `gh auth token` follows it while the login probe is pinned to github.com.
+# This gh answers the way the real one does: a token request without
+# `--hostname github.com` is about $GH_HOST, and either fails (github.com-only
+# login) or yields that server's token (logged in to both). The harness's
+# ordinary gh stub answers `auth token` unconditionally, which is why the
+# mismatch was invisible (#705).
+install_ghes_gh_stub() {
+    cat >"$stub_dir/gh" <<'GH'
+#!/usr/bin/env bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+    [ "$*" = "auth status --hostname github.com --active" ] && exit 0
+    exit 1
+fi
+if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
+    if [ "$*" = "auth token --hostname github.com" ]; then
+        if [ -n "${AIB_TEST_GITHUB_TOKEN_FAILS-}" ]; then
+            echo "no oauth token found for github.com" >&2
+            exit 1
+        fi
+        echo "fake-token-123"
+        exit 0
+    fi
+    if [ -n "${AIB_TEST_GHES_LOGGED_IN-}" ]; then
+        echo "ghes-token-999"
+        exit 0
+    fi
+    echo "no oauth token found for ${GH_HOST:-github.com}" >&2
+    exit 1
+fi
+exit 1
+GH
+    chmod +x "$stub_dir/gh"
+}
+
+test_gh_host_github_only_login_still_forwards_token() {
+    setup_stubs
+    install_ghes_gh_stub
+    local out status forwarded
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN GH_HOST=ghe.example.com "$aib" 2>&1)"
+    status=$?
+    forwarded="$(cat "$podman_env_log" 2>/dev/null)"
+    assert_eq "$status" "0" "GH_HOST, github.com login only: the wrapper does not die"
+    assert_not_contains "$out" "no oauth token found" "GH_HOST, github.com login only: no bare gh error"
+    assert_contains "$(cat "$podman_log" 2>/dev/null)" "-e GH_TOKEN " "GH_HOST, github.com login only: GH_TOKEN forwarded"
+    assert_eq "$forwarded" "fake-token-123" "GH_HOST, github.com login only: the github.com token reaches the container"
+    cleanup_stubs
+}
+
+test_gh_host_does_not_forward_the_enterprise_token() {
+    setup_stubs
+    install_ghes_gh_stub
+    local forwarded
+    PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN GH_HOST=ghe.example.com \
+        AIB_TEST_GHES_LOGGED_IN=1 "$aib" >/dev/null 2>&1
+    forwarded="$(cat "$podman_env_log" 2>/dev/null)"
+    assert_eq "$forwarded" "fake-token-123" "GH_HOST, both logins: the github.com token is forwarded"
+    assert_not_contains "$forwarded" "ghes-token-999" "GH_HOST, both logins: the Enterprise token is not"
+    cleanup_stubs
+}
+
+# --- a token fetch that fails forwards nothing, and says so ----------------
+# Under `set -e` a failing `gh auth token` used to end the wrapper with gh's
+# one stderr line and no aib: message. It now falls back to the same aib-gh
+# volume a missing gh gets, and the container's own login takes over.
+test_gh_token_failure_falls_back_to_gh_volume() {
+    setup_stubs
+    install_ghes_gh_stub
+    local out status args forwarded
+    out="$(PATH="$stub_dir" HOME="$stub_dir/home" env -u GH_TOKEN AIB_TEST_GITHUB_TOKEN_FAILS=1 "$aib" 2>&1)"
+    status=$?
+    args="$(cat "$podman_log" 2>/dev/null)"
+    forwarded="$(cat "$podman_env_log" 2>/dev/null)"
+    assert_eq "$status" "0" "token fetch fails: the wrapper still runs the image"
+    assert_contains "$out" "aib: gh says you are logged in to github.com but would not hand over a" "token fetch fails: says what happened in an aib: line"
+    assert_contains "$out" "aib:   gh auth token --hostname github.com" "token fetch fails: gives a command to see why"
+    assert_not_contains "$args" "-e GH_TOKEN" "token fetch fails: GH_TOKEN not forwarded"
+    assert_eq "$forwarded" "<unset>" "token fetch fails: no token in podman's environment"
+    assert_contains "$args" "aib-gh:/root/.config/gh" "token fetch fails: aib-gh volume mounted instead"
     cleanup_stubs
 }
 
@@ -1039,6 +1158,9 @@ test_podman_missing
 test_gh_authenticated
 test_gh_stale_other_host_still_forwards_token
 test_gh_token_forwarded_by_environment_not_argv
+test_gh_host_github_only_login_still_forwards_token
+test_gh_host_does_not_forward_the_enterprise_token
+test_gh_token_failure_falls_back_to_gh_volume
 test_custom_image_gets_no_credentials
 test_skip_verify_gets_no_credentials
 test_unverified_auth_opt_in_forwards_token
@@ -1074,6 +1196,7 @@ test_skip_verify_warns_and_runs
 test_pull_failure_refuses_to_run
 test_custom_image_is_not_verified
 test_published_release_tag_is_verified
+test_published_digest_pin_is_verified
 test_pull_of_a_missing_tag_is_not_called_offline
 test_remedies_keep_a_pinned_release
 test_unparseable_digest_refuses_to_run

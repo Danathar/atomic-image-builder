@@ -386,10 +386,26 @@ if [ "$forward_auth" = no ]; then
 # Only the active github.com account decides this: bare `gh auth status` fails
 # when any account on any host is stale, even with a working github.com login,
 # and the container then asked the user to log in again (#513).
+#
+# The token is pinned to the same host as the probe. Bare `gh auth token` asks
+# gh's default host, which is $GH_HOST when that is set -- as it is for anyone
+# who also uses a GitHub Enterprise server. Unpinned, a github.com-only login
+# killed the wrapper under `set -e` with one unexplained gh line, and a login
+# on both hosts sent the Enterprise token into a container that talks to
+# github.com (#705). A fetch that fails or comes back empty forwards nothing:
+# the container gets the aib-gh volume and its own login, as if gh were absent.
 elif command -v gh >/dev/null 2>&1 && gh auth status --hostname github.com --active >/dev/null 2>&1; then
-    GH_TOKEN="$(gh auth token)"
-    export GH_TOKEN
-    podman_args+=(-e GH_TOKEN)
+    if GH_TOKEN="$(gh auth token --hostname github.com 2>/dev/null)" && [ -n "$GH_TOKEN" ]; then
+        export GH_TOKEN
+        podman_args+=(-e GH_TOKEN)
+    else
+        unset GH_TOKEN
+        echo "aib: gh says you are logged in to github.com but would not hand over a" >&2
+        echo "aib: token, so aib will ask you to log in inside the container instead." >&2
+        echo "aib: To see what gh is missing, copy this:" >&2
+        echo "aib:   gh auth token --hostname github.com" >&2
+        podman_args+=(-v "aib-gh:/root/.config/gh")
+    fi
 else
     podman_args+=(-v "aib-gh:/root/.config/gh")
 fi
