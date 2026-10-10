@@ -67,7 +67,36 @@ _CHECKSUM = re.compile(r'(?P<digest>[0-9a-f]{64})\s+(?P<path>[^"\n]+)"\s*\|\s*sh
 # without them reports a weaker result under the same name. bash is left out
 # deliberately: every runner has one and there is nothing in a workflow to
 # assert about it.
-UNIT_SUITE_TOOLS = {"rhysd/actionlint", "casey/just"}
+#
+# Derived from the suite's own skip gates rather than written out, so a test
+# that starts skipping on a new tool cannot be missed here. Both spellings
+# count: the `skipUnless(shutil.which(...))` decorator and the inline
+# `which(...) is None` guard followed by skipTest, which is how gum and
+# hadolint went unnoticed (#707). A tool with no entry in _TOOL_REPOS comes out
+# as an "<unmapped:...>" repository no workflow downloads, so it fails loudly.
+_SKIP_GATE = re.compile(
+    r"skipUnless\(\s*shutil\.which\(\s*\"([^\"]+)\""
+    r"|shutil\.which\(\s*\"([^\"]+)\"\s*\)\s+is\s+None\s*:\s*self\.skipTest\("
+)
+_TOOL_REPOS = {
+    "actionlint": "rhysd/actionlint",
+    "just": "casey/just",
+    "gum": "charmbracelet/gum",
+    "hadolint": "hadolint/hadolint",
+}
+# On every GitHub runner image already; nothing for a workflow to download.
+_PREINSTALLED = {"bash", "sh", "jq"}
+
+
+def _unit_suite_tools() -> set[str]:
+    names: set[str] = set()
+    for path in sorted(Path(__file__).resolve().parent.glob("*.py")):
+        for decorated, inline in _SKIP_GATE.findall(path.read_text()):
+            names.add(decorated or inline)
+    return {_TOOL_REPOS.get(name, f"<unmapped:{name}>") for name in names - _PREINSTALLED}
+
+
+UNIT_SUITE_TOOLS = _unit_suite_tools()
 UNIT_SUITE = "unittest discover -s tests"
 
 
@@ -189,6 +218,11 @@ class ReleaseBinaryPinTests(unittest.TestCase):
         # reported under the same name means different things in different
         # workflows, and nothing says so. Both tools cover generated output,
         # which is the part that reaches other people's repositories.
+        self.assertGreaterEqual(
+            UNIT_SUITE_TOOLS,
+            {"rhysd/actionlint", "casey/just", "charmbracelet/gum", "hadolint/hadolint"},
+            "the skip-gate scan stopped finding tools",
+        )
         short = {}
         for path in _workflows():
             if UNIT_SUITE not in path.read_text():

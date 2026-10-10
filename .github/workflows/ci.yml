@@ -38,6 +38,10 @@ jobs:
       # dry run both pass on a wrong binding -- running it is the only thing
       # that catches one (see #239). Without just on the runner that test
       # skips, which is the same as not having it.
+      #
+      # gum is here for the same reason: ten tests drive the real binary
+      # (Esc, Ctrl-J, table width, spinner stderr) and skip without it. Its
+      # tarball nests the binary in a versioned directory, hence the strip.
       - name: Install test tooling
         run: |
           pip install coverage==7.16.0 ruff==0.16.5
@@ -56,6 +60,10 @@ jobs:
             https://github.com/casey/just/releases/download/1.57.0/just-1.57.0-x86_64-unknown-linux-musl.tar.gz
           echo "45b548094283cb9739af8f13273b8cddeee869f5b4ef2bb631b1f311cb566155  $RUNNER_TEMP/just.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/just.tar.gz" -C "$RUNNER_TEMP/bin" just
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/gum.tar.gz" \
+            https://github.com/charmbracelet/gum/releases/download/v2.0.2/gum_2.0.2_Linux_x86_64.tar.gz
+          echo "d842e06d93dbed90af48cb8dd10698db6f22e331fc40346bb37bbc753109edc2  $RUNNER_TEMP/gum.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gum.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/bin" gum_2.0.2_Linux_x86_64/gum
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Run tests

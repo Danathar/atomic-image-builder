@@ -57,6 +57,8 @@ echo "e2e: collecting coverage from $image into $data_dir"
 scenario version 0 "$image" --version
 scenario version-short 0 "$image" -V
 scenario help 0 "$image" --help
+scenario help-short 0 "$image" -h
+scenario bad-argument 2 "$image" --bogus
 scenario preflight-no-gum 1 -v "$no_gum:/usr/bin/gum:$E2E_MOUNT_SUFFIX" "$image"
 
 echo "e2e: coverage data written to $data_dir"

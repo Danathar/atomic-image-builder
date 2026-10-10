@@ -42,8 +42,8 @@ jobs:
         with:
           python-version: "3.10"
 
-      # actionlint and just are here because the unit suite skips tests
-      # without them, and a skipped test is still counted in "Ran N tests" --
+      # hadolint, actionlint, just and gum are here because the unit suite skips
+      # tests without them (gum backs the real-gum regression tests), and a skipped test is still counted in "Ran N tests" --
       # so without these this job would report the same gate under the same
       # name while checking less than ci.yml does. Same versions and
       # checksums ci.yml pins; a test asserts they cannot drift apart.
@@ -52,6 +52,10 @@ jobs:
           set -euo pipefail
           pip install coverage==7.16.0
           mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/bin/hadolint" \
+            https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-Linux-x86_64
+          echo "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47  $RUNNER_TEMP/bin/hadolint" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/hadolint"
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/actionlint.tar.gz" \
             https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
@@ -60,6 +64,10 @@ jobs:
             https://github.com/casey/just/releases/download/1.57.0/just-1.57.0-x86_64-unknown-linux-musl.tar.gz
           echo "45b548094283cb9739af8f13273b8cddeee869f5b4ef2bb631b1f311cb566155  $RUNNER_TEMP/just.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/just.tar.gz" -C "$RUNNER_TEMP/bin" just
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/gum.tar.gz" \
+            https://github.com/charmbracelet/gum/releases/download/v2.0.2/gum_2.0.2_Linux_x86_64.tar.gz
+          echo "d842e06d93dbed90af48cb8dd10698db6f22e331fc40346bb37bbc753109edc2  $RUNNER_TEMP/gum.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gum.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/bin" gum_2.0.2_Linux_x86_64/gum
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       # The offline half. These cannot break from outside, so a failure here
