@@ -112,8 +112,9 @@
 #
 # Known limitation: local Podman test builds are not available through this
 # wrapper (no podman-socket passthrough in v1). Inside the container the
-# tool's own "podman is required to run a local test build" message is the
-# expected, correct degradation — see README.md.
+# image sets AIB_DISABLE_LOCAL_BUILD=1, so the tool's own "Local test builds
+# are not available in this environment." message is the expected, correct
+# degradation — see docs/installing.md#limitations-of-running-in-a-container.
 
 set -euo pipefail
 

@@ -6373,12 +6373,12 @@ class App:
         # and only then asks for confirmation before pushing.
         #
         # write_project_files is called twice intentionally:
-        #   1) First write: generates files WITHOUT signing so the user can
-        #      preview the diff before any secrets are created or rotated.
+        #   1) First write: previews the diff before any secrets are created or
+        #      rotated, so no new key material exists yet.
         #   2) Second write: after ensure_signing_ready() uploads the cosign
-        #      keypair, regenerates files WITH signing enabled so the workflow
-        #      includes the cosign steps.  If the diff changes, the user is
-        #      asked to re-confirm before pushing.
+        #      keypair, adds the freshly generated cosign.pub.  If that
+        #      changes the diff, the user is asked to re-confirm before
+        #      pushing.
         self.generated_cosign_pub = None
         self.config.signing_enabled = True
         default_branch = self.repo_default_branch(owner, repo)

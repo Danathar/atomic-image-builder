@@ -275,9 +275,12 @@ jobs:
             echo "any_changed=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # --format docker because publish-image.yml's buildah-build leaves `oci`
+      # at its default (false), so the published image is Docker format; podman
+      # defaults to OCI, which would smoke-test a different artifact.
       - name: Build image
         if: steps.changed.outputs.any_changed == 'true'
-        run: podman build -t aib-ci-test -f Containerfile .
+        run: podman build --format docker -t aib-ci-test -f Containerfile .
 
       # Every non-interactive path the packaged entrypoint has, asserted by
       # tests/e2e/smoke.sh. The suite lives in the repo rather than in this
@@ -303,7 +306,7 @@ jobs:
       # packaged path is measured for real instead of inferred.
       - name: Build coverage-instrumented image
         if: steps.changed.outputs.any_changed == 'true'
-        run: podman build -t aib-ci-test-cov -f container/Containerfile.coverage --build-arg BASE_IMAGE=aib-ci-test .
+        run: podman build --format docker -t aib-ci-test-cov -f container/Containerfile.coverage --build-arg BASE_IMAGE=aib-ci-test .
 
       # The same scenarios again, through the coverage shim. Each writes its
       # own data file so the artifact shows which lines a given invocation
