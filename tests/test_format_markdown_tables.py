@@ -75,6 +75,20 @@ class DisplayWidthTests(unittest.TestCase):
         self.assertEqual(display_width("日本語"), 6)
         self.assertEqual(display_width("e\u0301"), 1)
 
+    def test_fullwidth_forms_take_two_columns(self) -> None:
+        # East Asian width "F", not "W": fullwidth Latin letters and digits.
+        self.assertEqual(display_width("\uff21\uff11"), 4)
+
+    def test_enclosing_marks_take_no_columns(self) -> None:
+        # Category Me, e.g. a combining enclosing circle drawn around a digit.
+        self.assertEqual(display_width("1\u20dd"), 1)
+
+    def test_format_characters_take_no_columns(self) -> None:
+        # Category Cf: a zero-width joiner inside an emoji sequence and a
+        # zero-width space occupy nothing in a fixed-width viewer.
+        self.assertEqual(display_width("\u2705\u200d\u2705"), 4)
+        self.assertEqual(display_width("a\u200bb"), 2)
+
     def test_a_table_with_wide_cells_is_padded_by_columns(self) -> None:
         self.assertEqual(
             format_text("| Name | Meaning |\n| --- | --- |\n| 日本語 | Japanese |\n| a | b |\n"),
