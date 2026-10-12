@@ -893,6 +893,27 @@ class BuilderTests(unittest.TestCase):
                 [*bare, f"        if: {sign_if}"],
             ),
             "bare dash without if": (bare, [bare[0], f"        if: {sign_if}", *bare[1:]]),
+            # A comment on the dash line is not a key either: the keys below
+            # still set the column, wherever they sit.
+            "comment on the dash line": (
+                [
+                    "      - # signs only on main",
+                    "          name: Install Cosign",
+                    "          uses: sigstore/cosign-installer@v3",
+                    f"          if: {branch_if}",
+                ],
+                [
+                    "      - # signs only on main",
+                    "          name: Install Cosign",
+                    "          uses: sigstore/cosign-installer@v3",
+                    f"          if: {sign_if}",
+                ],
+            ),
+            # Nor does a comment line above the keys set it.
+            "comment above the keys": (
+                ["      -", "          # pinned by digest", *bare[1:]],
+                ["      -", f"        if: {sign_if}", "          # pinned by digest", *bare[1:]],
+            ),
             "three spaces after the dash": (
                 ["      -   name: Install Cosign", "          uses: sigstore/cosign-installer@v3"],
                 [
@@ -916,6 +937,12 @@ class BuilderTests(unittest.TestCase):
         head = ["      - name: Install Cosign", "        uses: sigstore/cosign-installer@v3", "        if: >-"]
         guarded = [*head, "          github.ref == 'refs/heads/main' &&", "          env.SIGNING_ENABLED == 'true'"]
         self.assertEqual(patch_signing_step_block(guarded, branch_if=branch_if, sign_if=sign_if), guarded)
+        # Guarded but still holding the legacy clause is not handled: that
+        # half tests a job-level variable the update removes, so the step
+        # would never sign again.
+        legacy = [*guarded[:-1], f"          env.SIGNING_ENABLED == 'true'{atomic_image_builder.LEGACY_SIGN_CONDITION}"]
+        with self.assertRaisesRegex(CommandError, r"'Install Cosign'.*block scalar"):
+            patch_signing_step_block(legacy, branch_if=branch_if, sign_if=sign_if)
         for header in ("if: >-", "if: |", "if: >"):
             with self.subTest(header=header):
                 step = [*head[:2], f"        {header}", f"          {branch_if}"]
@@ -2465,6 +2492,35 @@ class BuilderTests(unittest.TestCase):
             [*pull_request, "  push:", "    paths-ignore:", "      - 'x'", "      - '**/README.md'"],
         )
         self.assertEqual(atomic_image_builder.add_paths_ignore_entry(pull_request, "'x'", anchors), pull_request)
+        # A comment between the key and its items, at any indent, does not
+        # hide which key holds them.
+        commented = [*pull_request[:3], "# docs-only builds", *pull_request[3:]]
+        self.assertEqual(atomic_image_builder.add_paths_ignore_entry(commented, "'x'", anchors), commented)
+
+    def test_strip_permission_entries_stops_dropping_after_the_dropped_entry(self) -> None:
+        # Only the dropped entry's own continuation lines go with it. A kept
+        # entry after it keeps its value on the next line, and a later
+        # permissions block -- here the job's, after the workflow's -- keeps
+        # every entry, however much deeper than the dropped one they sit.
+        workflow = (
+            "permissions:\n  contents: read\n  id-token: write\n"
+            "jobs:\n  build:\n    permissions:\n      id-token: write\n      packages:\n        write\n"
+            "    steps: []\n"
+        )
+        self.assertEqual(
+            atomic_image_builder.strip_permission_entries(workflow, ["id-token"]),
+            "permissions:\n  contents: read\n"
+            "jobs:\n  build:\n    permissions:\n      packages:\n        write\n    steps: []\n",
+        )
+        workflow = (
+            "permissions:\n  id-token: write\n"
+            "jobs:\n  build:\n    permissions:\n      contents: read\n      packages: write\n    steps: []\n"
+        )
+        self.assertEqual(
+            atomic_image_builder.strip_permission_entries(workflow, ["id-token"]),
+            "permissions: {}\n"
+            "jobs:\n  build:\n    permissions:\n      contents: read\n      packages: write\n    steps: []\n",
+        )
 
     def test_strip_permission_entries_leaves_a_block_scalar_alone(self) -> None:
         # A `run: |` script that prints a permissions block is text, and the
