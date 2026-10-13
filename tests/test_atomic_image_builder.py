@@ -4921,6 +4921,19 @@ class BuilderTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "not valid text"):
                     atomic_image_builder.config_from_state_payload(json.loads(payload))
 
+    def test_config_from_state_payload_keeps_non_ascii_text(self) -> None:
+        # The state file is written with json.dumps' default ensure_ascii, so an
+        # emoji in the description is stored as a surrogate-pair escape. Only a
+        # lone surrogate is damage (#700); a valid pair, or any other non-ASCII
+        # text, must load, or the repo could never be updated again.
+        description = "Caf\u00e9 \U0001f680 \u955c\u50cf"
+        stored = json.dumps({"image_desc": description})
+        self.assertIn("\\ud83d\\ude80", stored)
+
+        cfg = atomic_image_builder.config_from_state_payload(json.loads(stored))
+
+        self.assertEqual(cfg.image_desc, description)
+
     def test_config_from_state_payload_reads_every_config_field(self) -> None:
         # state_payload() writes Config with asdict(), so every field reaches the
         # state file. A field the loader cannot read would be dropped on the next
