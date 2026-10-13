@@ -16,6 +16,7 @@ from atomic_image_builder import (
     BLUEBUILD_CLI_INSTALLER_IMAGE_TAG,
     BOOTC_IMAGE_BUILDER_IMAGE_DIGEST,
     BOOTC_IMAGE_BUILDER_IMAGE_TAG,
+    COSIGN_COMPATIBILITY_FLOOR,
     UNIVERSAL_BLUE_BREW_IMAGE_DIGEST,
     UNIVERSAL_BLUE_BREW_IMAGE_TAG,
 )
@@ -32,6 +33,7 @@ from maintenance_audit import (
     audit_bluebuild_cli_image_pin,
     audit_brew_image_pin,
     audit_container_trust_roots,
+    audit_cosign_release,
     audit_disk_builder_image_pin,
     audit_local_snapshot,
     audit_pin_table_shapes,
@@ -606,7 +608,7 @@ class MaintenanceAuditTests(unittest.TestCase):
             "maintenance_audit.audit_brew_image_pin", return_value=[]
         ), patch("maintenance_audit.audit_disk_builder_image_pin", return_value=[]), patch(
             "maintenance_audit.audit_bluebuild_cli_image_pin", return_value=[]
-        ), patch("maintenance_audit.audit_wrapper_release", return_value=([], [])):
+        ), patch("maintenance_audit.audit_wrapper_release", return_value=([], [])), patch("maintenance_audit.audit_cosign_release", return_value=[]):
             with patch(
                 "maintenance_audit.audit_action_update_availability", return_value=["stale pin"]
             ):
@@ -941,7 +943,7 @@ class ContainerTrustRootAuditTests(unittest.TestCase):
                         "maintenance_audit.audit_disk_builder_image_pin", return_value=[]
                     ), patch("maintenance_audit.audit_bluebuild_cli_image_pin", return_value=[]), patch(
                         "maintenance_audit.audit_wrapper_release", return_value=([], [])
-                    ):
+                    ), patch("maintenance_audit.audit_cosign_release", return_value=[]):
                         repo_root = Path(__file__).resolve().parents[1]
                         run_audit(repo_root, skip_upstream=True, check_action_updates=False)
                         self.assertEqual(checked.call_count, 0)
@@ -1159,7 +1161,7 @@ class BrewPayloadPinAuditTests(unittest.TestCase):
         with patch("maintenance_audit.audit_brew_image_pin", return_value=["moved"]) as checked:
             with patch("maintenance_audit.audit_disk_builder_image_pin", return_value=[]), patch(
                 "maintenance_audit.audit_bluebuild_cli_image_pin", return_value=[]
-            ), patch("maintenance_audit.audit_wrapper_release", return_value=([], [])):
+            ), patch("maintenance_audit.audit_wrapper_release", return_value=([], [])), patch("maintenance_audit.audit_cosign_release", return_value=[]):
                 with patch("maintenance_audit.audit_container_trust_roots", return_value=[]):
                     with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
                         with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
@@ -1217,7 +1219,7 @@ class DiskBuilderPinAuditTests(unittest.TestCase):
         with patch("maintenance_audit.audit_disk_builder_image_pin", return_value=["moved"]) as checked:
             with patch("maintenance_audit.audit_brew_image_pin", return_value=[]), patch(
                 "maintenance_audit.audit_bluebuild_cli_image_pin", return_value=[]
-            ), patch("maintenance_audit.audit_wrapper_release", return_value=([], [])):
+            ), patch("maintenance_audit.audit_wrapper_release", return_value=([], [])), patch("maintenance_audit.audit_cosign_release", return_value=[]):
                 with patch("maintenance_audit.audit_container_trust_roots", return_value=[]):
                     with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
                         with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
@@ -1275,7 +1277,7 @@ class BlueBuildCliPinAuditTests(unittest.TestCase):
         with patch("maintenance_audit.audit_bluebuild_cli_image_pin", return_value=["moved"]) as checked:
             with patch("maintenance_audit.audit_brew_image_pin", return_value=[]), patch(
                 "maintenance_audit.audit_disk_builder_image_pin", return_value=[]
-            ), patch("maintenance_audit.audit_wrapper_release", return_value=([], [])):
+            ), patch("maintenance_audit.audit_wrapper_release", return_value=([], [])), patch("maintenance_audit.audit_cosign_release", return_value=[]):
                 with patch("maintenance_audit.audit_container_trust_roots", return_value=[]):
                     with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
                         with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
@@ -1288,6 +1290,74 @@ class BlueBuildCliPinAuditTests(unittest.TestCase):
                             )
                             self.assertEqual(checked.call_count, 1)
                             self.assertIn("moved", advisories)
+
+
+class CosignReleaseAuditTests(unittest.TestCase):
+    """The pinned cosign version is checked against sigstore/cosign's latest release.
+
+    One version is written into four places, and with no check for upstream
+    movement cosign 3.1.3, a security release, went unreported for two months
+    (#737). The advisory has to name all four sites and the sha256 re-pin,
+    because a bump that misses one leaves the repository disagreeing with
+    itself.
+    """
+
+    def _release(self, tag: str) -> tuple[str, dict[str, str]]:
+        return tag, {}
+
+    def test_a_pin_at_the_latest_release_says_nothing(self) -> None:
+        with patch(
+            "maintenance_audit.query_latest_release", return_value=self._release(COSIGN_COMPATIBILITY_FLOOR)
+        ) as queried:
+            self.assertEqual(audit_cosign_release(), [])
+        queried.assert_called_once_with("sigstore/cosign")
+
+    def test_an_older_latest_release_says_nothing(self) -> None:
+        with patch("maintenance_audit.query_latest_release", return_value=self._release("v0.0.1")):
+            self.assertEqual(audit_cosign_release(), [])
+
+    def test_a_newer_release_names_every_site_and_the_sha256_repin(self) -> None:
+        with patch("maintenance_audit.query_latest_release", return_value=self._release("v999.0.0")):
+            (advisory,) = audit_cosign_release()
+        self.assertIn("v999.0.0", advisory)
+        self.assertIn(COSIGN_COMPATIBILITY_FLOOR, advisory)
+        for site in (
+            "Containerfile",
+            ".github/workflows/publish-image.yml",
+            "atomic_image_builder.py",
+            "COSIGN_COMPATIBILITY_FLOOR",
+            "template_snapshots/containerfile/.github/workflows/build.yml",
+        ):
+            with self.subTest(site=site):
+                self.assertIn(site, advisory)
+        self.assertIn("sha256 must be re-pinned", advisory)
+
+    def test_a_release_query_that_fails_is_said_so_not_passed(self) -> None:
+        with patch("maintenance_audit.query_latest_release", side_effect=RuntimeError("timed out")):
+            (advisory,) = audit_cosign_release()
+        self.assertIn("Unable to query the latest release of sigstore/cosign", advisory)
+        self.assertIn("timed out", advisory)
+
+    def test_the_weekly_run_is_the_one_that_checks_the_cosign_release(self) -> None:
+        with patch("maintenance_audit.audit_cosign_release", return_value=["newer"]) as checked:
+            with patch("maintenance_audit.audit_brew_image_pin", return_value=[]), patch(
+                "maintenance_audit.audit_disk_builder_image_pin", return_value=[]
+            ), patch("maintenance_audit.audit_bluebuild_cli_image_pin", return_value=[]), patch(
+                "maintenance_audit.audit_wrapper_release", return_value=([], [])
+            ):
+                with patch("maintenance_audit.audit_container_trust_roots", return_value=[]):
+                    with patch("maintenance_audit.audit_action_update_availability", return_value=[]):
+                        with patch("maintenance_audit.audit_action_pin_freshness", return_value=[]):
+                            repo_root = Path(__file__).resolve().parents[1]
+                            run_audit(repo_root, skip_upstream=True, check_action_updates=False)
+                            self.assertEqual(checked.call_count, 0)
+
+                            findings, advisories = run_audit(
+                                repo_root, skip_upstream=True, check_action_updates=True
+                            )
+                            self.assertEqual(checked.call_count, 1)
+                            self.assertIn("newer", advisories)
+                            self.assertNotIn("newer", findings)
 
 
 class WrapperReleaseAuditTests(unittest.TestCase):
@@ -1669,7 +1739,9 @@ class WrapperReleaseAuditTests(unittest.TestCase):
         # And its failures land in the failure bucket: run_audit() must not
         # flatten the pair into advisories the way the other network checks
         # are collected.
-        with patch("maintenance_audit.audit_wrapper_release", return_value=(["trailing"], ["unsure"])) as checked:
+        with patch("maintenance_audit.audit_wrapper_release", return_value=(["trailing"], ["unsure"])) as checked, patch(
+            "maintenance_audit.audit_cosign_release", return_value=[]
+        ):
             with patch("maintenance_audit.audit_disk_builder_image_pin", return_value=[]), patch(
                 "maintenance_audit.audit_bluebuild_cli_image_pin", return_value=[]
             ):

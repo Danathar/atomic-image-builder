@@ -24,6 +24,7 @@ from atomic_image_builder import (
     BOOTC_IMAGE_BUILDER_IMAGE_DIGEST,
     BOOTC_IMAGE_BUILDER_IMAGE_REPO,
     BOOTC_IMAGE_BUILDER_IMAGE_TAG,
+    COSIGN_COMPATIBILITY_FLOOR,
     UNIVERSAL_BLUE_BREW_IMAGE_DIGEST,
     UNIVERSAL_BLUE_BREW_IMAGE_REPO,
     UNIVERSAL_BLUE_BREW_IMAGE_TAG,
@@ -593,6 +594,9 @@ def run_audit(
         advisories.extend(audit_brew_image_pin())
         advisories.extend(audit_disk_builder_image_pin())
         advisories.extend(audit_bluebuild_cli_image_pin())
+        # The cosign version is a release pin rather than a digest, but it
+        # ages the same way and nothing else here would notice it (#737).
+        advisories.extend(audit_cosign_release())
         # Same gate, different bucket: the release asset trailing contrib/aib
         # is the repo contradicting itself, so it fails rather than advises.
         wrapper_findings, wrapper_advisories = audit_wrapper_release(repo_root)
@@ -839,6 +843,48 @@ def audit_bluebuild_cli_image_pin() -> list[str]:
             "still renders with the new one before re-pinning."
         ),
     )
+
+
+COSIGN_RELEASE_REPO = "sigstore/cosign"
+COSIGN_PIN_SITES = (
+    "Containerfile (the cosign RPM URL and its sha256)",
+    ".github/workflows/publish-image.yml (cosign-release)",
+    "atomic_image_builder.py (COSIGN_COMPATIBILITY_FLOOR)",
+    "template_snapshots/containerfile/.github/workflows/build.yml (cosign-release)",
+)
+
+
+def audit_cosign_release() -> list[str]:
+    """Advise when sigstore/cosign has released past the pinned version.
+
+    One cosign version is written into four places: the tool image's own RPM
+    download, the workflow that signs that image, COSIGN_COMPATIBILITY_FLOOR,
+    and the containerfile template a new repository starts from. Every other
+    pin the repository carries had a weekly check for upstream movement and
+    this one did not, so cosign 3.1.3 -- a security release -- went unreported
+    for two months (#737). The repository has no Renovate or Dependabot
+    config to catch it either.
+
+    Advisory, like the image pins: upstream releasing is not something wrong
+    here. Bumping is the maintainer's call, because raising the floor also
+    rewrites generated repositories' workflows. The latest *release* is asked
+    for rather than the newest tag, so tags never published as releases are
+    skipped.
+    """
+    try:
+        latest, _assets = query_latest_release(COSIGN_RELEASE_REPO)
+    except RuntimeError as exc:
+        return [f"Unable to query the latest release of {COSIGN_RELEASE_REPO}: {exc}"]
+    if not is_newer_version_available(COSIGN_COMPATIBILITY_FLOOR, latest):
+        return []
+    return [
+        f"{COSIGN_RELEASE_REPO} has released {latest}; the pinned cosign is "
+        f"{COSIGN_COMPATIBILITY_FLOOR}. A bump updates all four sites together: "
+        + "; ".join(COSIGN_PIN_SITES)
+        + ". The Containerfile sha256 must be re-pinned with the new RPM URL, and "
+        "raising COSIGN_COMPATIBILITY_FLOOR rewrites generated repositories' workflows, "
+        "so review the release notes before bumping."
+    ]
 
 
 def query_latest_release(repo: str) -> tuple[str, dict[str, str]]:
