@@ -3,6 +3,7 @@ import hashlib
 import http.client
 import io
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -17,6 +18,7 @@ from atomic_image_builder import (
     BOOTC_IMAGE_BUILDER_IMAGE_DIGEST,
     BOOTC_IMAGE_BUILDER_IMAGE_TAG,
     COSIGN_COMPATIBILITY_FLOOR,
+    COSIGN_RELEASE_LINE_RE,
     UNIVERSAL_BLUE_BREW_IMAGE_DIGEST,
     UNIVERSAL_BLUE_BREW_IMAGE_TAG,
 )
@@ -1337,6 +1339,43 @@ class CosignReleaseAuditTests(unittest.TestCase):
             (advisory,) = audit_cosign_release()
         self.assertIn("Unable to query the latest release of sigstore/cosign", advisory)
         self.assertIn("timed out", advisory)
+
+    def test_every_site_the_advisory_names_pins_the_compatibility_floor(self) -> None:
+        # The audit compares upstream with COSIGN_COMPATIBILITY_FLOOR alone and
+        # trusts the other sites to say the same version. The snapshot is held
+        # to the floor in test_atomic_image_builder.py; nothing held the tool
+        # image's own two, so a bump that missed publish-image.yml or the
+        # Containerfile RPM passed every test, and the audit then went quiet
+        # over a cosign that was still the old one.
+        repo_root = Path(__file__).resolve().parents[1]
+        for workflow in (
+            ".github/workflows/publish-image.yml",
+            "template_snapshots/containerfile/.github/workflows/build.yml",
+        ):
+            with self.subTest(site=workflow):
+                releases = [
+                    match.group("quoted") or match.group("plain")
+                    for match in map(COSIGN_RELEASE_LINE_RE.match, (repo_root / workflow).read_text().splitlines())
+                    if match is not None
+                ]
+                self.assertEqual(releases, [COSIGN_COMPATIBILITY_FLOOR])
+
+        # The RPM URL says the version twice, as the release tag and in the
+        # file name; a bump has to move both or the download 404s.
+        rpms = [
+            re.fullmatch(
+                r"https://github\.com/sigstore/cosign/releases/download/(?P<tag>[^/]+)/"
+                r"cosign-(?P<version>[^-/]+)-\d+\.x86_64\.rpm",
+                url,
+            )
+            for url, _dest, _digest in iter_pinned_downloads((repo_root / "Containerfile").read_text())
+            if "sigstore/cosign" in url
+        ]
+        self.assertEqual(len(rpms), 1, "expected one checksum-pinned cosign RPM download in the Containerfile")
+        (rpm,) = rpms
+        self.assertIsNotNone(rpm, "the cosign RPM URL no longer has the release-tag/file-name shape")
+        self.assertEqual(rpm.group("tag"), COSIGN_COMPATIBILITY_FLOOR)
+        self.assertEqual(f"v{rpm.group('version')}", COSIGN_COMPATIBILITY_FLOOR)
 
     def test_the_weekly_run_is_the_one_that_checks_the_cosign_release(self) -> None:
         with patch("maintenance_audit.audit_cosign_release", return_value=["newer"]) as checked:
