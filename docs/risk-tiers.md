@@ -123,9 +123,9 @@ what the check then says.
 `.github/workflows/update-homebrew-formula.yml`, `.github/workflows/ci.yml`,
 `homebrew_formula.py`, `coverage_badge.py`, `Formula/`,
 `.github/policies/workflow-permissions.json`, `.github/rulesets/**`,
-`.claude/settings.json`, `.claude/hooks/`, anything touching signing or
-cosign, and any workflow token that can write to the repository or its
-packages
+`.claude/settings.json`, `.claude/hooks/`, `renovate.json`, anything touching
+signing or cosign, and any workflow token that can write to the repository or
+its packages
 
 `ci.yml` is here for one job. `publish-coverage` holds `contents: write` and,
 on every push to `main`, runs `coverage_badge.py` and pushes what it writes to
@@ -176,6 +176,15 @@ request can change all three, so green says the table is consistent, not that
 widening it was safe. A change that only narrows the boundary -- a new
 refusal, a removed allow row, a new `deny` row -- is still in this tier, and
 its evidence is short: say what it now stops.
+
+`renovate.json` is here because it steers a token that writes to the
+repository: the Renovate app pushes `renovate/*` branches and opens pull
+requests with whatever the file lets it touch. Today that is the `FROM` lines
+of the Dockerfiles outside `template_snapshots/`, with every Fedora bump held
+on the Dependency Dashboard until a maintainer approves it, because Fedora tags
+rawhide with the next release's number. One edit to the file can enable the
+`github-actions` manager, which writes Tier 4 workflows and the snapshots, or
+set `automerge`, which lets the app merge its own pull requests.
 
 **Reaches:** the published image, the release-bound wrapper and its checksum,
 and the Homebrew formula, which is what `brew upgrade` installs. Homebrew never

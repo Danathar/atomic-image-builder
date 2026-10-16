@@ -862,8 +862,8 @@ def audit_cosign_release() -> list[str]:
     and the containerfile template a new repository starts from. Every other
     pin the repository carries had a weekly check for upstream movement and
     this one did not, so cosign 3.1.3 -- a security release -- went unreported
-    for two months (#737). The repository has no Renovate or Dependabot
-    config to catch it either.
+    for two months (#737). Renovate here only reads Dockerfile FROM lines
+    and Dependabot is not configured, so neither catches it.
 
     Advisory, like the image pins: upstream releasing is not something wrong
     here. Bumping is the maintainer's call, because raising the floor also
