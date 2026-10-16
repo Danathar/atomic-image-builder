@@ -16,10 +16,12 @@ issues and the README.
   releases, and zero open correctness issues against the five-stage runtime
   at the time of the third release. **What counts as a regression (#751,
   decided 2026-10-16):** a scan, carry or build behavior that worked in an
-  earlier tagged release and broke in this one. A scan, carry or build bug
-  that was already in the previous release, or that sits in behavior the
-  previous release did not have, is latent: it is listed against the release
-  it was reported in, but it does not reset the count.
+  earlier tagged release and broke in this one. A bug reported later against
+  behavior that broke in an earlier release is that earlier release's
+  regression. A scan, carry or build bug that no earlier release handled
+  correctly, or that sits in behavior no earlier release had, is latent: it is
+  listed against the release it was reported in, but it does not reset the
+  count.
 - Supported bases: Universal Blue (Bazzite, Aurora, Bluefin and their
   variants) and Fedora Atomic (Silverblue, Kinoite, Sway, Budgie, COSMIC).
 - Two build methods: Containerfile (from `ublue-os/image-template`) and
@@ -70,7 +72,10 @@ bugs that v0.10.0 did not have, both in the update that rewrites an older
 repo's signing steps. #695: a signing key set at an unusual indent was removed
 without the safety check, so the image was built unsigned. #697: a step
 written as a bare dash came out with two "if" keys, which GitHub rejects. The
-other nine behave the same at v0.10.0, so they are latent.
+other nine already behave the same at v0.10.0, so none is a v0.11.0
+regression. They are listed as latent here. Tracing one further back could
+only make it a regression of a release older than this table, so it cannot
+change any *Counts*.
 
 After each tagged release, add a row and
 update the count above. [docs/strategy.md](docs/strategy.md) has the command

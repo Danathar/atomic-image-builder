@@ -56,14 +56,24 @@ the file the faulty code is in and list what this release changed there:
 git log --oneline <previous-tag>..<tag> -- <file>
 ```
 
-If none of those commits wrote the faulty lines, the defect was already in
-`<previous-tag>` and the bug is latent. If one did, check out `<previous-tag>`
-and try the same input. It is a regression only if `<previous-tag>` got it
-right. A gap left by a partial fix, or a defect in something `<previous-tag>`
-did not do at all, is latent.
+If one of those commits wrote the faulty lines, check out `<previous-tag>`
+and try the same input. If `<previous-tag>` got it right, the bug is a
+regression of this release.
+
+If none of them did, the defect is older than this release, but that alone
+does not make it latent: a behavior can break in one release and be reported
+two releases later. Walk back one tag at a time, running the same `git log`
+between each pair of older tags, until you reach the release whose commits
+wrote the faulty lines. Check out the tag before that release and try the same
+input. If that tag got it right, the bug is a regression of the release that
+broke it. Record it in that release's row, as ROADMAP.md asks, even when the
+row is already in the table, and redo that row's *Counts*.
+
+The bug is latent only if no earlier tag handled the input correctly: a gap
+left by a partial fix, or a defect in something no earlier release did at all.
 
 **Latent bugs found**: the scan, carry and build bugs from the list above that
-the check above did not make regressions.
+the check above did not make regressions of this release or of an earlier one.
 
 **Unit coverage**: the row the coverage history holds for the tagged commit.
 Fetch the `coverage-data` branch first, as
