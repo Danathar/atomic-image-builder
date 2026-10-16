@@ -25,8 +25,9 @@ with it, so a long run of merges with no new tag leaves the count where it was.
 
 One entry per column of the table, in the table's order. `<tag>` is the
 release tag, such as `v0.10.0`, and `<date>` is the day it was published, as
-`YYYY-MM-DD`. Every search is pinned to that date, so the commands give the
-same answer on release day and a month later.
+`YYYY-MM-DD`. `<previous-tag>` is the tag of the release before it. Every
+search is pinned to that date, so the commands give the same answer on
+release day and a month later.
 
 **Release** and **Date**: the newest releases, with the time each was
 published.
@@ -36,15 +37,43 @@ gh release list --repo Danathar/atomic-image-builder --limit 5 --json tagName,pu
 ```
 
 **Containerfile regressions** and **BlueBuild regressions**: every bug issue
-opened since the release. Which of them are scan, carry or build regressions,
-and which build method each one hit, has to be read from the issue: the bug
-form asks for the version but not the build method, and issues an agent files
-do not use the form.
+opened since the release. Which of them are scan, carry or build bugs, and
+which build method each one hit, has to be read from the issue: the bug form
+asks for the version but not the build method, and issues an agent files do
+not use the form.
 
 ```bash
 gh issue list --repo Danathar/atomic-image-builder --label bug --state all --limit 1000 \
   --search "created:>=<date>" --json number,title,state
 ```
+
+Each scan, carry or build bug is then either a regression or latent, as
+ROADMAP.md's [*Current state*](../ROADMAP.md#current-state) defines them. The
+question is whether `<previous-tag>` handled the same input correctly. Find
+the file the faulty code is in and list what this release changed there:
+
+```bash
+git log --oneline <previous-tag>..<tag> -- <file>
+```
+
+If one of those commits wrote the faulty lines, check out `<previous-tag>`
+and try the same input. If `<previous-tag>` got it right, the bug is a
+regression of this release.
+
+If none of them did, the defect is older than this release, but that alone
+does not make it latent: a behavior can break in one release and be reported
+two releases later. Walk back one tag at a time, running the same `git log`
+between each pair of older tags, until you reach the release whose commits
+wrote the faulty lines. Check out the tag before that release and try the same
+input. If that tag got it right, the bug is a regression of the release that
+broke it. Record it in that release's row, as ROADMAP.md asks, even when the
+row is already in the table, and redo that row's *Counts*.
+
+The bug is latent only if no earlier tag handled the input correctly: a gap
+left by a partial fix, or a defect in something no earlier release did at all.
+
+**Latent bugs found**: the scan, carry and build bugs from the list above that
+the check above did not make regressions of this release or of an earlier one.
 
 **Unit coverage**: the row the coverage history holds for the tagged commit.
 Fetch the `coverage-data` branch first, as

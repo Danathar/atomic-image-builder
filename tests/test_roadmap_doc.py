@@ -9,9 +9,10 @@ What: Reads ROADMAP.md as a subject and checks each claim it makes about the
       against VERSION, BASE_IMAGES, METHOD_DISPLAY, the template constants,
       STATE_FILE, ARCHITECTURE.md and the README.
       It also checks the "Beta-exit progress" table: each row's release is
-      one VERSION has reached, its "Counts" cell follows from its other
-      cells and the gate in .coverage-thresholds.json, and the stated
-      "N of 3" is the run of "yes" rows at the bottom.
+      one VERSION has reached, its "Counts" cell follows from its regression
+      and coverage cells and the gate in .coverage-thresholds.json, no issue
+      is both a regression and latent in one row, and the stated "N of 3"
+      is the run of "yes" rows at the bottom.
       It also reads the README's own "Supported bases" line and build-method
       bullet, which ROADMAP.md copies and which no test joined to the code.
 Doing: Parses the base list out of each document's prose and compares it to
@@ -72,10 +73,16 @@ PROGRESS_COLUMNS = (
     "Date",
     "Containerfile regressions",
     "BlueBuild regressions",
+    "Latent bugs found",
     "Unit coverage",
     "Open five-stage correctness issues",
     "Counts",
 )
+
+REGRESSION_COLUMNS = ("Containerfile regressions", "BlueBuild regressions")
+
+# A cell that lists issues: "none", or issue numbers separated by ", ".
+ISSUE_CELL = r"^(none|#\d+(, #\d+)*)$"
 
 THRESHOLDS = json.loads((ROOT / ".coverage-thresholds.json").read_text(encoding="utf-8"))
 
@@ -412,14 +419,25 @@ class BetaExitProgress(unittest.TestCase):
                 coverage = re.fullmatch(r"(\d+(?:\.\d+)?)%", row["Unit coverage"])
                 self.assertIsNotNone(coverage, "unit coverage is not a percentage")
                 self.assertRegex(row["Open five-stage correctness issues"], r"^\d+$")
-                for column in ("Containerfile regressions", "BlueBuild regressions"):
-                    self.assertRegex(row[column], r"^(none|#\d+(, #\d+)*)$")
+                for column in (*REGRESSION_COLUMNS, "Latent bugs found"):
+                    self.assertRegex(row[column], ISSUE_CELL)
+                # Latent bugs are listed but never decide the row.
                 clean = (
-                    row["Containerfile regressions"] == "none"
-                    and row["BlueBuild regressions"] == "none"
+                    all(row[column] == "none" for column in REGRESSION_COLUMNS)
                     and float(coverage.group(1)) >= self.gate()
                 )
                 self.assertEqual(row["Counts"], "yes" if clean else "no")
+
+    def test_no_issue_is_both_a_regression_and_latent(self) -> None:
+        # The definition makes the two exclusive. One issue in both cells is a
+        # row someone half-reclassified, and its Counts cell reads the stale half.
+        for row in self.table():
+            with self.subTest(release=row["Release"]):
+                regressions = {
+                    issue for column in REGRESSION_COLUMNS for issue in re.findall(r"#\d+", row[column])
+                }
+                latent = set(re.findall(r"#\d+", row["Latent bugs found"]))
+                self.assertEqual(regressions & latent, set())
 
     def test_the_empty_table_note_goes_once_a_row_is_added(self) -> None:
         empty = "No release has been recorded yet." in squash(self.body())
