@@ -97,9 +97,11 @@ Nothing pushes to `main` outside a pull request, and
 `tests/test_branch_ruleset.py` fails if a workflow starts to. The formula
 workflow used to push there directly; its last three pushes were the formula
 updates for v0.9.1, v0.9.5 and v0.10.0. Every other first-parent
-commit on `main` after 2026-06-11 is a pull request merge. There is no
-Renovate or Dependabot configuration for this repository (the ones under
-`template_snapshots/` are shipped to generated repositories).
+commit on `main` after 2026-06-11 is a pull request merge. Renovate is the
+only dependency bot here: `renovate.json` limits it to the `FROM` lines of the
+Dockerfiles outside `template_snapshots/`, and it pushes `renovate/*`
+branches and opens pull requests, never to `main` (the `dependabot.yml` files
+under `template_snapshots/` are shipped to generated repositories).
 `publish-wrapper.yml` attaches release assets and pushes no commits.
 
 ## Applying it

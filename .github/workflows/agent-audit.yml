@@ -130,8 +130,8 @@ jobs:
             def signature: (.body // "") | split("\n") | map(select(startswith("— hive:"))) | first;
             # The Tier 4 paths in docs/risk-tiers.md: the release workflows,
             # the token policy and ruleset, the agent permission table and its
-            # hooks, and what the release path runs.
-            def tier4: test("^(\\.github/workflows/(ci|publish-image|publish-wrapper|update-homebrew-formula)\\.yml$|\\.github/policies/|\\.github/rulesets/|\\.claude/settings\\.json$|\\.claude/hooks/|homebrew_formula\\.py$|coverage_badge\\.py$|Formula/)");
+            # hooks, the Renovate config, and what the release path runs.
+            def tier4: test("^(\\.github/workflows/(ci|publish-image|publish-wrapper|update-homebrew-formula)\\.yml$|\\.github/policies/|\\.github/rulesets/|\\.claude/settings\\.json$|\\.claude/hooks/|renovate\\.json$|homebrew_formula\\.py$|coverage_badge\\.py$|Formula/)");
             # A merge of main into the branch needs no trailer: "Update
             # branch", a local `git merge origin/main` and an agent naming its
             # own merge write one, and what it brings in was audited when it

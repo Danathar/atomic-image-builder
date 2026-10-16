@@ -89,7 +89,8 @@
         ".github/policies/workflow-permissions.json",
         ".github/rulesets/**",
         ".claude/settings.json",
-        ".claude/hooks/"
+        ".claude/hooks/",
+        "renovate.json"
       ],
       "evidence": [
         "python3 -m unittest discover -s tests",

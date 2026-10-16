@@ -2,5 +2,26 @@
     "$schema": "https://docs.renovatebot.com/renovate-schema.json",
     "extends": [
         "config:recommended"
+    ],
+    "ignorePaths": [
+        "**/node_modules/**",
+        "**/tests/**",
+        "template_snapshots/**"
+    ],
+    "enabledManagers": [
+        "dockerfile"
+    ],
+    "packageRules": [
+        {
+            "description": "Fedora publishes rawhide under the next release's number (fedora:46 is rawhide while 44 is current), so every Fedora bump waits on the Dependency Dashboard until a maintainer approves the release that has actually shipped.",
+            "matchDatasources": [
+                "docker"
+            ],
+            "matchPackageNames": [
+                "registry.fedoraproject.org/fedora"
+            ],
+            "separateMultipleMajor": true,
+            "dependencyDashboardApproval": true
+        }
     ]
 }
