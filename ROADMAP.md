@@ -14,7 +14,12 @@ issues and the README.
   scan/carry/build regression reported against either build method, the
   coverage gate holding at or above its current threshold across those
   releases, and zero open correctness issues against the five-stage runtime
-  at the time of the third release.
+  at the time of the third release. **What counts as a regression (#751,
+  decided 2026-10-16):** a scan, carry or build behavior that worked in an
+  earlier tagged release and broke in this one. A scan, carry or build bug
+  that was already in the previous release, or that sits in behavior the
+  previous release did not have, is latent: it is listed against the release
+  it was reported in, but it does not reset the count.
 - Supported bases: Universal Blue (Bazzite, Aurora, Bluefin and their
   variants) and Fedora Atomic (Silverblue, Kinoite, Sway, Budgie, COSMIC).
 - Two build methods: Containerfile (from `ublue-os/image-template`) and
@@ -53,12 +58,19 @@ How close the project is to the bar under "Current state", one row per
 tagged release. Only releases tagged after the bar was decided on 2026-10-01
 count. v0.10.0 (2026-09-21) came before it, so it does not.
 
-**Clean releases in a row: 2 of 3.**
+**Clean releases in a row: 1 of 3.**
 
-| Release | Date       | Containerfile regressions | BlueBuild regressions | Unit coverage | Open five-stage correctness issues | Counts |
-| ------- | ---------- | ------------------------- | --------------------- | ------------- | ---------------------------------- | ------ |
-| v0.11.0 | 2026-10-05 | none                      | none                  | 99%           | 0                                  | yes    |
-| v0.12.0 | 2026-10-16 | none                      | none                  | 99%           | 0                                  | yes    |
+| Release | Date       | Containerfile regressions | BlueBuild regressions | Latent bugs found                                    | Unit coverage | Open five-stage correctness issues | Counts |
+| ------- | ---------- | ------------------------- | --------------------- | ---------------------------------------------------- | ------------- | ---------------------------------- | ------ |
+| v0.11.0 | 2026-10-05 | #695, #697                | none                  | #696, #698, #699, #700, #701, #702, #703, #704, #706 | 99%           | 0                                  | no     |
+| v0.12.0 | 2026-10-16 | none                      | none                  | none                                                 | 99%           | 0                                  | yes    |
+
+v0.11.0 was first recorded as clean. The audit of 2026-10-10 then found two
+bugs that v0.10.0 did not have, both in the update that rewrites an older
+repo's signing steps. #695: a signing key set at an unusual indent was removed
+without the safety check, so the image was built unsigned. #697: a step
+written as a bare dash came out with two "if" keys, which GitHub rejects. The
+other nine behave the same at v0.10.0, so they are latent.
 
 After each tagged release, add a row and
 update the count above. [docs/strategy.md](docs/strategy.md) has the command
@@ -66,16 +78,22 @@ that reads each column:
 
 - **Release** and **Date**: the tag and the day it was published.
 - **Containerfile regressions** and **BlueBuild regressions**: the issue
-  numbers of any scan, carry or build regression reported against that build
-  method in this release, or "none". If one is reported later against a
-  release already in the table, add it to that row.
+  numbers of any scan, carry or build regression, as "Current state" defines
+  it, that hit that build method in this release, or "none". A regression
+  goes in the row of the release that broke the behavior. If one is reported
+  later against a release already in the table, add it to that row.
+- **Latent bugs found**: the issue numbers of the scan, carry or build bugs
+  reported against this release that are not regressions, for either build
+  method, or "none". They are listed so a reader of "N of 3" can see what
+  was found in the same window. If one is reported later against a release
+  already in the table, add it to that row.
 - **Unit coverage**: the unit coverage percentage at the tagged commit, from
   the history described in docs/metrics.md. The gate it has to meet is the
   unit threshold in .coverage-thresholds.json, the same one CI enforces.
 - **Open five-stage correctness issues**: how many open bug issues there are
   against the five-stage runtime on the release date.
 - **Counts**: "yes" when both regression columns say "none" and unit coverage
-  is at or above the gate, otherwise "no".
+  is at or above the gate, otherwise "no". Latent bugs do not change it.
 
 The count above is the number of "yes" rows at the bottom of the table, in a
 row. A "no" sets it back to 0. The bar is met when that count reaches three

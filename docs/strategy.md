@@ -25,8 +25,9 @@ with it, so a long run of merges with no new tag leaves the count where it was.
 
 One entry per column of the table, in the table's order. `<tag>` is the
 release tag, such as `v0.10.0`, and `<date>` is the day it was published, as
-`YYYY-MM-DD`. Every search is pinned to that date, so the commands give the
-same answer on release day and a month later.
+`YYYY-MM-DD`. `<previous-tag>` is the tag of the release before it. Every
+search is pinned to that date, so the commands give the same answer on
+release day and a month later.
 
 **Release** and **Date**: the newest releases, with the time each was
 published.
@@ -36,15 +37,33 @@ gh release list --repo Danathar/atomic-image-builder --limit 5 --json tagName,pu
 ```
 
 **Containerfile regressions** and **BlueBuild regressions**: every bug issue
-opened since the release. Which of them are scan, carry or build regressions,
-and which build method each one hit, has to be read from the issue: the bug
-form asks for the version but not the build method, and issues an agent files
-do not use the form.
+opened since the release. Which of them are scan, carry or build bugs, and
+which build method each one hit, has to be read from the issue: the bug form
+asks for the version but not the build method, and issues an agent files do
+not use the form.
 
 ```bash
 gh issue list --repo Danathar/atomic-image-builder --label bug --state all --limit 1000 \
   --search "created:>=<date>" --json number,title,state
 ```
+
+Each scan, carry or build bug is then either a regression or latent, as
+ROADMAP.md's [*Current state*](../ROADMAP.md#current-state) defines them. The
+question is whether `<previous-tag>` handled the same input correctly. Find
+the file the faulty code is in and list what this release changed there:
+
+```bash
+git log --oneline <previous-tag>..<tag> -- <file>
+```
+
+If none of those commits wrote the faulty lines, the defect was already in
+`<previous-tag>` and the bug is latent. If one did, check out `<previous-tag>`
+and try the same input. It is a regression only if `<previous-tag>` got it
+right. A gap left by a partial fix, or a defect in something `<previous-tag>`
+did not do at all, is latent.
+
+**Latent bugs found**: the scan, carry and build bugs from the list above that
+the check above did not make regressions.
 
 **Unit coverage**: the row the coverage history holds for the tagged commit.
 Fetch the `coverage-data` branch first, as
