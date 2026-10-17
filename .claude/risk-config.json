@@ -25,6 +25,7 @@
         ".simplecov",
         ".coverage-thresholds.json",
         ".github/auto-qa-tuning.json",
+        ".github/actionlint.yaml",
         ".github/ISSUE_TEMPLATE/",
         ".github/workflows/nightly-compliance.yml",
         ".github/workflows/agent-audit.yml",
@@ -32,7 +33,9 @@
         ".github/workflows/ai-fix.yml",
         ".github/workflows/maintenance-audit.yml",
         ".github/workflows/auto-issues.yml",
-        "snapshot_drift_issue.py"
+        ".github/workflows/variant-boot-test.yml",
+        "snapshot_drift_issue.py",
+        "variant_boot_test.py"
       ],
       "evidence": [
         "python3 -m unittest discover -s tests"

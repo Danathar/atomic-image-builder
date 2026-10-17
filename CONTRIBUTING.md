@@ -211,6 +211,21 @@ shipped to generated repos — and a linter those repos never run does not
 belong in it. To match CI locally, install the same release from
 [hadolint/hadolint](https://github.com/hadolint/hadolint/releases/tag/v2.14.0).
 
+`.github/actionlint.yaml` names `ubuntu-26.04` as a known runner label only
+because actionlint v1.7.12 predates that hosted image, which
+`variant-boot-test.yml` needs for its podman 5, QEMU and virtiofsd. That
+workflow also downloads bcvk v0.19.0 by sha256 to boot each generated image
+in a VM, and first runs bcvk's own CI host setup from `bootc-dev/actions` at a
+pinned commit; without it virtiofsd never starts on the hosted runner. Neither
+pin is bumped automatically. Move the bcvk version and sha256 with bcvk's
+releases; review the `bootc-actions` commit when its host setup changes, and
+keep the bcvk version that setup installs in step with the one pinned here.
+The same test runs on a Linux workstation with KVM, podman and bcvk:
+`python3 variant_boot_test.py run --base <key> --work /var/tmp/aib-boot`,
+where `<key>` is a `BASE_IMAGES` key such as `sway-atomic`. It pulls the base
+(2 to 6 GB compressed) and builds on top of it, so like any local podman
+build it needs consent first (AGENTS.md).
+
 One hadolint finding needed a real fix rather than a suppression: DL4006 on
 the cosign checksum, which was `echo "<sha>  <file>" | sha256sum -c -`. Under
 `/bin/sh` a pipeline reports only its last command's status. Note that the

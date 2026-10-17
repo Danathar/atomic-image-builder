@@ -192,6 +192,7 @@ release](#cutting-a-release).
 | `ai-fix.yml`                  | `ai-fix-requested` label, dispatch     | Posts the current gate result on the issue as context. Read-only: no code writes, no pull request, no model                                                                                                                       |
 | `agent-audit.yml`             | Monthly on the 1st 05:23 UTC, dispatch | Lists every agent pull request merged in the window with its backend and model, who merged it, and any Tier 4 path it touched; fails when one lacks its `— hive:` signature line or a Signed-off-by trailer. Read-only            |
 | `auto-issues.yml`             | A scheduled audit run finishes         | Opens an issue when a scheduled or dispatched run of `nightly-compliance.yml`, `maintenance-audit.yml` or `agent-audit.yml` fails on `main`, comments on it at each further failure, and closes it when the workflow passes again |
+| `variant-boot-test.yml`       | Daily 02:41 UTC, dispatch              | Generates a project for two bases from `BASE_IMAGES` (all of them each week), builds it with podman and boots it with bcvk; keeps one issue per failing base, closed when that base passes again                                  |
 
 Only a build of `main` tags the image `latest` — a release published from an
 older commit must not drag `latest` backwards. Only a release (a tag ref)

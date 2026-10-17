@@ -21,13 +21,16 @@ change, and the other way round.
 `.gitignore`, `LICENSE`, `maintenance_notes.txt`, `format_markdown_tables.py`;
 the lint and coverage configuration — `ruff.toml`, `.coveragerc`, `.coveragerc.e2e`,
 `.coveragerc.maintenance-audit`, `.simplecov`, `.coverage-thresholds.json`,
-`.github/auto-qa-tuning.json`; the issue forms in `.github/ISSUE_TEMPLATE/`;
-and the workflows whose token can only read the repository or write to its
-issue tracker — `.github/workflows/nightly-compliance.yml`,
+`.github/auto-qa-tuning.json`, `.github/actionlint.yaml`; the issue forms in
+`.github/ISSUE_TEMPLATE/`; and the workflows whose token can only read the
+repository or write to its issue tracker —
+`.github/workflows/nightly-compliance.yml`,
 `.github/workflows/agent-audit.yml`, `.github/workflows/triage.yml`,
 `.github/workflows/ai-fix.yml`, `.github/workflows/maintenance-audit.yml`,
-`.github/workflows/auto-issues.yml` — with `snapshot_drift_issue.py`, which
-the audit workflow runs to open its issues
+`.github/workflows/auto-issues.yml`, `.github/workflows/variant-boot-test.yml`
+— with `snapshot_drift_issue.py`, which the audit workflow runs to open its
+issues, and `variant_boot_test.py`, which the boot workflow runs to build,
+boot and open its issues
 
 **Reaches:** contributors and maintainers. Nothing users run.
 
@@ -47,18 +50,20 @@ words, and a diff that shrinks what `.coveragerc` measures needs to say what
 it stopped measuring.
 
 The issue-tracker workflows are here by reach too: what `triage.yml`,
-`ai-fix.yml`, `maintenance-audit.yml` and `auto-issues.yml` can touch with
-their `issues: write` token is this repository's issues and the labels the
-agents act on, `nightly-compliance.yml` holds `contents: read`, and
-`agent-audit.yml` holds `contents: read` beside the `pull-requests: read` it
-needs to list merged pull requests; it writes nothing but its own run summary.
-`auto-issues.yml` holds `issues: write` and nothing else, not even
-`contents: read`: it opens, comments on and closes the issue that tracks a red
-scheduled run, and never checks out or runs anything. Their permission blocks
-are pinned by `.github/policies/workflow-permissions.json`, so asking one of
-them for a broader token is a Tier 4 change whichever file the diff starts
-in. The same holds for `snapshot_drift_issue.py`, which runs under the audit
-workflow's token and can open issues and nothing else.
+`ai-fix.yml`, `maintenance-audit.yml`, `auto-issues.yml` and
+`variant-boot-test.yml` can touch with their `issues: write` token is this
+repository's issues and the labels the agents act on, `nightly-compliance.yml`
+holds `contents: read`, and `agent-audit.yml` holds `contents: read` beside the
+`pull-requests: read` it needs to list merged pull requests; it writes nothing
+but its own run summary. `auto-issues.yml` holds `issues: write` and nothing
+else, not even `contents: read`: it opens, comments on and closes the issue
+that tracks a red scheduled run, and never checks out or runs anything. Their
+permission blocks are pinned by `.github/policies/workflow-permissions.json`,
+so asking one of them for a broader token is a Tier 4 change whichever file
+the diff starts in. The same holds for `snapshot_drift_issue.py`, which runs
+under the audit workflow's token and can open issues and nothing else, and
+for `variant_boot_test.py`: the images it builds and boots stay on the runner,
+and nothing it does is pushed or signed.
 
 ## Tier 2 — the tool users run
 

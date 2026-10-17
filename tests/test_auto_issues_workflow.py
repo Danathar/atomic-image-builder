@@ -90,6 +90,16 @@ def issue(number: int, title: str, author: str = "app/github-actions", state: st
     return {"number": number, "title": title, "author": {"login": author}, "state": state}
 
 
+# Scheduled workflows auto-issues.yml deliberately does not watch, each with
+# the reason. One issue per workflow, closed on the next green run, is wrong
+# for a rotation: tonight's variant boot run tests different bases from last
+# night's, so its green run would close an issue about a base it never
+# touched. variant_boot_test.py keeps one issue per base instead.
+SELF_REPORTING = {
+    "Variant boot test": "variant_boot_test.py keeps one issue per base and closes it when that base passes",
+}
+
+
 def scheduled_workflow_names() -> list[str]:
     """The `name:` of every workflow whose `on:` declares a schedule."""
     names = []
@@ -191,10 +201,15 @@ class AutoIssuesWorkflowTests(unittest.TestCase):
     def test_the_watched_workflows_are_exactly_the_scheduled_ones(self) -> None:
         # workflow_run matches on `name:`. A renamed workflow, or a new
         # scheduled one, would otherwise go untracked with nothing failing.
+        # An exemption has to name a workflow that is still scheduled, so a
+        # renamed one cannot leave a stale entry that hides its new name.
         listed = re.search(r"^\s*workflows: \[(?P<names>[^\]]+)\]", WORKFLOW.read_text(), re.MULTILINE)
         self.assertIsNotNone(listed, "auto-issues.yml has no inline workflows: list")
         names = sorted(name.strip() for name in listed.group("names").split(","))
-        self.assertEqual(names, scheduled_workflow_names())
+        scheduled = scheduled_workflow_names()
+        for exempt in SELF_REPORTING:
+            self.assertIn(exempt, scheduled, f"{exempt!r} is exempted but no scheduled workflow has that name")
+        self.assertEqual(names, [name for name in scheduled if name not in SELF_REPORTING])
 
     def test_a_first_failure_opens_one_issue_naming_the_run(self) -> None:
         # Every conclusion the step counts as a failure, including the one
