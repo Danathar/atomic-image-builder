@@ -622,15 +622,24 @@ def render_issue_body(result: Result, *, run_url: str | None) -> str:
         lines += [f"Failed units in the unmodified base, booted the same way: {shown}"]
     if result.log_tail:
         lines += ["", "<details><summary>Last lines of the log</summary>", "", "```text", result.log_tail, "```", "", "</details>"]
-    method_args = "" if result.method == CONTAINERFILE else f" --method {result.method}"
-    lines += [
-        "",
-        "Reproduce on a Linux workstation with KVM, podman and bcvk:",
-        "",
-        "```bash",
-        f"python3 variant_boot_test.py run --base {result.base}{method_args} --work /var/tmp/aib-boot-{result.base}",
-        "```",
-    ]
+    if result.stage in HOST_STAGES:
+        # A workstation run would not reproduce a runner that failed to set up
+        # or to start bcvk, so the issue points at where that happened.
+        lines += [
+            "",
+            "This is the runner, not the base. Read the failed job's setup steps (\"Prepare the host the way "
+            "bcvk's CI does\", \"Install the VM stack\") and bcvk's output in the log above.",
+        ]
+    else:
+        method_args = "" if result.method == CONTAINERFILE else f" --method {result.method}"
+        lines += [
+            "",
+            "Reproduce on a Linux workstation with KVM, podman and bcvk:",
+            "",
+            "```bash",
+            f"python3 variant_boot_test.py run --base {result.base}{method_args} --work /var/tmp/aib-boot-{result.base}",
+            "```",
+        ]
     if run_url:
         lines += ["", f"Run: {run_url} (logs are in its `variant-boot-*` artifact)"]
     return "\n".join(lines) + "\n"

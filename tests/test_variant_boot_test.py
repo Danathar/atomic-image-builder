@@ -424,6 +424,10 @@ class IssueTests(unittest.TestCase):
                 sync_issue(result, repo="o/r", run_url=None)
                 create = gh.call_args.args[0]
                 self.assertEqual(create[create.index("--title") + 1], HOST_ISSUE_TITLE)
+                # A workstation command would not reproduce a runner failure.
+                body = create[create.index("--body") + 1]
+                self.assertNotIn("variant_boot_test.py run", body)
+                self.assertIn("Prepare the host", body)
 
     def test_a_gh_failure_does_not_fail_the_report_step(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
