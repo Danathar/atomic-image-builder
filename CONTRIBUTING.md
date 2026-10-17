@@ -217,7 +217,9 @@ because actionlint v1.7.12 predates that hosted image, which
 workflow also downloads bcvk v0.19.0 by sha256 to boot each generated image
 in a VM, and first runs bcvk's own CI host setup from `bootc-dev/actions` at a
 pinned commit; without it virtiofsd never starts on the hosted runner. Neither
-pin is bumped automatically, so update both together when bcvk moves.
+pin is bumped automatically. Move the bcvk version and sha256 with bcvk's
+releases; review the `bootc-actions` commit when its host setup changes, and
+keep the bcvk version that setup installs in step with the one pinned here.
 The same test runs on a Linux workstation with KVM, podman and bcvk:
 `python3 variant_boot_test.py run --base <key> --work /var/tmp/aib-boot`,
 where `<key>` is a `BASE_IMAGES` key such as `sway-atomic`. It pulls the base
