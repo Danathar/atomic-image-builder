@@ -26,9 +26,11 @@ gh run list --workflow ci.yml --branch main -L 5            # is main green
 gh run list --workflow nightly-compliance.yml -L 7          # one run a day
 gh run list --workflow maintenance-audit.yml -L 4           # one run a Monday
 gh run list --workflow agent-audit.yml -L 2                 # one run a month
+gh run list --workflow variant-boot-test.yml -L 7           # two bases a night
 gh pr list --state open --label hold                        # agent PRs waiting on a person
 gh issue list --state open --label ai-fix-requested         # issues waiting on an agent
 gh issue list --search "in:title Scheduled run failing"     # red scheduled runs
+gh issue list --search "in:title Nightly boot test failing"  # bases that fail to build or boot
 ```
 
 A run that should be in that list and is not is a signal too. See
@@ -110,6 +112,31 @@ removed or renamed, since nothing else will.
 
 If `auto-issues.yml` itself failed, the scheduled run's own result is still in
 [Start here](#start-here)'s run lists; only the issue is missing.
+
+## A *Nightly boot test failing* issue opened
+
+`variant-boot-test.yml` builds what the tool generates for two bases a night
+and boots it in a VM, so each base in `BASE_IMAGES` comes up once a week. When
+one fails, `variant_boot_test.py` opens `Nightly boot test failing: <base>`. A
+further failure of that base comments there, and its next pass closes it. It
+is not an `auto-issues.yml` issue: that one would be closed by the next
+night's green run, which tests different bases.
+
+The issue says which stage failed and whose fault it probably is:
+
+1. **generate**: the tool could not write or render the project. A bug here.
+2. **build**: read the failing build step it quotes. A `/ctx/build.sh` step
+   runs what the tool generated; a `FROM` step is the registry or the base.
+3. **boot** or **checks**: the unmodified base was booted the same way. If it
+   fails the same way, the problem is upstream; comment and wait rather than
+   change the tool. A unit that fails only in a VM goes in
+   `ALLOWED_FAILED_UNITS` with its reason, never without one.
+
+To check a fix, dispatch the one base:
+`gh workflow run variant-boot-test.yml -f base=<base>`. A pass on `main`
+closes the issue. The logs are in the run's `variant-boot-<base>-<method>`
+artifact, and the issue gives the command that reproduces it on a workstation
+with KVM.
 
 ## The weekly audit failed or advised
 

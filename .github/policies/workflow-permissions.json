@@ -50,6 +50,13 @@
     "update-homebrew-formula.yml": {
       "workflow": {"contents": "write", "issues": "write"},
       "jobs": {}
+    },
+    "variant-boot-test.yml": {
+      "workflow": null,
+      "jobs": {
+        "plan": {"contents": "read"},
+        "boot": {"contents": "read", "issues": "write"}
+      }
     }
   }
 }

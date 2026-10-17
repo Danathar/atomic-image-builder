@@ -1,0 +1,178 @@
+---
+name: Variant boot test
+# Builds what the tool generates for two base images each night and boots the
+# result in a VM, so every base in BASE_IMAGES is covered once a week (#756).
+#
+# The gap: the unit suite proves the tool writes the files it means to write,
+# and nothing proved those files still build into an image that boots. The
+# bases change upstream every day, so a Universal Blue or Fedora change that
+# broke generated projects was first found by a user. variant_boot_test.py does
+# the work; this file only gives it a runner with KVM, a VM stack and storage.
+#
+# Not watched by auto-issues.yml. That workflow keeps one issue per workflow
+# and closes it on the next green run, and with a rotation the next run tests
+# different bases. variant_boot_test.py keeps one issue per base instead and
+# closes it only when that base passes again.
+
+on:
+  schedule:
+    # 02:41 UTC daily. An odd minute, clear of the top-of-hour rush when
+    # scheduled runs are delayed or dropped, and of the other schedules here.
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Test this one base (a BASE_IMAGES key, e.g. bazzite). Empty runs tonight's pair."
+        required: false
+        default: ""
+      method:
+        description: "Build method for that base"
+        required: false
+        type: choice
+        options:
+          - containerfile
+          - bluebuild
+        default: containerfile
+
+# One night's runs at a time; a dispatch queues behind the scheduled run
+# instead of cancelling it.
+concurrency:
+  group: variant-boot-test
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Pick the bases
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      slots: ${{ steps.plan.outputs.slots }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Plan
+        id: plan
+        env:
+          BASE: ${{ inputs.base }}
+          METHOD: ${{ inputs.method }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE:-}" ]; then
+            slots="$(python3 variant_boot_test.py plan --base "$BASE" --method "${METHOD:-containerfile}")"
+          else
+            slots="$(python3 variant_boot_test.py plan)"
+          fi
+          echo "slots=$slots" >> "$GITHUB_OUTPUT"
+
+  boot:
+    name: Boot ${{ matrix.base }} (${{ matrix.method }})
+    needs: plan
+    # 26.04 ships podman 5 and a QEMU and virtiofsd new enough for bcvk;
+    # bcvk's own CI boots VMs on this image.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      # For this base's tracking issue, opened, commented on or closed by
+      # variant_boot_test.py report.
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.slots) }}
+    env:
+      # The project, logs and result.json. Small: the images live in podman's
+      # storage, which the step below moves to the larger disk.
+      WORK: ${{ github.workspace }}/variant-boot
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Give the runner user KVM
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Install the VM stack
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils virtiofsd
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/bcvk.tar.gz" \
+            https://github.com/bootc-dev/bcvk/releases/download/v0.19.0/bcvk-x86_64-unknown-linux-gnu.tar.gz
+          echo "e6e3e2e8c13546d30481b035217442de78f2efe3e5a3bd3dbfb58d38345b4b98  $RUNNER_TEMP/bcvk.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/bcvk.tar.gz" -C "$RUNNER_TEMP/bin" bcvk-x86_64-unknown-linux-gnu
+          mv "$RUNNER_TEMP/bin/bcvk-x86_64-unknown-linux-gnu" "$RUNNER_TEMP/bin/bcvk"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # A base image is up to about 6 GB compressed and twice that unpacked,
+      # and the build adds a layer on top. The root filesystem's free space
+      # varies between runners; /mnt, where it exists, is the larger disk.
+      - name: Put container storage on the larger disk
+        run: |
+          set -euo pipefail
+          df -h / /mnt 2>/dev/null || df -h /
+          if [ -d /mnt ] && [ "$(df --output=avail -B1 /mnt | tail -1)" -gt "$(df --output=avail -B1 / | tail -1)" ]; then
+            sudo mkdir -p /mnt/containers /mnt/tmp
+            sudo chown "$(id -u):$(id -g)" /mnt/containers /mnt/tmp
+            mkdir -p "$HOME/.config/containers"
+            printf '[storage]\ndriver = "overlay"\ngraphroot = "/mnt/containers/storage"\n' > "$HOME/.config/containers/storage.conf"
+            echo "TMPDIR=/mnt/tmp" >> "$GITHUB_ENV"
+          fi
+          podman info --format '{{.Store.GraphRoot}}'
+
+      - name: Generate, build and boot
+        env:
+          BASE: ${{ matrix.base }}
+          METHOD: ${{ matrix.method }}
+        run: python3 variant_boot_test.py run --base "$BASE" --method "$METHOD" --work "$WORK"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: variant-boot-${{ matrix.base }}-${{ matrix.method }}
+          path: |
+            ${{ env.WORK }}/result.json
+            ${{ env.WORK }}/build.log
+            ${{ env.WORK }}/boot-*/
+            ${{ env.WORK }}/upstream/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # Only main's runs speak for the project; a dispatch from a branch is
+      # someone testing this workflow, and its failures are theirs to read.
+      - name: Open, update or close this base's issue
+        if: always() && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ matrix.base }}
+          METHOD: ${{ matrix.method }}
+        run: |
+          python3 variant_boot_test.py report --base "$BASE" --method "$METHOD" \
+            --result "$WORK/result.json" --repo "$GITHUB_REPOSITORY" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+      - name: Summarize
+        if: always()
+        env:
+          BASE: ${{ matrix.base }}
+          METHOD: ${{ matrix.method }}
+        run: |
+          {
+            echo "## Variant boot test: $BASE ($METHOD)"
+            echo
+            if [ -f "$WORK/result.json" ]; then
+              jq -r '"**\(.stage)**: \(.summary)\n\n\(.fault)"' "$WORK/result.json"
+            else
+              echo "No result: the job failed before the test ran."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
