@@ -14,6 +14,7 @@ from variant_boot_test import (
     ALLOWED_FAILED_UNITS,
     BLUEBUILD,
     CONTAINERFILE,
+    HOST_ISSUE_TITLE,
     NIGHTLY_SLOTS,
     WORST_CASE_SLOT_SECONDS,
     Boot,
@@ -316,6 +317,32 @@ class RunSlotTests(unittest.TestCase):
             run_slot(self.slot, self.work, keep_image=True)
         self.podman.assert_not_called()
 
+    def test_a_vm_that_never_started_is_not_blamed_on_either_image(self) -> None:
+        # Seen on the hosted runner: virtiofsd exited before the guest wrote a
+        # single journal line. Booting the unmodified base would fail the same
+        # way and "prove" upstream broke.
+        dead = Boot(False, "", [], [], [], "Error: virtiofsd failed to start for socket", guest_started=False)
+        with patch("variant_boot_test.boot", side_effect=[dead, dead]) as boot:
+            result = run_slot(self.slot, self.work)
+        self.assertEqual(result.stage, "host")
+        self.assertEqual(boot.call_count, 2)
+        self.assertNotIn("Upstream", result.fault)
+        self.assertIn("virtiofsd failed to start", result.summary)
+
+    def test_the_issue_log_carries_the_guest_console_as_well_as_bcvk(self) -> None:
+        failing = Boot(True, "degraded", passing_checks(), ["sddm.service"], [], "AIB-DONE", console="sddm: no display\n")
+        with patch("variant_boot_test.boot", side_effect=[failing, failing, booted()]):
+            result = run_slot(self.slot, self.work)
+        self.assertIn("sddm: no display", result.log_tail)
+        self.assertIn("AIB-DONE", result.log_tail)
+
+    def test_run_refuses_a_work_directory_that_already_holds_a_project(self) -> None:
+        (self.work / "project").mkdir()
+        with patch("sys.stderr"), self.assertRaises(SystemExit) as caught:
+            main(["run", "--base", "kinoite", "--work", str(self.work)])
+        self.assertEqual(caught.exception.code, 2)
+        self.generate.assert_not_called()
+
 
 class IssueTests(unittest.TestCase):
     def failed(self, method: str = CONTAINERFILE) -> Result:
@@ -338,23 +365,25 @@ class IssueTests(unittest.TestCase):
             sync_issue(self.failed(), repo="o/r", run_url=None)
         self.assertEqual(gh.call_args.args[0][:3], ["issue", "comment", "4"])
 
-    def test_a_pass_closes_only_that_bases_issue(self) -> None:
+    def test_a_pass_closes_only_that_bases_issue_and_the_runner_issue(self) -> None:
         listed = json.dumps(
             [
                 {"number": 4, "title": issue_title("bazzite"), "author": BOT_AUTHOR},
                 {"number": 5, "title": issue_title("aurora"), "author": BOT_AUTHOR},
+                {"number": 6, "title": HOST_ISSUE_TITLE, "author": BOT_AUTHOR},
             ]
         )
         passed = Result(base="aurora", method=CONTAINERFILE, image_uri="x", stage="passed", passed=True)
-        with patch("variant_boot_test.run_gh", side_effect=[listed, "", ""]) as gh:
+        with patch("variant_boot_test.run_gh", side_effect=[listed, "", "", listed, "", ""]) as gh:
             sync_issue(passed, repo="o/r", run_url="https://run")
-        self.assertEqual([call.args[0][:3] for call in gh.call_args_list[1:]], [["issue", "comment", "5"], ["issue", "close", "5"]])
+        writes = [call.args[0][:3] for call in gh.call_args_list if call.args[0][1] != "list"]
+        self.assertEqual(writes, [["issue", "comment", "5"], ["issue", "close", "5"], ["issue", "comment", "6"], ["issue", "close", "6"]])
 
     def test_a_pass_with_no_issue_writes_nothing(self) -> None:
         passed = Result(base="aurora", method=CONTAINERFILE, image_uri="x", stage="passed", passed=True)
         with patch("variant_boot_test.run_gh", return_value="[]") as gh:
             sync_issue(passed, repo=None, run_url=None)
-        self.assertEqual(gh.call_count, 1)
+        self.assertEqual({call.args[0][1] for call in gh.call_args_list}, {"list"})
 
     def test_an_issue_with_the_title_but_another_author_is_not_ours(self) -> None:
         # The repository takes issues from anyone; a squatted title must not
@@ -364,14 +393,18 @@ class IssueTests(unittest.TestCase):
             sync_issue(self.failed(), repo="o/r", run_url=None)
         self.assertEqual(gh.call_args.args[0][:2], ["issue", "create"])
 
-    def test_a_job_that_died_before_the_test_reports_runner_setup(self) -> None:
+    def test_a_failure_before_the_image_ran_goes_to_the_runner_issue_not_the_bases(self) -> None:
+        # A job that died in setup wrote no result.json; a bcvk that never
+        # started the VM wrote stage "host". Neither says anything about the
+        # base, and both of a night's jobs would report it.
         with tempfile.TemporaryDirectory() as tmp:
-            result = load_result(Path(tmp) / "result.json", Slot(base_by_key("aurora"), CONTAINERFILE))
-        self.assertFalse(result.passed)
-        with patch("variant_boot_test.run_gh", side_effect=["[]", "url"]) as gh:
-            sync_issue(result, repo="o/r", run_url=None)
-        body = gh.call_args.args[0][gh.call_args.args[0].index("--body") + 1]
-        self.assertIn("runner setup", body.lower())
+            setup = load_result(Path(tmp) / "result.json", Slot(base_by_key("aurora"), CONTAINERFILE))
+        host = Result(base="bazzite", method=CONTAINERFILE, image_uri="x", stage="host", summary="bcvk never started the VM")
+        for result in (setup, host):
+            with self.subTest(stage=result.stage), patch("variant_boot_test.run_gh", side_effect=["[]", "url"]) as gh:
+                sync_issue(result, repo="o/r", run_url=None)
+                create = gh.call_args.args[0]
+                self.assertEqual(create[create.index("--title") + 1], HOST_ISSUE_TITLE)
 
     def test_a_gh_failure_does_not_fail_the_report_step(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

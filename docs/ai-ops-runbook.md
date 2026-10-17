@@ -122,6 +122,11 @@ further failure of that base comments there, and its next pass closes it. It
 is not an `auto-issues.yml` issue: that one would be closed by the next
 night's green run, which tests different bases.
 
+A failure before any image ran, in the runner's setup or in bcvk itself (for
+example virtiofsd exiting before the VM starts), is not a base's. It goes to
+one shared issue, `Nightly boot test cannot run on the runner`, and the next
+slot that passes closes it. Fix the workflow's host setup, not the tool.
+
 The issue says which stage failed and whose fault it probably is:
 
 1. **generate**: the tool could not write or render the project. A bug here.
