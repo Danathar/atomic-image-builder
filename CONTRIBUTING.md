@@ -215,7 +215,10 @@ belong in it. To match CI locally, install the same release from
 because actionlint v1.7.12 predates that hosted image, which
 `variant-boot-test.yml` needs for its podman 5, QEMU and virtiofsd. That
 workflow also downloads bcvk v0.19.0 by sha256 to boot each generated image
-in a VM. The same test runs on a Linux workstation with KVM, podman and bcvk:
+in a VM, and first runs bcvk's own CI host setup from `bootc-dev/actions` at a
+pinned commit; without it virtiofsd never starts on the hosted runner. Neither
+pin is bumped automatically, so update both together when bcvk moves.
+The same test runs on a Linux workstation with KVM, podman and bcvk:
 `python3 variant_boot_test.py run --base <key> --work /var/tmp/aib-boot`,
 where `<key>` is a `BASE_IMAGES` key such as `sway-atomic`. It pulls the base
 (2 to 6 GB compressed) and builds on top of it, so like any local podman

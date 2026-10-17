@@ -71,7 +71,7 @@ jobs:
     name: Boot ${{ matrix.base }} (${{ matrix.method }})
     needs: plan
     # 26.04 ships podman 5 and a QEMU and virtiofsd new enough for bcvk;
-    # bcvk's own CI boots VMs on this image.
+    # bcvk's own CI boots VMs on this image, after the host setup below.
     runs-on: ubuntu-26.04
     timeout-minutes: 120
     permissions:
@@ -95,6 +95,24 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # bcvk's own CI host setup, run as its CI runs it. Without it virtiofsd
+      # exited before any VM started ("Error entering sandbox:
+      # DropSupplementalGroups ... Operation not permitted"), on every base;
+      # with it both a Universal Blue and a Fedora base booted on this runner
+      # image. It runs before anything else touches podman. Pinned by commit,
+      # not used as an action, because every `uses:` here must be in
+      # ACTION_PINS, which ships to generated repositories.
+      - name: Prepare the host the way bcvk's CI does
+        env:
+          BOOTC_ACTIONS_SHA: f77e18eca58220a5f8e82a115d65ee5973fcec83
+          BOOTC_HOST_LIBVIRT: "true"
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/bootc-dev/actions "$RUNNER_TEMP/bootc-actions"
+          git -C "$RUNNER_TEMP/bootc-actions" checkout -q "$BOOTC_ACTIONS_SHA"
+          bash "$RUNNER_TEMP/bootc-actions/bootc-host-setup/ci/install-deps.sh"
+          bash "$RUNNER_TEMP/bootc-actions/bootc-host-setup/ci/workarounds.sh"
 
       - name: Give the runner user KVM
         run: |

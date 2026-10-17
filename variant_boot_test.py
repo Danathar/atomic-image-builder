@@ -86,6 +86,17 @@ ALLOWED_FAILED_UNITS: dict[str, str] = {
         "seen in a VM on an AMD host: mcelog exits with 'AMD Processor family 25: mcelog does not support "
         "this processor'. The guest sees the host's CPU, so this follows the machine, not the image"
     ),
+    # Seen on bazzite in the hosted run: both call rpm-ostree, which refuses
+    # with "This system was not booted via libostree". bcvk boots the image's
+    # tree directly, with no ostree deployment, so these fail on every boot.
+    "greenboot-healthcheck.service": (
+        "greenboot's required checks run rpm-ostree and grub2-editenv; an ephemeral VM is not booted via "
+        "libostree and has no /boot/grub2"
+    ),
+    "bazzite-hardware-setup.service": (
+        "it applies kernel arguments with rpm-ostree, which refuses on a system not booted via libostree, "
+        "as a bcvk ephemeral VM is not"
+    ),
 }
 
 # Two things bcvk needs from the guest that an installed desktop has or does
@@ -386,10 +397,13 @@ def parse_guest_output(output: str) -> tuple[bool, str, list[dict[str, str]], li
     checks: list[dict[str, str]] = []
     units: list[str] = []
     for line in output.splitlines():
-        line = line.strip()
-        if not line.startswith(MARKER):
+        # A login shell can print terminal queries ahead of the first line
+        # (bazzite's sends OSC colour and cursor-position requests), so the
+        # marker is looked for anywhere in the line, not only at its start.
+        start = line.find(MARKER)
+        if start < 0:
             continue
-        kind, _, rest = line[len(MARKER) :].partition(" ")
+        kind, _, rest = line[start + len(MARKER) :].strip().partition(" ")
         if kind == "DONE":
             done = True
         elif kind == "STATE":

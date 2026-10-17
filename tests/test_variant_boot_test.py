@@ -196,6 +196,16 @@ exit 1
 
 
 class ParseTests(unittest.TestCase):
+    def test_terminal_queries_ahead_of_the_first_marker_do_not_hide_it(self) -> None:
+        # The first bytes of bazzite's real output from the hosted run: its
+        # login shell asks for the terminal colours and cursor position on
+        # the same line as the first marker, which was then missed and the
+        # boot reported as never settling.
+        output = "\x1b]10;?\x1b\\\x1b[6n\x1b]11;?\x1b\\\x1b[6nAIB-STATE degraded\nAIB-DONE\n"
+        done, state, _, _ = parse_guest_output(output)
+        self.assertTrue(done)
+        self.assertEqual(state, "degraded")
+
     def test_login_noise_is_ignored_and_a_missing_done_marker_means_not_reached(self) -> None:
         done, state, checks, _ = parse_guest_output("Welcome to Bazzite\nAIB-STATE running\nAIB-CHECK package:tmux pass\n")
         self.assertFalse(done)
