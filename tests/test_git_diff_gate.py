@@ -414,9 +414,7 @@ ALLOWED = "allowed"
 # a `REFUSED` one -- a gate that blocks ordinary work gets switched off, which
 # is the same as not having one.
 #
-# The rows are the corpus filed across the six repositories this hive manages
-# (sensi#250, goodreads-mcp#120, zfs-kinoite-complex#229, aurora-zfs-simple#222,
-# arch-bootc#333), so a shape found in any of them can be added here as a row.
+# A shape found later is added here as a row.
 REACH_CORPUS = (
     # 1. An environment assignment reaching the tool. None of these appears
     # inside the string an allow rule matches, and all but the pager reach.
@@ -1940,15 +1938,14 @@ class RefusalTests(unittest.TestCase):
                 self.assertEqual(gate.tokenize(gate.mask_quotes_stripped(command)), tokens)
 
     def test_no_allow_rule_runs_bash(self) -> None:
-        # aurora-zfs-simple and arch-bootc allow `bash -n`, and their hooks
-        # refuse what it prints there (aurora-zfs-simple#233,
-        # arch-bootc#345): -n stops bash running a script, not printing it,
-        # so `bash -n -v ./cosign.key` prints the key, -o history and -i copy
+        # `bash -n` is not safe to allow without rules of its own (#452): -n
+        # stops bash running a script, not printing it, so
+        # `bash -n -v ./cosign.key` prints the key, -o history and -i copy
         # it into ~/.bash_history, and a syntax error prints its line. This
         # hook carries none of those rules, because no row here runs bash and
         # each of those spellings prompts. A row that did would pass the test
         # above as soon as GATED_PREFIXES listed it, with none of them, so it
-        # fails here until they are ported.
+        # fails here until they are added.
         allow = json.loads(SETTINGS.read_text(encoding="utf-8"))["permissions"]["allow"]
         shells = [
             rule
@@ -1960,8 +1957,8 @@ class RefusalTests(unittest.TestCase):
         self.assertEqual(
             shells,
             [],
-            "an allow row runs a shell; port the bash -n option and operand rules from "
-            "aurora-zfs-simple's gate before allowing it",
+            "an allow row runs a shell; add bash -n option and operand rules to "
+            "this hook before allowing it",
         )
 
     def test_no_allow_rule_reaches_a_redirection_written_after_a_group(self) -> None:
@@ -1982,7 +1979,7 @@ class RefusalTests(unittest.TestCase):
         # row that allows everything (`Bash`, `Bash(*)`). A wildcard row whose
         # fixed part opens a compound (`Bash(if true:*)`) matches such a string
         # the same way. This fails if a row like that is added;
-        # reaches_a_group() says what counts (aurora-zfs-simple#241).
+        # reaches_a_group() says what counts (#455).
         allow = json.loads(SETTINGS.read_text(encoding="utf-8"))["permissions"]["allow"]
         patterns = {rule: rule[len("Bash(") : -1] for rule in allow if rule.startswith("Bash(")}
         self.assertTrue(patterns)

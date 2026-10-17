@@ -141,11 +141,11 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   `env` or `$ENV` in any pflag spelling (`--jq V`, `--jq=V`, `-q V`, `-qV`,
   `-wq=V`), a quoted string included, and a filter bash would rewrite first
   (a brace, an unquoted glob, a leading `~`); `.env` as a field of the
-  fetched JSON is not refused. Same fix as
-  [aurora-zfs-simple#293](https://github.com/Danathar/aurora-zfs-simple/pull/293). `tests/test_git_diff_gate.py` derives the list from the
+  fetched JSON is not refused. Fixed in
+  [#597](https://github.com/Danathar/atomic-image-builder/pull/597). `tests/test_git_diff_gate.py` derives the list from the
   settings file, so a `:*` row added there fails until the hook lists it, and
-  shows the truncation in a throwaway directory first. Same fix as
-  [zfs-kinoite-complex#224](https://github.com/Danathar/zfs-kinoite-complex/pull/224).
+  shows the truncation in a throwaway directory first. Fixed in
+  [#420](https://github.com/Danathar/atomic-image-builder/pull/420).
   The *read* is not git's alone either. The linter prints the source line
   above every diagnostic it reports, so pointing it at `./.env` printed back
   every unexported `NAME=value` line of a file `Read(./.env)` denies -- values
@@ -210,9 +210,8 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   variable that is not set creates it -- and whatever value it carries, since
   nothing in this repository sets it; the cost is that a word which only quotes the
   assignment is refused too, so the variable is searched for by name without
-  the `=`. Same finding as
-  [arch-bootc#314](https://github.com/Danathar/arch-bootc/issues/314) and
-  [aurora-zfs-simple#206](https://github.com/Danathar/aurora-zfs-simple/issues/206).
+  the `=`. Found in
+  [#422](https://github.com/Danathar/atomic-image-builder/issues/422).
   That variable turned out to be one of a family, and the family is now a
   table rather than a special case: `GIT_EXTERNAL_DIFF` names a program git
   runs on every file it diffs, the `GIT_CONFIG_*` family injects

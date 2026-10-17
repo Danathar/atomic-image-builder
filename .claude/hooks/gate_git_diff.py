@@ -560,7 +560,7 @@ def podman_extglob_word(positions: list[int], tokens: list[str], masked: list[st
     reaches podman as that option beside a file of that name. The tokenizer
     ends the segment at the `(`, so the pattern shows up here as the
     segment's last word ending in one of those five characters, unquoted in
-    its masked twin, with a `(` as the very next token (aurora-zfs-simple#262).
+    its masked twin, with a `(` as the very next token (#481).
     A quoted `'@'(x)` masks to `Q`, so it is left alone.
     """
     if not positions:
@@ -1331,13 +1331,13 @@ def strip_comments(command: str) -> str:
     A `#` that begins a word after whitespace (or the start of the string)
     starts a comment bash drops through the end of the line, so `shellcheck
     contrib/aib # output > file` opens nothing and must not be refused for
-    the `>` in the comment (review on aurora-zfs-simple#211, the bash twin
-    of this hook). The spans are found on the quote-masked copy, where a
-    quoted `#` is a `Q`, and cut from the command itself; tokenize() is then
-    handed a string with no comment in it, and its `commenters = ""` still
-    holds for the `#` this leaves in place: one inside a word (`HEAD^#x`),
-    which is a character of the word, and one straight after an operator
-    (`;#`), which is kept as a word and can only over-refuse.
+    the `>` in the comment (#420). The spans are found on the quote-masked
+    copy, where a quoted `#` is a `Q`, and cut from the command itself;
+    tokenize() is then handed a string with no comment in it, and its
+    `commenters = ""` still holds for the `#` this leaves in place: one
+    inside a word (`HEAD^#x`), which is a character of the word, and one
+    straight after an operator (`;#`), which is kept as a word and can only
+    over-refuse.
     """
     masked = mask_quotes(command)
     kept: list[str] = []
