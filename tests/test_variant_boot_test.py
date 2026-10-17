@@ -27,6 +27,7 @@ from variant_boot_test import (
     compare_with_upstream,
     generate,
     guest_script,
+    host_failure,
     issue_title,
     judge,
     load_result,
@@ -321,13 +322,21 @@ class RunSlotTests(unittest.TestCase):
         # Seen on the hosted runner: virtiofsd exited before the guest wrote a
         # single journal line. Booting the unmodified base would fail the same
         # way and "prove" upstream broke.
-        dead = Boot(False, "", [], [], [], "Error: virtiofsd failed to start for socket", guest_started=False)
+        output = "Error:\n   0: virtiofsd failed to start for socket /run/inner-shared/virtiofs.sock\n"
+        dead = Boot(False, "", [], [], [], output, host_failure(output, journal_written=False))
         with patch("variant_boot_test.boot", side_effect=[dead, dead]) as boot:
             result = run_slot(self.slot, self.work)
         self.assertEqual(result.stage, "host")
         self.assertEqual(boot.call_count, 2)
         self.assertNotIn("Upstream", result.fault)
         self.assertIn("virtiofsd failed to start", result.summary)
+
+    def test_only_a_named_host_failure_with_no_guest_journal_is_the_runners(self) -> None:
+        # A guest that dies before its journal reaches the host is silent too;
+        # without a host-side error from bcvk it stays a failure of the base.
+        self.assertEqual(host_failure("Timeout waiting for readiness after 240s", journal_written=False), "")
+        self.assertEqual(host_failure("0: virtiofsd failed to start for socket x", journal_written=True), "")
+        self.assertIn("OCI runtime error", host_failure("Error: OCI runtime error: crun: setns", journal_written=False))
 
     def test_the_issue_log_carries_the_guest_console_as_well_as_bcvk(self) -> None:
         failing = Boot(True, "degraded", passing_checks(), ["sddm.service"], [], "AIB-DONE", console="sddm: no display\n")

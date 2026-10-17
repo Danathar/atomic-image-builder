@@ -144,6 +144,12 @@ LOG_TAIL_LINES = 50
 # SSH session that also carries whatever the image prints at login.
 MARKER = "AIB-"
 CONSOLE_FAILURE_RE = re.compile(r"Kernel panic|\bOops\b|\bBUG:|Unknown symbol in module")
+# What bcvk prints when the host, not the guest, failed: the VM's file sharing,
+# QEMU or the container around them never started. Only these count as a
+# runner failure; a boot that is merely silent stays a failure of the base, so
+# a guest that dies before its journal reaches the host is not filed away as
+# the runner's.
+HOST_FAILURE_RE = re.compile(r"virtiofsd failed to start|Failed to spawn (?:QEMU|virtiofsd)|OCI runtime error|bwrap: .*Permission denied")
 # bcvk mounts a --ro-bind directory at /run/virtiofs-mnt-<name> in the guest.
 GUEST_SCRIPT_MOUNT = "aib-checks"
 
@@ -368,9 +374,9 @@ class Boot:
     failed_units: list[str]
     console_errors: list[str]
     output: str
-    # False when the guest never wrote a journal line: bcvk, QEMU or virtiofsd
-    # failed on the host before the image ran at all.
-    guest_started: bool = True
+    # Set when the guest never wrote a journal line and bcvk's output names a
+    # host-side failure (HOST_FAILURE_RE): the image never ran at all.
+    host_error: str = ""
     console: str = ""
 
 
@@ -444,9 +450,16 @@ def boot(image: str, log_dir: Path, *, packages: Sequence[str], services: Sequen
     console = console_path.read_text(errors="replace") if console_path.exists() else ""
     console_errors = sorted({match.group(0) for match in CONSOLE_FAILURE_RE.finditer(console)})
     journal = log_dir / "journal.json"
-    guest_started = journal.exists() and journal.stat().st_size > 0
+    journal_written = journal.exists() and journal.stat().st_size > 0
     done, state, checks, units_failed = parse_guest_output(output)
-    return Boot(done, state, checks, units_failed, console_errors, output, guest_started, console)
+    return Boot(done, state, checks, units_failed, console_errors, output, host_failure(output, journal_written=journal_written), console)
+
+
+def host_failure(output: str, *, journal_written: bool) -> str:
+    """bcvk's line naming a host-side failure, when the guest never wrote a journal line."""
+    if journal_written:
+        return ""
+    return next((line.strip() for line in output.splitlines() if HOST_FAILURE_RE.search(line)), "")
 
 
 def boot_log_tail(boot_result: Boot) -> str:
@@ -461,10 +474,8 @@ def boot_log_tail(boot_result: Boot) -> str:
 def judge(boot_result: Boot) -> tuple[str, str, list[str]]:
     """(stage, summary, unexpected failed units); stage is "passed" when nothing failed."""
     unexpected = [unit for unit in boot_result.failed_units if unit not in ALLOWED_FAILED_UNITS]
-    if not boot_result.guest_started:
-        first_error = next((line.strip() for line in boot_result.output.splitlines() if "failed" in line.lower()), "")
-        detail = f" ({first_error})" if first_error else ""
-        return "host", f"bcvk never started the VM, so the image was not tested{detail}.", unexpected
+    if boot_result.host_error:
+        return "host", f"bcvk never started the VM, so the image was not tested ({boot_result.host_error}).", unexpected
     if not boot_result.reached:
         return "boot", "The VM never reached the point where the checks run (no SSH, or the checks did not finish).", unexpected
     if boot_result.console_errors:

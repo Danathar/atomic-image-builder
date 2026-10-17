@@ -81,6 +81,11 @@ jobs:
       issues: write
     strategy:
       fail-fast: false
+      # One slot at a time. Both slots can report to the shared runner issue,
+      # and finding an issue then creating it is not atomic: two jobs failing
+      # together would open it twice, or one's pass would close it under the
+      # other's failure. A night takes twice as long; nothing waits on it.
+      max-parallel: 1
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.slots) }}
     env:
