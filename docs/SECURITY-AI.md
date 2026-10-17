@@ -211,7 +211,7 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   nothing in this repository sets it; the cost is that a word which only quotes the
   assignment is refused too, so the variable is searched for by name without
   the `=`. Found in
-  [#422](https://github.com/Danathar/atomic-image-builder/issues/422).
+  [#424](https://github.com/Danathar/atomic-image-builder/issues/424).
   That variable turned out to be one of a family, and the family is now a
   table rather than a special case: `GIT_EXTERNAL_DIFF` names a program git
   runs on every file it diffs, the `GIT_CONFIG_*` family injects
