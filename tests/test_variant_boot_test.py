@@ -1,6 +1,7 @@
 import datetime as dt
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -14,6 +15,7 @@ from variant_boot_test import (
     BLUEBUILD,
     CONTAINERFILE,
     NIGHTLY_SLOTS,
+    WORST_CASE_SLOT_SECONDS,
     Boot,
     Result,
     Slot,
@@ -33,6 +35,8 @@ from variant_boot_test import (
     run_slot,
     sync_issue,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # The shape gh returns for an issue this workflow opened: GraphQL spells the
 # app actor with the "app/" prefix. Spelled out rather than imported so a
@@ -228,23 +232,39 @@ class JudgeTests(unittest.TestCase):
 
 class BlameTests(unittest.TestCase):
     def test_units_failing_in_the_unmodified_base_too_are_upstream(self) -> None:
-        fault = compare_with_upstream("checks", passing_checks(), ["sddm.service"], booted(units=["sddm.service"]))
-        self.assertIn("Upstream", fault)
+        ours = booted(checks=passing_checks(), units=["sddm.service"])
+        self.assertIn("Upstream", compare_with_upstream(ours, booted(units=["sddm.service"])))
 
     def test_a_failed_package_or_service_check_is_never_upstreams(self) -> None:
         # The unmodified base was never asked for the test package or service,
         # so sharing a failed unit with it cannot excuse a failed check.
-        checks = [{"name": "package:tmux", "status": "fail", "detail": "not-installed"}]
-        fault = compare_with_upstream("checks", checks, ["sddm.service"], booted(units=["sddm.service"]))
-        self.assertIn("atomic-image-builder", fault)
+        ours = booted(checks=[{"name": "package:tmux", "status": "fail", "detail": "not-installed"}], units=["sddm.service"])
+        self.assertIn("atomic-image-builder", compare_with_upstream(ours, booted(units=["sddm.service"])))
 
     def test_a_unit_failing_only_in_the_generated_image_is_the_tools(self) -> None:
-        fault = compare_with_upstream("checks", passing_checks(), ["sddm.service", "x.service"], booted(units=["sddm.service"]))
-        self.assertIn("atomic-image-builder", fault)
+        ours = booted(checks=passing_checks(), units=["sddm.service", "x.service"])
+        self.assertIn("atomic-image-builder", compare_with_upstream(ours, booted(units=["sddm.service"])))
 
-    def test_a_boot_failure_is_upstreams_only_when_the_base_fails_to_boot_too(self) -> None:
-        self.assertIn("Upstream", compare_with_upstream("boot", [], [], booted(reached=False)))
-        self.assertIn("atomic-image-builder", compare_with_upstream("boot", [], [], booted(checks=passing_checks())))
+    def test_a_boot_failure_is_upstreams_only_when_the_base_fails_the_same_way(self) -> None:
+        unreachable = booted(reached=False)
+        panicking = booted(checks=passing_checks(), console=["Kernel panic"])
+        self.assertIn("Upstream", compare_with_upstream(unreachable, booted(reached=False)))
+        self.assertIn("Upstream", compare_with_upstream(panicking, booted(console=["Kernel panic"])))
+        # Both are "boot" failures, but not the same one: an image that never
+        # answers SSH is not explained by a base that answers and panics.
+        self.assertIn("atomic-image-builder", compare_with_upstream(unreachable, panicking))
+        self.assertIn("atomic-image-builder", compare_with_upstream(unreachable, booted(checks=passing_checks())))
+
+
+class WorkflowBudgetTests(unittest.TestCase):
+    def test_the_job_outlives_the_slowest_slot(self) -> None:
+        # If the job's timeout-minutes cancels it first, the steps that upload
+        # the logs and report the issue never run -- on exactly the slow
+        # failures they exist for. Ten minutes covers the runner setup.
+        workflow = (REPO_ROOT / ".github" / "workflows" / "variant-boot-test.yml").read_text()
+        boot_job = workflow[workflow.index("\n  boot:\n") :]
+        minutes = int(re.search(r"^    timeout-minutes: (\d+)$", boot_job, re.MULTILINE).group(1))
+        self.assertGreaterEqual(minutes * 60, WORST_CASE_SLOT_SECONDS + 10 * 60)
 
 
 class RunSlotTests(unittest.TestCase):

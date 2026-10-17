@@ -26,7 +26,6 @@ also runs on a Linux workstation with KVM, podman and bcvk:
 from __future__ import annotations
 
 import argparse
-import base64
 import datetime as dt
 import json
 import re
@@ -126,17 +125,28 @@ WantedBy=default.target
 VM_MEMORY = "4G"
 VM_VCPUS = "2"
 # Seconds for the whole of one boot, checks included. bcvk gives up on SSH by
-# itself after four minutes; this bounds a VM that is reachable but hangs.
-BOOT_TIMEOUT_SECONDS = 15 * 60
+# itself after four minutes and the guest waits at most SETTLE_TIMEOUT_SECONDS
+# for boot to settle; this bounds a VM that is reachable but hangs.
+BOOT_TIMEOUT_SECONDS = 12 * 60
 # Seconds the guest waits for boot to settle before it reports what it has.
 SETTLE_TIMEOUT_SECONDS = 300
-BUILD_TIMEOUT_SECONDS = 90 * 60
+# The largest base builds in minutes on a hosted runner; this only stops a
+# hung build.
+BUILD_TIMEOUT_SECONDS = 45 * 60
+# A slot can boot three times: the generated image twice, then the unmodified
+# base. The job's timeout-minutes has to cover all of it plus the runner setup,
+# or the job is cancelled before it uploads the logs and reports the issue --
+# exactly on the slow failures those exist for. test_the_job_outlives_the_
+# slowest_slot holds the workflow to this.
+WORST_CASE_SLOT_SECONDS = BUILD_TIMEOUT_SECONDS + 3 * BOOT_TIMEOUT_SECONDS
 LOG_TAIL_LINES = 50
 
 # The guest writes one marker per line so the host can read results out of an
 # SSH session that also carries whatever the image prints at login.
 MARKER = "AIB-"
 CONSOLE_FAILURE_RE = re.compile(r"Kernel panic|\bOops\b|\bBUG:|Unknown symbol in module")
+# bcvk mounts a --ro-bind directory at /run/virtiofs-mnt-<name> in the guest.
+GUEST_SCRIPT_MOUNT = "aib-checks"
 
 ISSUE_TITLE_PREFIX = "Nightly boot test failing: "
 
@@ -397,16 +407,22 @@ def write_units(directory: Path) -> Path:
 def boot(image: str, log_dir: Path, *, packages: Sequence[str], services: Sequence[str]) -> Boot:
     log_dir.mkdir(parents=True, exist_ok=True)
     units = write_units(log_dir.parent / "units")
-    encoded = base64.b64encode(guest_script(packages, services).encode()).decode()
+    # The script travels as a file on a read-only virtiofs mount rather than
+    # inside the SSH command line, so what the guest ran is a file anyone can
+    # read in the run's artifact.
+    script_dir = log_dir / "checks"
+    script_dir.mkdir(exist_ok=True)
+    (script_dir / "checks.sh").write_text(guest_script(packages, services) + "\n")
     command = [
         "bcvk", "ephemeral", "run-ssh",
         "--memory", VM_MEMORY,
         "--vcpus", VM_VCPUS,
         "--systemd-units", str(units),
+        "--ro-bind", f"{script_dir}:{GUEST_SCRIPT_MOUNT}",
         "--log-dir", f"journal,console={log_dir}/",
         image,
         "--",
-        f"echo {encoded} | base64 -d | bash",
+        f"bash /run/virtiofs-mnt-{GUEST_SCRIPT_MOUNT}/checks.sh",
     ]
     try:
         proc = subprocess.run(command, capture_output=True, text=True, errors="replace", check=False, timeout=BOOT_TIMEOUT_SECONDS)
@@ -442,20 +458,36 @@ def judge(boot_result: Boot) -> tuple[str, str, list[str]]:
     return "passed", "Built and booted; every check passed.", unexpected
 
 
-def compare_with_upstream(stage: str, checks: Sequence[dict[str, str]], unexpected: Sequence[str], upstream: Boot) -> str:
+def boot_failure_signature(boot_result: Boot) -> str:
+    """How a boot failed, specific enough that two different failures differ.
+
+    judge() calls all of these "boot"; a generated image that never answers
+    SSH and a base that answers but panics are not failing "the same way".
+    """
+    if not boot_result.reached:
+        return "unreachable"
+    if boot_result.console_errors:
+        return "console: " + ", ".join(boot_result.console_errors)
+    return f"state: {boot_result.state or 'unknown'}"
+
+
+def compare_with_upstream(booted: Boot, upstream: Boot) -> str:
     """Whose failure this is, from booting the unmodified base the same way.
 
     The comparison only assigns blame; it never turns a failure into a pass.
-    A failed package or service check is always the generated project's, since
-    the unmodified base was never asked for either. Units count as upstream's
-    only when every unexpected one also fails in the unmodified base.
+    A boot failure is upstream's only when the base fails with the same
+    signature. A failed package or service check is always the generated
+    project's, since the unmodified base was never asked for either. Units
+    count as upstream's only when every unexpected one also fails in the base.
     """
+    stage, _, unexpected = judge(booted)
     upstream_stage, _, upstream_unexpected = judge(upstream)
     if stage == "boot":
-        return fault_for("boot", upstream_also_fails=upstream_stage == "boot")
+        same = upstream_stage == "boot" and boot_failure_signature(upstream) == boot_failure_signature(booted)
+        return fault_for("boot", upstream_also_fails=same)
     if not upstream.reached:
         return fault_for("checks", upstream_also_fails=None)
-    failed_checks = any(check["status"] != "pass" for check in checks)
+    failed_checks = any(check["status"] != "pass" for check in booted.checks)
     shared = not failed_checks and bool(unexpected) and set(unexpected) <= set(upstream_unexpected)
     return fault_for("checks", upstream_also_fails=shared)
 
@@ -495,7 +527,7 @@ def run_slot(slot: Slot, work: Path, *, keep_image: bool = False) -> Result:
             return result
         upstream = boot(slot.base.image_uri, work / "upstream", packages=(), services=())
         result.upstream_failed_units = upstream.failed_units if upstream.reached else None
-        result.fault = compare_with_upstream(stage, booted.checks, unexpected, upstream)
+        result.fault = compare_with_upstream(booted, upstream)
         result.log_tail = tail(booted.output)
     except StageFailure as failure:
         result.stage = failure.stage
