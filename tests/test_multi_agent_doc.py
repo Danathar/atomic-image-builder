@@ -180,6 +180,21 @@ class Ruleset(unittest.TestCase):
         self.assertIs(checks["strict_required_status_checks_policy"], True)
         self.assertIn("`strict_required_status_checks_policy` is `true`", flatten(SECTIONS[OVERLAP]))
 
+    def test_the_page_says_what_strict_costs(self) -> None:
+        # Strict leaves every other open pull request behind main after each
+        # merge. Only the `true` above was read, so a sentence saying a pull
+        # request need not contain main, or calling the block a failure to
+        # fix, could sit next to it unnoticed.
+        body = flatten(SECTIONS[OVERLAP])
+        for sentence in (
+            "**Expect a pull request to fall behind `main`.**",
+            "a pull request has to contain the latest `main`, and pass `test` with it, before it can merge.",
+            "GitHub blocks each one as behind `main` until it is updated from `main`",
+            "A pull request blocked as behind needs an update from `main`, not a fix",
+        ):
+            with self.subTest(sentence=sentence):
+                self.assertIn(sentence, body)
+
     def test_no_approval_is_required_and_nobody_bypasses(self) -> None:
         self.assertEqual(self.rule("pull_request")["required_approving_review_count"], 0)
         self.assertEqual(RULESET["bypass_actors"], [])

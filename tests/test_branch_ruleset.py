@@ -231,6 +231,12 @@ class RulesetTests(unittest.TestCase):
         # repository 1 would stop everything merging.
         self.assertEqual(rules()["pull_request"]["required_approving_review_count"], 0)
 
+    def test_unattributed_changes_need_an_extra_approval(self) -> None:
+        # The live ruleset has this on (#761). The documented PUT replaces the
+        # live rules with this file's, so a key dropped or flipped here turns
+        # it off on main the next time anyone re-applies the file.
+        self.assertIs(rules()["pull_request"].get("require_extra_approval_for_unattributed_changes"), True)
+
     def test_every_required_check_comes_from_github_actions(self) -> None:
         checks = rules()["required_status_checks"]["required_status_checks"]
         self.assertTrue(checks, "the ruleset requires no check")
@@ -322,6 +328,19 @@ class DocTests(unittest.TestCase):
         approvals = re.search(r"`pull_request` with (\d+) approvals?", leads)
         self.assertIsNotNone(approvals, "the doc no longer says how many approvals pull_request needs")
         self.assertEqual(int(approvals.group(1)), rules()["pull_request"]["required_approving_review_count"])
+
+    def test_the_doc_says_whether_the_required_check_is_strict(self) -> None:
+        # The bullet tells an admin what the required check enforces. A file
+        # made strict, or made lax again, with the bullet left alone has the
+        # page describe a ruleset other than the one the PUT applies.
+        strict = rules()["required_status_checks"]["strict_required_status_checks_policy"]
+        bullet = re.search(
+            r"^- \*\*`required_status_checks`.*?(?=^- |^\n|\Z)", doc_section("The ruleset"), re.M | re.S
+        )
+        self.assertIsNotNone(bullet, "the doc no longer has a `required_status_checks` bullet")
+        text = " ".join(bullet.group(0).split())
+        self.assertIn(f"(`strict_required_status_checks_policy` is `{json.dumps(strict)}`)", text)
+        self.assertEqual("has to be up to date with `main`" in text, strict)
 
     def test_the_doc_says_how_to_apply_and_check_it(self) -> None:
         self.assertIn("(../.github/rulesets/main.json)", DOC)
