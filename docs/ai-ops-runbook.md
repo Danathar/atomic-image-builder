@@ -140,9 +140,12 @@ The issue says which stage failed and whose fault it probably is:
 
 To check a fix, dispatch the one base:
 `gh workflow run variant-boot-test.yml -f base=<base>`. A pass on `main`
-closes the issue. The logs are in the run's `variant-boot-<base>-<method>`
-artifact, and the issue gives the command that reproduces it on a workstation
-with KVM.
+closes the issue. An issue titled `<base> (BlueBuild)` needs
+`-f method=bluebuild` as well: only a BlueBuild pass of that base closes it,
+and the Sunday rotation reaches a base only once in as many weeks as
+`BASE_IMAGES` has bases. The logs are in the run's
+`variant-boot-<base>-<method>` artifact, and the issue gives the command that
+reproduces it on a workstation with KVM.
 
 ## The weekly audit failed or advised
 

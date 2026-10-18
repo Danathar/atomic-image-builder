@@ -531,6 +531,10 @@ def compare_with_upstream(booted: Boot, upstream: Boot) -> str:
     """
     stage, _, unexpected = judge(booted)
     upstream_stage, _, upstream_unexpected = judge(upstream)
+    if upstream_stage == "host":
+        # bcvk never started the base's VM, so the base was not compared at
+        # all; "does not fail this way" would blame the tool for the runner.
+        return fault_for(stage, upstream_also_fails=None)
     if stage == "boot":
         same = upstream_stage == "boot" and boot_failure_signature(upstream) == boot_failure_signature(booted)
         return fault_for("boot", upstream_also_fails=same)
@@ -559,8 +563,15 @@ def run_slot(slot: Slot, work: Path, *, keep_image: bool = False) -> Result:
             # to do with the image (a slow runner missing bcvk's SSH deadline).
             # It is a retry of the boot only; the build is not repeated.
             result.attempts = attempt
-            booted = boot(slot.tag, work / f"boot-{attempt}", packages=TEST_PACKAGES, services=TEST_SERVICES)
-            stage, summary, unexpected = judge(booted)
+            retry = boot(slot.tag, work / f"boot-{attempt}", packages=TEST_PACKAGES, services=TEST_SERVICES)
+            judged = judge(retry)
+            if booted is not None and judged[0] == "host":
+                # A retry bcvk never started says nothing about the image, so
+                # the first attempt's failure stands. Reporting the retry would
+                # file a real failure of this base under the runner issue.
+                break
+            booted = retry
+            stage, summary, unexpected = judged
             if stage == "passed":
                 break
         assert booted is not None

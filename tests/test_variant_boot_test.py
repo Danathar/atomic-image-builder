@@ -267,6 +267,14 @@ class BlameTests(unittest.TestCase):
         self.assertIn("atomic-image-builder", compare_with_upstream(unreachable, panicking))
         self.assertIn("atomic-image-builder", compare_with_upstream(unreachable, booted(checks=passing_checks())))
 
+    def test_a_base_vm_that_never_started_blames_no_one(self) -> None:
+        # The unmodified base was not compared at all, so neither "the same
+        # way" nor "does not fail this way" is known.
+        dead = Boot(False, "", [], [], [], "virtiofsd failed to start", "virtiofsd failed to start")
+        for ours in (booted(reached=False), booted(checks=passing_checks(), units=["sddm.service"])):
+            with self.subTest(stage=judge(ours)[0]):
+                self.assertIn("Unknown", compare_with_upstream(ours, dead))
+
 
 class WorkflowBudgetTests(unittest.TestCase):
     def test_the_job_outlives_the_slowest_slot(self) -> None:
@@ -340,6 +348,18 @@ class RunSlotTests(unittest.TestCase):
         self.assertEqual(boot.call_count, 2)
         self.assertNotIn("Upstream", result.fault)
         self.assertIn("virtiofsd failed to start", result.summary)
+
+    def test_a_retry_that_never_started_keeps_the_first_attempts_failure(self) -> None:
+        # The first boot reached a real failure of the image; filing the
+        # retry's runner failure instead would move it to the runner issue,
+        # which the next passing slot closes.
+        output = "virtiofsd failed to start"
+        dead = Boot(False, "", [], [], [], output, host_failure(output, journal_written=False))
+        bad = booted(checks=passing_checks(), units=["sddm.service"])
+        with patch("variant_boot_test.boot", side_effect=[bad, dead, booted(units=["sddm.service"])]):
+            result = run_slot(self.slot, self.work)
+        self.assertEqual((result.stage, result.attempts, result.unexpected_units), ("checks", 2, ["sddm.service"]))
+        self.assertIn("Upstream", result.fault)
 
     def test_only_a_named_host_failure_with_no_guest_journal_is_the_runners(self) -> None:
         # A guest that dies before its journal reaches the host is silent too;
