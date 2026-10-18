@@ -120,17 +120,6 @@ class GenerateTests(unittest.TestCase):
             self.assertIn("tmux", build_sh)
             self.assertIn("systemctl enable podman.socket", build_sh)
             self.assertIn("FROM quay.io/fedora-ostree-desktops/sway-atomic", (context / "Containerfile").read_text())
-            self.assertEqual(base_reference(base_by_key("sway-atomic"), context), "quay.io/fedora-ostree-desktops/sway-atomic:44")
-
-    def test_a_bluebuild_base_is_found_by_the_digest_it_was_pinned_to(self) -> None:
-        # The first lines bluebuild generate rendered for budgie-atomic in the
-        # first hosted run: the base pinned by digest, then the module stages.
-        # The tag is not in local storage after that build, so it cannot be
-        # what the digest is read from.
-        pinned = "quay.io/fedora-ostree-desktops/budgie-atomic@sha256:5be0a50e0a987e11e37a5f55e5310acc11f376a94489272ff70ea10199e41b87"
-        with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "Containerfile").write_text(f"FROM {pinned} AS variant-budgie-atomic\nFROM scratch AS stage-files\n")
-            self.assertEqual(base_reference(base_by_key("budgie-atomic"), Path(tmp)), pinned)
 
     def test_a_render_failure_is_reported_as_the_generate_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch("variant_boot_test.App.render_bluebuild_containerfile", return_value=False):
@@ -151,6 +140,22 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(caught.exception.stage, "build")
         self.assertIn("RUN /ctx/build.sh", caught.exception.summary)
         self.assertIn("No match for argument: tmux", caught.exception.log_tail)
+
+    def test_the_base_digest_is_read_from_the_reference_the_build_pulled(self) -> None:
+        # The BlueBuild case is the first lines of budgie-atomic's build log
+        # from the first hosted run: the rendered Containerfile says
+        # FROM "${BASE_IMAGE}", and the step shows the digest it expanded to.
+        # The tag is not in local storage after that build, so it cannot be
+        # what the digest is read from.
+        pinned = "quay.io/fedora-ostree-desktops/budgie-atomic@sha256:5be0a50e0a987e11e37a5f55e5310acc11f376a94489272ff70ea10199e41b87"
+        cases = (
+            ("budgie-atomic", f"[1/6] STEP 1/1: FROM {pinned} AS variant-budgie-atomic\n[2/6] STEP 1/2: FROM scratch AS stage-files\n", pinned),
+            ("bazzite", "[1/2] STEP 1/2: FROM scratch AS ctx\n[2/2] STEP 1/4: FROM ghcr.io/ublue-os/bazzite:stable\n", "ghcr.io/ublue-os/bazzite:stable"),
+        )
+        for key, log, expected in cases:
+            with self.subTest(base=key), tempfile.TemporaryDirectory() as tmp:
+                (Path(tmp) / "build.log").write_text(log)
+                self.assertEqual(base_reference(base_by_key(key), Path(tmp) / "build.log"), expected)
 
 
 @unittest.skipIf(shutil.which("bash") is None, "bash is not installed")
