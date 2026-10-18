@@ -91,7 +91,11 @@ does:
   image's files change.
   `Publish coverage badge and trend` runs on pushes to `main` only.
   `integration_id` 15368 is GitHub Actions. `tests/test_branch_ruleset.py`
-  fails if the job is renamed, skipped, or gains a filter.
+  fails if the job is renamed, skipped, or gains a filter. The check is
+  strict (`strict_required_status_checks_policy` is `true`): a pull request
+  has to be up to date with `main`, and pass `test` that way, before it can
+  merge. [`docs/multi-agent.md`](multi-agent.md) says what that means for
+  several open pull requests at once.
 
 Nothing pushes to `main` outside a pull request, and
 `tests/test_branch_ruleset.py` fails if a workflow starts to. The formula

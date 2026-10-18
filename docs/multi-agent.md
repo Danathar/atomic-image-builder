@@ -80,16 +80,18 @@ a `Claims` line naming the files and symbols it changes lets the next agent
 see the overlap without reading the diff. Several roles already do this.
 Nothing enforces it.
 
-**Expect two green pull requests to be red together.** The `main` ruleset
-requires `test` to pass, but `strict_required_status_checks_policy` is `false`
-in [`.github/rulesets/main.json`](../.github/rulesets/main.json): a pull
-request does not have to be tested against the latest `main` before it merges.
-On 2026-10-03, #632 added a path to [`docs/risk-tiers.md`](risk-tiers.md) and
+**Expect a pull request to fall behind `main`.** The `main` ruleset requires
+`test` to pass, and `strict_required_status_checks_policy` is `true` in
+[`.github/rulesets/main.json`](../.github/rulesets/main.json): a pull request
+has to contain the latest `main`, and pass `test` with it, before it can
+merge. Every merge makes the other open pull requests stale, so GitHub blocks
+each one as behind `main` until it is updated from `main` and `test` runs
+again. That is the cost of strict, and it is why it is on. On 2026-10-03,
+before it was, #632 added a path to [`docs/risk-tiers.md`](risk-tiers.md) and
 #636 added [`.claude/risk-config.json`](../.claude/risk-config.json) with the
 old path list. Each passed on its own; together they turned `test` red on
-`main` until #637. When two open pull requests touch the same document and the
-test that reads it, update the second from `main` before it merges so `test`
-runs on the pair.
+`main` until #637. A pull request blocked as behind needs an update from
+`main`, not a fix, unless `test` then fails on the pair.
 
 ## Who merges
 

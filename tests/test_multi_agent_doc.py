@@ -170,14 +170,15 @@ class Ruleset(unittest.TestCase):
         self.assertEqual(len(matches), 1, f"main.json has no single {kind} rule")
         return matches[0].get("parameters", {})
 
-    def test_test_is_required_but_not_against_the_latest_main(self) -> None:
-        # The page's warning that two green pull requests can be red together
-        # is true only while the check is not strict. Turning strict on makes
-        # the warning wrong, and this is what says so.
+    def test_test_is_required_against_the_latest_main(self) -> None:
+        # The page tells an agent to expect pull requests blocked as behind
+        # main, which is true only while the check is strict. Turning strict
+        # off brings back the pair failure of #632 and #636, and this is what
+        # says the page has to warn about it again.
         checks = self.rule("required_status_checks")
         self.assertEqual([check["context"] for check in checks["required_status_checks"]], ["test"])
-        self.assertIs(checks["strict_required_status_checks_policy"], False)
-        self.assertIn("`strict_required_status_checks_policy` is `false`", flatten(SECTIONS[OVERLAP]))
+        self.assertIs(checks["strict_required_status_checks_policy"], True)
+        self.assertIn("`strict_required_status_checks_policy` is `true`", flatten(SECTIONS[OVERLAP]))
 
     def test_no_approval_is_required_and_nobody_bypasses(self) -> None:
         self.assertEqual(self.rule("pull_request")["required_approving_review_count"], 0)

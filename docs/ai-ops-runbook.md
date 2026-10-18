@@ -36,13 +36,14 @@ A run that should be in that list and is not is a signal too. See
 
 ## `main` is red
 
-The `protect main` ruleset requires `test` on each pull request, against the
-`main` it was tested with. Two pull requests that each pass alone can fail
-together. Then `test` is red on `main`, and on every pull request the next
-time its CI runs, whatever that pull request changes. Every `ai-fix.yml`
-intake comment shows **FAIL** for the same reason: it runs the gate on `main`,
-not on the issue. This happened on 2026-10-03: #632 and #636 each passed, and
-together broke `test_risk_config`. #637 is the fix.
+The `protect main` ruleset requires `test` on each pull request, and since
+2026-10-07 it requires the pull request to be up to date with `main` first, so
+two pull requests that each pass alone can no longer merge untested together.
+When `test` is red on `main`, it is red on every pull request the next time
+its CI runs, whatever that pull request changes. Every `ai-fix.yml` intake
+comment shows **FAIL** for the same reason: it runs the gate on `main`, not on
+the issue. Before strict was on, this happened on 2026-10-03: #632 and #636
+each passed, and together broke `test_risk_config`. #637 is the fix.
 
 1. Read the failing step of the newest `ci.yml` run on `main` and run the
    named test locally.
