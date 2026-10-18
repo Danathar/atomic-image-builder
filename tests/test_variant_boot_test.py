@@ -22,6 +22,7 @@ from variant_boot_test import (
     Slot,
     StageFailure,
     base_by_key,
+    base_reference,
     bluebuild_base,
     build,
     compare_with_upstream,
@@ -119,6 +120,17 @@ class GenerateTests(unittest.TestCase):
             self.assertIn("tmux", build_sh)
             self.assertIn("systemctl enable podman.socket", build_sh)
             self.assertIn("FROM quay.io/fedora-ostree-desktops/sway-atomic", (context / "Containerfile").read_text())
+            self.assertEqual(base_reference(base_by_key("sway-atomic"), context), "quay.io/fedora-ostree-desktops/sway-atomic:44")
+
+    def test_a_bluebuild_base_is_found_by_the_digest_it_was_pinned_to(self) -> None:
+        # The first lines bluebuild generate rendered for budgie-atomic in the
+        # first hosted run: the base pinned by digest, then the module stages.
+        # The tag is not in local storage after that build, so it cannot be
+        # what the digest is read from.
+        pinned = "quay.io/fedora-ostree-desktops/budgie-atomic@sha256:5be0a50e0a987e11e37a5f55e5310acc11f376a94489272ff70ea10199e41b87"
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "Containerfile").write_text(f"FROM {pinned} AS variant-budgie-atomic\nFROM scratch AS stage-files\n")
+            self.assertEqual(base_reference(base_by_key("budgie-atomic"), Path(tmp)), pinned)
 
     def test_a_render_failure_is_reported_as_the_generate_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch("variant_boot_test.App.render_bluebuild_containerfile", return_value=False):
@@ -293,7 +305,7 @@ class RunSlotTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.work = Path(self.tmp.name)
         self.slot = Slot(base_by_key("kinoite"), CONTAINERFILE)
-        for target, value in (("generate", None), ("build", None), ("image_digest", "sha256:abc")):
+        for target, value in (("generate", None), ("build", None), ("base_reference", "quay.io/x:1"), ("image_digest", "sha256:abc")):
             patcher = patch(f"variant_boot_test.{target}", return_value=value)
             setattr(self, target, patcher.start())
             self.addCleanup(patcher.stop)
