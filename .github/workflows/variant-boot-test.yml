@@ -93,8 +93,13 @@ jobs:
       # storage, which the step below moves to the larger disk.
       WORK: ${{ github.workspace }}/variant-boot
     steps:
+      # Without the persisted token: this job holds issues: write and then runs
+      # bootc-dev/actions' scripts, which need no git credentials. Only the
+      # report step gets a token, through GH_TOKEN.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       # bcvk's own CI host setup, run as its CI runs it. Without it virtiofsd
       # exited before any VM started ("Error entering sandbox:
