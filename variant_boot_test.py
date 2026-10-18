@@ -150,8 +150,9 @@ BUILD_TIMEOUT_SECONDS = 45 * 60
 # slowest_slot holds the workflow to this.
 WORST_CASE_SLOT_SECONDS = BUILD_TIMEOUT_SECONDS + 3 * BOOT_TIMEOUT_SECONDS
 LOG_TAIL_LINES = 50
-# A Containerfile FROM line's image, past any --platform style flags.
-FROM_RE = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)", re.IGNORECASE)
+# A FROM step in podman's build log, with ARGs already expanded. The rendered
+# BlueBuild Containerfile names its base through one (FROM "${BASE_IMAGE}").
+FROM_STEP_RE = re.compile(r"\bSTEP \d+/\d+: FROM\s+(?:--\S+\s+)*\"?([^\"\s]+)", re.IGNORECASE)
 
 # The guest writes one marker per line so the host can read results out of an
 # SSH session that also carries whatever the image prints at login.
@@ -342,18 +343,18 @@ def build(slot: Slot, context: Path, log_path: Path) -> None:
         raise StageFailure("build", summary, fault_for("build"), tail(output))
 
 
-def base_reference(base: BaseImage, context: Path) -> str:
-    """The reference the build pulled the base by.
+def base_reference(base: BaseImage, log_path: Path) -> str:
+    """The reference the build pulled the base by, from its FROM step in the build log.
 
     The generated Containerfile names the base by its tag, but `bluebuild
-    generate` pins it by digest (`FROM <repository>@sha256:... AS ...`). A base
-    pulled only by digest has no tag in local storage, so inspecting the tag
-    found nothing and a BlueBuild slot recorded no base digest.
+    generate` pins it by digest, through an ARG: the step reads `FROM
+    <repository>@sha256:... AS ...`. A base pulled only by digest has no tag in
+    local storage, so inspecting the tag found nothing and a BlueBuild slot
+    recorded no base digest.
     """
     repository = re.sub(r":[^/]*$", "", base.image_uri)
-    for line in (context / "Containerfile").read_text().splitlines():
-        match = FROM_RE.match(line)
-        if match and (match.group(1) == base.image_uri or match.group(1).startswith(f"{repository}@")):
+    for match in FROM_STEP_RE.finditer(log_path.read_text()):
+        if match.group(1) == base.image_uri or match.group(1).startswith(f"{repository}@"):
             return match.group(1)
     return base.image_uri
 
@@ -575,7 +576,7 @@ def run_slot(slot: Slot, work: Path, *, keep_image: bool = False) -> Result:
         result.stage = "build"
         build(slot, context, work / "build.log")
         built = True
-        result.base_digest = image_digest(base_reference(slot.base, context))
+        result.base_digest = image_digest(base_reference(slot.base, work / "build.log"))
         booted = None
         for attempt in (1, 2):
             # A second attempt absorbs the nested-VM failures that have nothing
