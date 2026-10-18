@@ -18,6 +18,7 @@ Goal: Adding a workflow without saying what to do when it fails, renaming a
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import unittest
@@ -34,6 +35,7 @@ WORKFLOW_DIR = ROOT / ".github/workflows"
 NIGHTLY = WORKFLOW_DIR / "nightly-compliance.yml"
 AGENT_AUDIT = WORKFLOW_DIR / "agent-audit.yml"
 SNAPSHOT_DRIFT = ROOT / "snapshot_drift_issue.py"
+RULESET = ROOT / ".github/rulesets/main.json"
 
 # Steps of the nightly job that set the runner up rather than check anything.
 # Listed so the step table cannot silently skip a check: every other step has
@@ -152,6 +154,17 @@ class RunbookTests(unittest.TestCase):
                 self.assertIn("workflow_dispatch:", (WORKFLOW_DIR / workflow).read_text())
                 passed = set(re.findall(r"-f ([\w-]+)=", flags))
                 self.assertLessEqual(passed, dispatch_inputs(WORKFLOW_DIR / workflow))
+
+    def test_main_is_red_says_whether_the_check_is_strict(self) -> None:
+        # The section says why main can go red. While the check is strict a
+        # pull request has to be up to date with main before it merges, so two
+        # that pass alone cannot merge as a red pair. Turning strict off makes
+        # that sentence false, and nothing else reads it.
+        rules = {rule["type"]: rule.get("parameters", {}) for rule in json.loads(RULESET.read_text())["rules"]}
+        strict = rules["required_status_checks"]["strict_required_status_checks_policy"]
+        body = " ".join(section(self.text, "`main` is red").split())
+        self.assertEqual("requires the pull request to be up to date with `main` first" in body, strict)
+        self.assertEqual("can no longer merge untested together" in body, strict)
 
     def test_links_resolve(self) -> None:
         for target in re.findall(r"\]\(([^)\s]+)\)", self.text):
