@@ -1,0 +1,8 @@
+# actionlint 1.7.12, the version CONTRIBUTING.md pins, predates GitHub's
+# ubuntu-26.04 hosted runner and reports the label as unknown. It is a hosted
+# label, not a self-hosted one; this is actionlint's only way to accept a label
+# it does not know. variant-boot-test.yml needs 26.04 for its podman 5, QEMU and
+# virtiofsd. Drop this once a pinned actionlint knows the label.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
