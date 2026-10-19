@@ -13,9 +13,13 @@ from atomic_image_builder import BASE_IMAGES
 from variant_boot_test import (
     ALLOWED_FAILED_UNITS,
     BLUEBUILD,
+    BOOT_TIMEOUT_SECONDS,
+    BUILD_TIMEOUT_SECONDS,
     CONTAINERFILE,
+    GUEST_SCRIPT_MOUNT,
     HOST_ISSUE_TITLE,
     NIGHTLY_SLOTS,
+    ROOTHOME_UNIT,
     WORST_CASE_SLOT_SECONDS,
     Boot,
     Result,
@@ -24,19 +28,23 @@ from variant_boot_test import (
     base_by_key,
     base_reference,
     bluebuild_base,
+    boot,
     build,
     compare_with_upstream,
     generate,
     guest_script,
     host_failure,
+    image_digest,
     issue_title,
     judge,
     load_result,
     main,
     parse_guest_output,
     plan,
+    render_issue_body,
     run_slot,
     sync_issue,
+    write_units,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -157,6 +165,42 @@ class BuildTests(unittest.TestCase):
                 (Path(tmp) / "build.log").write_text(log)
                 self.assertEqual(base_reference(base_by_key(key), Path(tmp) / "build.log"), expected)
 
+    def test_a_quoted_from_step_is_read_without_its_quotes(self) -> None:
+        pinned = "quay.io/fedora-ostree-desktops/budgie-atomic@sha256:5be0a50e0a987e11e37a5f55e5310acc11f376a94489272ff70ea10199e41b87"
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "build.log").write_text(f'[1/6] STEP 1/1: FROM "{pinned}" AS variant-budgie-atomic\n')
+            self.assertEqual(base_reference(base_by_key("budgie-atomic"), Path(tmp) / "build.log"), pinned)
+
+    def test_a_log_that_never_pulled_the_base_falls_back_to_its_tag(self) -> None:
+        # Another base's FROM step is not this one's; the tag is still the
+        # best reference to inspect, and an empty one would inspect nothing.
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "build.log").write_text("[1/2] STEP 1/2: FROM scratch AS ctx\n[2/2] STEP 1/4: FROM ghcr.io/ublue-os/aurora:stable\n")
+            self.assertEqual(base_reference(base_by_key("bazzite"), Path(tmp) / "build.log"), "ghcr.io/ublue-os/bazzite:stable")
+
+    def test_a_build_pulls_tonights_base_and_skips_the_layer_cache_within_its_limit(self) -> None:
+        # --no-cache: podman keyed the build.sh RUN step on its command line,
+        # not the bind-mounted script, and reused a stale layer.
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "variant_boot_test.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "STEP 1/1: FROM x\n", "")
+        ) as run:
+            slot = Slot(base_by_key("bazzite"), CONTAINERFILE)
+            build(slot, Path(tmp), Path(tmp) / "build.log")
+            self.assertEqual((Path(tmp) / "build.log").read_text(), "STEP 1/1: FROM x\n")
+        command = run.call_args.args[0]
+        self.assertEqual(command[:2], ["podman", "build"])
+        self.assertIn("--pull=always", command)
+        self.assertIn("--no-cache", command)
+        self.assertEqual(command[-3:], ["-t", slot.tag, tmp])
+        self.assertEqual(run.call_args.kwargs["timeout"], BUILD_TIMEOUT_SECONDS)
+
+    def test_a_reference_podman_cannot_inspect_has_no_digest(self) -> None:
+        with patch("variant_boot_test.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "sha256:abc\n", "")):
+            self.assertEqual(image_digest("ghcr.io/ublue-os/bazzite:stable"), "sha256:abc")
+        # The failed inspect's stdout is not a digest, even when it is not empty.
+        with patch("variant_boot_test.subprocess.run", return_value=subprocess.CompletedProcess([], 125, "Error: no such image\n", "")):
+            self.assertEqual(image_digest("ghcr.io/ublue-os/bazzite:stable"), "")
+
 
 @unittest.skipIf(shutil.which("bash") is None, "bash is not installed")
 class GuestScriptTests(unittest.TestCase):
@@ -229,6 +273,12 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(state, "running")
         self.assertEqual(checks, [{"name": "package:tmux", "status": "pass", "detail": ""}])
 
+    def test_a_blank_failed_unit_line_is_not_a_failed_unit(self) -> None:
+        # judge() would count an empty name as an unexpected unit and fail a
+        # base that has none.
+        _, _, _, units = parse_guest_output("AIB-FAILED-UNIT \nAIB-FAILED-UNIT sddm.service\nAIB-DONE\n")
+        self.assertEqual(units, ["sddm.service"])
+
 
 class JudgeTests(unittest.TestCase):
     def test_degraded_by_allowlisted_units_alone_passes(self) -> None:
@@ -291,6 +341,87 @@ class BlameTests(unittest.TestCase):
         for ours in (booted(reached=False), booted(checks=passing_checks(), units=["sddm.service"])):
             with self.subTest(stage=judge(ours)[0]):
                 self.assertIn("Unknown", compare_with_upstream(ours, dead))
+
+    def test_two_boot_failures_with_different_signs_are_not_the_same_way(self) -> None:
+        # Both judged "boot", but a panic is not explained by an oops, and a
+        # boot stuck starting is not explained by one in maintenance mode.
+        panicking = booted(checks=passing_checks(), console=["Kernel panic"])
+        self.assertIn("atomic-image-builder", compare_with_upstream(panicking, booted(console=["Oops"])))
+        self.assertIn("atomic-image-builder", compare_with_upstream(panicking, booted(state="degraded")))
+        starting = booted(state="starting")
+        self.assertIn("Upstream", compare_with_upstream(starting, booted(state="starting")))
+        self.assertIn("atomic-image-builder", compare_with_upstream(starting, booted(state="maintenance")))
+
+    def test_a_base_that_never_answered_cannot_excuse_a_failed_check(self) -> None:
+        # The base booted but never reached the checks, so its failed units
+        # are unknown: neither "upstream too" nor "only ours" is known.
+        ours = booted(checks=passing_checks(), units=["sddm.service"])
+        self.assertIn("Unknown", compare_with_upstream(ours, booted(reached=False)))
+
+
+class BootTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.work = Path(self.tmp.name)
+
+    def boot(self, output: str, *, console: str | None = None, journal: str | None = None, log: str = "boot-1"):
+        log_dir = self.work / log
+
+        def run(command, **kwargs):
+            # bcvk writes the console and journal into --log-dir.
+            if console is not None:
+                (log_dir / "console.txt").write_text(console)
+            if journal is not None:
+                (log_dir / "journal.json").write_text(journal)
+            return subprocess.CompletedProcess(command, 0, output, "")
+
+        with patch("variant_boot_test.subprocess.run", side_effect=run) as bcvk:
+            result = boot("localhost/aib-test:x", log_dir, packages=("tmux",), services=("podman.socket",))
+        return result, bcvk
+
+    def test_every_boot_injects_the_roothome_unit_and_sshd(self) -> None:
+        units = write_units(self.work / "units")
+        wants = units / "system" / "default.target.wants"
+        self.assertEqual((units / "system" / "aib-roothome.service").read_text(), ROOTHOME_UNIT)
+        self.assertEqual(os.readlink(wants / "aib-roothome.service"), "../aib-roothome.service")
+        # The desktops ship sshd disabled, and bcvk reaches the guest over SSH.
+        self.assertEqual(os.readlink(wants / "sshd.service"), "/usr/lib/systemd/system/sshd.service")
+        # The retry and the unmodified base share the directory.
+        self.assertEqual(write_units(self.work / "units"), units)
+
+    def test_bcvk_runs_the_check_script_from_a_read_only_mount(self) -> None:
+        result, bcvk = self.boot("AIB-STATE running\nAIB-CHECK package:tmux pass\nAIB-DONE\n", journal="{}\n")
+        log_dir = self.work / "boot-1"
+        script = (log_dir / "checks" / "checks.sh").read_text()
+        self.assertEqual(script, guest_script(("tmux",), ("podman.socket",)) + "\n")
+        command = bcvk.call_args.args[0]
+        self.assertEqual(command[:3], ["bcvk", "ephemeral", "run-ssh"])
+        self.assertEqual(command[command.index("--systemd-units") + 1], str(self.work / "units"))
+        self.assertEqual(command[command.index("--ro-bind") + 1], f"{log_dir / 'checks'}:{GUEST_SCRIPT_MOUNT}")
+        self.assertEqual(command[command.index("--") - 1], "localhost/aib-test:x")
+        self.assertEqual(command[-1], f"bash /run/virtiofs-mnt-{GUEST_SCRIPT_MOUNT}/checks.sh")
+        self.assertEqual(bcvk.call_args.kwargs["timeout"], BOOT_TIMEOUT_SECONDS)
+        self.assertTrue((self.work / "units" / "system" / "default.target.wants" / "sshd.service").is_symlink())
+        self.assertEqual((log_dir / "bcvk.log").read_text(), "AIB-STATE running\nAIB-CHECK package:tmux pass\nAIB-DONE\n")
+        self.assertEqual((result.reached, result.state, result.host_error), (True, "running", ""))
+        self.assertEqual(result.checks, [{"name": "package:tmux", "status": "pass", "detail": ""}])
+
+    def test_the_console_is_read_for_kernel_failures(self) -> None:
+        result, _ = self.boot("AIB-DONE\n", console="[ 1.0] Kernel panic - not syncing\n[ 2.0] Oops: 0000\n", journal="{}\n")
+        self.assertEqual(result.console_errors, ["Kernel panic", "Oops"])
+        self.assertIn("Kernel panic - not syncing", result.console)
+        quiet, _ = self.boot("AIB-DONE\n", journal="{}\n", log="boot-2")
+        self.assertEqual((quiet.console, quiet.console_errors), ("", []))
+
+    def test_an_empty_journal_counts_as_none_written(self) -> None:
+        # bcvk creates journal.json before the guest starts; an empty one means
+        # the guest never wrote a line, so a named host failure is the runner's.
+        output = "Error:\n   0: virtiofsd failed to start for socket /run/inner-shared/virtiofs.sock\n"
+        empty, _ = self.boot(output, journal="")
+        self.assertIn("virtiofsd failed to start", empty.host_error)
+        written, _ = self.boot(output, journal="{}\n", log="boot-2")
+        self.assertEqual(written.host_error, "")
 
 
 class WorkflowBudgetTests(unittest.TestCase):
@@ -399,6 +530,29 @@ class RunSlotTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 2)
         self.generate.assert_not_called()
 
+    def test_a_base_that_never_answered_records_no_failed_units(self) -> None:
+        # "none" would claim the base booted clean; it never reached the checks.
+        bad = booted(checks=passing_checks(), units=["sddm.service"])
+        with patch("variant_boot_test.boot", side_effect=[bad, bad, booted(reached=False)]):
+            result = run_slot(self.slot, self.work)
+        self.assertIsNone(result.upstream_failed_units)
+        self.assertIn("Unknown", result.fault)
+
+    def test_run_writes_the_result_the_report_step_reads_and_fails_the_step_on_a_failure(self) -> None:
+        # The run step's exit status is what turns the nightly job red, and
+        # result.json is all the report step knows about the slot.
+        failed = Result(base="kinoite", method=CONTAINERFILE, image_uri="quay.io/x:1", stage="checks", summary="Booted, but failed units: x.service.", fault="atomic-image-builder: ...", upstream_failed_units=[])
+        passed = Result(base="kinoite", method=CONTAINERFILE, image_uri="quay.io/x:1", stage="passed", passed=True)
+        for result, code in ((failed, 1), (passed, 0)):
+            # run_slot, patched out here, is what creates the directory.
+            work = self.work / result.stage
+            work.mkdir()
+            with self.subTest(stage=result.stage), patch("variant_boot_test.run_slot", return_value=result), patch("builtins.print") as printed:
+                self.assertEqual(main(["run", "--base", "kinoite", "--work", str(work)]), code)
+                self.assertEqual(load_result(work / "result.json", self.slot), result)
+                said = "\n".join(call.args[0] for call in printed.call_args_list)
+                self.assertEqual("Whose fault: atomic-image-builder" in said, not result.passed)
+
 
 class IssueTests(unittest.TestCase):
     def failed(self, method: str = CONTAINERFILE) -> Result:
@@ -465,6 +619,32 @@ class IssueTests(unittest.TestCase):
                 body = create[create.index("--body") + 1]
                 self.assertNotIn("variant_boot_test.py run", body)
                 self.assertIn("Prepare the host", body)
+
+    def test_the_body_names_the_failed_units_in_both_images(self) -> None:
+        result = self.failed()
+        result.stage, result.unexpected_units = "checks", ["sddm.service", "x.service"]
+        body = render_issue_body(result, run_url=None)
+        self.assertIn("Failed units: `sddm.service`, `x.service`", body)
+        self.assertNotIn("unmodified base, booted the same way", body)
+        for upstream, shown in ((["sddm.service"], "`sddm.service`"), ([], "none")):
+            result.upstream_failed_units = upstream
+            with self.subTest(upstream=upstream):
+                self.assertIn(f"Failed units in the unmodified base, booted the same way: {shown}\n", render_issue_body(result, run_url=None))
+
+    def test_an_unreadable_issue_list_stops_the_report_instead_of_filing_again(self) -> None:
+        # Reading a gh hiccup as "no issue yet" would open a second issue for
+        # a base that already has one.
+        for listed in ("not json", json.dumps({"number": 4})):
+            with self.subTest(listed=listed), patch("variant_boot_test.run_gh", return_value=listed) as gh:
+                with self.assertRaises(RuntimeError):
+                    sync_issue(self.failed(), repo="o/r", run_url=None)
+                self.assertEqual(gh.call_count, 1)
+
+    def test_a_matching_issue_without_a_number_is_skipped(self) -> None:
+        listed = json.dumps([{"number": "4", "title": issue_title("bazzite"), "author": BOT_AUTHOR}])
+        with patch("variant_boot_test.run_gh", side_effect=[listed, "https://example/issues/11"]) as gh:
+            sync_issue(self.failed(), repo="o/r", run_url=None)
+        self.assertEqual(gh.call_args.args[0][:2], ["issue", "create"])
 
     def test_a_gh_failure_does_not_fail_the_report_step(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
