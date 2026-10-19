@@ -129,6 +129,19 @@ class GenerateTests(unittest.TestCase):
             self.assertIn("systemctl enable podman.socket", build_sh)
             self.assertIn("FROM quay.io/fedora-ostree-desktops/sway-atomic", (context / "Containerfile").read_text())
 
+    def test_the_project_is_written_by_the_same_method_as_the_menus_local_build(self) -> None:
+        # The test is only worth running if it builds what "Test build
+        # locally" builds. A hand copy of that sequence here drifts the first
+        # time the menu's side changes, and nothing would say so.
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "variant_boot_test.App.write_local_build_context", autospec=True, return_value=True
+        ) as write:
+            context = Path(tmp) / "project"
+            generate(Slot(base_by_key("bluefin"), BLUEBUILD), context)
+        write.assert_called_once()
+        self.assertEqual(write.call_args.args[1:], (context, None))
+        self.assertEqual(write.call_args.args[0].config.method, BLUEBUILD)
+
     def test_a_render_failure_is_reported_as_the_generate_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch("variant_boot_test.App.render_bluebuild_containerfile", return_value=False):
             with self.assertRaises(StageFailure) as caught:

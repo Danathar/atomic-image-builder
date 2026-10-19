@@ -5881,9 +5881,7 @@ class App:
         tag = f"{TOOL_SLUG}-local-test:dryrun"
         with tempfile.TemporaryDirectory(prefix=f"{TOOL_SLUG}-local-build.") as tmp:
             tmpdir = Path(tmp)
-            self.seed_project_template(tmpdir)
-            self.write_project_files(tmpdir, include_workflow=False)
-            if self.config.method == "bluebuild" and not self.render_bluebuild_containerfile(tmpdir, repo_dir):
+            if not self.write_local_build_context(tmpdir, repo_dir):
                 self.gum.enter_to_continue("Press Enter to return to the menu...")
                 return
             proc = self.gum.spinner_result(
@@ -5896,6 +5894,20 @@ class App:
             else:
                 self.report_local_build_failure("Local podman build", proc)
         self.gum.enter_to_continue("Press Enter to return to the menu...")
+
+    def write_local_build_context(self, context: Path, repo_dir: Path | None) -> bool:
+        """Write into `context` the project a local podman build reads.
+
+        This is the generated project without its workflow, plus, for
+        BlueBuild, the Containerfile rendered from its recipe. The menu's local
+        test build and variant_boot_test.py both build from it, so the nightly
+        boot test exercises exactly what this writes. Returns False when the
+        BlueBuild render failed, which render_bluebuild_containerfile() has
+        already reported.
+        """
+        self.seed_project_template(context)
+        self.write_project_files(context, include_workflow=False)
+        return self.config.method != "bluebuild" or self.render_bluebuild_containerfile(context, repo_dir)
 
     def report_local_build_failure(self, what: str, proc: subprocess.CompletedProcess[str]) -> None:
         # Only the last eight stderr lines are shown: the useful part of a
