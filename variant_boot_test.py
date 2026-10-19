@@ -315,6 +315,11 @@ def tail(text: str, lines: int = LOG_TAIL_LINES) -> str:
     return "\n".join(text.splitlines()[-lines:])
 
 
+def timed_out_output(exc: subprocess.TimeoutExpired) -> str:
+    """What a timed-out command printed. TimeoutExpired keeps it as bytes even under text=True."""
+    return "".join(part.decode(errors="replace") if isinstance(part, bytes) else part for part in (exc.stdout, exc.stderr) if part)
+
+
 def last_build_step(log: str) -> str:
     steps = [line.strip() for line in log.splitlines() if re.search(r"\bSTEP \d+/\d+:", line)]
     return steps[-1] if steps else ""
@@ -333,8 +338,7 @@ def build(slot: Slot, context: Path, log_path: Path) -> None:
         output = proc.stdout + proc.stderr
         returncode = proc.returncode
     except subprocess.TimeoutExpired as exc:
-        output = f"{exc.stdout or ''}{exc.stderr or ''}\npodman build timed out after {BUILD_TIMEOUT_SECONDS}s"
-        output = output if isinstance(output, str) else output.decode(errors="replace")
+        output = timed_out_output(exc) + f"\npodman build timed out after {BUILD_TIMEOUT_SECONDS}s"
         returncode = -1
     log_path.write_text(output)
     if returncode != 0:
@@ -477,8 +481,7 @@ def boot(image: str, log_dir: Path, *, packages: Sequence[str], services: Sequen
         proc = subprocess.run(command, capture_output=True, text=True, errors="replace", check=False, timeout=BOOT_TIMEOUT_SECONDS)
         output = proc.stdout + proc.stderr
     except subprocess.TimeoutExpired as exc:
-        partial = f"{exc.stdout or ''}{exc.stderr or ''}"
-        output = (partial if isinstance(partial, str) else partial.decode(errors="replace")) + f"\nbcvk timed out after {BOOT_TIMEOUT_SECONDS}s"
+        output = timed_out_output(exc) + f"\nbcvk timed out after {BOOT_TIMEOUT_SECONDS}s"
     (log_dir / "bcvk.log").write_text(output)
     console_path = log_dir / "console.txt"
     console = console_path.read_text(errors="replace") if console_path.exists() else ""
