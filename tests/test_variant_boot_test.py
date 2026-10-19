@@ -149,6 +149,17 @@ class BuildTests(unittest.TestCase):
         self.assertIn("RUN /ctx/build.sh", caught.exception.summary)
         self.assertIn("No match for argument: tmux", caught.exception.log_tail)
 
+    def test_a_timed_out_build_names_the_step_it_stopped_at(self) -> None:
+        # subprocess keeps a timed-out command's output as bytes even with
+        # text=True; formatting them wrote b'...' with escaped newlines.
+        timeout = subprocess.TimeoutExpired(["podman"], 1, output=b"[2/2] STEP 2/4: RUN /ctx/build.sh\nInstalling tmux\n")
+        with tempfile.TemporaryDirectory() as tmp, patch("variant_boot_test.subprocess.run", side_effect=timeout):
+            with self.assertRaises(StageFailure) as caught:
+                build(Slot(base_by_key("bazzite"), CONTAINERFILE), Path(tmp), Path(tmp) / "build.log")
+            self.assertTrue((Path(tmp) / "build.log").read_text().startswith("[2/2] STEP 2/4: RUN /ctx/build.sh\nInstalling tmux\n"))
+        self.assertIn("at `[2/2] STEP 2/4: RUN /ctx/build.sh`", caught.exception.summary)
+        self.assertIn("timed out after", caught.exception.log_tail)
+
     def test_the_base_digest_is_read_from_the_reference_the_build_pulled(self) -> None:
         # The BlueBuild case is the first lines of budgie-atomic's build log
         # from the first hosted run: the rendered Containerfile says
@@ -379,6 +390,16 @@ class BootTests(unittest.TestCase):
         with patch("variant_boot_test.subprocess.run", side_effect=run) as bcvk:
             result = boot("localhost/aib-test:x", log_dir, packages=("tmux",), services=("podman.socket",))
         return result, bcvk
+
+    def test_a_timed_out_boot_keeps_what_the_guest_reported(self) -> None:
+        # subprocess keeps a timed-out command's output as bytes even with
+        # text=True; formatting them hid the guest's report in one b'...' line.
+        timeout = subprocess.TimeoutExpired(["bcvk"], 1, output=b"AIB-STATE running\nAIB-CHECK package:tmux pass\nAIB-FAILED-UNIT sddm.service\n")
+        with patch("variant_boot_test.subprocess.run", side_effect=timeout):
+            result = boot("localhost/aib-test:x", self.work / "boot-1", packages=("tmux",), services=())
+        self.assertFalse(result.reached)
+        self.assertEqual((result.state, result.failed_units), ("running", ["sddm.service"]))
+        self.assertEqual(result.checks, [{"name": "package:tmux", "status": "pass", "detail": ""}])
 
     def test_every_boot_injects_the_roothome_unit_and_sshd(self) -> None:
         units = write_units(self.work / "units")
