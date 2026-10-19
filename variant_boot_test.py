@@ -9,9 +9,9 @@ failed (#756).
 
 Each night the workflow runs two slots from NIGHTLY_SLOTS, so every base is
 covered once a week. A slot generates a project the way the menu's "Test build
-locally" does -- seed_project_template() then write_project_files() -- with a
-fixed test configuration, builds it with podman, and boots the image in a VM
-with bcvk. No GitHub repository is created, and nothing is pushed or signed.
+locally" does -- through App.write_local_build_context(), the method that menu
+item calls -- with a fixed test configuration, builds it with podman, and boots
+the image in a VM with bcvk. No GitHub repository is created, and nothing is pushed or signed.
 
 A failing slot keeps one issue per base, reused, and closed only when that same
 base passes again: the next night tests different bases, so a green run says
@@ -284,11 +284,10 @@ def generate(slot: Slot, context: Path) -> None:
     app.gum = HeadlessGum()
     app.config = test_config(slot)
     try:
-        app.seed_project_template(context)
-        app.write_project_files(context, include_workflow=False)
+        rendered = app.write_local_build_context(context, None)
     except CommandError as exc:
         raise StageFailure("generate", f"The tool could not write the project: {exc}", fault_for("generate")) from exc
-    if slot.method == BLUEBUILD and not app.render_bluebuild_containerfile(context, None):
+    if not rendered:
         raise StageFailure("generate", "The BlueBuild CLI could not render the recipe into a Containerfile.", fault_for("generate"))
 
 
