@@ -9,7 +9,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from atomic_image_builder import BASE_IMAGES
+from atomic_image_builder import (
+    BASE_IMAGES,
+    BLUEBUILD_TEMPLATE_DIR,
+    CONTAINERFILE_TEMPLATE_DIR,
+)
 from variant_boot_test import (
     ALLOWED_FAILED_UNITS,
     BLUEBUILD,
@@ -142,6 +146,40 @@ class GenerateTests(unittest.TestCase):
         self.assertEqual(write.call_args.args[1:], (context, None))
         self.assertEqual(write.call_args.args[0].config.method, BLUEBUILD)
 
+    def test_the_project_starts_from_the_bundled_template(self) -> None:
+        # The build reads files that only the template snapshot ships: the
+        # Containerfile copies system_files into its ctx stage, and a BlueBuild
+        # recipe's files module reads files/system. write_project_files() alone
+        # writes neither, so a context that skips the seed fails to build.
+        cases = (
+            ("sway-atomic", CONTAINERFILE, CONTAINERFILE_TEMPLATE_DIR),
+            ("bluefin", BLUEBUILD, BLUEBUILD_TEMPLATE_DIR),
+        )
+        for key, method, template in cases:
+            with self.subTest(base=key), tempfile.TemporaryDirectory() as tmp, patch(
+                "variant_boot_test.App.render_bluebuild_containerfile", return_value=True
+            ):
+                context = Path(tmp) / "project"
+                generate(Slot(base_by_key(key), method), context)
+                shipped = {
+                    path.relative_to(template)
+                    for path in template.rglob("*")
+                    if path.is_file() and path.name not in {".template-source", "renovate.json5"}
+                }
+                written = {path.relative_to(context) for path in context.rglob("*") if path.is_file()}
+                self.assertTrue(shipped)
+                self.assertLessEqual(shipped, written)
+
+    def test_every_path_the_containerfile_copies_is_in_the_project(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = Path(tmp) / "project"
+            generate(Slot(base_by_key("sway-atomic"), CONTAINERFILE), context)
+            sources = re.findall(r"^COPY (\S+) ", (context / "Containerfile").read_text(), re.MULTILINE)
+            self.assertIn("system_files", sources)
+            for source in sources:
+                with self.subTest(source=source):
+                    self.assertTrue((context / source).is_dir())
+
     def test_a_render_failure_is_reported_as_the_generate_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch("variant_boot_test.App.render_bluebuild_containerfile", return_value=False):
             with self.assertRaises(StageFailure) as caught:
@@ -172,6 +210,21 @@ class BuildTests(unittest.TestCase):
             self.assertTrue((Path(tmp) / "build.log").read_text().startswith("[2/2] STEP 2/4: RUN /ctx/build.sh\nInstalling tmux\n"))
         self.assertIn("at `[2/2] STEP 2/4: RUN /ctx/build.sh`", caught.exception.summary)
         self.assertIn("timed out after", caught.exception.log_tail)
+
+    def test_a_timed_out_build_keeps_its_stderr_and_bytes_that_are_not_utf8(self) -> None:
+        # podman writes its errors to stderr, after what the step printed, and
+        # a hung step can print bytes that are not UTF-8. The log keeps both
+        # streams in the order a finished build writes them, and a bad byte
+        # becomes a replacement character instead of crashing the slot.
+        timeout = subprocess.TimeoutExpired(
+            ["podman"], 1, output=b"[2/2] STEP 2/4: RUN /ctx/build.sh\n", stderr=b"Error: \xff stalled\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch("variant_boot_test.subprocess.run", side_effect=timeout):
+            with self.assertRaises(StageFailure) as caught:
+                build(Slot(base_by_key("bazzite"), CONTAINERFILE), Path(tmp), Path(tmp) / "build.log")
+            log = (Path(tmp) / "build.log").read_text()
+        self.assertTrue(log.startswith("[2/2] STEP 2/4: RUN /ctx/build.sh\nError: \ufffd stalled\n"))
+        self.assertIn("Error: \ufffd stalled", caught.exception.log_tail)
 
     def test_the_base_digest_is_read_from_the_reference_the_build_pulled(self) -> None:
         # The BlueBuild case is the first lines of budgie-atomic's build log
