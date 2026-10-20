@@ -302,7 +302,11 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   [`tests/fixtures/gate-refusal-corpus.json`](../tests/fixtures/gate-refusal-corpus.json)
   is the table of commands every copy has to decide the same way, and
   `tests/test_gate_refusal_corpus.py` runs each row this repository's allow
-  list makes reachable through the registered hook.
+  list makes reachable through the registered hook. The rows it lets through
+  today, the wrappers in front of `git diff` that Claude Code asks about in
+  the default mode but not in bypass or auto mode
+  ([#772](https://github.com/Danathar/atomic-image-builder/issues/772)), are
+  listed there as known gaps and asserted to still get through.
   This repository holds the canonical copy; [the corpus guide](gate-refusal-corpus.md)
   says how to add a row and how the other repositories take it.
 - `maintenance_audit.py` fails when a workflow action is not covered by the

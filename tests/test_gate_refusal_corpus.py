@@ -10,6 +10,17 @@ prefixes the row depends on. A repository runs the rows its own allow list
 makes reachable, so a newly found bypass is one new row, and every repository
 that allows the command fails until its gate refuses it.
 
+A row with a `wraps` field puts a wrapper no allow rule covers (`flock`,
+`watch`, `find -exec`) in front of the command it requires. It runs wherever
+that inner command is allowed, because every gate refuses the protected
+action behind any wrapper, whether or not Claude Code would prompt first:
+bypass and auto permission modes prompt for nothing (#772).
+
+KNOWN_GAPS lists the refuse rows this repository's gate does not refuse yet.
+Each one is asserted to still get through, so closing a gap fails this test
+until its id is removed, and a row that is not listed cannot regress
+silently.
+
 This repository holds the canonical copy. docs/gate-refusal-corpus.md says
 how the others take it.
 
@@ -22,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import unittest
 from pathlib import Path
@@ -33,6 +45,28 @@ SETTINGS = ROOT / ".claude/settings.json"
 REFUSE = "refuse"
 ALLOW = "allow"
 ROW_FIELDS = {"id", "class", "verdict", "requires", "command", "why"}
+OPTIONAL_FIELDS = {"wraps"}
+
+# Refuse rows this gate lets through today: wrappers Claude Code's allow-rule
+# matcher does not step over, so they prompt in the default permission mode
+# and nothing refuses them in bypass or auto mode (#772). Closing one is the
+# security lane's change to .claude/hooks/gate_git_diff.py, and removes its
+# id here in the same pull request.
+KNOWN_GAPS = frozenset(
+    {
+        "wrapper-flock",
+        "wrapper-flock-nonblock",
+        "wrapper-watch",
+        "wrapper-taskset",
+        "wrapper-chrt-fifo",
+        "wrapper-chrt-signed-priority",
+        "wrapper-chrt-dashdash-priority",
+        "wrapper-find-exec",
+        "wrapper-unshare",
+        "wrapper-ionice",
+        "wrapper-env-split",
+    }
+)
 
 
 def allow_prefixes(settings: dict) -> list[str]:
@@ -60,6 +94,18 @@ def covered(prefix: str, prefixes: list[str]) -> bool:
 
 def applies(row: dict, prefixes: list[str]) -> bool:
     return all(covered(prefix, prefixes) for prefix in row["requires"])
+
+
+def inner_words(row: dict) -> list[str]:
+    """The words a row's command is checked against for what it requires.
+
+    A row without `wraps` is read word by word, as written. A wrapped row is
+    read the way the shell hands it to the wrapper, and each of those words
+    split again, so `env -S 'git diff ...'` names `git diff` as well.
+    """
+    if "wraps" not in row:
+        return row["command"].split()
+    return [part for word in shlex.split(row["command"]) for part in word.split()]
 
 
 def hook_command(settings: dict) -> str:
@@ -97,7 +143,8 @@ class CorpusShapeTests(unittest.TestCase):
     def test_every_row_has_exactly_the_documented_fields(self) -> None:
         for row in self.corpus["rows"]:
             with self.subTest(row=row.get("id")):
-                self.assertEqual(set(row), ROW_FIELDS)
+                self.assertLessEqual(ROW_FIELDS, set(row))
+                self.assertLessEqual(set(row), ROW_FIELDS | OPTIONAL_FIELDS)
                 self.assertIn(row["verdict"], (REFUSE, ALLOW))
                 self.assertTrue(row["requires"], "a row has to name what it depends on")
                 for prefix in row["requires"]:
@@ -116,12 +163,27 @@ class CorpusShapeTests(unittest.TestCase):
         # a gate that has nothing to do with it.
         for row in self.corpus["rows"]:
             with self.subTest(row=row["id"]):
-                words = row["command"].split()
+                words = inner_words(row)
                 self.assertTrue(
                     any(" ".join(words[i : i + len(p.split())]) == p
                         for p in row["requires"] for i in range(len(words))),
                     f"{row['command']!r} names none of {row['requires']}",
                 )
+
+    def test_a_wrapped_row_starts_with_the_wrapper_it_names(self) -> None:
+        # `wraps` is what tells a reader the row is not reachable through an
+        # allow rule alone. It names the first word, and is never one of the
+        # prefixes the row requires, or the row would run only where the
+        # wrapper itself is allowed.
+        for row in self.corpus["rows"]:
+            if "wraps" not in row:
+                continue
+            with self.subTest(row=row["id"]):
+                wrapper = row["wraps"]
+                self.assertIsInstance(wrapper, str)
+                self.assertTrue(wrapper and wrapper == wrapper.strip() and " " not in wrapper)
+                self.assertEqual(shlex.split(row["command"])[0], wrapper)
+                self.assertFalse(any(prefix.split()[0] == wrapper for prefix in row["requires"]))
 
     def test_both_verdicts_are_present(self) -> None:
         # Refusals alone would pass a gate that refuses everything, and a
@@ -150,6 +212,8 @@ class PrefixMatchTests(unittest.TestCase):
 
 
 class CorpusVerdictTests(unittest.TestCase):
+    known_gaps = KNOWN_GAPS
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.corpus = json.loads(CORPUS.read_text(encoding="utf-8"))
@@ -163,11 +227,27 @@ class CorpusVerdictTests(unittest.TestCase):
         # skipped and the verdict test would pass on nothing.
         self.assertGreaterEqual(len(self.rows), 20)
 
+    def test_every_known_gap_names_a_reachable_refuse_row(self) -> None:
+        rows = {row["id"]: row for row in self.corpus["rows"]}
+        reachable = {row["id"] for row in self.rows}
+        for gap in sorted(self.known_gaps):
+            with self.subTest(row=gap):
+                self.assertIn(gap, rows, f"KNOWN_GAPS names {gap}, which is not in the corpus")
+                self.assertEqual(rows[gap]["verdict"], REFUSE, f"{gap} is not a refuse row")
+                self.assertIn(gap, reachable, f"{gap} does not run here; remove it from KNOWN_GAPS")
+
     def test_every_row_this_repository_allows_is_decided_the_way_it_says(self) -> None:
         for row in self.rows:
             with self.subTest(row=row["id"], command=row["command"]):
                 verdict, result = decide(row["command"], self.hook)
                 self.assertIn(result.returncode, (0, 2), result.stderr)
+                if row["id"] in self.known_gaps:
+                    self.assertEqual(
+                        verdict,
+                        ALLOW,
+                        f"the gate now refuses {row['id']}; remove it from KNOWN_GAPS",
+                    )
+                    continue
                 self.assertEqual(
                     verdict,
                     row["verdict"],
@@ -201,6 +281,65 @@ class HarnessContractTests(unittest.TestCase):
     def assertProbeFails(self, result: unittest.TestResult) -> None:
         self.assertEqual(result.errors, [])
         self.assertTrue(result.failures, "the guard let a broken input through")
+
+    def test_a_wrapped_row_runs_where_its_inner_command_is_allowed(self) -> None:
+        # No allow rule covers `flock`; the row still runs wherever `git diff`
+        # is allowed, which is the point of the field.
+        row = {**self.ROW, "wraps": "flock", "command": "flock /tmp/l git diff /dev/null ./.env"}
+        self.assertTrue(applies(row, ["git diff"]))
+        self.assertFalse(applies(row, ["git status"]))
+
+    def test_a_wrapped_row_names_what_it_requires_inside_a_quoted_word(self) -> None:
+        row = {**self.ROW, "wraps": "env", "command": "env -S 'git diff /dev/null ./.env'"}
+        self.assertIn("git", inner_words(row))
+        self.assertTrue(probe(CorpusShapeTests,
+                              "test_a_row_requires_the_command_it_starts_with",
+                              corpus=self.corpus(row)).wasSuccessful())
+
+    def test_a_row_without_wraps_is_read_as_written(self) -> None:
+        # Rows that predate the field keep the check they always had.
+        row = {**self.ROW, "command": "env -S 'git diff /dev/null ./.env'"}
+        self.assertProbeFails(probe(CorpusShapeTests,
+                                    "test_a_row_requires_the_command_it_starts_with",
+                                    corpus=self.corpus(row)))
+
+    def test_a_wrapped_row_that_starts_elsewhere_is_rejected(self) -> None:
+        row = {**self.ROW, "wraps": "flock", "command": "watch git diff /dev/null ./.env"}
+        self.assertProbeFails(probe(CorpusShapeTests,
+                                    "test_a_wrapped_row_starts_with_the_wrapper_it_names",
+                                    corpus=self.corpus(row)))
+
+    def test_a_wrapper_the_row_also_requires_is_rejected(self) -> None:
+        row = {**self.ROW, "wraps": "flock", "requires": ["flock", "git diff"],
+               "command": "flock /tmp/l git diff /dev/null ./.env"}
+        self.assertProbeFails(probe(CorpusShapeTests,
+                                    "test_a_wrapped_row_starts_with_the_wrapper_it_names",
+                                    corpus=self.corpus(row)))
+
+    def test_an_undocumented_field_is_rejected(self) -> None:
+        row = {**self.ROW, "skip": True}
+        self.assertProbeFails(probe(CorpusShapeTests,
+                                    "test_every_row_has_exactly_the_documented_fields",
+                                    corpus=self.corpus(row)))
+
+    def test_a_known_gap_the_gate_now_refuses_is_rejected(self) -> None:
+        self.assertProbeFails(probe(
+            CorpusVerdictTests,
+            "test_every_row_this_repository_allows_is_decided_the_way_it_says",
+            rows=[self.ROW], known_gaps=frozenset({"r"}), hook="cat >/dev/null; exit 2"))
+
+    def test_a_known_gap_that_is_not_a_reachable_refuse_row_is_rejected(self) -> None:
+        allow = {**self.ROW, "verdict": ALLOW, "command": "git diff"}
+        for case in ({"corpus": self.corpus(self.ROW), "rows": [self.ROW],
+                      "known_gaps": frozenset({"missing"})},
+                     {"corpus": self.corpus(allow), "rows": [allow],
+                      "known_gaps": frozenset({"r"})},
+                     {"corpus": self.corpus(self.ROW), "rows": [],
+                      "known_gaps": frozenset({"r"})}):
+            with self.subTest(case=case):
+                self.assertProbeFails(probe(
+                    CorpusVerdictTests, "test_every_known_gap_names_a_reachable_refuse_row",
+                    **case))
 
     def test_a_row_runs_only_when_every_prefix_it_requires_is_allowed(self) -> None:
         row = {**self.ROW, "requires": ["git diff", "git status"]}
@@ -268,7 +407,9 @@ class HarnessContractTests(unittest.TestCase):
         # a test is run outside its suite.
         corpus = json.loads(CORPUS.read_text(encoding="utf-8"))
         for name in ("test_both_verdicts_are_present",
-                     "test_a_row_requires_the_command_it_starts_with"):
+                     "test_a_row_requires_the_command_it_starts_with",
+                     "test_a_wrapped_row_starts_with_the_wrapper_it_names",
+                     "test_every_row_has_exactly_the_documented_fields"):
             with self.subTest(test=name):
                 self.assertTrue(probe(CorpusShapeTests, name, corpus=corpus).wasSuccessful())
 
