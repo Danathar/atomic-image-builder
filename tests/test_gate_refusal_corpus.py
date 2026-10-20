@@ -47,26 +47,11 @@ ALLOW = "allow"
 ROW_FIELDS = {"id", "class", "verdict", "requires", "command", "why"}
 OPTIONAL_FIELDS = {"wraps"}
 
-# Refuse rows this gate lets through today: wrappers Claude Code's allow-rule
-# matcher does not step over, so they prompt in the default permission mode
-# and nothing refuses them in bypass or auto mode (#772). Closing one is the
-# security lane's change to .claude/hooks/gate_git_diff.py, and removes its
-# id here in the same pull request.
-KNOWN_GAPS = frozenset(
-    {
-        "wrapper-flock",
-        "wrapper-flock-nonblock",
-        "wrapper-watch",
-        "wrapper-taskset",
-        "wrapper-chrt-fifo",
-        "wrapper-chrt-signed-priority",
-        "wrapper-chrt-dashdash-priority",
-        "wrapper-find-exec",
-        "wrapper-unshare",
-        "wrapper-ionice",
-        "wrapper-env-split",
-    }
-)
+# Refuse rows this gate lets through today. Empty: the wrapper rows added for
+# #772 are refused by opaque_wrapper_command() in
+# .claude/hooks/gate_git_diff.py. A row added later that this gate lets
+# through is listed here until the change that closes it removes it.
+KNOWN_GAPS: frozenset[str] = frozenset()
 
 
 def allow_prefixes(settings: dict) -> list[str]:

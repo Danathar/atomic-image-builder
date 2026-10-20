@@ -75,12 +75,14 @@ standard output, is a refusal. Exit status 0 with no decision is an allow.
 
 A known gap is a refuse row the gate lets through today. The test asserts
 that it still gets through, so the change that closes it fails until its id
-is removed, and a row that is not listed cannot regress silently. The
-`wrapper-*` rows with a `wraps` field are known gaps here: this gate does not
-yet refuse `flock`, `watch`, `taskset`, `chrt`, `find -exec`, `unshare`,
-`ionice` or `env -S` in front of `git diff`. They were added from the matrix
-in [#772](https://github.com/Danathar/atomic-image-builder/issues/772), which
-ran each one against every gate in the fleet on 2026-10-20.
+is removed, and a row that is not listed cannot regress silently. This
+repository lists none. The `wrapper-*` rows with a `wraps` field were added
+from the matrix in
+[#772](https://github.com/Danathar/atomic-image-builder/issues/772), which
+ran each one against every gate in the fleet on 2026-10-20; this gate now
+refuses a gated command behind `flock`, `watch`, `taskset`, `chrt`, `find`,
+`unshare` or `ionice`, and inside a command string such as `env -S '...'`,
+whatever its arguments are.
 
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
