@@ -302,11 +302,13 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   [`tests/fixtures/gate-refusal-corpus.json`](../tests/fixtures/gate-refusal-corpus.json)
   is the table of commands every copy has to decide the same way, and
   `tests/test_gate_refusal_corpus.py` runs each row this repository's allow
-  list makes reachable through the registered hook. The rows it lets through
-  today, the wrappers in front of `git diff` that Claude Code asks about in
-  the default mode but not in bypass or auto mode
-  ([#772](https://github.com/Danathar/atomic-image-builder/issues/772)), are
-  listed there as known gaps and asserted to still get through.
+  list makes reachable through the registered hook. That includes the
+  wrappers in front of `git diff` that Claude Code asks about in the default
+  mode but not in bypass or auto mode
+  ([#772](https://github.com/Danathar/atomic-image-builder/issues/772)): the
+  gate refuses a gated command behind `flock`, `watch`, `taskset`, `chrt`,
+  `find`, `unshare` or `ionice`, or inside a command string a wrapper
+  re-splits or hands to a shell (`env -S '...'`, `sh -c '...'`).
   This repository holds the canonical copy; [the corpus guide](gate-refusal-corpus.md)
   says how to add a row and how the other repositories take it.
 - `maintenance_audit.py` fails when a workflow action is not covered by the

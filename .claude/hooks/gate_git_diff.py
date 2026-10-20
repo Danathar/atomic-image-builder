@@ -594,14 +594,12 @@ def podman_extglob_word(positions: list[int], tokens: list[str], masked: list[st
 # matching an allow rule as it does `nohup`.
 # A wrapper whose command the leading-words match cannot see -- one that
 # takes it from somewhere else (`sh -c`, `find -exec`, the string after
-# `env -S`), or one this set does not name (`flock`, `watch`, `taskset`,
-# `chrt`, `unshare`, `ionice`) -- matches no allow rule, so in the default
-# permission mode Claude Code prompts for it. That prompt is not the
-# boundary: bypass and auto modes prompt for nothing, and the fleet's corpus
-# says every gate refuses the protected action behind any wrapper, prompted
-# or not (#772). This gate lets the corpus's wrapper rows through today, so
-# tests/test_gate_refusal_corpus.py lists each one as a known gap, asserted
-# to still get through; the change that closes one here removes it there.
+# `env -S`), or one this set does not name (OPAQUE_WRAPPERS below) --
+# matches no allow rule, so in the default permission mode Claude Code
+# prompts for it. That prompt is not the boundary: bypass and auto modes
+# prompt for nothing, and the fleet's corpus says every gate refuses the
+# protected action behind any wrapper, prompted or not (#772). Those are
+# refused by opaque_wrapper_command() rather than stepped over here.
 # `xargs` is absent from this set for another reason: its command is a
 # word of this string, but the operands it hands that command are not, and
 # an allow rule matches `xargs git diff` as readily as `git diff`. Stepping
@@ -623,6 +621,35 @@ COMMAND_WRAPPERS = frozenset(
         "noglob",
     }
 )
+
+# Programs that run a command of their own choosing which Claude Code's
+# matcher does not step over, so no allow rule covers what they run and the
+# words after them are not checked the way COMMAND_WRAPPERS' are. Stepping
+# over them would mean modelling each one's options, and those options are
+# where the reach is: `chrt -o +0` and `flock -n /tmp/l` take values that
+# look like a command, `unshare --wd=DIR` and `find -execdir` move the
+# command out of this checkout, `find -exec ... {}` hands it operands that
+# are not in this string, and `watch` and `flock -c` hand it to `sh -c` as
+# one string. So a gated command behind one of these is refused outright,
+# whatever its own arguments are (#772); see opaque_wrapper_command().
+OPAQUE_WRAPPERS = frozenset(
+    {
+        "flock",
+        "watch",
+        "taskset",
+        "chrt",
+        "unshare",
+        "ionice",
+        "find",
+    }
+)
+
+# The characters that separate the words of a command string a wrapper hands
+# to a shell or re-splits itself (`env -S '...'`, `watch '...'`, `flock -c
+# '...'`, `find -exec sh -c '...'`): whitespace, the shell's own punctuation
+# and the quotes. Splitting on all of them reads more words than the shell
+# would, which can only over-refuse. See string_gated_name().
+COMMAND_STRING_SEPARATORS = re.compile(r"[\s;&|()<>`'\"]+")
 
 # xargs's own options, which stand between `xargs` and the command it runs,
 # as GNU findutils parses them (`xargs --help`; tests/test_git_diff_gate.py
@@ -1983,15 +2010,16 @@ def xargs_feeds(words: list[str], index: int) -> str | None:
     """The gated command the `xargs` at `words[index]` runs, or None.
 
     The command it runs may be another wrapper (`xargs nice git diff`,
-    `xargs timeout 5 shellcheck`), and then the gated name is looked for at
-    every later word, the way name_positions() looks behind a wrapper; or
-    another xargs, which is read the same way this one is.
+    `xargs timeout 5 shellcheck`, `xargs flock /tmp/l git diff`), and then
+    the gated name is looked for at every later word, the way
+    name_positions() looks behind a wrapper; or another xargs, which is read
+    the same way this one is.
     """
     for start in xargs_command_starts(words, index):
         name = bare(words[start]).rsplit("/", 1)[-1]
         if name == "xargs":
             fed = xargs_feeds(words, start)
-        elif wrapper_basename(words[start]) in COMMAND_WRAPPERS:
+        elif wrapper_basename(words[start]) in COMMAND_WRAPPERS | OPAQUE_WRAPPERS:
             fed = next(
                 (
                     found
@@ -2026,6 +2054,88 @@ def xargs_fed_command(invocation: Invocation) -> str | None:
             fed = xargs_feeds(invocation.words, start)
             if fed is not None:
                 return fed
+    return None
+
+
+def string_gated_name(word: str) -> str | None:
+    """The gated command a command string in this word names, or None.
+
+    The string is the word itself when it holds more than one word of its
+    own (`watch 'git diff ...'`, `flock /tmp/l -c 'git diff ...'`), or a
+    value attached to an option in the same word: after the `=` of a long
+    option (`flock --command='git diff ...'`, `env --split-string='...'`),
+    or after any letter of a short-option cluster (`flock -c'git diff
+    ...'`, `env -iS'git diff ...'`, `env -Sgit diff ...`, where env
+    re-splits `git` and runs it with the words after). Which letter takes a
+    value is not modelled, so every one is tried, which can only
+    over-refuse. Its words are cut at COMMAND_STRING_SEPARATORS and read
+    with gated_name() at every position, the way name_positions() reads
+    the words behind a wrapper. A single word that is not an option is left
+    to gated_name() on the invocation's own words.
+    """
+    texts: list[str] = []
+    if COMMAND_STRING_SEPARATORS.search(word):
+        texts.append(word)
+    if word.startswith("--"):
+        if "=" in word:
+            texts.append(word.split("=", 1)[1])
+    elif cluster := re.match(r"-([A-Za-z0-9]+)", word):
+        texts.extend(word[cut:] for cut in range(2, cluster.end() + 1))
+    for text in texts:
+        if not text:
+            continue
+        pieces = [piece for piece in COMMAND_STRING_SEPARATORS.split(text) if piece]
+        for start in range(len(pieces)):
+            found = gated_name(pieces, start)
+            if found is not None:
+                return found
+    return None
+
+
+def opaque_wrapper_command(invocation: Invocation) -> tuple[str, str] | None:
+    """The wrapper and the gated command it hides, or None.
+
+    Two shapes, both refused whatever the gated command's own arguments are:
+
+    - an OPAQUE_WRAPPERS program as the command (`flock /tmp/l git diff`,
+      `chrt -o -- -0 git diff`) or behind a stepped-over wrapper (`nice
+      find . -exec git diff ...`), with a gated command at any later word or
+      in a command string at any later word (`watch 'git diff ...'`);
+    - a command string in front of the gated command's own name behind a
+      stepped-over wrapper (`env -S 'git diff ...'`, `timeout 5 sh -c 'git
+      diff ...'`), whose words the checks after this one never see as
+      words. Words after the gated name are that command's own arguments
+      (`timeout 5 git log --grep 'git diff'`) and are not read here.
+    """
+    words = invocation.words
+    if invocation.wrapped:
+        start = command_start(invocation)
+        reach = range(start if start is not None else len(words))
+    else:
+        reach = range(min(len(words), 1))
+    for index in reach:
+        # Position 0 is read from `invocation.name`, as wrapper_chdir() does:
+        # command_words() cut the first word at its last `/`, which turns
+        # `-S'git diff --no-index /dev/null .env'` into `null .env`.
+        word = invocation.name if index == 0 else words[index]
+        name = next(
+            (
+                found
+                for reading in (word, invocation.raws[index])
+                if (found := wrapper_basename(reading)) in OPAQUE_WRAPPERS
+            ),
+            None,
+        )
+        if name is not None:
+            for later in range(index + 1, len(words)):
+                found = gated_name(words, later) or string_gated_name(words[later])
+                if found is not None:
+                    return name, found
+        elif invocation.wrapped:
+            found = string_gated_name(word)
+            if found is not None:
+                wrapper = wrapper_word(*invocation.wrappers[-1]) or "the wrapper"
+                return wrapper, found
     return None
 
 
@@ -2764,6 +2874,21 @@ def refusal(command: str) -> str | None:
                 "prompts either. Name the operands in the command itself instead "
                 "(xargs in front of a command no allow rule covers, such as `xargs "
                 "echo`, is not refused)"
+            )
+        hidden = opaque_wrapper_command(invocation)
+        if hidden is not None:
+            wrapper, gated = hidden
+            return (
+                f"{wrapper} runs `{gated}` where this scan cannot check it: either "
+                "behind a program Claude Code's matcher does not step over (flock, "
+                "watch, taskset, chrt, unshare, ionice, find), whose own options "
+                "can move the command out of this checkout (`unshare --wd`, `find "
+                "-execdir`), hand it operands that are not in this string (`find "
+                "-exec ... {}`) or pass it to `sh -c` as one string (`watch`, `flock "
+                "-c`), or inside a command string a wrapper re-splits or hands to a "
+                "shell (`env -S '...'`, `sh -c '...'`). Bypass and auto modes prompt "
+                "for none of these, so a gated command behind them is refused "
+                "whatever its arguments are; run the command on its own instead"
             )
         prefix = gated_prefix(invocation)
         if prefix is not None:

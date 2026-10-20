@@ -255,6 +255,20 @@ REFUSED_COMMANDS = (
     ),
     ("env -C/tmp/other git diff", "relocates git through -C's attached short spelling, with no space or ="),
     ("env --chd=/tmp/other git diff", "relocates git through an unambiguous abbreviation of --chdir"),
+    ("flock -n /tmp/l git diff HEAD", "runs git behind a wrapper no allow rule steps over, so bypass mode never prompts"),
+    ("chrt -o -- -0 git diff HEAD", "hides git behind a priority value that looks like an option"),
+    ("nice -n 5 taskset -c 0 git log", "puts the opaque wrapper behind one the matcher does step over"),
+    ("/usr/bin/ionice -c3 podman ps", "runs an allow-listed command behind a wrapper spelled as a path"),
+    ("unshare --wd=/ git diff etc/passwd etc/hostname", "moves git out of the checkout, where relative operands imply --no-index"),
+    ("find / -maxdepth 0 -execdir git diff etc/passwd etc/hostname \\;", "moves git out of the checkout through find"),
+    ("find /etc -name passwd -exec git diff {} +", "hands git operands find picks rather than ones written here"),
+    ("watch 'git diff --no-index /dev/null .env'", "hands git to sh -c as one string the scan never splits"),
+    ("flock /tmp/l --command='git diff --no-index /dev/null .env'", "attaches the command string to flock's long option"),
+    ("flock /tmp/l -c'git diff --no-index /dev/null .env'", "attaches the command string to flock's short option"),
+    ("env -iS'git diff --no-index /dev/null .env'", "re-splits git out of a clustered -S value"),
+    ("env -Sgit diff --no-index /dev/null .env", "re-splits only git's name out of -S, with its arguments after"),
+    ("timeout 5 sh -c 'git diff --no-index /dev/null .env'", "hands git to a shell behind a stepped-over wrapper"),
+    ("printf '%s\\n' /dev/null .env | xargs flock /tmp/l git diff", "feeds git's operands through xargs and an opaque wrapper"),
 )
 
 # Commands it has to leave alone. Everything an ordinary session runs.
@@ -396,6 +410,16 @@ ALLOWED_COMMANDS = (
     # refusing it outright was a plain command the scan had no reach-based
     # reason to stop.
     "gh release create v$TAG",
+    # An opaque wrapper in front of a command no allow rule covers, a gated
+    # name in the arguments of a gated command behind a stepped-over
+    # wrapper, and a command string that names nothing gated are left to
+    # Claude Code's own prompt.
+    "flock /tmp/l make test",
+    "watch -n 2 ls -la",
+    "find . -name '*.py' -exec grep -n flock {} +",
+    "timeout 5 git log --grep 'git diff --output'",
+    "env -S 'echo hi'",
+    "git log --grep flock",
 )
 
 
