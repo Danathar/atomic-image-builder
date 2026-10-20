@@ -269,6 +269,16 @@ REFUSED_COMMANDS = (
     ("env -Sgit diff --no-index /dev/null .env", "re-splits only git's name out of -S, with its arguments after"),
     ("timeout 5 sh -c 'git diff --no-index /dev/null .env'", "hands git to a shell behind a stepped-over wrapper"),
     ("printf '%s\\n' /dev/null .env | xargs flock /tmp/l git diff", "feeds git's operands through xargs and an opaque wrapper"),
+    ("watch 'true;git diff --no-index /dev/null .env'", "names git after a ; inside the command string"),
+    ("watch 'true&&git diff --no-index /dev/null .env'", "names git after && inside the command string"),
+    ("watch 'true|git diff --no-index /dev/null .env'", "names git after a pipe inside the command string"),
+    ("watch 'echo x$(git diff --no-index /dev/null .env)'", "names git in a command substitution glued to another word"),
+    ("watch 'echo x`git diff --no-index /dev/null .env`'", "names git in a backquoted substitution glued to another word"),
+    ("watch \"true;'git' diff --no-index /dev/null .env\"", "single-quotes git's name inside the command string"),
+    ("watch 'true;\"git\" diff --no-index /dev/null .env'", "double-quotes git's name inside the command string"),
+    ("env -0Sgit diff --no-index /dev/null .env", "re-splits git out of -S behind a digit option in the same cluster"),
+    ('"flock" /tmp/l git diff HEAD', "quotes the opaque wrapper's name, which bash still runs as flock"),
+    ("nice fl\\ock /tmp/l git diff HEAD", "backslashes the opaque wrapper's name behind a stepped-over wrapper"),
 )
 
 # Commands it has to leave alone. Everything an ordinary session runs.
