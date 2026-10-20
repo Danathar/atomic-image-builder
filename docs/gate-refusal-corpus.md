@@ -1,10 +1,14 @@
 # The shared gate refusal corpus
 
 Every repository in this fleet has a PreToolUse hook that stops an agent's
-allow-listed commands (`git diff`, `git log`, `gh pr view` and the like) from
-reading `.env`, writing a file, or running a program the allow list never
-named. Each repository wrote its own copy, in bash or Python, and the copies
-have drifted apart. A bypass fixed in one copy is not fixed in the others, and
+commands from reading `.env`, writing a file, or running a program the allow
+list never named, through an allow-listed command (`git diff`, `git log`,
+`gh pr view` and the like) or behind any wrapper in front of one, whether or
+not Claude Code would ask first. A session in bypass or auto permission mode
+asks for nothing, so the hook is the boundary there and the prompt is not
+([#772](https://github.com/Danathar/atomic-image-builder/issues/772)).
+Each repository wrote its own copy, in bash or Python, and the copies have
+drifted apart. A bypass fixed in one copy is not fixed in the others, and
 nothing fails when a repository misses one
 ([#609](https://github.com/Danathar/atomic-image-builder/issues/609)).
 
@@ -39,6 +43,14 @@ This repository holds the canonical copy. Change the table here first.
   `Bash(git diff*)` all cover `git diff`; a rule with no wildcard covers no
   prefix. A row that needs `gh pr view` does not run where `gh pr view` is not
   allowed, because Claude Code asks before that command anyway.
+- `wraps` (optional): the program the command starts with, when that program
+  is a wrapper no allow rule covers, such as `flock` in
+  `flock /tmp/l git diff --no-index /dev/null .env`. The row still runs
+  wherever `requires` is covered: Claude Code asks before the wrapped command
+  in the default mode, but not in bypass or auto mode, and every gate has to
+  refuse it in all of them. `wraps` is never one of the `requires` prefixes, or the
+  row would run only where the wrapper itself is allowed. A row without it is
+  read exactly as before.
 - `command`: the command string exactly as the hook receives it.
 - `why`: what the command reaches, in one line, so a failure explains itself.
 
@@ -56,9 +68,19 @@ standard output, is a refusal. Exit status 0 with no decision is an allow.
 1. Add it here, in `tests/fixtures/gate-refusal-corpus.json`.
 2. Run `python3 -m unittest tests.test_gate_refusal_corpus`. If this
    repository's gate lets the command through, fix the gate in the same pull
-   request.
+   request, or list the row's id in that test's `KNOWN_GAPS` and open an
+   issue to close it.
 3. Copy the new file into each other repository that allows the command, and
-   fix any gate that fails there.
+   fix any gate that fails there, or list the row as a known gap there.
+
+A known gap is a refuse row the gate lets through today. The test asserts
+that it still gets through, so the change that closes it fails until its id
+is removed, and a row that is not listed cannot regress silently. The
+`wrapper-*` rows with a `wraps` field are known gaps here: this gate does not
+yet refuse `flock`, `watch`, `taskset`, `chrt`, `find -exec`, `unshare`,
+`ionice` or `env -S` in front of `git diff`. They were added from the matrix
+in [#772](https://github.com/Danathar/atomic-image-builder/issues/772), which
+ran each one against every gate in the fleet on 2026-10-20.
 
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
@@ -79,3 +101,6 @@ fetching it:
   read the file with `jq`.
 - Pin the file's SHA-256 in that test, so the copy cannot be edited locally.
   To change a row, change it here and copy it again.
+- A runner that checks a row's fields has to accept the optional `wraps`
+  field. A gate that lets a row through lists it as a known gap, as akmods
+  does, rather than skipping it.

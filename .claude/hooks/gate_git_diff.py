@@ -592,10 +592,17 @@ def podman_extglob_word(positions: list[int], tokens: list[str], masked: list[st
 # has opened the redirection, and zsh runs the command, so `noglob podman ps
 # >out` truncates `out` in either shell, and Claude Code steps over it before
 # matching an allow rule as it does `nohup`.
-# A wrapper that takes its command from somewhere else -- `sh -c`, `find
-# -exec` -- is absent on purpose: the command it runs is not a word of this
-# string, and neither matches an allow rule, so Claude Code prompts for them
-# on its own. `xargs` is absent for the opposite reason: its command is a
+# A wrapper whose command the leading-words match cannot see -- one that
+# takes it from somewhere else (`sh -c`, `find -exec`, the string after
+# `env -S`), or one this set does not name (`flock`, `watch`, `taskset`,
+# `chrt`, `unshare`, `ionice`) -- matches no allow rule, so in the default
+# permission mode Claude Code prompts for it. That prompt is not the
+# boundary: bypass and auto modes prompt for nothing, and the fleet's corpus
+# says every gate refuses the protected action behind any wrapper, prompted
+# or not (#772). This gate lets the corpus's wrapper rows through today, so
+# tests/test_gate_refusal_corpus.py lists each one as a known gap, asserted
+# to still get through; the change that closes one here removes it there.
+# `xargs` is absent from this set for another reason: its command is a
 # word of this string, but the operands it hands that command are not, and
 # an allow rule matches `xargs git diff` as readily as `git diff`. Stepping
 # over it would check the operands that are written and pass the ones that
