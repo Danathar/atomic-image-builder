@@ -215,12 +215,15 @@ from __future__ import annotations
 import fnmatch
 import glob
 import importlib.machinery
+import itertools
 import json
 import os
 import re
 import shlex
 import subprocess
 import sys
+import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
 
@@ -417,6 +420,7 @@ GATED_PREFIXES = (
     ("gh", "search", "issues"),
     ("gh", "search", "prs"),
 )
+GATED_PREFIX_WORDS = max(len(prefix) for prefix in GATED_PREFIXES)
 
 # podman's persistent global options that open a path for writing and dump a
 # pprof profile into it. podman accepts a persistent option after the
@@ -667,6 +671,17 @@ ARGUMENT_ONLY_PROGRAMS = frozenset({"echo", "printf", "grep", "egrep", "fgrep"})
 # behind one program the invocation is refused unread (#782); no real one runs that
 # many.
 UNLISTED_PROGRAM_MAX_COMMANDS = 8
+
+# That bound covers one way the reading grows, not all of them. A short-option
+# cluster is read as a command string from every letter on, and each of those
+# strings is read in full, so a 13 KB `true '-aaaa...cgit log y y ...'` kept
+# the hook busy for more than 75 seconds and the `git diff --no-index` after
+# it ran unread (#784). Rather than bound each loop that can grow, the whole
+# reading gets a deadline, and a command still being read when it passes is
+# refused. Every command in the tests is read in well under a second; ten
+# seconds leaves a slow machine room inside the 60-second hook timeout.
+REFUSAL_BUDGET_SECONDS = 10.0
+_deadline: float | None = None
 
 # The characters that separate the words of a command string a wrapper hands
 # to a shell or re-splits itself (`env -S '...'`, `watch '...'`, `flock -c
@@ -1684,6 +1699,25 @@ def after_redirection(segment: list[str], index: int) -> int:
     return index
 
 
+class OverBudget(Exception):
+    """Raised when reading a command outlasts REFUSAL_BUDGET_SECONDS."""
+
+
+def spend() -> None:
+    """Raise OverBudget once the deadline budgeted_refusal() set has passed.
+
+    Called in each loop whose count grows with the command, so a command
+    crafted to keep the hook reading is refused before the hook times out.
+    """
+    if _deadline is not None and time.monotonic() > _deadline:
+        raise OverBudget(
+            f"the gate could not finish reading this command within "
+            f"{REFUSAL_BUDGET_SECONDS:g} seconds, and Claude Code runs a command "
+            "whose hook times out, so it is refused rather than left half-read; "
+            "split it into shorter commands"
+        )
+
+
 class Invocation(NamedTuple):
     """A segment read as the command bash would run.
 
@@ -1928,7 +1962,9 @@ def gated_name(words: list[str], start: int) -> str | None:
     bare_word = bare(words[start]).rsplit("/", 1)[-1]
     if bare_word == "git":
         return "git"
-    candidates = [bare_word, *words[start + 1 :]]
+    # Only as many words as the longest prefix: copying the rest made reading
+    # every position of a long command string cost the square of its words.
+    candidates = [bare_word, *words[start + 1 : start + GATED_PREFIX_WORDS]]
     for prefix in GATED_PREFIXES:
         if tuple(candidates[: len(prefix)]) == prefix:
             return " ".join(prefix)
@@ -2097,19 +2133,10 @@ def string_gated_name(word: str) -> str | None:
     the words behind a wrapper. A single word that is not an option is left
     to gated_name() on the invocation's own words.
     """
-    texts: list[str] = []
-    if COMMAND_STRING_SEPARATORS.search(word):
-        texts.append(word)
-    if word.startswith("--"):
-        if "=" in word:
-            texts.append(word.split("=", 1)[1])
-    elif cluster := re.match(r"-([A-Za-z0-9]+)", word):
-        texts.extend(word[cut:] for cut in range(2, cluster.end() + 1))
-    for text in texts:
-        if not text:
-            continue
+    for text in command_string_texts(word):
         pieces = [piece for piece in COMMAND_STRING_SEPARATORS.split(text) if piece]
         for start in range(len(pieces)):
+            spend()
             found = gated_name(pieces, start)
             if found is not None:
                 return found
@@ -2152,6 +2179,7 @@ def opaque_wrapper_command(invocation: Invocation) -> tuple[str, str] | None:
         )
         if name is not None:
             for later in range(index + 1, len(words)):
+                spend()
                 found = gated_name(words, later) or string_gated_name(words[later])
                 if found is not None:
                     return name, found
@@ -2163,20 +2191,26 @@ def opaque_wrapper_command(invocation: Invocation) -> tuple[str, str] | None:
     return None
 
 
-def command_string_texts(word: str) -> list[str]:
+def command_string_texts(word: str) -> Iterator[str]:
     """The command strings a word may hand to a shell or re-split: the word
     itself when it holds more than one word of its own, the value after a
-    long option's `=`, and every tail of a short-option cluster, the same
-    readings string_gated_name() tries."""
+    long option's `=`, and every tail of a short-option cluster, the readings
+    string_gated_name() tries.
+
+    Yielded one at a time: a long cluster has as many tails as letters, each
+    nearly as long as the word, so building them all up front cost the square
+    of the word before spend() was reached."""
     texts: list[str] = []
     if COMMAND_STRING_SEPARATORS.search(word):
         texts.append(word)
-    if word.startswith("--"):
-        if "=" in word:
-            texts.append(word.split("=", 1)[1])
-    elif cluster := re.match(r"-([A-Za-z0-9]+)", word):
-        texts.extend(word[cut:] for cut in range(2, cluster.end() + 1))
-    return [text for text in texts if text]
+    if word.startswith("--") and "=" in word:
+        texts.append(word.split("=", 1)[1])
+    cluster = None if word.startswith("--") else re.match(r"-([A-Za-z0-9]+)", word)
+    tails = (word[cut:] for cut in range(2, cluster.end() + 1)) if cluster else ()
+    for text in itertools.chain(texts, tails):
+        spend()
+        if text:
+            yield text
 
 
 def unlisted_program_command(invocation: Invocation) -> tuple[str, str, str] | None:
@@ -2211,6 +2245,7 @@ def unlisted_program_command(invocation: Invocation) -> tuple[str, str, str] | N
         return None
     gated_starts = 0
     for index in range(1, len(words)):
+        spend()
         inner: list[str] = []
         if gated_name(words, index) is not None:
             gated_starts += 1
@@ -2222,10 +2257,10 @@ def unlisted_program_command(invocation: Invocation) -> tuple[str, str, str] | N
                     "program are too many to read before the hook times out",
                 )
             inner.append(" ".join(invocation.raws[index:]))
-        inner.extend(
+        strings = (
             text for text in command_string_texts(words[index]) if string_gated_name(text) is not None
         )
-        for text in inner:
+        for text in itertools.chain(inner, strings):
             try:
                 tokenize(text)
             except ValueError:
@@ -3390,6 +3425,21 @@ def untracked_import_refusal(command: str, cwd: Path) -> str | None:
     return None
 
 
+def budgeted_refusal(command: str) -> str | None:
+    """refusal() under a deadline of REFUSAL_BUDGET_SECONDS (#784).
+
+    The nested refusal() calls unlisted_program_command() makes share it.
+    """
+    global _deadline
+    _deadline = time.monotonic() + REFUSAL_BUDGET_SECONDS
+    try:
+        return refusal(command)
+    except OverBudget as exc:
+        return str(exc)
+    finally:
+        _deadline = None
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -3402,7 +3452,7 @@ def main() -> int:
     if not isinstance(command, str):
         print("gate_git_diff: Bash command is not a string", file=sys.stderr)
         return 2
-    reason = refusal(command)
+    reason = budgeted_refusal(command)
     if reason is None:
         where = payload.get("cwd")
         reason = untracked_import_refusal(
