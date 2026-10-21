@@ -196,11 +196,18 @@ stands among the wrappers (see xargs_fed_command()). One in front of a
 command no rule covers (`xargs echo`, `xargs grep -n git`) is left alone:
 Claude Code prompts for that on its own.
 
+A program this hook does not step over can still run the words after it, or
+a string it hands to a shell -- `setarch x86_64 git diff ...`, `prlimit git
+diff ...`, `sh -c '...'`, `script -qc '...'`. No allow rule covers them, so
+the default mode prompts, but bypass and auto modes do not (#772); so a
+command such a program would run is read on its own and refused when it
+would be refused standing alone (see unlisted_program_command()).
+
 And one residual, which a `PreToolUse` hook reading one command string cannot
 close: a wrapper that takes its command from somewhere this hook cannot read
--- `sh -c '...'`, `find -exec` -- reaches any tool. Neither matches an allow
-rule, so Claude Code prompts for them on its own; that prompt, not this hook,
-is what covers them.
+-- a file, standard input, an environment variable -- reaches any tool. None
+of those matches an allow rule, so Claude Code prompts for them in the
+default mode.
 """
 
 from __future__ import annotations
@@ -643,6 +650,13 @@ OPAQUE_WRAPPERS = frozenset(
         "find",
     }
 )
+
+# Programs that print or match their arguments and never run them, so a
+# gated command among their words is text, not a command, and
+# unlisted_program_command() does not read them. Leaving a program out of
+# this set can only over-refuse; a path or quote in the name (`./echo`) is
+# some other file and is read like any other program.
+ARGUMENT_ONLY_PROGRAMS = frozenset({"echo", "printf", "grep", "egrep", "fgrep"})
 
 # The characters that separate the words of a command string a wrapper hands
 # to a shell or re-splits itself (`env -S '...'`, `watch '...'`, `flock -c
@@ -2139,6 +2153,70 @@ def opaque_wrapper_command(invocation: Invocation) -> tuple[str, str] | None:
     return None
 
 
+def command_string_texts(word: str) -> list[str]:
+    """The command strings a word may hand to a shell or re-split: the word
+    itself when it holds more than one word of its own, the value after a
+    long option's `=`, and every tail of a short-option cluster, the same
+    readings string_gated_name() tries."""
+    texts: list[str] = []
+    if COMMAND_STRING_SEPARATORS.search(word):
+        texts.append(word)
+    if word.startswith("--"):
+        if "=" in word:
+            texts.append(word.split("=", 1)[1])
+    elif cluster := re.match(r"-([A-Za-z0-9]+)", word):
+        texts.extend(word[cut:] for cut in range(2, cluster.end() + 1))
+    return [text for text in texts if text]
+
+
+def unlisted_program_command(invocation: Invocation) -> tuple[str, str, str] | None:
+    """The program, the command it runs and why that command is refused, or
+    None.
+
+    COMMAND_WRAPPERS and OPAQUE_WRAPPERS name the wrappers this scan knows,
+    but no list of programs that run their arguments as a command is
+    complete: `setarch x86_64 git diff ...`, `prlimit git diff ...`,
+    `setpriv git diff ...`, `strace -o log git diff ...` run git with the
+    words after it, and `sh -c '...'` and `script -qc '...'` hand a shell
+    the whole string. None of them matches an allow rule, so the default
+    mode prompts, but bypass and auto modes prompt for nothing and #772
+    settled that every gate refuses the protected action behind any wrapper.
+    So when the command's own name is not a gated one, each later word where
+    a gated command starts, and each command string a later word carries, is
+    read as a command of its own with refusal(), and the invocation is
+    refused when that command would be. A command it would leave alone stays
+    alone (`uname git diff HEAD`, `rg 'git diff' docs`), and a string that is
+    not valid shell is skipped, since a shell handed it runs nothing. A
+    program in ARGUMENT_ONLY_PROGRAMS, typed as its bare name or under
+    WRAPPER_DIRECTORIES, is not read at all (`echo git diff --no-index a b`,
+    `grep -rn 'git diff --no-index' docs`).
+    Wrapped invocations are not read here: name_positions() already reads
+    every word behind a stepped-over wrapper as the possible name.
+    """
+    words = invocation.words
+    if invocation.wrapped or not words or gated_name(words, 0) is not None:
+        return None
+    program = wrapper_basename(invocation.name)
+    if program in ARGUMENT_ONLY_PROGRAMS and plain_wrapper_spelling(invocation.raws[0], program):
+        return None
+    for index in range(1, len(words)):
+        inner: list[str] = []
+        if gated_name(words, index) is not None:
+            inner.append(" ".join(invocation.raws[index:]))
+        inner.extend(
+            text for text in command_string_texts(words[index]) if string_gated_name(text) is not None
+        )
+        for text in inner:
+            try:
+                tokenize(text)
+            except ValueError:
+                continue
+            reason = refusal(text)
+            if reason is not None:
+                return program, text, reason
+    return None
+
+
 def env_short_option(token: str, letter: str) -> str | None:
     """Does this short-option word carry `letter` ("C" or "S"), and if so
     what value is attached to it in the same word (empty when the value
@@ -2889,6 +2967,16 @@ def refusal(command: str) -> str | None:
                 "shell (`env -S '...'`, `sh -c '...'`). Bypass and auto modes prompt "
                 "for none of these, so a gated command behind them is refused "
                 "whatever its arguments are; run the command on its own instead"
+            )
+        unlisted = unlisted_program_command(invocation)
+        if unlisted is not None:
+            program, inner, reason = unlisted
+            return (
+                f"{program} runs `{inner}` as a command of its own, and that command is "
+                f"refused here on its own: {reason}. {program} is a program this scan "
+                "does not step over, so no allow rule covers what it runs and Claude Code "
+                "prompts for it only in the default mode; bypass and auto modes prompt for "
+                "nothing, so the command behind it is read as though it stood alone"
             )
         prefix = gated_prefix(invocation)
         if prefix is not None:

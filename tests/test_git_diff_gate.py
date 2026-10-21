@@ -279,6 +279,13 @@ REFUSED_COMMANDS = (
     ("env -0Sgit diff --no-index /dev/null .env", "re-splits git out of -S behind a digit option in the same cluster"),
     ('"flock" /tmp/l git diff HEAD', "quotes the opaque wrapper's name, which bash still runs as flock"),
     ("nice fl\\ock /tmp/l git diff HEAD", "backslashes the opaque wrapper's name behind a stepped-over wrapper"),
+    ("setarch x86_64 git diff --no-index /dev/null .env", "runs git behind a program neither wrapper set names"),
+    ("prlimit git diff --no-index /dev/null .env", "runs git behind a util-linux program with no option before it"),
+    ("strace -o /dev/null git diff --no-index /dev/null .env", "runs git behind a tracer with an option value before it"),
+    ("sh -c 'git diff --no-index /dev/null .env'", "hands git to a shell with no wrapper in front"),
+    ("script -qc 'git diff --no-index /dev/null .env' /dev/null", "hands git to a shell through script -c"),
+    ("script -qc'git diff --no-index /dev/null .env' /dev/null", "attaches the command string to script's short option"),
+    ("./echo git diff --no-index /dev/null .env", "names a file that may run its arguments, not echo itself"),
 )
 
 # Commands it has to leave alone. Everything an ordinary session runs.
@@ -430,6 +437,17 @@ ALLOWED_COMMANDS = (
     "timeout 5 git log --grep 'git diff --output'",
     "env -S 'echo hi'",
     "git log --grep flock",
+    # A program no wrapper set names is read only for a command that would be
+    # refused on its own, and a program that only prints or matches its
+    # arguments is not read at all.
+    "uname git diff HEAD",
+    "setarch x86_64 git diff HEAD",
+    "bash -c 'git diff HEAD~1'",
+    "sh -c 'git status'",
+    "rg 'git diff' docs",
+    "grep -rn 'git diff --no-index' docs/",
+    "echo git diff --no-index /dev/null .env",
+    "grep -rn \"git diff doesn't\" docs",
 )
 
 
@@ -620,7 +638,7 @@ REACH_CORPUS = (
     ("command name", "/usr/bin/shellcheck ./.env", REFUSED, "a path to the linter"),
     ("command name", "command -v shellcheck", ALLOWED, "naming a command is not running it"),
     ("command name", "echo git diff --no-index a b", ALLOWED, "the name has to stand in command position"),
-    ("command name", "sh -c 'git diff --no-index /dev/null ./cosign.key'", ALLOWED, "the command is not a word of this string; it matches no allow rule either, so Claude Code prompts"),
+    ("command name", "sh -c 'git diff --no-index /dev/null ./cosign.key'", REFUSED, "the shell runs the string as a command; bypass and auto modes prompt for nothing (#772)"),
     ("command name", "noglob git diff --no-index /dev/null ./cosign.key", REFUSED, "zsh's noglob runs the command, and Claude Code steps over it before matching a rule"),
     ("command name", "noglob shellcheck ./.env", REFUSED, "the same wrapper in front of the linter"),
     ("command name", "noglob podman ps >out", REFUSED, "bash has no noglob, but it opens the target before it says so"),
