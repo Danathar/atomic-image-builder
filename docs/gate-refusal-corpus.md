@@ -84,6 +84,14 @@ refuses a gated command behind `flock`, `watch`, `taskset`, `chrt`, `find`,
 `unshare` or `ionice`, and inside a command string such as `env -S '...'`,
 whatever its arguments are.
 
+The `unlisted-*` rows put a program no gate lists in front of the command:
+`setarch`, `prlimit`, `strace`, and `script -c`, which carries the command
+as a quoted string. Since
+[#781](https://github.com/Danathar/atomic-image-builder/pull/781) this gate
+reads a gated command behind any program, not only the wrappers it names,
+and `allow-unlisted-plain-diff` pins the other half of that rule: a command
+that passes alone still passes behind one.
+
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
 table. The one disagreement found, `git diff --ext-diff`, is refused here and

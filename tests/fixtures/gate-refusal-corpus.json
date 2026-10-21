@@ -352,6 +352,61 @@
       "why": "the env builtin through another gh subcommand that takes --jq"
     },
     {
+      "id": "unlisted-setarch",
+      "class": "unlisted program",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "wraps": "setarch",
+      "command": "setarch x86_64 git diff --no-index /dev/null .env",
+      "why": "setarch runs the command after it under another architecture name, with its output unchanged"
+    },
+    {
+      "id": "unlisted-prlimit",
+      "class": "unlisted program",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "wraps": "prlimit",
+      "command": "prlimit --nofile=64 git diff --no-index /dev/null .env",
+      "why": "prlimit runs the command after it under new resource limits"
+    },
+    {
+      "id": "unlisted-strace",
+      "class": "unlisted program",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "wraps": "strace",
+      "command": "strace -o /dev/null git diff --no-index /dev/null .env",
+      "why": "strace runs the command it traces, and -o sends only the trace away"
+    },
+    {
+      "id": "unlisted-script-command-string",
+      "class": "unlisted program",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "wraps": "script",
+      "command": "script -qc 'git diff /dev/null ./.env' /dev/null",
+      "why": "script -c runs its quoted argument as a command line, so git diffs .env as a plain file"
+    },
+    {
+      "id": "unlisted-gh-jq-env",
+      "class": "unlisted program",
+      "verdict": "refuse",
+      "requires": [
+        "gh pr view"
+      ],
+      "wraps": "setarch",
+      "command": "setarch x86_64 gh pr view 1 --json number --jq env",
+      "why": "the --jq env filter prints the whole environment, GH_TOKEN included, behind any program that runs gh"
+    },
+    {
       "id": "allow-diff",
       "class": "ordinary use",
       "verdict": "allow",
@@ -420,6 +475,17 @@
       ],
       "command": "gh pr view 1 --json title --jq '.title'",
       "why": "a filter that names a field reads no environment"
+    },
+    {
+      "id": "allow-unlisted-plain-diff",
+      "class": "ordinary use",
+      "verdict": "allow",
+      "requires": [
+        "git diff"
+      ],
+      "wraps": "setarch",
+      "command": "setarch x86_64 git diff HEAD",
+      "why": "a command that passes alone still passes behind a program that only runs it"
     }
   ]
 }
