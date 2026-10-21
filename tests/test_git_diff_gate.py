@@ -2967,6 +2967,49 @@ class MainTests(unittest.TestCase):
         self.assertIn("--no-index", err)
 
 
+class BudgetTests(unittest.TestCase):
+    """A command the gate cannot finish reading in time is refused (#784)."""
+
+    # Every letter of the cluster is a command string read in full: on main
+    # before #784 this took more than 75 seconds, past the hook timeout.
+    SLOW = "true '-" + "a" * 3000 + "cgit log " + "y " * 1500 + "'; git diff --no-index /dev/null .env"
+
+    def setUp(self) -> None:
+        self.budget = gate.REFUSAL_BUDGET_SECONDS
+        self.addCleanup(setattr, gate, "REFUSAL_BUDGET_SECONDS", self.budget)
+        gate.REFUSAL_BUDGET_SECONDS = 0.05
+
+    def test_a_command_still_being_read_at_the_deadline_is_refused(self) -> None:
+        code, err = run_main(hook_input(self.SLOW))
+        self.assertEqual(code, 2)
+        self.assertIn("could not finish reading this command", err)
+        self.assertIsNone(gate._deadline, "the deadline outlived the call that set it")
+
+    def test_an_ordinary_command_is_read_inside_the_budget(self) -> None:
+        gate.REFUSAL_BUDGET_SECONDS = self.budget
+        self.assertIsNone(gate.budgeted_refusal("git diff --stat"))
+        self.assertIn("--no-index", gate.budgeted_refusal("setarch x86_64 git diff --no-index a b"))
+
+    def test_refusal_alone_sets_no_deadline(self) -> None:
+        # The nested reads of a command string share the outer deadline;
+        # refusal() called on its own is not bounded.
+        self.assertIsNotNone(gate.refusal("true '-aaacgit log y'; git diff --no-index a b"))
+        self.assertIsNone(gate._deadline)
+
+    def test_the_budget_leaves_room_inside_the_hook_timeout(self) -> None:
+        settings = json.loads(SETTINGS.read_text())
+        timeouts = [
+            entry.get("timeout", 60)
+            for group in settings["hooks"]["PreToolUse"]
+            for entry in group.get("hooks", [])
+            if "gate_git_diff.py" in entry.get("command", "")
+        ]
+        self.assertTrue(timeouts, "the hook is not registered")
+        # Unset, Claude Code waits 60 seconds; half of it leaves the
+        # interpreter and the import check after refusal() room to finish.
+        self.assertLessEqual(self.budget, min(timeouts) / 2)
+
+
 class QuotedHeredocTests(unittest.TestCase):
     """drop_quoted_heredoc_bodies(): a quoted here-document's body is data (#537)."""
 
