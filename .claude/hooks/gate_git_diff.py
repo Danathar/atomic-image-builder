@@ -658,6 +658,16 @@ OPAQUE_WRAPPERS = frozenset(
 # some other file and is read like any other program.
 ARGUMENT_ONLY_PROGRAMS = frozenset({"echo", "printf", "grep", "egrep", "fgrep"})
 
+# unlisted_program_command() reads each gated command behind a program from
+# where it starts to the end of the invocation, so its work grows with the
+# square of the words: 2500 repeats of `git diff HEAD` behind one program took
+# 78 seconds, past Claude Code's 60-second hook timeout, and Claude Code runs
+# the command when its hook times out (checked on 2.1.304), so a padded string
+# reached whatever followed the padding unread. Past this many gated commands
+# behind one program the invocation is refused unread (#782); no real one runs that
+# many.
+UNLISTED_PROGRAM_MAX_COMMANDS = 8
+
 # The characters that separate the words of a command string a wrapper hands
 # to a shell or re-splits itself (`env -S '...'`, `watch '...'`, `flock -c
 # '...'`, `find -exec sh -c '...'`): whitespace, the shell's own punctuation
@@ -2199,9 +2209,18 @@ def unlisted_program_command(invocation: Invocation) -> tuple[str, str, str] | N
     program = wrapper_basename(invocation.name)
     if program in ARGUMENT_ONLY_PROGRAMS and plain_wrapper_spelling(invocation.raws[0], program):
         return None
+    gated_starts = 0
     for index in range(1, len(words)):
         inner: list[str] = []
         if gated_name(words, index) is not None:
+            gated_starts += 1
+            if gated_starts > UNLISTED_PROGRAM_MAX_COMMANDS:
+                return (
+                    program,
+                    words[index],
+                    f"more than {UNLISTED_PROGRAM_MAX_COMMANDS} gated commands behind one "
+                    "program are too many to read before the hook times out",
+                )
             inner.append(" ".join(invocation.raws[index:]))
         inner.extend(
             text for text in command_string_texts(words[index]) if string_gated_name(text) is not None
