@@ -440,6 +440,78 @@
       "why": "the --jq env filter prints the whole environment, GH_TOKEN included, behind any program that runs gh"
     },
     {
+      "id": "name-brace",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "{git,} diff --no-index /dev/null .env",
+      "why": "the shell expands {git,} to git and drops the empty word, which prints .env whole beside /dev/null"
+    },
+    {
+      "id": "unlisted-name-brace",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "wraps": "setarch",
+      "command": "setarch x86_64 {git,} diff --no-index /dev/null .env",
+      "why": "the shell expands {git,} to git before setarch runs it, which prints .env whole beside /dev/null"
+    },
+    {
+      "id": "name-glob-path",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "/usr/bin/g?t diff --no-index /dev/null .env",
+      "why": "the shell matches /usr/bin/g?t to /usr/bin/git, which prints .env whole beside /dev/null"
+    },
+    {
+      "id": "unlisted-name-glob-path",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "wraps": "setarch",
+      "command": "setarch x86_64 /usr/bin/g?t diff --no-index /dev/null .env",
+      "why": "the shell matches /usr/bin/g?t to /usr/bin/git before setarch runs it, which prints .env whole beside /dev/null"
+    },
+    {
+      "id": "name-ansi-c",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "$'git' diff --no-index /dev/null .env",
+      "why": "the shell reads $'git' as git, which prints .env whole beside /dev/null"
+    },
+    {
+      "id": "name-locale",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "$\"git\" diff --no-index /dev/null .env",
+      "why": "the shell reads $\"git\" as git, which prints .env whole beside /dev/null"
+    },
+    {
+      "id": "name-ansi-c-escape",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "$'\\x67it' diff --no-index /dev/null .env",
+      "why": "the shell decodes \\x67 to g, so $'\\x67it' is git, which prints .env whole beside /dev/null"
+    },
+    {
       "id": "allow-diff",
       "class": "ordinary use",
       "verdict": "allow",
