@@ -52,17 +52,9 @@ OPTIONAL_FIELDS = {"wraps"}
 
 # Refuse rows this gate lets through today. The wrapper rows added for #772
 # are refused by opaque_wrapper_command() in .claude/hooks/gate_git_diff.py.
-# The `name spelling` rows (#790) are not, apart from `name-brace`: the gate
-# reads a command name as typed, not the way the shell expands it. A row
-# stays here until the change that closes it removes it.
-KNOWN_GAPS: frozenset[str] = frozenset({
-    "unlisted-name-brace",
-    "name-glob-path",
-    "unlisted-name-glob-path",
-    "name-ansi-c",
-    "name-locale",
-    "name-ansi-c-escape",
-})
+# The `name spelling` rows (#790) are refused by spelled_name_refusal(). A
+# row stays here until the change that closes it removes it.
+KNOWN_GAPS: frozenset[str] = frozenset()
 
 
 def allow_prefixes(settings: dict) -> list[str]:

@@ -512,6 +512,37 @@
       "why": "the shell decodes \\x67 to g, so $'\\x67it' is git, which prints .env whole beside /dev/null"
     },
     {
+      "id": "ansi-c-command-string",
+      "class": "shell expansion",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "wraps": "sh",
+      "command": "sh -c $'\\x67it diff --no-index /dev/null .env'",
+      "why": "the shell decodes the whole $'...' string to git diff --no-index /dev/null .env before sh runs it, which prints .env whole beside /dev/null"
+    },
+    {
+      "id": "ansi-c-option",
+      "class": "shell expansion",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git log $'--output=cosign.pub' -1",
+      "why": "the shell reads $'--output=cosign.pub' as --output=cosign.pub, which overwrites cosign.pub with the log"
+    },
+    {
+      "id": "ansi-c-escaped-quote",
+      "class": "shell expansion",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "echo $'\\'' ; git diff --no-index /dev/null .env ; \\'",
+      "why": "bash reads \\' inside $'...' as a quote, not its end, so the echo string ends later than a word splitter without $'...' ends it and the git diff between is a command of its own, which prints .env whole beside /dev/null"
+    },
+    {
       "id": "allow-diff",
       "class": "ordinary use",
       "verdict": "allow",
