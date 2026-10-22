@@ -396,6 +396,39 @@
       "why": "script -c runs its quoted argument as a command line, so git diffs .env as a plain file"
     },
     {
+      "id": "unlisted-script-split-quote",
+      "class": "unlisted program",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "wraps": "script",
+      "command": "script -qc 'g\"\"it diff --no-index /dev/null .env' /dev/null",
+      "why": "the shell drops the empty quotes inside g\"\"it and runs git, which prints .env whole beside /dev/null"
+    },
+    {
+      "id": "unlisted-script-backslash",
+      "class": "unlisted program",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "wraps": "script",
+      "command": "script -qc 'gi\\t diff --no-index /dev/null .env' /dev/null",
+      "why": "the shell drops the backslash inside gi\\t and runs git, which prints .env whole beside /dev/null"
+    },
+    {
+      "id": "unlisted-script-ansi-c",
+      "class": "unlisted program",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "wraps": "script",
+      "command": "script -qc \"$'git' diff --no-index /dev/null .env\" /dev/null",
+      "why": "the shell reads $'git' as git, which prints .env whole beside /dev/null"
+    },
+    {
       "id": "unlisted-gh-jq-env",
       "class": "unlisted program",
       "verdict": "refuse",

@@ -2213,6 +2213,41 @@ def command_string_texts(word: str) -> Iterator[str]:
             yield text
 
 
+def unquoted(text: str) -> str:
+    """The text with every `$`, quote and backslash removed.
+
+    The shell a command string is handed to drops quotes and backslashes
+    before it looks a name up, so `g""it`, `gi\\t` and `$'git'` in a string
+    all run git, while COMMAND_STRING_SEPARATORS cuts `g""it` into `g` and
+    `it` and leaves `gi\\t` whole. Removing more than the shell would can
+    only over-refuse.
+    """
+    return re.sub(r"[$\"'\\]", "", text)
+
+
+def gated_command_strings(word: str) -> Iterator[str]:
+    """The command strings a word carries that name a gated command, as
+    written or once unquoted() has run, each in the readings
+    unlisted_program_command() decides.
+
+    A string that names one neither way is not read, so a string that
+    passed before still passes unless the shell would find a gated name in
+    it. tokenize() already joins `g""it` and `gi\\t` back into git, so the
+    string as written is the reading for those. It keeps the `$` of bash's
+    `$'...'` and `$"..."` quoting, though, so `$'git'` reaches gated_name()
+    as `$git`, and when the caller's own words were tokenized the quotes are
+    gone before the string gets here (`script -qc $'git diff ...'` hands
+    over `$git diff ...`). So a string carrying a `$` is read a second time
+    with every `$` dropped, which leaves its quoting as typed. That reading
+    is never the only one, so it can only add a refusal."""
+    for text in command_string_texts(word):
+        if string_gated_name(text) is None and string_gated_name(unquoted(text)) is None:
+            continue
+        yield text
+        if "$" in text:
+            yield text.replace("$", "")
+
+
 def unlisted_program_command(invocation: Invocation) -> tuple[str, str, str] | None:
     """The program, the command it runs and why that command is refused, or
     None.
@@ -2231,6 +2266,8 @@ def unlisted_program_command(invocation: Invocation) -> tuple[str, str, str] | N
     refused when that command would be. A command it would leave alone stays
     alone (`uname git diff HEAD`, `rg 'git diff' docs`), and a string that is
     not valid shell is skipped, since a shell handed it runs nothing. A
+    string is looked through for a gated name with its quoting removed too,
+    since the shell joins `g""it` back into git (see gated_command_strings()). A
     program in ARGUMENT_ONLY_PROGRAMS, typed as its bare name or under
     WRAPPER_DIRECTORIES, is not read at all (`echo git diff --no-index a b`,
     `grep -rn 'git diff --no-index' docs`).
@@ -2257,10 +2294,7 @@ def unlisted_program_command(invocation: Invocation) -> tuple[str, str, str] | N
                     "program are too many to read before the hook times out",
                 )
             inner.append(" ".join(invocation.raws[index:]))
-        strings = (
-            text for text in command_string_texts(words[index]) if string_gated_name(text) is not None
-        )
-        for text in itertools.chain(inner, strings):
+        for text in itertools.chain(inner, gated_command_strings(words[index])):
             try:
                 tokenize(text)
             except ValueError:

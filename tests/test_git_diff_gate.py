@@ -287,6 +287,11 @@ REFUSED_COMMANDS = (
     ("script -qc'git diff --no-index /dev/null .env' /dev/null", "attaches the command string to script's short option"),
     ("./echo git diff --no-index /dev/null .env", "names a file that may run its arguments, not echo itself"),
     ("setarch x86_64" + " git diff HEAD" * 9, "puts more gated commands behind one program than the gate reads"),
+    ("script -qc 'g\"\"it diff --no-index /dev/null .env' /dev/null", "splits git's name with quotes the shell drops"),
+    ("script -qc 'gi\\t diff --no-index /dev/null .env' /dev/null", "splits git's name with a backslash the shell drops"),
+    ("script -qc \"$'git' diff --no-index /dev/null .env\" /dev/null", "ANSI-C quotes git's name inside the string"),
+    ("script -qc $'git diff --no-index /dev/null .env' /dev/null", "ANSI-C quotes the whole command string"),
+    ("script -qc \"git status; $'git' diff --no-index /dev/null .env\" /dev/null", "hides the second command's name behind a plain one"),
 )
 
 # Commands it has to leave alone. Everything an ordinary session runs.
@@ -450,6 +455,9 @@ ALLOWED_COMMANDS = (
     "echo git diff --no-index /dev/null .env",
     "grep -rn \"git diff doesn't\" docs",
     "setarch x86_64" + " git diff HEAD" * 8,
+    # A name the shell joins back together is read like the name itself.
+    "script -qc 'g\"\"it status' /dev/null",
+    "script -qc \"$'git' diff HEAD\" /dev/null",
 )
 
 
