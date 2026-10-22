@@ -292,6 +292,19 @@ REFUSED_COMMANDS = (
     ("script -qc \"$'git' diff --no-index /dev/null .env\" /dev/null", "ANSI-C quotes git's name inside the string"),
     ("script -qc $'git diff --no-index /dev/null .env' /dev/null", "ANSI-C quotes the whole command string"),
     ("script -qc \"git status; $'git' diff --no-index /dev/null .env\" /dev/null", "hides the second command's name behind a plain one"),
+    ("/usr/bin/g?t diff --no-index /dev/null .env", "names git with a wildcard the shell matches to /usr/bin/git"),
+    ("g?t diff --no-index /dev/null .env", "names git with a wildcard that matches a file named git"),
+    ("$'git' diff --no-index /dev/null .env", "ANSI-C quotes git's name"),
+    ("$\"git\" diff --no-index /dev/null .env", "locale-quotes git's name"),
+    ("$'\\x67it' diff --no-index /dev/null .env", "spells git's first letter as an ANSI-C escape"),
+    ("/usr/bin/shellch?ck ./.env", "names shellcheck with a wildcard, which prints the file it lints"),
+    ("setarch x86_64 {git,} diff --no-index /dev/null .env", "builds git's name with a brace behind a program no gate lists"),
+    ("setarch x86_64 /usr/bin/g?t diff --no-index /dev/null .env", "names git with a wildcard behind a program no gate lists"),
+    ("script -qc 'g{,}it diff --no-index /dev/null .env' /dev/null", "builds git's name with a brace inside the string"),
+    ("script -qc '/usr/bin/g?t diff --no-index /dev/null .env' /dev/null", "names git with a wildcard inside the string"),
+    ("setarch x86_64 sh -c $'\\x67it diff --no-index /dev/null .env'", "ANSI-C escapes git's name in a whole command string"),
+    ("git show $'--output=cosign.pub' HEAD", "ANSI-C quotes an option git would otherwise be refused"),
+    ("echo $'\\'' ; git diff --no-index /dev/null .env ; \\'", "ends a $'...' string where the word splitter does not"),
 )
 
 # Commands it has to leave alone. Everything an ordinary session runs.
@@ -458,6 +471,12 @@ ALLOWED_COMMANDS = (
     # A name the shell joins back together is read like the name itself.
     "script -qc 'g\"\"it status' /dev/null",
     "script -qc \"$'git' diff HEAD\" /dev/null",
+    "/usr/bin/g?t status",
+    "$'git' status",
+    "setarch x86_64 ls /usr/bin/g*",
+    "ls *.py",
+    "echo g?t",
+    "echo $'it\\x27s'",
 )
 
 

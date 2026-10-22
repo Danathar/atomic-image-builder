@@ -2225,6 +2225,17 @@ def unquoted(text: str) -> str:
     return re.sub(r"[$\"'\\]", "", text)
 
 
+def spells_a_gated_name(text: str) -> bool:
+    """Does a word of this command string spell a gated name bash would
+    expand or decode into (`/usr/bin/g?t`, `g{,}it`, `$'\\x67it'`)? See
+    spelled_names(). A string that cannot be split into words is not."""
+    try:
+        words = raw_words(text)
+    except ValueError:
+        return False
+    return any(spelled_names(word) for word in words)
+
+
 def gated_command_strings(word: str) -> Iterator[str]:
     """The command strings a word carries that name a gated command, as
     written or once unquoted() has run, each in the readings
@@ -2232,8 +2243,10 @@ def gated_command_strings(word: str) -> Iterator[str]:
 
     A string that names one neither way is not read, so a string that
     passed before still passes unless the shell would find a gated name in
-    it. tokenize() already joins `g""it` and `gi\\t` back into git, so the
-    string as written is the reading for those. It keeps the `$` of bash's
+    it, or a word of it is one spelled_names() reads as a gated name
+    (`/usr/bin/g?t`, `g{,}it`). tokenize() already joins `g""it` and
+    `gi\\t` back into git, so the string as written is the reading for
+    those. It keeps the `$` of bash's
     `$'...'` and `$"..."` quoting, though, so `$'git'` reaches gated_name()
     as `$git`, and when the caller's own words were tokenized the quotes are
     gone before the string gets here (`script -qc $'git diff ...'` hands
@@ -2241,7 +2254,11 @@ def gated_command_strings(word: str) -> Iterator[str]:
     with every `$` dropped, which leaves its quoting as typed. That reading
     is never the only one, so it can only add a refusal."""
     for text in command_string_texts(word):
-        if string_gated_name(text) is None and string_gated_name(unquoted(text)) is None:
+        if (
+            string_gated_name(text) is None
+            and string_gated_name(unquoted(text)) is None
+            and not spells_a_gated_name(text)
+        ):
             continue
         yield text
         if "$" in text:
@@ -2868,8 +2885,296 @@ def global_refusal(arguments: list[str]) -> str | None:
     return None
 
 
-def refusal(command: str) -> str | None:
-    """Why this command is blocked, or None when it is left alone."""
+# The first word of each gated command: what a command name has to become in
+# the shell for the command to be one this hook reads. See spelled_names().
+GATED_NAMES = frozenset({"git", *(prefix[0] for prefix in GATED_PREFIXES)})
+
+# The escapes bash decodes inside `$'...'` to a single character, and for
+# `\xHH`, `\uHHHH` and `\UHHHHHHHH` the most hex digits each one reads.
+ANSI_C_ESCAPES = {
+    "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n",
+    "r": "\r", "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?",
+}
+ANSI_C_HEX = {"x": 2, "u": 4, "U": 8}
+
+# The most words one brace-expanded name is read as; a word that expands to
+# more is read as every gated name at once (see spelled_names()).
+MAX_SPELLED_WORDS = 32
+
+
+def ansi_c_body(text: str, start: int) -> tuple[str, int]:
+    """The `$'...'` body that begins at `start`, decoded, and the index past
+    its closing quote. `\\'` does not end the string, as it does not in bash;
+    a backslash before anything bash does not decode is kept."""
+    out: list[str] = []
+    index = start
+    while index < len(text) and text[index] != "'":
+        if text[index] != "\\" or index + 1 == len(text):
+            out.append(text[index])
+            index += 1
+            continue
+        escape = text[index + 1]
+        hex_digits = (
+            re.match(rf"[0-9a-fA-F]{{1,{ANSI_C_HEX[escape]}}}", text[index + 2 :])
+            if escape in ANSI_C_HEX
+            else None
+        )
+        octal_digits = re.match(r"[0-7]{1,3}", text[index + 1 :])
+        if escape in ANSI_C_ESCAPES:
+            out.append(ANSI_C_ESCAPES[escape])
+            index += 2
+        elif hex_digits:
+            out.append(chr(int(hex_digits.group(), 16)))
+            index += 2 + len(hex_digits.group())
+        elif octal_digits:
+            out.append(chr(int(octal_digits.group(), 8) & 0xFF))
+            index += 1 + len(octal_digits.group())
+        else:
+            out.append("\\")
+            index += 1
+    return "".join(out), index + 1
+
+
+def shell_word(raw: str) -> list[tuple[str, bool]] | None:
+    """A word as typed, read the way bash reads it before expansion: each
+    character with whether it was quoted. Quote marks and escaping
+    backslashes are removed, `$'...'` is decoded and `$"..."` is read as
+    `"..."`. None when the word carries a `$` or a backtick that bash would
+    expand at run time, which this scan cannot read and expands_at_runtime()
+    answers for."""
+    chars: list[tuple[str, bool]] = []
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if raw.startswith("$'", index):
+            body, index = ansi_c_body(raw, index + 2)
+            chars.extend((piece, True) for piece in body)
+        elif raw.startswith('$"', index):
+            index += 1
+        elif char == "'":
+            close = raw.find("'", index + 1)
+            close = len(raw) if close < 0 else close
+            chars.extend((piece, True) for piece in raw[index + 1 : close])
+            index = close + 1
+        elif char == '"':
+            index += 1
+            while index < len(raw) and raw[index] != '"':
+                if raw[index] in EXPANSION:
+                    return None
+                if raw[index] == "\\" and raw[index + 1 : index + 2] in ('"', "\\", "$", "`"):
+                    index += 1
+                chars.append((raw[index : index + 1], True))
+                index += 1
+            index += 1
+        elif char == "\\":
+            chars.append((raw[index + 1 : index + 2], True))
+            index += 2
+        elif char in EXPANSION:
+            return None
+        else:
+            chars.append((char, False))
+            index += 1
+    return chars
+
+
+def brace_expansions(chars: list[tuple[str, bool]]) -> list[list[tuple[str, bool]]]:
+    """The words bash expands a word's unquoted comma brace groups into,
+    innermost group first, dropping the empty ones bash drops. A `{..}`
+    range is not modelled; brace_would_expand() refuses it as a name."""
+    opening = None
+    for index, (char, quoted) in enumerate(chars):
+        if quoted:
+            continue
+        if char == "{":
+            opening = index
+        elif char == "}" and opening is not None:
+            body = chars[opening + 1 : index]
+            commas = [cut for cut, (piece, flag) in enumerate(body) if piece == "," and not flag]
+            if not commas:
+                opening = None
+                continue
+            cuts = [-1, *commas, len(body)]
+            expanded: list[list[tuple[str, bool]]] = []
+            for left, right in itertools.pairwise(cuts):
+                spend()
+                word = chars[:opening] + body[left + 1 : right] + chars[index + 1 :]
+                expanded.extend(brace_expansions(word))
+                if len(expanded) > MAX_SPELLED_WORDS:
+                    return expanded
+            return expanded
+    return [chars] if chars else []
+
+
+def spelled_names(raw: str) -> frozenset[str]:
+    """The gated names bash may run a word typed as `raw` as, when it does
+    not spell one out plainly.
+
+    The gate reads a command name as shlex hands it back, which is not what
+    bash runs: a brace group (`{git,}`) expands, an unquoted wildcard in the
+    name (`/usr/bin/g?t`, or `g?t` beside a file named `git`) matches a
+    file, and ANSI-C or locale quoting (`$'git'`, `$'\\x67it'`, `$"git"`)
+    is decoded. Each reading is cut to its last path component and compared
+    with GATED_NAMES; a wildcard is matched against them as the pattern it
+    is, so a bare `*` names every one. A word that expands to more than
+    MAX_SPELLED_WORDS words is read as every gated name, which can only
+    over-refuse. A word whose shlex reading already ends in the name is left
+    to the rest of the scan, which reads it as typed.
+    """
+    if not any(char in raw for char in "{*?[$\\'\""):
+        return frozenset()
+    chars = shell_word(raw)
+    if chars is None:
+        return frozenset()
+    expanded = brace_expansions(chars)
+    if len(expanded) > MAX_SPELLED_WORDS:
+        return GATED_NAMES
+    names: set[str] = set()
+    for word in expanded:
+        cut = max((index for index, (char, _) in enumerate(word) if char == "/"), default=-1)
+        last = word[cut + 1 :]
+        if any(char in GLOB and not quoted for char, quoted in last):
+            pattern = "".join(char if not quoted else glob.escape(char) for char, quoted in last)
+            names.update(name for name in GATED_NAMES if fnmatch.fnmatchcase(name, pattern))
+        else:
+            names.update({"".join(char for char, _ in last)} & GATED_NAMES)
+    return frozenset(names)
+
+
+def ansi_c_split_mismatch(command: str) -> bool:
+    """Does an unquoted `$'...'` in the command end somewhere other than
+    where shlex ends it?
+
+    bash reads `\\'` inside `$'...'` as a quote character, not the end of the
+    string; shlex knows no `$'...'` and ends the string at that quote. So
+    `echo $'\\'' ; git diff ...` is one echo to bash and two commands to
+    shlex, and every word after the quote is split differently than bash
+    splits it. Such a command is refused rather than read misaligned.
+    """
+    quote = ""
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote == "'":
+            if char == "'":
+                quote = ""
+        elif quote == '"':
+            if char == "\\":
+                index += 1
+            elif char == '"':
+                quote = ""
+        elif char == "\\":
+            index += 1
+        elif command.startswith("$'", index):
+            _, past = ansi_c_body(command, index + 2)
+            close = command.find("'", index + 2)
+            if close < 0 or past != close + 1:
+                return True
+            index = past
+            continue
+        elif char in "'\"":
+            quote = char
+        index += 1
+    return False
+
+
+def decoded_word(raw: str) -> str | None:
+    """A word that carries `$'...'` or `$"..."` quoting, written as the
+    single-quoted literal bash reads it as, or None when it carries neither
+    or expands at run time (see shell_word())."""
+    if "$'" not in raw and '$"' not in raw:
+        return None
+    chars = shell_word(raw)
+    if chars is None:
+        return None
+    return shlex.quote("".join(char for char, _ in chars))
+
+
+def spelled_name_refusal(tokens: list[str], raws: list[str]) -> str | None:
+    """Why the command is refused once its words are read the way bash
+    expands or decodes them, or None.
+
+    shlex keeps the `$` of `$'...'` and `$"..."` and decodes no escape, so
+    `git show $'--output=cosign.pub' HEAD` reached the scan as
+    `$--output=cosign.pub`, and `sh -c $'\\x67it diff ...'` handed it a
+    string naming no gated command. Each such word is read again as the
+    literal bash decodes it to. Then, for each gated name a word may become
+    (spelled_names()), the command is read again with every such word
+    written as that name, and refused when that reading is (`/usr/bin/g?t
+    diff --no-index a b` is read as `git diff --no-index a b`). A reading
+    that leaves the command alone leaves it alone here too (`/usr/bin/g?t
+    status`, `ls /usr/bin/g*`), so the extra readings can only add
+    refusals. They are not repeated inside themselves, so a command reads
+    at most len(GATED_NAMES) + 1 times more.
+    """
+    decoded = list(raws)
+    spelled: list[tuple[int, frozenset[str]]] = []
+    for index, (token, raw) in enumerate(zip(tokens, raws, strict=True)):
+        spend()
+        literal = decoded_word(raw)
+        if literal is not None:
+            decoded[index] = literal
+        names = spelled_names(raw)
+        if names and token.rsplit("/", 1)[-1] not in names:
+            spelled.append((index, names))
+    readings: list[tuple[str, list[str]]] = []
+    if decoded != raws:
+        readings.append(("", decoded))
+    for name in sorted(set().union(*(names for _, names in spelled))):
+        rewritten = list(decoded)
+        for index, names in spelled:
+            if name in names:
+                rewritten[index] = name
+        readings.append((name, rewritten))
+    for name, rewritten in readings:
+        reason = refusal(" ".join(rewritten), spell_names=False)
+        if reason is None:
+            continue
+        if not name:
+            written = next(raw for raw, word in zip(raws, decoded, strict=True) if raw != word)
+            return (
+                f"{written} is quoting bash decodes before the command runs, and the "
+                f"command is refused once the word is written as bash reads it: {reason}"
+            )
+        written = next(raws[index] for index, names in spelled if name in names)
+        return (
+            f"{written} is a name bash may run as {name} once it expands or "
+            "decodes the word, and the command is refused when it is written "
+            f"that way: {reason}"
+        )
+    return None
+
+
+def refusal(command: str, spell_names: bool = True) -> str | None:
+    """Why this command is blocked, or None when it is left alone.
+
+    The command is read as typed first (typed_refusal()). With
+    `spell_names`, a command that passes is read again the way bash expands
+    and decodes its words (spelled_name_refusal()), so those readings only
+    ever add a refusal and never change the reason one already gets.
+    """
+    reason = typed_refusal(command)
+    if reason is not None or not spell_names:
+        return reason
+    try:
+        command = strip_comments(join_continuations(drop_quoted_heredoc_bodies(command)))
+        tokens = tokenize(command)
+        raws = raw_words(command)
+    except ValueError:
+        return None
+    if ansi_c_split_mismatch(command):
+        return (
+            "a $'...' string in the command carries an escaped quote (\\'), which "
+            "bash reads as part of the string and this scan's word splitter reads "
+            "as its end, so the words after it cannot be matched to the ones bash "
+            "runs; write the quote as \\x27 or quote the string another way"
+        )
+    if len(tokens) != len(raws):
+        return None
+    return spelled_name_refusal(tokens, raws)
+
+
+def typed_refusal(command: str) -> str | None:
+    """Why this command is blocked as its words are typed, or None."""
     try:
         command = strip_comments(join_continuations(drop_quoted_heredoc_bodies(command)))
         tokens = tokenize(command)

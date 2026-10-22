@@ -76,8 +76,7 @@ standard output, is a refusal. Exit status 0 with no decision is an allow.
 A known gap is a refuse row the gate lets through today. The test asserts
 that it still gets through, so the change that closes it fails until its id
 is removed, and a row that is not listed cannot regress silently. This
-repository lists six, the `name spelling` rows below that its gate does not
-refuse yet. The `wrapper-*` rows with a `wraps` field were added
+repository lists none. The `wrapper-*` rows with a `wraps` field were added
 from the matrix in
 [#772](https://github.com/Danathar/atomic-image-builder/issues/772), which
 ran each one against every gate in the fleet on 2026-10-20; this gate now
@@ -105,8 +104,16 @@ in a path (`/usr/bin/g?t`, which the shell matches to `/usr/bin/git`),
 ANSI-C quoting (`$'git'`, and `$'\x67it'` with an escape) and locale
 quoting (`$"git"`). The brace and wildcard rows also run behind `setarch`, a
 program no gate lists. A gate that compares the command word as typed lets
-them all through. This gate refuses `name-brace` only, so the other six are
-known gaps here until the gate reads a name the way the shell does.
+them all through. This gate reads each word the way the shell expands or
+decodes it, and reads the command again with that word written as the gated
+name it may become, so it refuses all seven.
+
+Three `shell expansion` rows written alongside them use the same decoding on
+words that are not a name: a whole command string in `$'...'` handed to
+`sh -c` (`ansi-c-command-string`), a refused git option in `$'...'`
+(`ansi-c-option`), and a `$'...'` string holding an escaped quote, which bash
+ends later than a word splitter that does not know `$'...'` does
+(`ansi-c-escaped-quote`).
 
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
