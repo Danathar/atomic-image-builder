@@ -31,13 +31,15 @@ the gate fails here as well.
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
 import shlex
 import subprocess
 import unittest
-from pathlib import Path
+from fnmatch import fnmatchcase
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "tests/fixtures/gate-refusal-corpus.json"
@@ -48,11 +50,19 @@ ALLOW = "allow"
 ROW_FIELDS = {"id", "class", "verdict", "requires", "command", "why"}
 OPTIONAL_FIELDS = {"wraps"}
 
-# Refuse rows this gate lets through today. Empty: the wrapper rows added for
-# #772 are refused by opaque_wrapper_command() in
-# .claude/hooks/gate_git_diff.py. A row added later that this gate lets
-# through is listed here until the change that closes it removes it.
-KNOWN_GAPS: frozenset[str] = frozenset()
+# Refuse rows this gate lets through today. The wrapper rows added for #772
+# are refused by opaque_wrapper_command() in .claude/hooks/gate_git_diff.py.
+# The `name spelling` rows (#790) are not, apart from `name-brace`: the gate
+# reads a command name as typed, not the way the shell expands it. A row
+# stays here until the change that closes it removes it.
+KNOWN_GAPS: frozenset[str] = frozenset({
+    "unlisted-name-brace",
+    "name-glob-path",
+    "unlisted-name-glob-path",
+    "name-ansi-c",
+    "name-locale",
+    "name-ansi-c-escape",
+})
 
 
 def allow_prefixes(settings: dict) -> list[str]:
@@ -82,23 +92,153 @@ def applies(row: dict, prefixes: list[str]) -> bool:
     return all(covered(prefix, prefixes) for prefix in row["requires"])
 
 
+# The one-letter escapes bash decodes inside `$'...'`.
+ANSI_C_ESCAPES = {
+    "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n",
+    "r": "\r", "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?",
+}
+# `\xHH`, `\uHHHH` and `\UHHHHHHHH`: the most hex digits each one reads.
+ANSI_C_HEX = {"x": 2, "u": 4, "U": 8}
+GLOB_CHARS = re.compile(r"[*?[]")
+MAX_BRACE_WORDS = 32
+
+
+def ansi_c(text: str, start: int) -> tuple[str, int]:
+    """Decode the `$'...'` body that begins at `start`; return it and the index past its quote.
+
+    `\'` does not end the string, as it does not in bash. A backslash
+    before anything bash does not decode is kept.
+    """
+    out, i = [], start
+    while i < len(text) and text[i] != "'":
+        if text[i] != "\\" or i + 1 == len(text):
+            out.append(text[i])
+            i += 1
+            continue
+        escape = text[i + 1]
+        if escape in ANSI_C_ESCAPES:
+            out.append(ANSI_C_ESCAPES[escape])
+            i += 2
+        elif escape in ANSI_C_HEX and (
+            digits := re.match(rf"[0-9a-fA-F]{{1,{ANSI_C_HEX[escape]}}}", text[i + 2 :])
+        ):
+            out.append(chr(int(digits.group(), 16)))
+            i += 2 + len(digits.group())
+        elif digits := re.match(r"[0-7]{1,3}", text[i + 1 :]):
+            out.append(chr(int(digits.group(), 8) & 0xFF))
+            i += 1 + len(digits.group())
+        else:
+            out.append("\\")
+            i += 1
+    return "".join(out), i + 1
+
+
+def shell_words(text: str) -> list[tuple[str, bool]]:
+    """Split `text` into words the way bash reads them, before expansion.
+
+    Each word comes back with its quotes and backslashes removed, `$'...'`
+    decoded and `$"..."` read as `"..."`, plus whether any of it was quoted.
+    An unterminated quote runs to the end of the text.
+    """
+    words: list[tuple[str, bool]] = []
+    word, quoted, started, i = "", False, False, 0
+    while i < len(text):
+        char = text[i]
+        if char.isspace():
+            if started:
+                words.append((word, quoted))
+            word, quoted, started = "", False, False
+            i += 1
+            continue
+        started = True
+        if text.startswith("$'", i):
+            body, i = ansi_c(text, i + 2)
+            word, quoted = word + body, True
+        elif text.startswith('$"', i):
+            i += 1
+        elif char == "'":
+            close = text.find("'", i + 1)
+            close = len(text) if close < 0 else close
+            word, quoted, i = word + text[i + 1 : close], True, close + 1
+        elif char == '"':
+            i += 1
+            while i < len(text) and text[i] != '"':
+                if text[i] == "\\" and text[i + 1 : i + 2] in ('"', "\\", "$", "`"):
+                    i += 1
+                word += text[i : i + 1]
+                i += 1
+            quoted, i = True, i + 1
+        elif char == "\\":
+            word, quoted, i = word + text[i + 1 : i + 2], True, i + 2
+        else:
+            word, i = word + char, i + 1
+    if started:
+        words.append((word, quoted))
+    return words
+
+
+def brace_words(word: str) -> list[str]:
+    """The words bash expands an unquoted brace group into, dropping empty ones."""
+    group = re.search(r"\{([^{}]*,[^{}]*)\}", word)
+    if not group:
+        return [word] if word else []
+    expanded = [
+        expanded_word
+        for alternative in group.group(1).split(",")
+        for expanded_word in brace_words(word[: group.start()] + alternative + word[group.end() :])
+    ]
+    return expanded[:MAX_BRACE_WORDS]
+
+
+def name_patterns(text: str) -> list[str]:
+    """The words of `text` as patterns a command name is matched against.
+
+    A word is read the way the shell reads a command name: unquoted brace
+    groups are expanded, and an unquoted wildcard in a path stands for any
+    file it can match, so `/usr/bin/g?t` is the pattern `g?t`. Every other
+    word matches only itself.
+    """
+    patterns = []
+    for word, quoted in shell_words(text):
+        if quoted:
+            patterns.append(glob.escape(word))
+            continue
+        for expanded in brace_words(word):
+            if "/" in expanded and GLOB_CHARS.search(expanded):
+                patterns.append(PurePosixPath(expanded).name)
+            else:
+                patterns.append(glob.escape(expanded))
+    return patterns
+
+
 def inner_words(row: dict) -> list[str]:
     """The words a row's command is checked against for what it requires.
 
-    A row without `wraps` is read word by word, as written. A wrapped row is
+    A row without `wraps` is read the way the shell reads its command line,
+    so `{git,} diff`, `/usr/bin/g?t diff`, `$'git' diff` and `$'\\x67it' diff`
+    all name `git diff`, as they all run it. A quoted string stays one word,
+    so `env -S 'git diff ...'` names nothing without `wraps`. A wrapped row is
     read the way the shell hands it to the wrapper, and each of those words
-    split again, so `env -S 'git diff ...'` names `git diff` as well. Each
-    part is read with its quotes, backslashes and `$` removed, the way the
-    shell that runs the string looks a name up, so `script -qc 'g""it diff
-    ...'` names `git diff` too.
+    is read again as a command line, so `env -S 'git diff ...'` names
+    `git diff` as well, and so do `script -qc 'g""it diff ...'` and
+    `script -qc "$'git' diff ..."`, as the shell that runs the string joins
+    the name back together.
+
+    Each word is a pattern (see `name_patterns`); `names()` matches a
+    required prefix against them.
     """
     if "wraps" not in row:
-        return row["command"].split()
-    return [
-        re.sub(r"[$\"'\\]", "", part)
-        for word in shlex.split(row["command"])
-        for part in word.split()
-    ]
+        return name_patterns(row["command"])
+    return [pattern for word, _ in shell_words(row["command"]) for pattern in name_patterns(word)]
+
+
+def names(words: list[str], prefix: str) -> bool:
+    """Whether consecutive `words` (from `inner_words`) spell out `prefix`."""
+    wanted = prefix.split()
+    return any(
+        all(fnmatchcase(name, pattern) for name, pattern in zip(wanted, words[i : i + len(wanted)]))
+        for i in range(len(words) - len(wanted) + 1)
+    )
 
 
 def hook_command(settings: dict) -> str:
@@ -158,8 +298,7 @@ class CorpusShapeTests(unittest.TestCase):
             with self.subTest(row=row["id"]):
                 words = inner_words(row)
                 self.assertTrue(
-                    any(" ".join(words[i : i + len(p.split())]) == p
-                        for p in row["requires"] for i in range(len(words))),
+                    any(names(words, prefix) for prefix in row["requires"]),
                     f"{row['command']!r} names none of {row['requires']}",
                 )
 
@@ -299,6 +438,35 @@ class HarnessContractTests(unittest.TestCase):
                 self.assertTrue(probe(CorpusShapeTests,
                                       "test_a_row_requires_the_command_it_starts_with",
                                       corpus=self.corpus(row)).wasSuccessful())
+
+    def test_a_row_names_what_it_requires_in_any_spelling_the_shell_runs(self) -> None:
+        for command in ("{git,} diff /dev/null ./.env",
+                        "/usr/bin/g?t diff /dev/null ./.env",
+                        "/usr/bin/g[i]t diff /dev/null ./.env",
+                        "$'git' diff /dev/null ./.env",
+                        '$"git" diff /dev/null ./.env',
+                        "$'\\x67it' diff /dev/null ./.env",
+                        "$'\\147it' diff /dev/null ./.env",
+                        "$'\\u0067it' diff /dev/null ./.env"):
+            with self.subTest(command=command):
+                row = {**self.ROW, "command": command}
+                self.assertTrue(probe(CorpusShapeTests,
+                                      "test_a_row_requires_the_command_it_starts_with",
+                                      corpus=self.corpus(row)).wasSuccessful())
+
+    def test_a_spelling_the_shell_does_not_run_as_the_name_is_rejected(self) -> None:
+        # A quoted wildcard or brace is literal, a bare wildcard is not a
+        # path, and a brace group that builds another word builds no name.
+        for command in ("'/usr/bin/g?t' diff /dev/null ./.env",
+                        "'{git,}' diff /dev/null ./.env",
+                        "g{i,x}t diff /dev/null ./.env",
+                        "/usr/bin/g?t status",
+                        "$'\\x67itx' diff /dev/null ./.env"):
+            with self.subTest(command=command):
+                row = {**self.ROW, "command": command}
+                self.assertProbeFails(probe(CorpusShapeTests,
+                                            "test_a_row_requires_the_command_it_starts_with",
+                                            corpus=self.corpus(row)))
 
     def test_a_row_without_wraps_is_read_as_written(self) -> None:
         # Rows that predate the field keep the check they always had.

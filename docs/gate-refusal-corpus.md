@@ -76,7 +76,8 @@ standard output, is a refusal. Exit status 0 with no decision is an allow.
 A known gap is a refuse row the gate lets through today. The test asserts
 that it still gets through, so the change that closes it fails until its id
 is removed, and a row that is not listed cannot regress silently. This
-repository lists none. The `wrapper-*` rows with a `wraps` field were added
+repository lists six, the `name spelling` rows below that its gate does not
+refuse yet. The `wrapper-*` rows with a `wraps` field were added
 from the matrix in
 [#772](https://github.com/Danathar/atomic-image-builder/issues/772), which
 ran each one against every gate in the fleet on 2026-10-20; this gate now
@@ -95,6 +96,17 @@ the string the way the shell joins it back together: `g""it`, `gi\t` and
 `$'git'` all run git. A gate that looks for a gated name in the string only
 as typed misses them, so it also has to look with the quotes, backslashes
 and `$` removed.
+
+The `name spelling` rows
+([#790](https://github.com/Danathar/atomic-image-builder/issues/790)) write
+the name `git` the ways the shell turns back into it before it runs anything:
+a brace group (`{git,}`, whose empty alternative the shell drops), a wildcard
+in a path (`/usr/bin/g?t`, which the shell matches to `/usr/bin/git`),
+ANSI-C quoting (`$'git'`, and `$'\x67it'` with an escape) and locale
+quoting (`$"git"`). The brace and wildcard rows also run behind `setarch`, a
+program no gate lists. A gate that compares the command word as typed lets
+them all through. This gate refuses `name-brace` only, so the other six are
+known gaps here until the gate reads a name the way the shell does.
 
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
@@ -116,7 +128,12 @@ fetching it:
 - Pin the file's SHA-256 in that test, so the copy cannot be edited locally.
   To change a row, change it here and copy it again.
 - A runner that checks a row's fields has to accept the optional `wraps`
-  field. One that checks a wrapped row names what it requires reads the
-  string with its quotes, backslashes and `$` removed, as
-  `unlisted-script-split-quote` needs. A gate that lets a row through lists
+  field. One that checks a row names what it requires reads the command
+  the way the shell does: quotes and backslashes removed, `$'...'` decoded,
+  `$"..."` read as `"..."`, unquoted brace groups expanded, and an unquoted
+  wildcard in a path matched against the name by its last part, as the
+  `name-*` rows need. A wrapped row's words are read that way a second
+  time, as `unlisted-script-split-quote` needs. `inner_words()` in
+  [`tests/test_gate_refusal_corpus.py`](../tests/test_gate_refusal_corpus.py)
+  is the reference. A gate that lets a row through lists
   it as a known gap, as akmods does, rather than skipping it.
