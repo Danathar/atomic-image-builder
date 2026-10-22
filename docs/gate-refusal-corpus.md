@@ -90,7 +90,11 @@ as a quoted string. Since
 [#781](https://github.com/Danathar/atomic-image-builder/pull/781) this gate
 reads a gated command behind any program, not only the wrappers it names,
 and `allow-unlisted-plain-diff` pins the other half of that rule: a command
-that passes alone still passes behind one.
+that passes alone still passes behind one. Three more split the name inside
+the string the way the shell joins it back together: `g""it`, `gi\t` and
+`$'git'` all run git. A gate that looks for a gated name in the string only
+as typed misses them, so it also has to look with the quotes, backslashes
+and `$` removed.
 
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
@@ -112,5 +116,7 @@ fetching it:
 - Pin the file's SHA-256 in that test, so the copy cannot be edited locally.
   To change a row, change it here and copy it again.
 - A runner that checks a row's fields has to accept the optional `wraps`
-  field. A gate that lets a row through lists it as a known gap, as akmods
-  does, rather than skipping it.
+  field. One that checks a wrapped row names what it requires reads the
+  string with its quotes, backslashes and `$` removed, as
+  `unlisted-script-split-quote` needs. A gate that lets a row through lists
+  it as a known gap, as akmods does, rather than skipping it.

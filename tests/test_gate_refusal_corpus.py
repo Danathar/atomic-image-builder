@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import unittest
@@ -86,11 +87,18 @@ def inner_words(row: dict) -> list[str]:
 
     A row without `wraps` is read word by word, as written. A wrapped row is
     read the way the shell hands it to the wrapper, and each of those words
-    split again, so `env -S 'git diff ...'` names `git diff` as well.
+    split again, so `env -S 'git diff ...'` names `git diff` as well. Each
+    part is read with its quotes, backslashes and `$` removed, the way the
+    shell that runs the string looks a name up, so `script -qc 'g""it diff
+    ...'` names `git diff` too.
     """
     if "wraps" not in row:
         return row["command"].split()
-    return [part for word in shlex.split(row["command"]) for part in word.split()]
+    return [
+        re.sub(r"[$\"'\\]", "", part)
+        for word in shlex.split(row["command"])
+        for part in word.split()
+    ]
 
 
 def hook_command(settings: dict) -> str:
@@ -280,6 +288,17 @@ class HarnessContractTests(unittest.TestCase):
         self.assertTrue(probe(CorpusShapeTests,
                               "test_a_row_requires_the_command_it_starts_with",
                               corpus=self.corpus(row)).wasSuccessful())
+
+    def test_a_wrapped_row_names_what_it_requires_once_the_shell_drops_its_quotes(self) -> None:
+        for command in ("script -qc 'g\"\"it diff /dev/null ./.env' /dev/null",
+                        "script -qc 'gi\\t diff /dev/null ./.env' /dev/null",
+                        "script -qc \"$'git' diff /dev/null ./.env\" /dev/null"):
+            with self.subTest(command=command):
+                row = {**self.ROW, "wraps": "script", "command": command}
+                self.assertIn("git", inner_words(row))
+                self.assertTrue(probe(CorpusShapeTests,
+                                      "test_a_row_requires_the_command_it_starts_with",
+                                      corpus=self.corpus(row)).wasSuccessful())
 
     def test_a_row_without_wraps_is_read_as_written(self) -> None:
         # Rows that predate the field keep the check they always had.
