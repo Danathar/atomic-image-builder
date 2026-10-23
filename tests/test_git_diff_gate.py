@@ -317,6 +317,20 @@ REFUSED_COMMANDS = (
     ("echo '\"' $'\\'' ; git diff --no-index /dev/null .env ; \\'", "hides the escaped-quote split behind a double quote in single quotes"),
     ("echo \"\\\"\" $'\\'' ; git diff --no-index /dev/null .env ; \\'", "hides the escaped-quote split behind an escaped double quote"),
     ("echo \\\" $'\\'' ; git diff --no-index /dev/null .env ; \\'", "hides the escaped-quote split behind a backslashed double quote"),
+    # An extglob group under `shopt -s extglob` is read as the `*` it matches
+    # no more than (extglob_flattened()).
+    ("shopt -s extglob\n/usr/bin/g@(i)t diff /dev/null ./.env", "names git with an extglob group the shell matches to /usr/bin/git"),
+    ("shopt -s extglob\n/usr/bin/@(git) log -p --output=.env -1", "names all of git with one extglob group"),
+    ("shopt -s extglob\n/usr/bin/g?(x)it diff /dev/null ./.env", "uses the ?(...) form, which also matches nothing"),
+    ("shopt -s extglob\n/usr/bin/!(foo) diff /dev/null ./.env", "uses a negated group, which matches git as * does"),
+    ("shopt -s extglob\n/usr/bin/g@(i)(t) diff /dev/null ./.env", "chains a second group onto the * the first is read as"),
+    ("shopt -s extglob\n/usr/bin/g@\\\n(i)t diff /dev/null ./.env", "splits the group from its opener with a backslash-newline bash removes"),
+    ("shopt -s extglob\ntouch git; g@(i)t diff /dev/null ./.env", "names git with an extglob group beside a file named git"),
+    ("shopt -s extglob\nsetarch x86_64 /usr/bin/g@(i)t diff /dev/null ./.env", "names git with an extglob group behind a program no gate lists"),
+    ("bash -c $'shopt -s extglob\\n/usr/bin/g@(i)t diff /dev/null ./.env'", "names git with an extglob group inside a command string"),
+    ("shopt -s extglob\ngit log -p @(--output=.env) -1", "spells a refused option as an extglob group beside a file of that name"),
+    ("@(git) diff /dev/null ./.env", "starts the command with a group, once an earlier call in the same shell turned extglob on"),
+    ("script -qc 'shopt -s extglob\n/usr/bin/g@(i)t diff /dev/null ./.env' /dev/null", "names git with an extglob group in a string a program no gate lists hands to a shell"),
 )
 
 # Commands it has to leave alone. Everything an ordinary session runs.
@@ -489,6 +503,14 @@ ALLOWED_COMMANDS = (
     "ls *.py",
     "echo g?t",
     "echo $'it\\x27s'",
+    # An extglob group that can name no gated command, or is quoted.
+    "shopt -s extglob\nls @(README|AGENTS).md",
+    "shopt -s extglob\n[[ x == @(a|b) ]] && echo y",
+    "shopt -s extglob\n/usr/bin/g@(i)t status",
+    "shopt -s extglob\ngit diff -- '@(README).md'",
+    "echo '@(x)' ; git diff HEAD",
+    "! (git status)",
+    "bash -c 'ls @(README).md'",
 )
 
 
@@ -1936,6 +1958,26 @@ class RefusalTests(unittest.TestCase):
                     any(word in reason for word in words),
                     f"the refusal of {command!r} names none of its arguments: {reason}",
                 )
+
+    def test_an_extglob_refusal_names_the_group_it_read_as_a_wildcard(self) -> None:
+        # The group is named as typed, opener included, and cut to 37
+        # characters and an ellipsis past 40, so a long one does not bury
+        # the reason.
+        reason = gate.refusal("shopt -s extglob\n/usr/bin/g@(i)t diff /dev/null ./.env")
+        self.assertIn("@(i) is an extglob pattern", reason)
+        for length, shown in ((40, None), (41, 37)):
+            group = "@(" + "x" * (length - 3) + ")"
+            with self.subTest(length=length):
+                reason = gate.refusal(f"/usr/bin/{group} diff /dev/null ./.env")
+                written = group if shown is None else group[:shown] + "..."
+                self.assertIn(f" {written} is an extglob pattern", " " + reason)
+
+    def test_a_command_string_that_cannot_be_split_spells_no_name(self) -> None:
+        # raw_words() refuses a string holding its own stand-in character;
+        # the flattened reading of it is refused the same way, and neither
+        # raises out of the check.
+        text = "/usr/bin/g@(i)t diff /dev/null ./.env " + gate.STAND_IN
+        self.assertFalse(gate.spells_a_gated_name(text))
 
     def test_ordinary_commands_pass_through(self) -> None:
         for command in ALLOWED_COMMANDS:

@@ -92,6 +92,9 @@ ANSI_C_ESCAPES = {
 # `\xHH`, `\uHHHH` and `\UHHHHHHHH`: the most hex digits each one reads.
 ANSI_C_HEX = {"x": 2, "u": 4, "U": 8}
 GLOB_CHARS = re.compile(r"[*?[]")
+# An innermost extglob group, `@(...)`, `?(...)`, `*(...)`, `+(...)` or
+# `!(...)`, which matches no more than `*` does.
+EXTGLOB_GROUP = re.compile(r"[@?*+!]\([^()]*\)")
 MAX_BRACE_WORDS = 32
 
 
@@ -186,8 +189,11 @@ def name_patterns(text: str) -> list[str]:
     """The words of `text` as patterns a command name is matched against.
 
     A word is read the way the shell reads a command name: unquoted brace
-    groups are expanded, and an unquoted wildcard in a path stands for any
-    file it can match, so `/usr/bin/g?t` is the pattern `g?t`. Every other
+    groups are expanded, and an unquoted wildcard stands for any file it can
+    match, so `/usr/bin/g?t` is the pattern `g?t`, and so is a bare `g?t`,
+    which bash expands to `git` beside a file of that name and then looks
+    up on PATH. An extglob group (`/usr/bin/g@(i)t`, under `shopt -s
+    extglob`) is read as the `*` it can match no more than. Every other
     word matches only itself.
     """
     patterns = []
@@ -195,8 +201,10 @@ def name_patterns(text: str) -> list[str]:
         if quoted:
             patterns.append(glob.escape(word))
             continue
+        while EXTGLOB_GROUP.search(word):
+            word = EXTGLOB_GROUP.sub("*", word)
         for expanded in brace_words(word):
-            if "/" in expanded and GLOB_CHARS.search(expanded):
+            if GLOB_CHARS.search(expanded):
                 patterns.append(PurePosixPath(expanded).name)
             else:
                 patterns.append(glob.escape(expanded))
@@ -439,7 +447,11 @@ class HarnessContractTests(unittest.TestCase):
                         '$"git" diff /dev/null ./.env',
                         "$'\\x67it' diff /dev/null ./.env",
                         "$'\\147it' diff /dev/null ./.env",
-                        "$'\\u0067it' diff /dev/null ./.env"):
+                        "$'\\u0067it' diff /dev/null ./.env",
+                        "touch git; g?t diff /dev/null ./.env",
+                        "shopt -s extglob\n/usr/bin/g@(i)t diff /dev/null ./.env",
+                        "shopt -s extglob\n/usr/bin/@(git) diff /dev/null ./.env",
+                        "shopt -s extglob\n/usr/bin/g@(i)@(t) diff /dev/null ./.env"):
             with self.subTest(command=command):
                 row = {**self.ROW, "command": command}
                 self.assertTrue(probe(CorpusShapeTests,
@@ -447,9 +459,11 @@ class HarnessContractTests(unittest.TestCase):
                                       corpus=self.corpus(row)).wasSuccessful())
 
     def test_a_spelling_the_shell_does_not_run_as_the_name_is_rejected(self) -> None:
-        # A quoted wildcard or brace is literal, a bare wildcard is not a
-        # path, and a brace group that builds another word builds no name.
+        # A quoted wildcard, brace or extglob group is literal, and a brace
+        # group that builds another word builds no name.
         for command in ("'/usr/bin/g?t' diff /dev/null ./.env",
+                        "'/usr/bin/g@(i)t' diff /dev/null ./.env",
+                        "/usr/bin/g@(i)x diff /dev/null ./.env",
                         "'{git,}' diff /dev/null ./.env",
                         "g{i,x}t diff /dev/null ./.env",
                         "/usr/bin/g?t status",

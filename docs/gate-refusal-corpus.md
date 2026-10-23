@@ -108,6 +108,23 @@ them all through. This gate reads each word the way the shell expands or
 decodes it, and reads the command again with that word written as the gated
 name it may become, so it refuses all seven.
 
+Eight more `name spelling` rows cover two spellings found after those
+([#792](https://github.com/Danathar/atomic-image-builder/issues/792) and
+the extglob finding folded into
+[#794](https://github.com/Danathar/atomic-image-builder/issues/794)). A
+wildcard with no `/` (`touch git; g?t diff ...`) expands to the word `git`
+beside a file of that name, and the shell then looks `git` up on `PATH`. An
+extglob group (`/usr/bin/g@(i)t`, `/usr/bin/@(git)`) does what a wildcard
+does once a first line `shopt -s extglob` turns the patterns on, which works
+because Claude Code runs a call one line at a time; the rows put it in a
+path, beside a file named `git`, behind `setarch`, in front of `--output=`
+and inside a `bash -c` string that turns the patterns on itself. A gate that
+splits words at `(` reads `/usr/bin/g@` and a subshell and finds no git.
+This gate reads each extglob group as the `*` it matches no more than, and
+then reads the command the way it reads a wildcard name.
+`allow-shopt-then-diff` keeps turning the patterns on from being refused on
+its own.
+
 Three `shell expansion` rows written alongside them use the same decoding on
 words that are not a name: a whole command string in `$'...'` handed to
 `sh -c` (`ansi-c-command-string`), a refused git option in `$'...'`
@@ -137,9 +154,9 @@ fetching it:
 - A runner that checks a row's fields has to accept the optional `wraps`
   field. One that checks a row names what it requires reads the command
   the way the shell does: quotes and backslashes removed, `$'...'` decoded,
-  `$"..."` read as `"..."`, unquoted brace groups expanded, and an unquoted
-  wildcard in a path matched against the name by its last part, as the
-  `name-*` rows need. A wrapped row's words are read that way a second
+  `$"..."` read as `"..."`, unquoted brace groups expanded, an unquoted
+  extglob group read as `*`, and an unquoted wildcard, in a path or not,
+  matched against the name by its last part, as the `name-*` rows need. A wrapped row's words are read that way a second
   time, as `unlisted-script-split-quote` needs. `inner_words()` in
   [`tests/test_gate_refusal_corpus.py`](../tests/test_gate_refusal_corpus.py)
   is the reference. A gate that lets a row through lists
