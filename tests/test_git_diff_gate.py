@@ -305,6 +305,18 @@ REFUSED_COMMANDS = (
     ("setarch x86_64 sh -c $'\\x67it diff --no-index /dev/null .env'", "ANSI-C escapes git's name in a whole command string"),
     ("git show $'--output=cosign.pub' HEAD", "ANSI-C quotes an option git would otherwise be refused"),
     ("echo $'\\'' ; git diff --no-index /dev/null .env ; \\'", "ends a $'...' string where the word splitter does not"),
+    # Each reading the shell does before it runs a word, one row per rule.
+    ("$'\\u0067it' diff --no-index /dev/null .env", "spells git's first letter as a four-digit unicode escape"),
+    ("$'\\147it' diff --no-index /dev/null .env", "spells git's first letter as a three-digit octal escape"),
+    ("$'\\547it' diff --no-index /dev/null .env", "spells git's first letter as an octal escape bash cuts to one byte"),
+    ("$'\\x68adolint' Containerfile >.claude/settings.json", "spells hadolint's h as a hex escape bash reads two digits of"),
+    ("setarch x86_64 {{git,},} diff --no-index /dev/null .env", "builds git's name with a brace inside a brace"),
+    ("setarch x86_64 {" + "-R," * 40 + "git} diff --no-index /dev/null .env", "puts git's name past the most words the gate expands a brace into"),
+    ("/usr/bin/g?t show $'--output=cosign.pub' HEAD", "needs both the wildcard and the ANSI-C reading at once"),
+    ("g?t status ; g?t diff --no-index /dev/null .env", "spells git with a wildcard twice, refused only the second time"),
+    ("echo '\"' $'\\'' ; git diff --no-index /dev/null .env ; \\'", "hides the escaped-quote split behind a double quote in single quotes"),
+    ("echo \"\\\"\" $'\\'' ; git diff --no-index /dev/null .env ; \\'", "hides the escaped-quote split behind an escaped double quote"),
+    ("echo \\\" $'\\'' ; git diff --no-index /dev/null .env ; \\'", "hides the escaped-quote split behind a backslashed double quote"),
 )
 
 # Commands it has to leave alone. Everything an ordinary session runs.

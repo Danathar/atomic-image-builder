@@ -18,9 +18,10 @@ change, and the other way round.
 
 **Paths:** `*.md`, `docs/`, `maintainer_docs/`, `tests/`, `.editorconfig`,
 `.cursor/rules/atomic-image-builder.mdc`, `.claude/risk-config.json`,
-`.gitignore`, `LICENSE`, `maintenance_notes.txt`, `format_markdown_tables.py`;
-the lint and coverage configuration — `ruff.toml`, `.coveragerc`, `.coveragerc.e2e`,
-`.coveragerc.maintenance-audit`, `.simplecov`, `.coverage-thresholds.json`,
+`.gitignore`, `LICENSE`, `maintenance_notes.txt`, `format_markdown_tables.py`,
+`mutation_check.py`; the lint, coverage and mutation configuration — `ruff.toml`,
+`.coveragerc`, `.coveragerc.e2e`, `.coveragerc.maintenance-audit`, `.simplecov`,
+`.coverage-thresholds.json`, `.mutation-survivors.json`,
 `.github/auto-qa-tuning.json`, `.github/actionlint.yaml`; the issue forms in
 `.github/ISSUE_TEMPLATE/`; and the workflows whose token can only read the
 repository or write to its issue tracker —
