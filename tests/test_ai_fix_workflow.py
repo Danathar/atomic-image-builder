@@ -188,12 +188,10 @@ def _ci_lint_steps() -> dict[str, str]:
     never reaches the intake table is the drift this join exists to catch, and
     a hand-written list here would have to be edited to notice it.
     """
-    lines = CI_WORKFLOW.read_text().splitlines()
     # The `test` job only. container-build is path-scoped and skips on runs
     # that touch nothing in the image, so it is not what "the gate" means.
-    end = next((i for i, line in enumerate(lines) if line.startswith("  publish-coverage:")), len(lines))
     steps = {}
-    for line in lines[:end]:
+    for line in _ci_test_job_lines():
         match = re.match(r"^\s+- name: Run (?P<tool>.+)$", line)
         if match:
             tool = match.group("tool")
@@ -201,14 +199,23 @@ def _ci_lint_steps() -> dict[str, str]:
     return steps
 
 
+def _ci_test_job_lines() -> list[str]:
+    """The lines of ci.yml's gating `test` job, up to the next job's key.
+
+    Ended at whichever job comes next rather than at a named one, so a job
+    added after `test` is not read as part of the gate.
+    """
+    lines = CI_WORKFLOW.read_text().splitlines()
+    start = lines.index("  test:")
+    end = next((i for i in range(start + 1, len(lines)) if re.match(r"^  [\w-]+:$", lines[i])), len(lines))
+    return lines[start:end]
+
+
 def _ci_test_job_steps() -> list[str]:
     """The names of every step in ci.yml's gating `test` job, in order."""
-    lines = CI_WORKFLOW.read_text().splitlines()
-    start = next(i for i, line in enumerate(lines) if line == "  test:")
-    end = next((i for i, line in enumerate(lines) if line.startswith("  publish-coverage:")), len(lines))
     return [
         match.group("name")
-        for line in lines[start:end]
+        for line in _ci_test_job_lines()
         if (match := re.match(r"^\s+- name: (?P<name>.+)$", line))
     ]
 

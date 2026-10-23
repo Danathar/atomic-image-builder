@@ -1,0 +1,11 @@
+{
+  "description": "Surviving mutants a maintainer has looked at and accepted: equivalent ones (no input can tell them apart from the original) and ones that only make a check stricter. mutation_check.py leaves these out of its report. An entry matches by module, cosmic-ray operator and the stripped text of the source line, so it follows the line when code above it moves and stops matching when the line itself changes. tests/test_mutation_check.py fails when an entry's line no longer exists. Say in reason why the mutant cannot matter.",
+  "accepted": [
+    {
+      "module": "mutation_check.py",
+      "operator": "core/NumberReplacer",
+      "line": "TIMEOUT_SECONDS = 120.0",
+      "reason": "How long cosmic-ray waits for one mutant's tests is a tuning value; 119 or 121 seconds changes no outcome a test can observe."
+    }
+  ]
+}
