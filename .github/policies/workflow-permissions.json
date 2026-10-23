@@ -17,6 +17,7 @@
       "workflow": null,
       "jobs": {
         "test": {"contents": "read"},
+        "mutation": {"contents": "read"},
         "publish-coverage": {"contents": "write"},
         "container-build": {"contents": "read"}
       }

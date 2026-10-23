@@ -20,6 +20,7 @@ class WorkflowDependencyTests(unittest.TestCase):
             ],
             ".github/workflows/ci.yml": [
                 "pip install coverage==7.16.0 ruff==0.16.5",
+                "pip install cosmic-ray==8.7.0",
                 "pip install coverage==7.16.0",
             ],
             ".github/workflows/maintenance-audit.yml": [

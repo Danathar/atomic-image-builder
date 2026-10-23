@@ -190,6 +190,41 @@ jobs:
           include-hidden-files: true
           retention-days: 30
 
+  # Line coverage says a line ran; this says whether a test would notice it
+  # breaking. mutation_check.py mutates only the lines the pull request
+  # changes in the modules of its TARGETS table and runs the tests that
+  # import each one -- see CONTRIBUTING.md's Coverage section. Advisory:
+  # continue-on-error keeps a surviving mutant from failing the run while
+  # the ledger in .mutation-survivors.json is still being filled in.
+  mutation:
+    name: Mutation check (advisory)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.10"
+
+      - name: Mutation-test the changed lines
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          pip install cosmic-ray==8.7.0
+          status=0
+          python3 mutation_check.py --base "origin/$BASE_REF" > mutation-report.md || status=$?
+          cat mutation-report.md >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
   publish-coverage:
     name: Publish coverage badge and trend
     needs: test
