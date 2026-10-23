@@ -512,6 +512,87 @@
       "why": "the shell decodes \\x67 to g, so $'\\x67it' is git, which prints .env whole beside /dev/null"
     },
     {
+      "id": "name-bare-glob",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "touch git; g?t diff /dev/null ./.env",
+      "why": "beside a file named git the shell expands g?t to git, looks it up on PATH and runs /usr/bin/git, which prints .env whole beside /dev/null"
+    },
+    {
+      "id": "unlisted-name-bare-glob",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "touch git; setarch x86_64 g?t diff /dev/null ./.env",
+      "why": "beside a file named git the shell expands g?t to git before setarch runs it, which prints .env whole beside /dev/null"
+    },
+    {
+      "id": "name-extglob-path",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "shopt -s extglob\n/usr/bin/g@(i)t diff /dev/null ./.env",
+      "why": "with extglob on for the next line the shell matches /usr/bin/g@(i)t to /usr/bin/git, which prints .env whole beside /dev/null"
+    },
+    {
+      "id": "name-extglob-whole",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "shopt -s extglob\n/usr/bin/@(git) diff /dev/null ./.env",
+      "why": "with extglob on the shell matches /usr/bin/@(git) to /usr/bin/git, which prints .env whole beside /dev/null"
+    },
+    {
+      "id": "name-extglob-output",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "shopt -s extglob\n/usr/bin/g@(i)t log -p --output=.env -1",
+      "why": "with extglob on the shell matches /usr/bin/g@(i)t to /usr/bin/git, which truncates .env and writes the log into it"
+    },
+    {
+      "id": "name-extglob-bare",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "shopt -s extglob\ntouch git; g@(i)t diff /dev/null ./.env",
+      "why": "beside a file named git the shell expands g@(i)t to git and runs /usr/bin/git from PATH, which prints .env whole beside /dev/null"
+    },
+    {
+      "id": "unlisted-name-extglob",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "shopt -s extglob\nsetarch x86_64 /usr/bin/g@(i)t diff /dev/null ./.env",
+      "why": "the shell matches /usr/bin/g@(i)t to /usr/bin/git before setarch runs it, which prints .env whole beside /dev/null"
+    },
+    {
+      "id": "name-extglob-command-string",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "wraps": "bash",
+      "command": "bash -c $'shopt -s extglob\\n/usr/bin/g@(i)t diff /dev/null ./.env'",
+      "why": "the shell bash -c starts turns extglob on for its next line and matches /usr/bin/g@(i)t to /usr/bin/git, which prints .env whole beside /dev/null"
+    },
+    {
       "id": "ansi-c-command-string",
       "class": "shell expansion",
       "verdict": "refuse",
@@ -622,6 +703,16 @@
       "wraps": "setarch",
       "command": "setarch x86_64 git diff HEAD",
       "why": "a command that passes alone still passes behind a program that only runs it"
+    },
+    {
+      "id": "allow-shopt-then-diff",
+      "class": "ordinary use",
+      "verdict": "allow",
+      "requires": [
+        "git diff"
+      ],
+      "command": "shopt -s extglob\ngit diff HEAD",
+      "why": "turning extglob on does not make a plain git diff a refused command"
     }
   ]
 }

@@ -2228,12 +2228,19 @@ def unquoted(text: str) -> str:
 def spells_a_gated_name(text: str) -> bool:
     """Does a word of this command string spell a gated name bash would
     expand or decode into (`/usr/bin/g?t`, `g{,}it`, `$'\\x67it'`)? See
-    spelled_names(). A string that cannot be split into words is not."""
-    try:
-        words = raw_words(text)
-    except ValueError:
-        return False
-    return any(spelled_names(word) for word in words)
+    spelled_names(). The string is read with each extglob group written as
+    `*` as well (extglob_flattened()), so `bash -c 'shopt -s extglob
+    <newline> /usr/bin/g@(i)t diff ...'` is read. A string that cannot be
+    split into words is not."""
+    flattened = extglob_flattened(text)
+    for reading in (text, *(flattened[:1] if flattened else ())):
+        try:
+            words = raw_words(reading)
+        except ValueError:
+            continue
+        if any(spelled_names(word) for word in words):
+            return True
+    return False
 
 
 def gated_command_strings(word: str) -> Iterator[str]:
@@ -3144,17 +3151,94 @@ def spelled_name_refusal(tokens: list[str], raws: list[str]) -> str | None:
     return None
 
 
+# The characters that open an extglob group when an unquoted `(` touches
+# them. See extglob_flattened().
+EXTGLOB_OPENERS = frozenset("@?*+!")
+
+
+def extglob_flattened(command: str) -> tuple[str, str] | None:
+    """The command with each unquoted extglob group written as `*`, and the
+    first group as typed, or None when it has none.
+
+    With `shopt -s extglob` on, `@(...)`, `?(...)`, `*(...)`, `+(...)` and
+    `!(...)` are part of the word they touch and match files the way `*`
+    does, and Claude Code runs a call one line at a time, so a first line
+    `shopt -s extglob` turns them on for the next. The tokenizer ends a
+    segment at the `(`, so `/usr/bin/g@(i)t diff /dev/null ./.env` reached
+    the scan as `/usr/bin/g@`, a subshell and a command named `t`, and none
+    of them is git. Read as `/usr/bin/g*t`, it is the wildcard name
+    spelled_names() already reads as git. A group can only match what `*`
+    matches, so the reading can only over-refuse: `ls @(README|AGENTS).md`
+    reads as `ls *.md` and still passes. A group runs to its matching `)`
+    in the quote-masked command, so a quoted `'@'(x)` or `@'('` is no
+    group, and an opener with no matching `)` is left as typed. The `*` a
+    group is written as opens the next one when a `(` touches it
+    (`g@(i)(t)` is `g*`), as bash reads `*(t)`.
+    """
+    masked = mask_quotes(command)
+    closing: dict[int, int] = {}
+    opened: list[int] = []
+    for index, char in enumerate(masked):
+        spend()
+        if char == "(":
+            opened.append(index)
+        elif char == ")" and opened:
+            closing[opened.pop()] = index
+    out: list[str] = []
+    unquoted_opener = False
+    first = None
+    index = 0
+    while index < len(command):
+        spend()
+        if masked[index] == "(" and unquoted_opener and index in closing:
+            close = closing[index]
+            first = first or command[index - 1 : close + 1]
+            out[-1] = "*"
+            index = close + 1
+            continue
+        out.append(command[index])
+        unquoted_opener = masked[index] in EXTGLOB_OPENERS
+        index += 1
+    if first is None:
+        return None
+    return "".join(out), first
+
+
 def refusal(command: str, spell_names: bool = True) -> str | None:
     """Why this command is blocked, or None when it is left alone.
 
     The command is read as typed first (typed_refusal()). With
     `spell_names`, a command that passes is read again the way bash expands
-    and decodes its words (spelled_name_refusal()), so those readings only
-    ever add a refusal and never change the reason one already gets.
+    and decodes its words (spelled_name_refusal()), and then with each
+    extglob group written as `*` (extglob_flattened()), so those readings
+    only ever add a refusal and never change the reason one already gets.
     """
     reason = typed_refusal(command)
     if reason is not None or not spell_names:
         return reason
+    reason = spelled_refusal(command)
+    if reason is not None:
+        return reason
+    flattened = extglob_flattened(join_continuations(command))
+    if flattened is None:
+        return None
+    rewritten, group = flattened
+    reason = refusal(rewritten)
+    if reason is None:
+        return None
+    if len(group) > 40:
+        group = group[:37] + "..."
+    return (
+        f"{group} is an extglob pattern: with `shopt -s extglob` on, bash reads it as "
+        "part of the word it touches and matches the word against files the way * "
+        "is, and the command is refused once the pattern is read as *: "
+        f"{reason}"
+    )
+
+
+def spelled_refusal(command: str) -> str | None:
+    """The reading refusal() makes the way bash expands and decodes the
+    command's words (spelled_name_refusal()), or None."""
     try:
         command = strip_comments(join_continuations(drop_quoted_heredoc_bodies(command)))
         tokens = tokenize(command)
