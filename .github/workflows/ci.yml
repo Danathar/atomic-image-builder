@@ -190,6 +190,66 @@ jobs:
           include-hidden-files: true
           retention-days: 30
 
+  # Line coverage says a line ran; this says whether a test would notice it
+  # breaking. mutation_check.py mutates only the lines the pull request
+  # changes in the modules of its TARGETS table and runs the tests that
+  # import each one -- see CONTRIBUTING.md's Coverage section. Advisory:
+  # continue-on-error keeps a surviving mutant from failing the run while
+  # the ledger in .mutation-survivors.json is still being filled in.
+  mutation:
+    name: Mutation check (advisory)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.10"
+
+      # The same binaries the test job installs, for the same reason: tests
+      # that drive them skip without them, and a mutant only a skipped test
+      # would kill is reported as a survivor. test_git_diff_gate needs
+      # hadolint; test_atomic_image_builder needs just, gum and actionlint.
+      - name: Install test tooling
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/bin/hadolint" \
+            https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-Linux-x86_64
+          echo "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47  $RUNNER_TEMP/bin/hadolint" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/hadolint"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/actionlint.tar.gz" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP/bin" actionlint
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/just.tar.gz" \
+            https://github.com/casey/just/releases/download/1.57.0/just-1.57.0-x86_64-unknown-linux-musl.tar.gz
+          echo "45b548094283cb9739af8f13273b8cddeee869f5b4ef2bb631b1f311cb566155  $RUNNER_TEMP/just.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/just.tar.gz" -C "$RUNNER_TEMP/bin" just
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/gum.tar.gz" \
+            https://github.com/charmbracelet/gum/releases/download/v0.17.0/gum_0.17.0_Linux_x86_64.tar.gz
+          echo "69ee169bd6387331928864e94d47ed01ef649fbfe875baed1bbf27b5377a6fdb  $RUNNER_TEMP/gum.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gum.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/bin" gum_0.17.0_Linux_x86_64/gum
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Mutation-test the changed lines
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          pip install cosmic-ray==8.7.0
+          status=0
+          python3 mutation_check.py --base "origin/$BASE_REF" > mutation-report.md || status=$?
+          cat mutation-report.md >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
   publish-coverage:
     name: Publish coverage badge and trend
     needs: test

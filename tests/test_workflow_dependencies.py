@@ -20,6 +20,7 @@ class WorkflowDependencyTests(unittest.TestCase):
             ],
             ".github/workflows/ci.yml": [
                 "pip install coverage==7.16.0 ruff==0.16.5",
+                "pip install cosmic-ray==8.7.0",
                 "pip install coverage==7.16.0",
             ],
             ".github/workflows/maintenance-audit.yml": [
@@ -433,10 +434,11 @@ class DownloadRetryTests(unittest.TestCase):
                 if _retry_count(match.group(0)) < 1:
                     missing.append(f"{path.relative_to(ROOT)}: {match.group('url')}")
         self.assertEqual(missing, [], "a workflow download has no --retry")
-        # hadolint, actionlint, just and gum in each of ci.yml, ai-fix.yml and
-        # nightly-compliance.yml, and bcvk in variant-boot-test.yml. A parser
-        # that stops matching would otherwise pass this by seeing nothing.
-        self.assertEqual(seen, 13)
+        # hadolint, actionlint, just and gum in each of ci.yml's test and
+        # mutation jobs, ai-fix.yml and nightly-compliance.yml, and bcvk in
+        # variant-boot-test.yml. A parser that stops matching would otherwise
+        # pass this by seeing nothing.
+        self.assertEqual(seen, 17)
 
     def test_every_containerfile_download_retries(self) -> None:
         missing = []
