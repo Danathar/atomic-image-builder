@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import ast
 import re
+import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -156,6 +158,10 @@ class HeadingReaderTests(unittest.TestCase):
         text = "## Out\n```bash\n## not a heading\n```\n~~~~\n### nor this\n```\n~~~~\n### Back\n"
         self.assertEqual(headings(text), ["## Out", "### Back"])
 
+    def test_a_fence_closes_only_on_its_own_marker_at_least_as_long(self) -> None:
+        self.assertEqual(headings("````\n```\n## in\n````\n## Out\n"), ["## Out"])
+        self.assertEqual(headings("```\n~~~\n## in\n```\n## Out\n"), ["## Out"])
+
     def test_drops_a_closing_hash_sequence(self) -> None:
         self.assertEqual(headings("## Closed ##\n"), ["## Closed"])
 
@@ -203,44 +209,109 @@ class OpensPageTests(unittest.TestCase):
         self.assertTrue(opens_page('doc="docs/using.md"\n', ".sh", "docs/using.md"))
 
 
+def page_mismatch(rows: dict[str, dict[str, tuple[str, str]]], pages: set[str]) -> tuple[list[str], list[str]]:
+    """(tracked pages with no block, blocks for pages that are not tracked)."""
+    return sorted(pages - set(rows)), sorted(set(rows) - pages)
+
+
+def unclassified(rows: dict[str, dict[str, tuple[str, str]]], root: Path) -> dict[str, list[str]]:
+    """Page -> headings it has that the map gives no row."""
+    found = {}
+    for page, page_rows in sorted(rows.items()):
+        missing = [h for h in headings((root / page).read_text()) if h not in page_rows]
+        if missing:
+            found[page] = missing
+    return found
+
+
+def stale(rows: dict[str, dict[str, tuple[str, str]]], root: Path) -> dict[str, list[str]]:
+    """Page -> rows naming headings the page no longer has."""
+    found = {}
+    for page, page_rows in sorted(rows.items()):
+        gone = sorted(set(page_rows) - set(headings((root / page).read_text())))
+        if gone:
+            found[page] = gone
+    return found
+
+
+def bad_join(page: str, heading: str, test: str, root: Path) -> str | None:
+    """Why a `joined:` row does not hold, or None when it does."""
+    if test == THIS_TEST:
+        return "this test reads headings, not what a section says"
+    path = root / test
+    if not (test.startswith("tests/") and path.is_file()):
+        return f"{page} {heading!r} is joined to {test}, which is not a file under tests/"
+    if not opens_page(path.read_text(), path.suffix, page):
+        return f"{page} {heading!r} is joined to {test}, which never opens {page}"
+    return None
+
+
+class GateOnFixtureTests(unittest.TestCase):
+    """Each check fires on a small repository built for it."""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        (self.root / "tests").mkdir()
+        (self.root / "page.md").write_text("# Page\n## Kept\n## New\n")
+        (self.root / "tests/test_reads.py").write_text('DOC = "page.md"\n')
+        (self.root / "elsewhere.py").write_text('DOC = "page.md"\n')
+
+    def test_a_heading_with_no_row_is_reported(self) -> None:
+        rows = {"page.md": {"## Kept": ("prose", "x")}}
+        self.assertEqual(unclassified(rows, self.root), {"page.md": ["## New"]})
+
+    def test_a_row_for_a_missing_heading_is_reported(self) -> None:
+        rows = {"page.md": {"## Kept": ("prose", "x"), "## New": ("prose", "x"), "## Gone": ("prose", "x")}}
+        self.assertEqual(stale(rows, self.root), {"page.md": ["## Gone"]})
+        self.assertEqual(unclassified(rows, self.root), {})
+
+    def test_a_join_outside_tests_or_to_this_test_is_refused(self) -> None:
+        self.assertIsNone(bad_join("page.md", "## Kept", "tests/test_reads.py", self.root))
+        self.assertIn("not a file under tests/", bad_join("page.md", "## Kept", "elsewhere.py", self.root))
+        self.assertIn("not a file under tests/", bad_join("page.md", "## Kept", "tests/absent.py", self.root))
+        self.assertIn("reads headings", bad_join("page.md", "## Kept", THIS_TEST, self.root))
+
+    def test_a_join_to_a_test_that_never_opens_the_page_is_refused(self) -> None:
+        (self.root / "tests/test_other.py").write_text('"""Reads page.md."""\nDOC = "other.md"\n')
+        self.assertIn("never opens", bad_join("page.md", "## Kept", "tests/test_other.py", self.root))
+
+    def test_the_page_lists_compare_both_ways(self) -> None:
+        self.assertEqual(page_mismatch({"a.md": {}, "b.md": {}}, {"a.md", "c.md"}), (["c.md"], ["b.md"]))
+
+
 class SectionMapTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.rows = parse_map(MAP.read_text())
 
     def test_the_map_lists_exactly_the_tracked_pages(self) -> None:
-        pages = tracked_pages()
+        unlisted, untracked = page_mismatch(self.rows, tracked_pages())
         self.assertEqual(
-            sorted(pages - set(self.rows)),
+            unlisted,
             [],
             f"tracked pages with no [page] block in {MAP_RELATIVE}; add one with a row per heading",
         )
         self.assertEqual(
-            sorted(set(self.rows) - pages),
+            untracked,
             [],
             f"{MAP_RELATIVE} lists pages that are not tracked documentation pages",
         )
 
     def test_every_heading_has_a_row(self) -> None:
-        for page, rows in sorted(self.rows.items()):
-            missing = [h for h in headings((ROOT / page).read_text()) if h not in rows]
-            with self.subTest(page=page):
-                self.assertEqual(
-                    missing,
-                    [],
-                    f"{page} has sections {MAP_RELATIVE} does not classify; give each a "
-                    "joined: line naming the test that reads it, or a prose: line saying why none does",
-                )
+        self.assertEqual(
+            unclassified(self.rows, ROOT),
+            {},
+            f"sections {MAP_RELATIVE} does not classify; give each a "
+            "joined: line naming the test that reads it, or a prose: line saying why none does",
+        )
 
     def test_every_row_names_a_heading_the_page_has(self) -> None:
-        for page, rows in sorted(self.rows.items()):
-            present = set(headings((ROOT / page).read_text()))
-            with self.subTest(page=page):
-                self.assertEqual(
-                    sorted(set(rows) - present),
-                    [],
-                    f"{MAP_RELATIVE} classifies headings {page} no longer has; rename or drop the rows",
-                )
+        self.assertEqual(
+            stale(self.rows, ROOT),
+            {},
+            f"{MAP_RELATIVE} classifies headings the page no longer has; rename or drop the rows",
+        )
 
     def test_every_joined_test_exists_and_opens_the_page(self) -> None:
         for page, rows in sorted(self.rows.items()):
@@ -248,16 +319,7 @@ class SectionMapTests(unittest.TestCase):
                 if kind != "joined":
                     continue
                 with self.subTest(page=page, heading=heading):
-                    self.assertNotEqual(test, THIS_TEST, "this test reads headings, not what a section says")
-                    path = ROOT / test
-                    self.assertTrue(
-                        test.startswith("tests/") and path.is_file(),
-                        f"{page} {heading!r} is joined to {test}, which is not a file under tests/",
-                    )
-                    self.assertTrue(
-                        opens_page(path.read_text(), path.suffix, page),
-                        f"{page} {heading!r} is joined to {test}, which never opens {page}",
-                    )
+                    self.assertIsNone(bad_join(page, heading, test, ROOT))
 
 
 if __name__ == "__main__":
