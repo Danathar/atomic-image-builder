@@ -106,3 +106,41 @@ jobs:
             echo "Rebuilt \`main\` from scratch and re-ran the gate against it."
             echo "A failure here means something outside this repository moved."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  shared-copies:
+    name: Copies of the shared safety files are current
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # The refusal corpus is canonical here and the guards' shell reader is
+      # canonical in Danathar/akmods. Each copy's own sha256 test catches a
+      # local edit but not a copy that has fallen behind its original, so this
+      # compares every copy with the original once a day.
+      - name: Compare every copy with its original
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          raw() { gh api "repos/$1/contents/$2" -H 'Accept: application/vnd.github.raw' | sha256sum | cut -d' ' -f1; }
+          corpus=tests/fixtures/gate-refusal-corpus.json
+          reader=.claude/hooks/shell-reader.mjs
+          want_corpus=$(sha256sum "$corpus" | cut -d' ' -f1)
+          want_reader=$(raw Danathar/akmods "$reader")
+          stale=0
+          check() {
+            got=$(raw "$1" "$2") || got=missing
+            if [ "$got" != "$3" ]; then
+              echo "::error::$1 $2 is $got; the original is $3"
+              stale=1
+            fi
+          }
+          for repo in akmods arch-bootc aurora-zfs-simple dns-failover exult goodreads-mcp openaudible-autoupdate sensi tududi zfs-aurora-complex zfs-kinoite-complex; do
+            check "Danathar/$repo" "$corpus" "$want_corpus"
+          done
+          for repo in dns-failover exult openaudible-autoupdate tududi; do
+            check "Danathar/$repo" "$reader" "$want_reader"
+          done
+          exit "$stale"
