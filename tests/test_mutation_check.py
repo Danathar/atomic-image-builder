@@ -398,7 +398,7 @@ class MainTests(unittest.TestCase):
         code, out, _, git, check, chdir = self.run_main(["--base", "origin/main"], changed="README.md\n")
         self.assertEqual(code, 0)
         self.assertIn("No module in the mutation table changed.", out)
-        self.assertEqual(git.call_args.args, ("diff", "--name-only", "origin/main", "--", *TARGETS))
+        self.assertEqual(git.call_args.args, ("diff", "--name-only", "--diff-filter=d", "origin/main", "--", *TARGETS))
         check.assert_not_called()
         chdir.assert_called_once_with(mutation_check.ROOT)
 
@@ -430,6 +430,23 @@ class MainTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
         self.assertEqual(err, "mutation check failed: python -m cosmic_ray.cli exec\nboom\n\n")
+
+    def test_a_target_the_change_deleted_is_not_checked(self) -> None:
+        with tempfile.TemporaryDirectory() as repo:
+            def run(*args: str) -> None:
+                subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", *args], check=True, capture_output=True)
+
+            run("init", "-q")
+            (Path(repo) / "coverage_badge.py").write_text("x = 1\n")
+            run("add", ".")
+            run("commit", "-qm", "base")
+            run("rm", "-q", "coverage_badge.py")
+            run("commit", "-qm", "delete the target")
+            with mock.patch.object(mutation_check, "ROOT", Path(repo)):
+                listed = mutation_check.git("diff", "--name-only", "--diff-filter=d", "HEAD~1", "--", "coverage_badge.py")
+                plain = mutation_check.git("diff", "--name-only", "HEAD~1", "--", "coverage_badge.py")
+            self.assertEqual(plain, "coverage_badge.py\n")
+            self.assertEqual(listed, "")
 
 
 class TargetTableTests(unittest.TestCase):

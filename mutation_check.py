@@ -279,7 +279,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     accepted = load_ledger(args.ledger)
-    changed = set(git("diff", "--name-only", args.base, "--", *TARGETS).splitlines())
+    # --diff-filter=d leaves out a module the change deleted or renamed away: it no longer exists to mutate.
+    changed = set(git("diff", "--name-only", "--diff-filter=d", args.base, "--", *TARGETS).splitlines())
     results = {}
     os.chdir(ROOT)
     try:
