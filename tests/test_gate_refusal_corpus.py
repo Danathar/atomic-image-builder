@@ -133,7 +133,9 @@ def shell_words(text: str) -> list[tuple[str, bool]]:
 
     Each word comes back with its quotes and backslashes removed, `$'...'`
     decoded and `$"..."` read as `"..."`, plus whether any of it was quoted.
-    An unterminated quote runs to the end of the text.
+    An unterminated quote runs to the end of the text. A backslash-newline
+    outside single quotes is dropped, as bash drops it before it reads a
+    word, so `gi\\<newline>t` is `git`.
     """
     words: list[tuple[str, bool]] = []
     word, quoted, started, i = "", False, False, 0
@@ -144,6 +146,9 @@ def shell_words(text: str) -> list[tuple[str, bool]]:
                 words.append((word, quoted))
             word, quoted, started = "", False, False
             i += 1
+            continue
+        if text.startswith("\\\n", i):
+            i += 2
             continue
         started = True
         if text.startswith("$'", i):
@@ -158,6 +163,9 @@ def shell_words(text: str) -> list[tuple[str, bool]]:
         elif char == '"':
             i += 1
             while i < len(text) and text[i] != '"':
+                if text.startswith("\\\n", i):
+                    i += 2
+                    continue
                 if text[i] == "\\" and text[i + 1 : i + 2] in ('"', "\\", "$", "`"):
                     i += 1
                 word += text[i : i + 1]
@@ -431,7 +439,8 @@ class HarnessContractTests(unittest.TestCase):
     def test_a_wrapped_row_names_what_it_requires_once_the_shell_drops_its_quotes(self) -> None:
         for command in ("script -qc 'g\"\"it diff /dev/null ./.env' /dev/null",
                         "script -qc 'gi\\t diff /dev/null ./.env' /dev/null",
-                        "script -qc \"$'git' diff /dev/null ./.env\" /dev/null"):
+                        "script -qc \"$'git' diff /dev/null ./.env\" /dev/null",
+                        "script -qc 'gi\\\nt diff /dev/null ./.env' /dev/null"):
             with self.subTest(command=command):
                 row = {**self.ROW, "wraps": "script", "command": command}
                 self.assertIn("git", inner_words(row))
@@ -451,7 +460,9 @@ class HarnessContractTests(unittest.TestCase):
                         "touch git; g?t diff /dev/null ./.env",
                         "shopt -s extglob\n/usr/bin/g@(i)t diff /dev/null ./.env",
                         "shopt -s extglob\n/usr/bin/@(git) diff /dev/null ./.env",
-                        "shopt -s extglob\n/usr/bin/g@(i)@(t) diff /dev/null ./.env"):
+                        "shopt -s extglob\n/usr/bin/g@(i)@(t) diff /dev/null ./.env",
+                        "gi\\\nt diff /dev/null ./.env",
+                        "\"gi\\\nt\" diff /dev/null ./.env"):
             with self.subTest(command=command):
                 row = {**self.ROW, "command": command}
                 self.assertTrue(probe(CorpusShapeTests,
@@ -463,6 +474,7 @@ class HarnessContractTests(unittest.TestCase):
         # group that builds another word builds no name.
         for command in ("'/usr/bin/g?t' diff /dev/null ./.env",
                         "'/usr/bin/g@(i)t' diff /dev/null ./.env",
+                        "'gi\\\nt' diff /dev/null ./.env",
                         "/usr/bin/g@(i)x diff /dev/null ./.env",
                         "'{git,}' diff /dev/null ./.env",
                         "g{i,x}t diff /dev/null ./.env",

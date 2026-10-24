@@ -2199,7 +2199,15 @@ def command_string_texts(word: str) -> Iterator[str]:
 
     Yielded one at a time: a long cluster has as many tails as letters, each
     nearly as long as the word, so building them all up front cost the square
-    of the word before spend() was reached."""
+    of the word before spend() was reached.
+
+    Each one is yielded again with its backslash-newline pairs joined
+    (join_continuations()) when that changes it: the shell the string is
+    handed to drops a `\\<newline>` outside single quotes before it reads a
+    word, so `bash -c 'gi\\<newline>t diff ...'` runs git while neither
+    `gi` nor `t` is a gated name. Single quotes around the string keep the
+    pair from the top-level join. The extra reading can only add a
+    refusal."""
     texts: list[str] = []
     if COMMAND_STRING_SEPARATORS.search(word):
         texts.append(word)
@@ -2211,6 +2219,9 @@ def command_string_texts(word: str) -> Iterator[str]:
         spend()
         if text:
             yield text
+            joined = join_continuations(text)
+            if joined != text:
+                yield joined
 
 
 def unquoted(text: str) -> str:

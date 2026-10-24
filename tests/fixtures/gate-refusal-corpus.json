@@ -593,6 +593,39 @@
       "why": "the shell bash -c starts turns extglob on for its next line and matches /usr/bin/g@(i)t to /usr/bin/git, which prints .env whole beside /dev/null"
     },
     {
+      "id": "name-continuation-command-string",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "wraps": "bash",
+      "command": "bash -c 'gi\\\nt diff --no-index /dev/null .env'",
+      "why": "single quotes keep the backslash-newline for the shell bash -c starts, which joins gi and t back into git before it reads a word, so git prints .env whole beside /dev/null"
+    },
+    {
+      "id": "name-continuation-script-string",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "wraps": "script",
+      "command": "script -qc 'gi\\\nt diff --no-index /dev/null .env' /dev/null",
+      "why": "the shell script -c starts joins the backslash-newline inside gi\\<newline>t and runs git, which prints .env whole beside /dev/null"
+    },
+    {
+      "id": "name-continuation-extglob-string",
+      "class": "name spelling",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "wraps": "bash",
+      "command": "bash -O extglob -c '/usr/bin/g@\\\n(i)t diff /dev/null ./.env'",
+      "why": "the shell bash -O extglob -c starts joins the backslash-newline into the extglob /usr/bin/g@(i)t and matches it to /usr/bin/git, which prints .env whole beside /dev/null"
+    },
+    {
       "id": "ansi-c-command-string",
       "class": "shell expansion",
       "verdict": "refuse",
