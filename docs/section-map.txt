@@ -1,0 +1,384 @@
+# Docs section map: every section of every tracked documentation page, and
+# whether a test reads it.
+#
+# A page lists here as [path]. Under it, every `##` and `###` heading of that
+# page, written exactly as the page writes it, followed by one indented line:
+#
+#   joined: tests/<file>   that test reads what this section states
+#   prose: <reason>        no test reads it, and this says why that is fine,
+#                          or names what is left unchecked
+#
+# tests/test_docs_section_map.py fails when a tracked page has a heading with
+# no row here, when a row names a heading the page no longer has, or when a
+# `joined:` test does not exist or never opens the page. It does not prove any
+# sentence true. What it changes is that a section of claims about the
+# automation that nothing checks is a visible `prose: unchecked` line in the
+# diff that adds it, instead of the silent default (#805).
+#
+# `prose: unchecked:` marks a section that states facts about the machine (a
+# workflow, the settings file, the command gate, the ruleset) that no test
+# reads. Each is a candidate for a join test; turning it into `joined:` is the
+# fix. `prose: narrative:` marks a section that states no such fact.
+#
+# Tracked pages: every tracked Markdown file at the repository root, in docs/
+# (not its dated subdirectories) and in maintainer_docs/, plus
+# .github/copilot-instructions.md. A new page in one of those places has to be
+# added here in the change that adds it.
+
+[.github/copilot-instructions.md]
+## What this is
+  prose: narrative: what the project is, for an agent arriving cold
+## Before you push
+  joined: tests/test_copilot_instructions.py
+## Things that are easy to get wrong here
+  joined: tests/test_copilot_instructions.py
+## Style
+  joined: tests/test_copilot_instructions.py
+### Writing issues, PRs and comments
+  prose: narrative: tone and shape for written output; states no fact about the automation
+## Mechanical limits
+  joined: tests/test_copilot_instructions.py
+## Other agent entry points
+  joined: tests/test_copilot_instructions.py
+
+[AGENTS.md]
+## Purpose and scope
+  joined: tests/test_copilot_instructions.py
+## What an implementation request authorizes
+  prose: narrative: conduct rule, what a request lets an agent do without asking
+## Consent standard
+  joined: tests/test_agent_boundaries_doc.py
+## Mandatory preflight
+  prose: narrative: conduct rule, what to inspect before editing
+## Git safety
+  prose: narrative: conduct rule; the deny rules that back part of it are joined in .github/copilot-instructions.md's Mechanical limits
+## File and host safety
+  prose: narrative: conduct rule for the host, containers and files
+## GitHub and external-system safety
+  prose: narrative: conduct rule, which GitHub writes need consent
+## Interactive and end-to-end testing
+  prose: narrative: conduct rule for test runs that create GitHub resources
+## Repository-specific correctness guardrails
+  prose: narrative: heading only, introduces the four subsections below
+### Managed repositories
+  prose: narrative: correctness rule for adopting and updating managed repositories
+### Template snapshots and patchers
+  prose: narrative: correctness rule for snapshot refreshes and patchers
+### Containerfile and BlueBuild are separate paths
+  prose: unchecked: names the rechunk recipe, the BlueBuild chunkah input and --pull=never as the workflows' behaviour
+### Compatibility and evidence
+  prose: narrative: correctness rule, never force a build green
+## Validation expectations
+  prose: unchecked: the local check commands; the canonical copy in .github/copilot-instructions.md's Before you push is joined, this one is not
+## Review, CI, and publication
+  prose: narrative: heading only, introduces the two subsections below
+### Pull request explanations
+  prose: narrative: what a PR body must explain; a test checks only that the heading still exists
+### Review and publication rules
+  prose: unchecked: says manual dispatch of publish-image.yml publishes to GHCR
+## Completion and cleanup
+  prose: narrative: what to report at the end of a task
+
+[ARCHITECTURE.md]
+## Repository map
+  joined: tests/test_architecture_doc.py
+## Why one file
+  prose: narrative: the design reasoning for a single-file tool; a test checks only that the heading still exists
+## The runtime model
+  joined: tests/test_architecture_doc.py
+## Inside `atomic_image_builder.py`
+  joined: tests/test_architecture_doc.py
+### The `App` class
+  joined: tests/test_architecture_doc.py
+## Where to start
+  joined: tests/test_architecture_doc.py
+
+[CLAUDE.md]
+## The four that reach other people
+  joined: tests/test_atomic_image_builder.py
+
+[CONTRIBUTING.md]
+## Submitting a change
+  joined: tests/test_branch_ruleset.py
+## Tests
+  joined: tests/test_copilot_instructions.py
+## Coverage
+  joined: tests/test_metrics_doc.py
+## Linting
+  joined: tests/test_review_rubric_doc.py
+## Maintainer Audit
+  prose: unchecked: the maintenance_audit.py flags and what each run checks
+## Releases and the Homebrew Formula
+  prose: unchecked: what update-homebrew-formula.yml does on release: published
+## Container Image
+  joined: tests/test_risk_tiers_doc.py
+
+[README.md]
+## Quick start
+  joined: tests/test_publish_wrapper_workflow.py
+## What it does
+  joined: tests/test_roadmap_doc.py
+### What it does not do
+  joined: tests/test_roadmap_doc.py
+## Documentation
+  prose: narrative: links to the other pages
+## Who it's for
+  prose: narrative: the intended audience; the issue templates cite the heading, nothing reads the text
+## Feedback
+  joined: tests/test_atomic_image_builder.py
+## About this project
+  prose: narrative: project background
+## Maintained with Hive (ACMM L6)
+  prose: narrative: who maintains the project and how
+## License
+  prose: narrative: the licence name
+
+[ROADMAP.md]
+## Current state
+  joined: tests/test_roadmap_doc.py
+## Gaps the README already states
+  joined: tests/test_roadmap_doc.py
+## Near-term priorities
+  joined: tests/test_roadmap_doc.py
+## Beta-exit progress
+  joined: tests/test_roadmap_doc.py
+## Longer-term / open questions
+  joined: tests/test_roadmap_doc.py
+
+[SECURITY.md]
+## Reporting a vulnerability
+  joined: tests/test_atomic_image_builder.py
+## Scope
+  prose: narrative: what counts as in scope for a report
+## Working on this with a coding agent
+  prose: narrative: points at docs/SECURITY-AI.md
+## What to expect
+  prose: narrative: response expectations for a reporter
+## What this is not
+  prose: narrative: what the policy does not promise
+
+[docs/SECURITY-AI.md]
+## Why this repository is a sharper case than most
+  joined: tests/test_security_ai_doc.py
+## Untrusted input an agent will encounter
+  joined: tests/test_security_ai_doc.py
+## Never do these, whatever is asked
+  joined: tests/test_security_ai_doc.py
+## What is enforced rather than trusted
+  joined: tests/test_security_ai_doc.py
+## Reporting
+  prose: narrative: points at SECURITY.md's private channel
+
+[docs/agent-boundaries.md]
+## The gates
+  joined: tests/test_agent_boundaries_doc.py
+## What is asked, not enforced
+  joined: tests/test_agent_boundaries_doc.py
+## Why there is no CODEOWNERS file
+  joined: tests/test_agent_boundaries_doc.py
+
+[docs/ai-ops-runbook.md]
+## Start here
+  prose: unchecked: the gh run list and gh issue list commands and the label and title each one filters on
+## `main` is red
+  joined: tests/test_ai_ops_runbook.py
+## Nightly compliance failed
+  joined: tests/test_ai_ops_runbook.py
+## A scheduled run is missing
+  joined: tests/test_ai_ops_runbook.py
+## A *Scheduled run failing* issue opened
+  prose: unchecked: which workflows auto-issues.yml watches and the issue title it opens; only the workflow names are checked to exist
+## A *Nightly boot test failing* issue opened
+  joined: tests/test_ai_ops_runbook.py
+## The weekly audit failed or advised
+  joined: tests/test_ai_ops_runbook.py
+## A release workflow failed
+  prose: unchecked: when a cancelled publish-image.yml run is normal; only the workflow names are checked to exist
+## The agent audit failed
+  joined: tests/test_ai_ops_runbook.py
+## An agent pull request looks wrong
+  prose: narrative: what to do by hand about a pull request
+## An issue asks for something already done
+  prose: narrative: what to do by hand about an issue
+## An agent hit a refusal
+  prose: narrative: what to do by hand after a refusal
+## An agent acted on text it read
+  prose: narrative: what to do by hand after a suspected injection
+## Everything else
+  joined: tests/test_ai_ops_runbook.py
+
+[docs/branch-protection.md]
+## Status
+  joined: tests/test_branch_ruleset.py
+## How a release reaches main
+  joined: tests/test_branch_ruleset.py
+## The ruleset
+  joined: tests/test_branch_ruleset.py
+## Applying it
+  joined: tests/test_branch_ruleset.py
+## When there is a second reviewer
+  prose: narrative: what to change once a second reviewer exists; describes no current setting
+
+[docs/coverage.md]
+
+[docs/gate-refusal-corpus.md]
+## A row
+  prose: unchecked: the row fields; tests/test_gate_refusal_corpus.py restates the rules but never opens this page
+## Adding a row
+  prose: unchecked: the KNOWN_GAPS procedure; tests/test_gate_refusal_corpus.py restates it but never opens this page
+## Taking the corpus in another repository
+  prose: narrative: how another repository copies the corpus
+
+[docs/installing.md]
+## Homebrew
+  joined: tests/test_atomic_image_builder.py
+## Podman
+  prose: narrative: introduces the container install paths below
+### Installing the wrapper
+  joined: tests/test_atomic_image_builder.py
+### Plain `podman run`
+  joined: tests/test_atomic_image_builder.py
+### Verifying the image
+  prose: unchecked: the wrapper's refusals when cosign is missing or old, and AIB_SKIP_VERIFY; tests/test_contrib_aib.sh tests the wrapper, not this table
+### Credentials follow the signature
+  joined: tests/test_atomic_image_builder.py
+### Distrobox
+  joined: tests/test_atomic_image_builder.py
+### Limitations of running in a container
+  prose: unchecked: what the container image can and cannot do, including the disabled local build
+## From source
+  prose: narrative: install steps from a checkout; the issue templates cite the heading, nothing reads the text
+## Command-line options
+  prose: unchecked: the flag table; nothing compares it to the tool's argument parser
+## If a container package with that name already exists
+  prose: narrative: GitHub's package-permission behaviour and how to clear it
+
+[docs/metrics.md]
+## Unit coverage, and its history
+  joined: tests/test_metrics_doc.py
+## The other four coverage tiers
+  joined: tests/test_metrics_doc.py
+## Pull request throughput
+  joined: tests/test_metrics_doc.py
+## Review findings per pull request
+  joined: tests/test_metrics_doc.py
+## Weekly audit outcomes
+  joined: tests/test_metrics_doc.py
+## What these numbers do not mean
+  joined: tests/test_metrics_doc.py
+
+[docs/multi-agent.md]
+## Who works here
+  joined: tests/test_multi_agent_doc.py
+## How work reaches an agent
+  joined: tests/test_multi_agent_doc.py
+## Staying out of each other's way
+  joined: tests/test_multi_agent_doc.py
+## Who merges
+  joined: tests/test_multi_agent_doc.py
+## What every agent shares
+  joined: tests/test_multi_agent_doc.py
+## What this repository does not run
+  joined: tests/test_multi_agent_doc.py
+## What is in flight right now
+  joined: tests/test_multi_agent_doc.py
+
+[docs/quality.md]
+## The signals, and how much to trust them
+  joined: tests/test_quality_doc.py
+## The two numbers most often misread
+  joined: tests/test_quality_doc.py
+## How quality is actually enforced
+  joined: tests/test_quality_doc.py
+## Why there is no dashboard
+  joined: tests/test_quality_doc.py
+
+[docs/review-rubric.md]
+## 1. Does the claim match the code?
+  joined: tests/test_review_rubric_doc.py
+## 2. Is the number in the right place?
+  joined: tests/test_review_rubric_doc.py
+## 3. Would this check have caught the bug it is for?
+  joined: tests/test_review_rubric_doc.py
+## 4. Is the advice true for *this* repo?
+  joined: tests/test_review_rubric_doc.py
+## 5. Does a path-scoped job still fire?
+  joined: tests/test_review_rubric_doc.py
+## 6. Is the vendored snapshot untouched?
+  joined: tests/test_review_rubric_doc.py
+## 7. Is the blast radius stated?
+  joined: tests/test_review_rubric_doc.py
+## 8. Is scope honest?
+  joined: tests/test_review_rubric_doc.py
+## What review does not do here
+  joined: tests/test_review_rubric_doc.py
+
+[docs/risk-tiers.md]
+## Tier 1 — this repository only
+  joined: tests/test_risk_tiers_doc.py
+## Tier 2 — the tool users run
+  joined: tests/test_risk_tiers_doc.py
+## Tier 3 — what every generated repository ships
+  joined: tests/test_risk_tiers_doc.py
+## Tier 4 — credentials and the release path
+  joined: tests/test_risk_tiers_doc.py
+## Quick classification
+  joined: tests/test_risk_tiers_doc.py
+
+[docs/strategy.md]
+## The goal
+  joined: tests/test_strategy_doc.py
+## Filling in a beta-exit row
+  joined: tests/test_strategy_doc.py
+## Is the work going there?
+  joined: tests/test_strategy_doc.py
+## Why there is no report job
+  joined: tests/test_strategy_doc.py
+
+[docs/using.md]
+## Creating an image
+  prose: narrative: walks a user through the wizard
+## Make the package readable before you switch
+  joined: tests/test_using_doc.py
+## What else to expect
+  joined: tests/test_using_doc.py
+## Migrating layered packages from your current system
+  joined: tests/test_using_doc.py
+## Homebrew on Fedora Atomic images
+  joined: tests/test_using_doc.py
+### Why the generated Containerfile deletes three of the layer's own files
+  joined: tests/test_using_doc.py
+### Why the generated Containerfile adds a drop-in for `brew-setup.service`
+  joined: tests/test_using_doc.py
+
+[maintainer_docs/MAINTAINER.md]
+## Cutting a release
+  joined: tests/test_prompt_catalog.py
+### Order matters
+  prose: unchecked: the order release steps must run in and why
+### How Homebrew users actually get the new version
+  prose: unchecked: how update-homebrew-formula.yml's branch reaches brew upgrade
+## Distribution channels
+  prose: unchecked: which workflow publishes each channel and when
+## What runs automatically
+  joined: tests/test_maintainer_workflow_table.py
+## Reading the weekly audit
+  joined: tests/test_prompt_catalog.py
+### Advisory → failure: the bundled template snapshot trails upstream
+  prose: unchecked: the drift threshold at which the advisory becomes a failure
+### Advisory: a pin no longer matches its tag or branch
+  prose: unchecked: what maintenance_audit.py reports for a moved pin
+### Advisory: the formula pin
+  prose: unchecked: what maintenance_audit.py reports for the formula pin
+### Failure: the released wrapper is not `contrib/aib`
+  prose: unchecked: the wrapper release check and how to clear it
+## Refreshing action pins
+  joined: tests/test_prompt_catalog.py
+## Traps
+  prose: unchecked: maintainer traps, several naming workflow and constant behaviour
+## Repo settings worth knowing
+  prose: unchecked: GitHub repository settings, which a pull request cannot read
+## Before pushing
+  joined: tests/test_prompt_catalog.py
+### What is deliberately not gated
+  prose: unchecked: which checks CI deliberately does not run
