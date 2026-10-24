@@ -67,6 +67,11 @@ Run the test suite with `unittest`:
 python3 -m unittest discover -s tests
 ```
 
+A change that adds or renames a `##` or `###` heading in a documentation page
+also classifies it in [docs/section-map.txt](docs/section-map.txt): `joined:`
+with the test that reads the section, or `prose:` with a reason no test does.
+`tests/test_docs_section_map.py` fails until it is.
+
 ## Coverage
 
 [docs/quality.md](docs/quality.md) is the index of every quality signal in this project and what each one is worth; start there if you want the overview rather than the mechanics.
