@@ -161,3 +161,9 @@ fetching it:
   [`tests/test_gate_refusal_corpus.py`](../tests/test_gate_refusal_corpus.py)
   is the reference. A gate that lets a row through lists
   it as a known gap, as akmods does, rather than skipping it.
+
+The `shared-copies` job in
+[`nightly-compliance.yml`](../.github/workflows/nightly-compliance.yml)
+compares every repository's copy with the original each night and fails when
+one has fallen behind, so a new repository that takes the corpus also needs a
+one-line addition to its list of repositories.
