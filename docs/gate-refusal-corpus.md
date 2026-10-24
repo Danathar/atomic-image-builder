@@ -132,6 +132,15 @@ words that are not a name: a whole command string in `$'...'` handed to
 ends later than a word splitter that does not know `$'...'` does
 (`ansi-c-escaped-quote`).
 
+Three further `name spelling` rows split the name with a backslash-newline
+inside a command string: `bash -c 'gi\<newline>t diff ...'`, the same
+through `script -qc`, and an extglob name split at its `(`
+(`bash -O extglob -c '/usr/bin/g@\<newline>(i)t diff ...'`). Single quotes
+keep the pair from the outer shell, and the shell the string is handed to
+removes it before it reads a word, so the string runs git. A gate that joins
+continuations only in the top-level command reads `gi` and `t` and finds no
+git. This gate also reads each command string with its pairs joined.
+
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
 table. The one disagreement found, `git diff --ext-diff`, is refused here and
