@@ -14,7 +14,7 @@ nothing fails when a repository misses one
 
 [`tests/fixtures/gate-refusal-corpus.json`](../tests/fixtures/gate-refusal-corpus.json)
 is the one table they share. Each row is a command and the verdict every gate
-has to reach. A repository runs the rows its own allow list makes reachable,
+has to reach. A repository runs the rows its own allow and ask rules make reachable,
 so a bypass found anywhere becomes one row, and every repository that allows
 the command fails its tests until its gate refuses it.
 
@@ -38,11 +38,14 @@ This repository holds the canonical copy. Change the table here first.
 - `verdict`: `refuse` or `allow`. Ordinary commands are rows too: a gate that
   refuses everything passes every `refuse` row and gets switched off.
 - `requires`: the command prefixes the row depends on. A repository runs the
-  row only when each prefix is covered by a wildcard `Bash(...)` allow rule in
-  its `.claude/settings.json`. `Bash(git diff:*)`, `Bash(git diff *)` and
-  `Bash(git diff*)` all cover `git diff`; a rule with no wildcard covers no
-  prefix. A row that needs `gh pr view` does not run where `gh pr view` is not
-  allowed, because Claude Code asks before that command anyway.
+  row only when each prefix is covered by a wildcard `Bash(...)` allow or ask
+  rule in its `.claude/settings.json`. `Bash(git diff:*)`, `Bash(git diff *)`
+  and `Bash(git diff*)` all cover `git diff`; a rule with no wildcard covers no
+  prefix. A row that needs `gh pr view` does not run where no rule names
+  `gh pr view`, because Claude Code asks before that command anyway. An ask
+  rule counts because the deny rules in front of it (`Bash(git push --force:*)`)
+  match exact prefixes: a spelling they miss reaches a prompt instead of a
+  refusal, and only the gate can still refuse it.
 - `wraps` (optional): the program the command starts with, when that program
   is a wrapper no allow rule covers, such as `flock` in
   `flock /tmp/l git diff --no-index /dev/null .env`. The row still runs
@@ -76,7 +79,7 @@ standard output, is a refusal. Exit status 0 with no decision is an allow.
 A known gap is a refuse row the gate lets through today. The test asserts
 that it still gets through, so the change that closes it fails until its id
 is removed, and a row that is not listed cannot regress silently. This
-repository lists none. The `wrapper-*` rows with a `wraps` field were added
+repository lists the seven `push` refuse rows (see below). The `wrapper-*` rows with a `wraps` field were added
 from the matrix in
 [#772](https://github.com/Danathar/atomic-image-builder/issues/772), which
 ran each one against every gate in the fleet on 2026-10-20; this gate now
@@ -140,6 +143,20 @@ keep the pair from the outer shell, and the shell the string is handed to
 removes it before it reads a word, so the string runs git. A gate that joins
 continuations only in the top-level command reads `gi` and `t` and finds no
 git. This gate also reads each command string with its pairs joined.
+
+The `push` rows
+([#803](https://github.com/Danathar/atomic-image-builder/issues/803),
+approved on
+[Danathar/tududi#399](https://github.com/Danathar/tududi/issues/399))
+cover `git push` spellings that rewrite or delete a remote branch without
+the words a deny rule names. git takes any unambiguous prefix of a long
+option, so `--force-w`, `--mirr` and `--rep=URL` do what `--force-with-lease`,
+`--mirror` and `--repo=URL` do, and `--delete`, `-d`, an `origin :branch`
+refspec and `--prune` each delete remote branches. Every repository has
+`ask: Bash(git push:*)`, which is why an ask rule makes a row reachable. Three
+`allow-push-*` rows keep a gate from refusing ordinary pushes. This
+repository's gate does not read `git push`, so its seven refuse rows are
+known gaps here.
 
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
