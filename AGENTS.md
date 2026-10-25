@@ -129,6 +129,43 @@ ownership, replacing `.git`, or using a more destructive command.
 - Treat existing containers, images, profiles, volumes, caches, and credentials
   as persistent user assets, even when they appear unused.
 
+## Findings about the Bash guard hook: what is in scope
+
+The command gate in `.claude/hooks/gate_git_diff.py` checks Bash commands for
+the reaches its header lists, among them `git` arguments that read or write a
+file the index does not hold, a writing redirection on a command
+`.claude/settings.json` allows outright, an assignment to one of the
+environment variables it names, and a `shellcheck` operand outside the
+checkout. It catches **mistakes by an agent
+that is following these rules**. It is not a sandbox against an agent that is
+trying to get around it. A shell can spell a command in endless ways, and a
+reader in a hook cannot keep up with all of them. Do not file, and do not fix
+unprompted, findings of this kind:
+
+- **Disguised spellings.** A blocked command gets through only when its name
+  or arguments are written in a form nobody types in ordinary work: quote
+  marks inside a word (`g"i"t`), brace, wildcard or extended-glob names
+  (`{git,}`, `g?t`, `g@(i)t`), backslash-newline splits, `$'...'` escapes,
+  variables or command substitution that build the name, or the same tricks
+  inside a command string handed to another shell or wrapper program.
+
+These are still in scope. File them as usual:
+
+- **The hook fails open.** It crashes, times out, or is missing a tool, and
+  the command runs unchecked.
+- **An ordinary spelling gets through.** The command is written the way an
+  agent would type it doing normal work: the plain name, its full path
+  (`/usr/bin/git`), a documented short option or alias (`git diff -O<file>`),
+  or the plain command behind a wrapper program (`timeout`, `xargs`, `flock`,
+  `watch`). Wrapped commands stay in scope under the ruling on
+  Danathar/atomic-image-builder#772.
+- **A regression.** A case the hook's tests already cover stops being
+  refused.
+- **The hook blocks normal work it should allow.**
+
+This is a standing ruling, not a gap to report: an agent that has to disguise
+a command to run it is already breaking the rules in this file.
+
 ## GitHub and external-system safety
 
 Read-only inspection of the current repository's GitHub state is allowed when
