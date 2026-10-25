@@ -6,9 +6,9 @@ or writing a file. The copies are separate code, so a bypass fixed in one
 repository says nothing about the other five (#609).
 `tests/fixtures/gate-refusal-corpus.json` is the one table they share: each
 row is a command, the verdict every gate has to reach, and the command
-prefixes the row depends on. A repository runs the rows its own allow list
-makes reachable, so a newly found bypass is one new row, and every repository
-that allows the command fails until its gate refuses it.
+prefixes the row depends on. A repository runs the rows its own allow and
+ask rules make reachable, so a newly found bypass is one new row, and every
+repository that allows the command fails until its gate refuses it.
 
 A row with a `wraps` field puts a wrapper no allow rule covers (`flock`,
 `watch`, `find -exec`) in front of the command it requires. It runs wherever
@@ -54,18 +54,37 @@ OPTIONAL_FIELDS = {"wraps"}
 # are refused by opaque_wrapper_command() in .claude/hooks/gate_git_diff.py.
 # The `name spelling` rows (#790) are refused by spelled_name_refusal(). A
 # row stays here until the change that closes it removes it.
-KNOWN_GAPS: frozenset[str] = frozenset()
+#
+# The `push` rows (#803) run here because `git push:*` is an ask rule. This
+# gate does not read `git push` at all: the force and delete spellings are
+# held by the deny and ask rules in .claude/settings.json, and an
+# abbreviated option (`--force-w`, `--mirr`) or a delete written another way
+# slips past the exact-prefix deny rows to a prompt. Listed until a gate
+# here refuses them.
+KNOWN_GAPS: frozenset[str] = frozenset({
+    "push-force-abbrev",
+    "push-mirror-abbrev",
+    "push-repo-abbrev",
+    "push-delete-option",
+    "push-delete-short",
+    "push-delete-refspec",
+    "push-prune",
+})
 
 
 def allow_prefixes(settings: dict) -> list[str]:
-    """The command prefix each wildcard `Bash(...)` allow rule covers.
+    """The command prefix each wildcard `Bash(...)` allow or ask rule covers.
 
     The fleet spells a prefix rule three ways (`git diff:*`, `git diff *`,
     `git diff*`); all three cover `git diff` and what follows it. A rule with
-    no wildcard allows one exact command and covers no prefix.
+    no wildcard allows one exact command and covers no prefix. An ask rule
+    counts as well: the deny rules in front of it match exact prefixes, so a
+    spelling they miss reaches a prompt instead of a refusal, and only the
+    gate can still refuse it (#803).
     """
+    permissions = settings.get("permissions", {})
     prefixes = []
-    for rule in settings.get("permissions", {}).get("allow", []):
+    for rule in permissions.get("allow", []) + permissions.get("ask", []):
         if not (rule.startswith("Bash(") and rule.endswith(")")):
             continue
         body = rule[len("Bash(") : -1]
@@ -338,6 +357,12 @@ class PrefixMatchTests(unittest.TestCase):
             with self.subTest(rule=rule):
                 prefixes = allow_prefixes({"permissions": {"allow": [rule]}})
                 self.assertTrue(covered("git diff", prefixes))
+
+    def test_an_ask_rule_covers_its_prefix(self) -> None:
+        prefixes = allow_prefixes({"permissions": {"ask": ["Bash(git push:*)"]}})
+        self.assertTrue(covered("git push", prefixes))
+        prefixes = allow_prefixes({"permissions": {"deny": ["Bash(git push:*)"]}})
+        self.assertFalse(covered("git push", prefixes))
 
     def test_an_exact_rule_covers_no_prefix(self) -> None:
         prefixes = allow_prefixes({"permissions": {"allow": ["Bash(ruff check)"]}})
