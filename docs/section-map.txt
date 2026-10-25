@@ -54,6 +54,8 @@
   prose: narrative: conduct rule; the deny rules that back part of it are joined in .github/copilot-instructions.md's Mechanical limits
 ## File and host safety
   prose: narrative: conduct rule for the host, containers and files
+## Findings about the Bash guard hook: what is in scope
+  prose: unchecked: names what the command gate in .claude/hooks/gate_git_diff.py checks; the rest is a ruling on which findings to file
 ## GitHub and external-system safety
   prose: narrative: conduct rule, which GitHub writes need consent
 ## Interactive and end-to-end testing
