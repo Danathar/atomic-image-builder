@@ -681,14 +681,15 @@ SEARCHERS_TAKING_PREFIXES = frozenset({"ag"})
 def searcher_starts_a_program(program: str, words: list[str]) -> bool:
     """Does this searcher invocation carry an option that names a program?
 
-    Read up to `--`, after which every word is a pattern or a path.
+    Read up to `--`, after which every word is a pattern or a path. The
+    program's own name is read with the rest; it never starts with `--`.
     """
-    for word in words[1:]:
+    for word in words:
         if word == "--":
             return False
         if not word.startswith("--"):
             continue
-        name = word[2:].split("=", 1)[0]
+        name = word.removeprefix("--").partition("=")[0]
         for option in SEARCHER_PROGRAM_OPTIONS[program]:
             if name == option or (program in SEARCHERS_TAKING_PREFIXES and name and option.startswith(name)):
                 return True

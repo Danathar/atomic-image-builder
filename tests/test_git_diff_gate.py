@@ -507,6 +507,10 @@ ALLOWED_COMMANDS = (
     "rg -n 'shellcheck ./.env' docs/",
     "ag 'git diff --no-index' docs",
     "rg -- --pre 'git diff --no-index' docs",
+    "rg --hidden -n 'git diff --no-index' docs",
+    "ag --hidden 'git diff --no-index' docs",
+    # ripgrep takes no abbreviated flag: `--p` is rejected and nothing runs.
+    "rg --p 'git diff --no-index' docs",
     "grep -rn 'git diff --no-index' docs/",
     "echo git diff --no-index /dev/null .env",
     "grep -rn \"git diff doesn't\" docs",
