@@ -77,7 +77,9 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   the `git` arguments that reach a file the index does not hold: `--no-index`,
   `--output`, `--ext-diff`, `-O`, an operand that is absolute, climbs out of
   the checkout or starts with a `~` bash would expand to a home directory,
-  and the `-c` and `GIT_EXTERNAL_DIFF` forms that change what `git` runs. It
+  the `-c` and `GIT_EXTERNAL_DIFF` forms that change what `git` runs, and
+  `git difftool -x`/`--extcmd`, which runs a command of the caller's choosing
+  under the `git diff:*` allow row. It
   also refuses an output redirection on the git command -- `git diff HEAD
   >cosign.pub`, which is `--output` in the shell's spelling and truncates the
   file before git runs, and `>cosign.pub git diff HEAD`, which bash reads as
