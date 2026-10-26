@@ -4773,6 +4773,14 @@ class App:
         if parsed is None or not command_exists("gh"):
             return None
         owner, repo = parsed
+        # Only the signed-in account's repos can be updated: select_repo lists
+        # `gh repo list <github_user>` and takes a typed name under that
+        # account too. Another person's tool-built image is, to this user, a
+        # stranger's custom image, and "Use 'Update Existing Image'" would be
+        # advice they cannot follow. GHCR lowercases the owner, so compare
+        # without case.
+        if not self.github_user or owner.lower() != self.github_user.lower():
+            return None
         try:
             return parsed if self.repo_has_state_file(owner, repo) else None
         except (CommandError, OSError):
