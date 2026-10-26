@@ -946,11 +946,11 @@ def difftool_runs_command(token: str) -> bool:
     -x; refusing more than that could only over-refuse.
     """
     if token.startswith("--"):
-        name = token[2:].split("=", 1)[0]
+        name = token.removeprefix("--").partition("=")[0]
         return bool(name) and DIFFTOOL_COMMAND_LONG.startswith(name)
     if not token.startswith("-"):
         return False
-    for letter in token[1:]:
+    for letter in token.removeprefix("-"):
         if letter == DIFFTOOL_COMMAND_SHORT:
             return True
         if letter in DIFFTOOL_VALUED_SHORT or letter in VALUED_SHORT:
