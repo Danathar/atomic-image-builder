@@ -535,6 +535,7 @@ ALLOWED_COMMANDS = (
     "gh pr create -t 'refuse git diff -O<file>' -b 'mentions git log >cosign.pub'",
     "gh pr create --title=x --body='see git diff --no-index a b'",
     "gh pr create -t'fix: refuse git diff -O<file>' -bx",
+    "gh pr comment 807 -b 'Repro: shellcheck /etc/profile'",
     "gh release create v1 --notes 'git diff --no-index is refused now'",
     "grep -rn 'git diff --no-index' docs/",
     "echo git diff --no-index /dev/null .env",
