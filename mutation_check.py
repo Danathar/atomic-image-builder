@@ -245,8 +245,24 @@ def report(results: dict[str, tuple[dict[str, int], list[dict]]], accepted) -> t
     ]
     for s in new:
         line = s["line"].replace("|", "\\|")
-        out.append(f"| `{s['module']}:{s['line_number']}` | `{s['operator']}` | `{line}` |")
+        out.append(f"| `{s['module']}:{s['line_number']}` | `{s['operator']}` | {code_span(line)} |")
     return "\n".join(out) + "\n", len(new)
+
+
+def code_span(text: str) -> str:
+    """`text` as one Markdown code span, whatever backticks it holds.
+
+    A survivor's line is source, and this repository's sources quote names in
+    backticks all through their messages; inside a single-backtick span the
+    first one ends it and the cell renders as broken code. CommonMark closes
+    a span only on a backtick run as long as the one that opened it, so the
+    fence is one longer than the longest run inside, and a line that starts
+    or ends with a backtick is padded with a space, which the renderer strips.
+    """
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    padded = f" {text} " if text.startswith("`") or text.endswith("`") else text
+    return f"{fence}{padded}{fence}"
 
 
 def git(*args: str) -> str:
