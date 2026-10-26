@@ -16,21 +16,21 @@ class WorkflowDependencyTests(unittest.TestCase):
     def test_python_ci_tool_installs_are_exactly_pinned(self) -> None:
         expected_commands = {
             ".github/workflows/ai-fix.yml": [
-                "pip install coverage==7.17.0 ruff==0.17.2",
+                "pip install coverage==7.16.0 ruff==0.17.2",
             ],
             ".github/workflows/ci.yml": [
-                "pip install coverage==7.17.0 ruff==0.17.2",
+                "pip install coverage==7.16.0 ruff==0.17.2",
                 "pip install cosmic-ray==8.7.0",
-                "pip install coverage==7.17.0",
+                "pip install coverage==7.16.0",
             ],
             ".github/workflows/maintenance-audit.yml": [
-                "pip install coverage==7.17.0",
+                "pip install coverage==7.16.0",
             ],
             ".github/workflows/nightly-compliance.yml": [
-                "pip install coverage==7.17.0",
+                "pip install coverage==7.16.0",
             ],
             ".github/workflows/update-homebrew-formula.yml": [
-                "pip install coverage==7.17.0",
+                "pip install coverage==7.16.0",
             ],
         }
 

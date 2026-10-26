@@ -42,7 +42,7 @@ sections below, and matches the exact versions `ci.yml` installs so a local
 run agrees with CI instead of disagreeing in either direction:
 
 ```bash
-pip install coverage==7.17.0 ruff==0.17.2
+pip install coverage==7.16.0 ruff==0.17.2
 ```
 
 One test also needs [`just`](https://github.com/casey/just) — CI pins v1.59.0

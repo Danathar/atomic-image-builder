@@ -44,7 +44,7 @@ jobs:
       # tarball nests the binary in a versioned directory, hence the strip.
       - name: Install test tooling
         run: |
-          pip install coverage==7.17.0 ruff==0.17.2
+          pip install coverage==7.16.0 ruff==0.17.2
           GEM_HOME="$RUNNER_TEMP/gems" gem install bashcov -v 4.0.0 --no-document --bindir "$RUNNER_TEMP/bin"
           echo "GEM_HOME=$RUNNER_TEMP/gems" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/bin"
@@ -366,7 +366,7 @@ jobs:
 
       - name: Install coverage tooling
         if: steps.changed.outputs.any_changed == 'true'
-        run: pip install coverage==7.17.0
+        run: pip install coverage==7.16.0
 
       # The unit suite measures the source tree, which says nothing about what
       # a real run of the built image executes. This runs the same entrypoint

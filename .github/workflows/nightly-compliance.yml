@@ -50,7 +50,7 @@ jobs:
       - name: Install test tooling
         run: |
           set -euo pipefail
-          pip install coverage==7.17.0
+          pip install coverage==7.16.0
           mkdir -p "$RUNNER_TEMP/bin"
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/bin/hadolint" \
             https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-linux-x86_64
