@@ -10,6 +10,7 @@ import pty
 import re
 import select
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -208,8 +209,13 @@ def drive_real_gum(args, *, stdin: str | None, keys: list[bytes], timeout: float
     differs from the real call: the argv is untouched, which is the point --
     a stub that returns the names it was handed cannot tell whether gum
     would have pre-selected them (#351).
+
+    The terminal gets a real size. openpty() leaves it at 0x0, which gum
+    0.17 tolerates but gum 2 does not: it redraws without end, the screen
+    never goes quiet, and no key is ever typed.
     """
     master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
 
     def controlling_tty() -> None:
         os.setsid()
