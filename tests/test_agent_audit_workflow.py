@@ -106,19 +106,20 @@ ONE_PARENT = [MAIN]
 FROM_MAIN = [PREV, MAIN]
 
 
-def merged(number: int, *, bot: bool, signed_body: bool, title: str = "fix: a thing") -> dict:
+def merged(number: int, *, bot: bool, signed_body: bool, title: str = "fix: a thing", login: str | None = None) -> dict:
     body = "## What changed\n\nThe thing.\n"
     if signed_body:
         body += f"\n{SIGNATURE}\n"
-    return {
+    entry = {
         "number": number,
         "title": title,
         "url": f"https://github.com/{REPO}/pull/{number}",
         "mergedAt": "2026-09-30T12:00:00Z",
         "mergedBy": {"login": "Danathar"},
-        "author": {"login": "app/danathar-atomic-hive" if bot else "Danathar", "is_bot": bot},
+        "author": {"login": login or ("app/danathar-atomic-hive" if bot else "Danathar"), "is_bot": bot},
         "body": body,
     }
+    return entry
 
 
 def oid(number: int, index: int) -> str:
@@ -295,6 +296,27 @@ class AuditStepTests(unittest.TestCase):
         self.assertIn("- #20: opened by the Hive app with no `— hive:` signature line", summary)
         self.assertNotIn("- #21:", summary)
         self.assertIn("::error::1 agent pull request(s) merged since 2026-09-01 left an incomplete record", result.stdout)
+
+    def test_another_apps_pull_request_is_not_an_agent_pull_request(self) -> None:
+        # Renovate is a GitHub App, so `is_bot` is true for it as it is for
+        # the Hive app, but it writes neither the signature line nor a
+        # Signed-off-by trailer (#744, "chore: Configure Renovate", merged
+        # with one unsigned commit). Counted as an agent's, every merged
+        # dependency bump would turn the monthly run red with two findings.
+        self.run_.stage(
+            [
+                merged(50, bot=True, signed_body=False, title="chore: Configure Renovate", login="app/renovate"),
+                merged(51, bot=True, signed_body=True),
+            ],
+            [details(51, [SIGNED], ["README.md"])],
+        )
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        summary = self.run_.summary.read_text()
+        self.assertIn("1 of the 2 pull requests merged in the window were written by an agent.", summary)
+        self.assertNotIn("#50", summary)
+        viewed = [call[3] for call in self.run_.gh_calls() if call[1:3] == ["pr", "view"]]
+        self.assertEqual(viewed, ["51"])
 
     def test_an_unsigned_commit_on_an_agent_pull_request_fails_the_run_and_names_the_commit(self) -> None:
         unsigned = "Hive-Run: Danathar/atomic-image-builder#1\n"
