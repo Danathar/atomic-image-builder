@@ -697,6 +697,51 @@ SEARCHER_PROGRAM_OPTIONS: dict[str, tuple[str, ...]] = {
 SEARCHERS_TAKING_PREFIXES = frozenset({"ag"})
 
 
+# gh's prose options. Their value is the title or text of a pull request, an
+# issue, a comment or a release, which gh sends to GitHub and never runs, and
+# this repository's pull requests routinely quote the very commands this hook
+# refuses (`fix(gate): refuse git diff -O<file>`), so reading those values as
+# command strings refused ordinary work that no prompt could then allow. gh
+# takes no abbreviated long option (pflag), so the names are matched whole.
+GH_PROSE_GROUPS = frozenset({"pr", "issue", "release"})
+GH_PROSE_LONG = frozenset({"title", "body", "notes", "subject"})
+GH_PROSE_SHORT = frozenset("tbn")
+
+
+def gh_prose_positions(words: list[str]) -> set[int]:
+    """The positions of the words in a `gh pr|issue|release ...` invocation
+    that hold a prose option's value: the option word itself when the value
+    is attached (`--title=...`, `-tx`), else the word after it."""
+    found: set[int] = set()
+    if next(iter(words[1:]), "") not in GH_PROSE_GROUPS:
+        return found
+    for index, word in enumerate(words):
+        if word.startswith("--"):
+            name, attached, _ = word.removeprefix("--").partition("=")
+            if name in GH_PROSE_LONG:
+                found.add(index if attached else index + 1)
+        elif word.startswith("-") and word.removeprefix("-")[:1] in GH_PROSE_SHORT:
+            letter_and_value = word.removeprefix("-")
+            found.add(index if letter_and_value.removeprefix(letter_and_value[:1]) else index + 1)
+    return found
+
+
+def carries_command_substitution(word: str, twin: str) -> bool:
+    """Does bash run a command substitution inside this word?
+
+    The masked twin keeps a `$` or a backtick exactly where bash acts on one,
+    inside double quotes too, and lines up with the word character for
+    character: a live backtick opens a substitution, and so does a live `$`
+    the word follows with `(` (`$((...))` arithmetic included, which can hold
+    a substitution of its own). A `$` or backtick inside single quotes or
+    escaped is masked and opens nothing.
+    """
+    for index, char in enumerate(twin):
+        if char == "`" or (char == "$" and word.startswith("(", index + 1)):
+            return True
+    return False
+
+
 def searcher_starts_a_program(program: str, words: list[str]) -> bool:
     """Does this searcher invocation carry an option that names a program?
 
@@ -2391,10 +2436,13 @@ def unlisted_program_command(invocation: Invocation) -> tuple[str, str, str] | N
     string is looked through for a gated name with its quoting removed too,
     since the shell joins `g""it` back into git (see gated_command_strings()). A
     program in ARGUMENT_ONLY_PROGRAMS, typed as its bare name or under
-    WRAPPER_DIRECTORIES, is not read at all (`echo git diff --no-index a b`,
-    `grep -rn 'git diff --no-index' docs`), and neither is a searcher in
-    SEARCHER_PROGRAM_OPTIONS that carries none of the options naming a
-    program (`rg -n 'git diff --no-index' docs`).
+    WRAPPER_DIRECTORIES, is read only for the command substitutions bash
+    runs in its words (`echo git diff --no-index a b` and
+    `grep -rn 'git diff --no-index' docs` are not read, `echo "$(git diff
+    --no-index a b)"` is), and so is a searcher in SEARCHER_PROGRAM_OPTIONS
+    that carries none of the options naming a program (`rg -n 'git diff
+    --no-index' docs`), and the value of one of gh's prose options
+    (`gh pr create --title 'fix(gate): refuse git diff -O<file>'`).
     Wrapped invocations are not read here: name_positions() already reads
     every word behind a stepped-over wrapper as the possible name.
     """
@@ -2402,17 +2450,17 @@ def unlisted_program_command(invocation: Invocation) -> tuple[str, str, str] | N
     if invocation.wrapped or not words or gated_name(words, 0) is not None:
         return None
     program = wrapper_basename(invocation.name)
-    if program in ARGUMENT_ONLY_PROGRAMS and plain_wrapper_spelling(invocation.raws[0], program):
-        return None
-    if (
-        program in SEARCHER_PROGRAM_OPTIONS
-        and plain_wrapper_spelling(invocation.raws[0], program)
-        and not searcher_starts_a_program(program, words)
-    ):
-        return None
+    plain = plain_wrapper_spelling(invocation.raws[0], program)
+    text_only = plain and (
+        program in ARGUMENT_ONLY_PROGRAMS
+        or (program in SEARCHER_PROGRAM_OPTIONS and not searcher_starts_a_program(program, words))
+    )
+    prose = gh_prose_positions(words) if plain and program == "gh" else set()
     gated_starts = 0
     for index in range(1, len(words)):
         spend()
+        if (text_only or index in prose) and not carries_command_substitution(words[index], invocation.twins[index]):
+            continue
         inner: list[str] = []
         if gated_name(words, index) is not None:
             gated_starts += 1
