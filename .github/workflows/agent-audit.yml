@@ -88,8 +88,13 @@ jobs:
 
           # An agent pull request is one the Hive app opened, or one whose body
           # carries the signature line. The second clause is what catches the
-          # omp-backed runs, which push under the maintainer's identity.
-          jq -c '[.[] | select(.author.is_bot or ((.body // "") | test("(^|\n)— hive:")))]' \
+          # omp-backed runs, which push under the maintainer's identity. The
+          # first names the Hive app by its login rather than asking whether
+          # the author is a bot: Renovate is a bot too, and its pull requests
+          # carry neither the signature line nor a Signed-off-by trailer, so
+          # `is_bot` would turn every merged dependency bump into two findings.
+          hive_app="app/danathar-atomic-hive"
+          jq -c --arg hive "$hive_app" '[.[] | select(.author.login == $hive or ((.body // "") | test("(^|\n)— hive:")))]' \
             merged.json > agents.json
 
           # Commits and files are fetched one pull request at a time: asking
