@@ -42,10 +42,10 @@ sections below, and matches the exact versions `ci.yml` installs so a local
 run agrees with CI instead of disagreeing in either direction:
 
 ```bash
-pip install coverage==7.16.0 ruff==0.16.5
+pip install coverage==7.17.0 ruff==0.17.2
 ```
 
-One test also needs [`just`](https://github.com/casey/just) — CI pins v1.57.0
+One test also needs [`just`](https://github.com/casey/just) — CI pins v1.59.0
 by sha256, the same way it pins hadolint and actionlint. It runs the generated
 Justfile's `spawn-vm` recipe with command stubs, because that recipe forwards
 arguments to another recipe and neither `just --fmt --check` nor a dry run
@@ -58,7 +58,7 @@ and `systemd-vmspawn` are stubbed.
 Ten more tests drive the real [`gum`](https://github.com/charmbracelet/gum)
 binary (Esc and Ctrl-J handling, table width, spinner stderr), and one runs
 `hadolint` against an unparseable Containerfile line. CI pins gum v0.17.0 and
-hadolint v2.14.0 by sha256 in `ci.yml`, `nightly-compliance.yml` and
+hadolint v2.15.1 by sha256 in `ci.yml`, `nightly-compliance.yml` and
 `ai-fix.yml`, so these run there; without the binaries they skip locally.
 
 Run the test suite with `unittest`:
@@ -211,12 +211,12 @@ installed. That test disables actionlint's shellcheck integration: every
 shellcheck finding in a generated project sits inside a `run:` block copied
 verbatim from `template_snapshots/`, which this repo must not reformat, so
 gating on it would mean gating on a fix only upstream can make. hadolint is a
-static binary; CI pins v2.14.0 by sha256 rather than using
+static binary; CI pins v2.15.1 by sha256 rather than using
 `hadolint/hadolint-action`, because `maintenance_audit.py` requires every
 `uses:` in this repo's workflows to appear in `ACTION_PINS` — the table
 shipped to generated repos — and a linter those repos never run does not
 belong in it. To match CI locally, install the same release from
-[hadolint/hadolint](https://github.com/hadolint/hadolint/releases/tag/v2.14.0).
+[hadolint/hadolint](https://github.com/hadolint/hadolint/releases/tag/v2.15.1).
 
 `.github/actionlint.yaml` names `ubuntu-26.04` as a known runner label only
 because actionlint v1.7.12 predates that hosted image, which
