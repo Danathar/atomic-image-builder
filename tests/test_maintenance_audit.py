@@ -301,6 +301,17 @@ class MaintenanceAuditTests(unittest.TestCase):
         self.assertIn("Refresh the snapshot", drift.message)
         self.assertFalse(drift.blocking)
 
+    def test_describe_snapshot_drift_marks_a_failed_comparison_uncounted(self) -> None:
+        source = TemplateSource(repo="https://github.com/ublue-os/image-template.git", revision="a" * 40)
+        with patch("maintenance_audit.query_github_comparison", side_effect=RuntimeError("HTTP 502")):
+            drift = describe_snapshot_drift(source, "b" * 40)
+        self.assertFalse(drift.counted)
+        self.assertFalse(drift.blocking)
+        with patch("maintenance_audit.query_github_comparison", return_value=("ahead", 3, 0)):
+            self.assertTrue(describe_snapshot_drift(source, "b" * 40).counted)
+        not_github = TemplateSource(repo="https://gitlab.example/x/y.git", revision="a" * 40)
+        self.assertTrue(describe_snapshot_drift(not_github, "b" * 40).counted)
+
     def test_describe_snapshot_drift_blocks_only_past_the_threshold(self) -> None:
         # The boundary is the whole point of the threshold, so pin both sides
         # of it. All four runs behind issue #129 sat at 1-4 commits.
