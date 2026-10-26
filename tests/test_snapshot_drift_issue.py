@@ -107,6 +107,21 @@ class CollectDriftTests(unittest.TestCase):
         self.assertIn("Could not resolve host", report.unchecked[0])
 
 
+    def test_collect_drift_keeps_an_uncounted_drift_out_of_the_drift(self) -> None:
+        # HEAD moved but the compare call failed, so the message has no
+        # commit count. Filed as drift it rewrote the issue body without the
+        # count, and back again the next week, with upstream unchanged.
+        with patch(
+            "snapshot_drift_issue.check_upstream_drift",
+            side_effect=[SnapshotDrift("behind, count unknown", False, counted=False), SnapshotDrift("slightly behind", False)],
+        ):
+            report = collect_drift(REPO_ROOT)
+        self.assertEqual(report.messages, ["slightly behind"])
+        self.assertEqual(len(report.unchecked), 1)
+        self.assertIn("Unable to compare", report.unchecked[0])
+        self.assertIn("behind, count unknown", report.unchecked[0])
+
+
 class RenderBodyTests(unittest.TestCase):
     def test_render_body_lists_every_message(self) -> None:
         body = render_body(["snapshot a behind", "snapshot b behind"])

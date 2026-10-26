@@ -283,6 +283,10 @@ def github_repo_slug(url: str) -> str | None:
 class SnapshotDrift:
     message: str
     blocking: bool
+    # False when the compare API failed, so the message lacks the commit count
+    # a working call puts in it. snapshot_drift_issue.py reads that as a
+    # partial comparison rather than as drift that changed.
+    counted: bool = True
 
 
 def describe_snapshot_drift(source: TemplateSource, head: str) -> SnapshotDrift:
@@ -304,13 +308,14 @@ def describe_snapshot_drift(source: TemplateSource, head: str) -> SnapshotDrift:
     )
     slug = github_repo_slug(source.repo)
     comparison = None
+    counted = True
     if slug is not None:
         try:
             comparison = query_github_comparison(slug, source.revision, head)
         except RuntimeError:
-            comparison = None
+            counted = False
     if comparison is None:
-        return SnapshotDrift(f"{prefix}. Refresh the snapshot and review pin updates.", False)
+        return SnapshotDrift(f"{prefix}. Refresh the snapshot and review pin updates.", False, counted)
     status, ahead, behind = comparison
     if status == "ahead":
         if ahead >= SNAPSHOT_DRIFT_FAILURE_COMMITS:
