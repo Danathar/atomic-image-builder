@@ -78,6 +78,7 @@ REFUSED_COMMANDS = (
     ("rg --hostname-bin='git diff --no-index /dev/null .env' x", "ripgrep runs the --hostname-bin program for its hyperlinks"),
     ("ag --pager='git diff --no-index /dev/null .env' x", "ag starts its pager through the shell"),
     ("ag --pag='git diff --no-index /dev/null .env' x", "ag takes an unambiguous prefix of --pager"),
+    ("rg -e -- --pre='git diff --no-index /dev/null .env' x", "-e takes the `--` as its pattern, so --pre is still an option"),
     ("./rg 'git diff --no-index /dev/null .env' docs", "a searcher spelled as a path is some other file"),
     ("git diff --no-index /dev/null ./cosign.key", "reads any file on disk"),
     ("git diff --no-index a b", "reads any file on disk"),
@@ -517,7 +518,6 @@ ALLOWED_COMMANDS = (
     "rg -F 'git diff -O' docs",
     "rg -n 'shellcheck ./.env' docs/",
     "ag 'git diff --no-index' docs",
-    "rg -- --pre 'git diff --no-index' docs",
     "rg --hidden -n 'git diff --no-index' docs",
     "ag --hidden 'git diff --no-index' docs",
     # ripgrep takes no abbreviated flag: `--p` is rejected and nothing runs.

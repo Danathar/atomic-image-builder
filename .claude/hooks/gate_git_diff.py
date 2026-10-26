@@ -745,12 +745,13 @@ def carries_command_substitution(word: str, twin: str) -> bool:
 def searcher_starts_a_program(program: str, words: list[str]) -> bool:
     """Does this searcher invocation carry an option that names a program?
 
-    Read up to `--`, after which every word is a pattern or a path. The
-    program's own name is read with the rest; it never starts with `--`.
+    Every word is read, `--` or not: an option that takes a value can take
+    `--` as that value (`rg -e -- --pre=PROG`), and then the words after it
+    are still options. Reading a pattern or path past a real `--` as an
+    option can only over-refuse. The program's own name is read with the
+    rest; it never starts with `--`.
     """
     for word in words:
-        if word == "--":
-            return False
         if not word.startswith("--"):
             continue
         name = word.removeprefix("--").partition("=")[0]
