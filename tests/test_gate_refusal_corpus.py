@@ -57,14 +57,11 @@ OPTIONAL_FIELDS = {"wraps"}
 #
 # The `push` rows (#803) run here because `git push:*` is an ask rule. This
 # gate does not read `git push` at all: the force and delete spellings are
-# held by the deny and ask rules in .claude/settings.json, and an
-# abbreviated option (`--force-w`, `--mirr`) or a delete written another way
+# held by the deny and ask rules in .claude/settings.json, and a delete
+# written without `--delete` (`-d`, an `origin :branch` refspec, `--prune`)
 # slips past the exact-prefix deny rows to a prompt. Listed until a gate
 # here refuses them.
 KNOWN_GAPS: frozenset[str] = frozenset({
-    "push-force-abbrev",
-    "push-mirror-abbrev",
-    "push-repo-abbrev",
     "push-delete-option",
     "push-delete-short",
     "push-delete-refspec",

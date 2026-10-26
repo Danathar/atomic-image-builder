@@ -79,7 +79,7 @@ standard output, is a refusal. Exit status 0 with no decision is an allow.
 A known gap is a refuse row the gate lets through today. The test asserts
 that it still gets through, so the change that closes it fails until its id
 is removed, and a row that is not listed cannot regress silently. This
-repository lists the seven `push` refuse rows (see below). The `wrapper-*` rows with a `wraps` field were added
+repository lists the four `push` refuse rows (see below). The `wrapper-*` rows with a `wraps` field were added
 from the matrix in
 [#772](https://github.com/Danathar/atomic-image-builder/issues/772), which
 ran each one against every gate in the fleet on 2026-10-20; this gate now
@@ -148,14 +148,14 @@ The `push` rows
 ([#803](https://github.com/Danathar/atomic-image-builder/issues/803),
 approved on
 [Danathar/tududi#399](https://github.com/Danathar/tududi/issues/399))
-cover `git push` spellings that rewrite or delete a remote branch without
-the words a deny rule names. git takes any unambiguous prefix of a long
-option, so `--force-w`, `--mirr` and `--rep=URL` do what `--force-with-lease`,
-`--mirror` and `--repo=URL` do, and `--delete`, `-d`, an `origin :branch`
-refspec and `--prune` each delete remote branches. Every repository has
+cover the ordinary ways to delete a remote branch: `--delete`, `-d`, an
+`origin :branch` refspec and `--prune`. A deny rule that names
+`git push --delete` misses the other three. Abbreviated long options such as
+`--force-w` have no rows: AGENTS.md puts spellings nobody types in ordinary
+work out of scope for the gates. Every repository has
 `ask: Bash(git push:*)`, which is why an ask rule makes a row reachable. Three
 `allow-push-*` rows keep a gate from refusing ordinary pushes. This
-repository's gate does not read `git push`, so its seven refuse rows are
+repository's gate does not read `git push`, so its four refuse rows are
 known gaps here.
 
 Before the corpus was first added, each row was checked against all six gates

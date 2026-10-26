@@ -748,36 +748,6 @@
       "why": "turning extglob on does not make a plain git diff a refused command"
     },
     {
-      "id": "push-force-abbrev",
-      "class": "push",
-      "verdict": "refuse",
-      "requires": [
-        "git push"
-      ],
-      "command": "git push origin main --force-w",
-      "why": "git takes any unambiguous prefix of a long option, so --force-w is --force-with-lease and rewrites the remote branch"
-    },
-    {
-      "id": "push-mirror-abbrev",
-      "class": "push",
-      "verdict": "refuse",
-      "requires": [
-        "git push"
-      ],
-      "command": "git push --mirr origin",
-      "why": "--mirr is --mirror, which force-updates and deletes every remote ref to match the local ones"
-    },
-    {
-      "id": "push-repo-abbrev",
-      "class": "push",
-      "verdict": "refuse",
-      "requires": [
-        "git push"
-      ],
-      "command": "git push --rep=https://example.com/x.git origin main",
-      "why": "--rep= is --repo=, which pushes to a URL no remote names"
-    },
-    {
       "id": "push-delete-option",
       "class": "push",
       "verdict": "refuse",
