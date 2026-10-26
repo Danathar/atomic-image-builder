@@ -291,6 +291,18 @@ REFUSED_ENVIRONMENT = (
         "re-points the repository the command reads",
     ),
     (
+        "GIT_COMMON_DIR",
+        "re-points the repository's common directory, whose config git reads "
+        "in place of the checkout's own -- a diff.external there runs on every "
+        "file the diff touches",
+    ),
+    (
+        "GIT_TRACE*",
+        "makes git append its trace to the file an absolute-path value names, "
+        "the write --output makes, on any git command; trace to the terminal "
+        "by leaving the variable off and reading the error output instead",
+    ),
+    (
         "GIT_WORK_TREE",
         "re-points the tree the command compares against",
     ),
