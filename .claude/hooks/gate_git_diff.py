@@ -924,6 +924,40 @@ def refused_short(token: str) -> bool:
     return False
 
 
+# `git difftool` runs a program of the caller's choosing with -x/--extcmd:
+# git documents that it runs `<command> $LOCAL $REMOTE` through the shell.
+# The subcommand starts with `diff`, so the `git diff:*` allow row covers it
+# the way it covers `git diff-tree`, and `git difftool -y -x 'cat cosign.key
+# #' HEAD~1` would run with no prompt. Scoped to difftool: `git cherry-pick
+# -x` is an ordinary option that runs nothing.
+DIFFTOOL_COMMAND_LONG = "extcmd"
+DIFFTOOL_COMMAND_SHORT = "x"
+# difftool's own short options that take a value; `-t` names a configured tool.
+DIFFTOOL_VALUED_SHORT = frozenset("t")
+
+
+def difftool_runs_command(token: str) -> bool:
+    """Does this difftool argument hand it a command to run?
+
+    `--extcmd`, any abbreviation git resolves to it (`--ext`, `--e`), or `-x`
+    alone or anywhere in a cluster up to the first value-taking letter
+    (`-yx cmd`, `-xcmd`). A walk that meets a letter git diff reads a value
+    for stops there too, as refused_short() does, so `-U3x` is not read as
+    -x; refusing more than that could only over-refuse.
+    """
+    if token.startswith("--"):
+        name = token.removeprefix("--").partition("=")[0]
+        return bool(name) and DIFFTOOL_COMMAND_LONG.startswith(name)
+    if not token.startswith("-"):
+        return False
+    for letter in token.removeprefix("-"):
+        if letter == DIFFTOOL_COMMAND_SHORT:
+            return True
+        if letter in DIFFTOOL_VALUED_SHORT or letter in VALUED_SHORT:
+            return False
+    return False
+
+
 def brace_would_expand(token: str) -> bool:
     """Does bash brace-expand this token before git ever sees it?
 
@@ -3665,7 +3699,16 @@ def typed_refusal(command: str) -> str | None:
                 f"{option} rewrites git's configuration or its repository before the "
                 "subcommand runs, which reaches past what the allow list describes"
             )
+        subcommand = next((word for word in arguments if not word.startswith("-")), "")
         for token in arguments:
+            if subcommand.startswith("difftool") and difftool_runs_command(token):
+                return (
+                    f"{token} makes git difftool run a command of its own for each "
+                    "changed file, through the shell; difftool starts with diff, so "
+                    "the git diff:* allow row would run it with no prompt (run git "
+                    "diff instead, or difftool with a --tool configured in the "
+                    "checkout)"
+                )
             if refused_long(token) or refused_short(token):
                 return (
                     f"{token} lets git read or write a file the index does not hold, "
