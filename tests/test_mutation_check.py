@@ -320,6 +320,20 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn("NumberReplacer", text)
 
 
+    def test_a_survivor_line_holding_backticks_stays_one_code_span(self) -> None:
+        # The sources quote names in backticks; a single-backtick span ended
+        # at the first one and the cell rendered as broken code.
+        quoted = dict(self.SURVIVOR, line='f"The `{ASSET}` attached to {tag}"')
+        text, _new = report({"m.py": ({"survived": 1}, [quoted])}, set())
+        self.assertIn('| `m.py:4` | `core/AddNot` | ``f"The `{ASSET}` attached to {tag}"`` |\n', text)
+
+    def test_code_span_fences_past_the_longest_backtick_run(self) -> None:
+        self.assertEqual(mutation_check.code_span("x = a"), "`x = a`")
+        self.assertEqual(mutation_check.code_span("a ``b`` c"), "```a ``b`` c```")
+        self.assertEqual(mutation_check.code_span("`x`"), "`` `x` ``")
+        self.assertEqual(mutation_check.code_span("x`"), "`` x` ``")
+
+
 class CheckTests(unittest.TestCase):
     def test_runs_init_then_skips_then_exec_then_dump(self) -> None:
         calls = []
