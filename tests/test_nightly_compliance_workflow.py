@@ -174,7 +174,7 @@ def run_tooling_step(tmp: Path, *, payloads: dict[str, bytes] | None = None, rea
     if payloads is None:
         _tool_tarball(payload_dir / "actionlint.tar.gz", "actionlint")
         _tool_tarball(payload_dir / "just.tar.gz", "just")
-        _tool_tarball(payload_dir / "gum.tar.gz", "gum", "gum_0.17.0_Linux_x86_64/gum")
+        _tool_tarball(payload_dir / "gum.tar.gz", "gum", "gum_2.0.2_Linux_x86_64/gum")
         (payload_dir / "hadolint").write_text("#!/usr/bin/env bash\necho hadolint\n")
     else:
         for name, data in payloads.items():
