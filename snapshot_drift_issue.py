@@ -109,6 +109,13 @@ def collect_drift(repo_root: Path) -> DriftReport:
         except RuntimeError as exc:
             report.unchecked.append(f"Unable to query upstream template HEAD for {source.repo}: {exc}")
             continue
+        if drift is not None and not drift.counted:
+            # HEAD moved, but how far could not be read, so the message lacks
+            # the commit count the issue body carries. Rewriting the body from
+            # it, and back once the count returns, is the churn sync() leaves
+            # an unchecked snapshot alone to avoid.
+            report.unchecked.append(f"Unable to compare {source.repo} with the pinned snapshot revision: {drift.message}")
+            continue
         if drift is not None:
             report.messages.append(drift.message)
     return report
