@@ -7717,8 +7717,14 @@ class App:
 
         managed_path(base_dir, "build_files").mkdir(parents=True, exist_ok=True)
         # A regenerated Containerfile COPYs system_files into ctx, so the
-        # directory has to exist even when the user has no overlay yet.
+        # directory has to exist even when the user has no overlay yet -- and
+        # exist in the pushed commit, not only on disk: git does not track an
+        # empty directory, so CI's checkout would lack it and the COPY would
+        # fail. The bundled snapshot ships .gitkeep files for the same reason;
+        # a repo created before it did (a7eacc7) has none.
         managed_path(base_dir, "system_files").mkdir(parents=True, exist_ok=True)
+        if not any(managed_path(base_dir, "system_files").iterdir()):
+            managed_path(base_dir, "system_files/.gitkeep").write_text("")
         existing_containerfile = containerfile_path.read_text() if containerfile_path.exists() else None
         containerfile_path.write_text(self.render_containerfile(existing_containerfile))
         build_sh = managed_path(base_dir, "build_files/build.sh")
