@@ -63,6 +63,11 @@ gate = load_hook()
 
 # Commands the hook has to refuse, each with the reach that earns the refusal.
 REFUSED_COMMANDS = (
+    ("rg --pre 'git diff --no-index /dev/null .env' x docs", "ripgrep runs the --pre program on each file it searches"),
+    ("rg --hostname-bin='git diff --no-index /dev/null .env' x", "ripgrep runs the --hostname-bin program for its hyperlinks"),
+    ("ag --pager='git diff --no-index /dev/null .env' x", "ag starts its pager through the shell"),
+    ("ag --pag='git diff --no-index /dev/null .env' x", "ag takes an unambiguous prefix of --pager"),
+    ("./rg 'git diff --no-index /dev/null .env' docs", "a searcher spelled as a path is some other file"),
     ("git diff --no-index /dev/null ./cosign.key", "reads any file on disk"),
     ("git diff --no-index a b", "reads any file on disk"),
     ("git diff --output=/tmp/out --no-index a b", "writes any file"),
@@ -494,6 +499,14 @@ ALLOWED_COMMANDS = (
     "bash -c 'git diff HEAD~1'",
     "sh -c 'git status'",
     "rg 'git diff' docs",
+    # A searcher without an option that starts a program reads its pattern as
+    # text, as grep does: searching the docs for a refused command is
+    # ordinary work in this repository.
+    "rg -n 'git diff --no-index' docs",
+    "rg -F 'git diff -O' docs",
+    "rg -n 'shellcheck ./.env' docs/",
+    "ag 'git diff --no-index' docs",
+    "rg -- --pre 'git diff --no-index' docs",
     "grep -rn 'git diff --no-index' docs/",
     "echo git diff --no-index /dev/null .env",
     "grep -rn \"git diff doesn't\" docs",

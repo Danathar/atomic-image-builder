@@ -662,6 +662,38 @@ OPAQUE_WRAPPERS = frozenset(
 # some other file and is read like any other program.
 ARGUMENT_ONLY_PROGRAMS = frozenset({"echo", "printf", "grep", "egrep", "fgrep"})
 
+# Searchers that read their arguments as patterns and paths, as grep does,
+# except through the options each one has that name a program to start:
+# ripgrep's --pre and --hostname-bin run the program they name, and ag's
+# --pager is started through the shell (popen), so a gated command can be
+# that option's value. With none of them among the words, a searcher is read
+# like ARGUMENT_ONLY_PROGRAMS, so `rg -n 'git diff --no-index' docs` -- a
+# search this repository's own docs invite -- is not taken for the command it
+# names. ripgrep takes no abbreviated long option; ag (getopt_long) takes
+# any unambiguous prefix, so every prefix of its option counts.
+SEARCHER_PROGRAM_OPTIONS: dict[str, tuple[str, ...]] = {
+    "rg": ("pre", "hostname-bin"),
+    "ag": ("pager",),
+}
+SEARCHERS_TAKING_PREFIXES = frozenset({"ag"})
+
+
+def searcher_starts_a_program(program: str, words: list[str]) -> bool:
+    """Does this searcher invocation carry an option that names a program?
+
+    Read up to `--`, after which every word is a pattern or a path.
+    """
+    for word in words[1:]:
+        if word == "--":
+            return False
+        if not word.startswith("--"):
+            continue
+        name = word[2:].split("=", 1)[0]
+        for option in SEARCHER_PROGRAM_OPTIONS[program]:
+            if name == option or (program in SEARCHERS_TAKING_PREFIXES and name and option.startswith(name)):
+                return True
+    return False
+
 # unlisted_program_command() reads each gated command behind a program from
 # where it starts to the end of the invocation, so its work grows with the
 # square of the words: 2500 repeats of `git diff HEAD` behind one program took
@@ -2305,7 +2337,9 @@ def unlisted_program_command(invocation: Invocation) -> tuple[str, str, str] | N
     since the shell joins `g""it` back into git (see gated_command_strings()). A
     program in ARGUMENT_ONLY_PROGRAMS, typed as its bare name or under
     WRAPPER_DIRECTORIES, is not read at all (`echo git diff --no-index a b`,
-    `grep -rn 'git diff --no-index' docs`).
+    `grep -rn 'git diff --no-index' docs`), and neither is a searcher in
+    SEARCHER_PROGRAM_OPTIONS that carries none of the options naming a
+    program (`rg -n 'git diff --no-index' docs`).
     Wrapped invocations are not read here: name_positions() already reads
     every word behind a stepped-over wrapper as the possible name.
     """
@@ -2314,6 +2348,12 @@ def unlisted_program_command(invocation: Invocation) -> tuple[str, str, str] | N
         return None
     program = wrapper_basename(invocation.name)
     if program in ARGUMENT_ONLY_PROGRAMS and plain_wrapper_spelling(invocation.raws[0], program):
+        return None
+    if (
+        program in SEARCHER_PROGRAM_OPTIONS
+        and plain_wrapper_spelling(invocation.raws[0], program)
+        and not searcher_starts_a_program(program, words)
+    ):
         return None
     gated_starts = 0
     for index in range(1, len(words)):
