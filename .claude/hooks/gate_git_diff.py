@@ -287,6 +287,13 @@ REFUSED_ENVIRONMENT = (
         "what `-c diff.external=` does in git's own spelling",
     ),
     (
+        "GIT_EXEC_PATH",
+        "re-points the directory git finds its own helper programs in, which "
+        "is what `--exec-path` does in git's own spelling -- a git-difftool--"
+        "helper planted there runs when `git difftool` matches the git diff:* "
+        "allow row",
+    ),
+    (
         "GIT_DIR",
         "re-points the repository the command reads",
     ),

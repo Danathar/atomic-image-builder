@@ -602,6 +602,8 @@ REACH_CORPUS = (
     ("environment", "export GIT_EXTERNAL_DIFF=/tmp/evil\ngit diff HEAD", REFUSED, "a newline separates two commands as a ; does"),
     ("environment", "export GIT_EXTERNAL_DIFF=/tmp/evil", REFUSED, "the Bash tool's shell outlives the call, so the next call's git diff carries it"),
     ("environment", "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.external git diff", REFUSED, "the numbered config family injects diff.external without -c"),
+    ("environment", "GIT_EXEC_PATH=./tools git difftool -y HEAD~1", REFUSED, "re-points where git finds its helper programs, like --exec-path"),
+    ("environment", "export GIT_EXEC_PATH=/tmp/tools", REFUSED, "exported ahead of the git difftool a later command runs"),
     ("environment", "GIT_DIR=/tmp/other/.git git log", REFUSED, "re-points the repository"),
     ("environment", "GIT_INDEX_FILE=/tmp/x git diff", REFUSED, "re-points the index the diff is taken against"),
     ("environment", "GIT_WORK_TREE=/tmp git diff", REFUSED, "re-points the tree the diff is taken against"),
