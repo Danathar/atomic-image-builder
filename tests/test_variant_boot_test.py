@@ -244,6 +244,9 @@ class BuildTests(unittest.TestCase):
             reference = base_reference(base_by_key("kinoite"), Path(tmp) / "build.log")
         self.assertEqual(run.call_count, 2)
         sleep.assert_called_once()
+        # The first try gets the whole budget; the retry only what is left of it.
+        self.assertEqual(run.call_args_list[0].kwargs["timeout"], BUILD_TIMEOUT_SECONDS)
+        self.assertLess(run.call_args_list[1].kwargs["timeout"], BUILD_TIMEOUT_SECONDS)
         self.assertIn("unexpected EOF", log)
         self.assertTrue(log.endswith(good))
         self.assertEqual(reference, uri)

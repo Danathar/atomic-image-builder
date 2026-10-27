@@ -363,7 +363,7 @@ def build(slot: Slot, context: Path, log_path: Path) -> None:
         # (see pulling_base_dropped): it costs the pull and nothing else, and
         # it gets what is left of BUILD_TIMEOUT_SECONDS so a slot never
         # outlasts WORST_CASE_SLOT_SECONDS.
-        timeout = BUILD_TIMEOUT_SECONDS - (time.monotonic() - started)
+        timeout = BUILD_TIMEOUT_SECONDS if attempt == 1 else BUILD_TIMEOUT_SECONDS - (time.monotonic() - started)
         try:
             proc = subprocess.run(command, capture_output=True, text=True, errors="replace", check=False, timeout=timeout)
             output = proc.stdout + proc.stderr
