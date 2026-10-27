@@ -18,6 +18,12 @@
       "operator": "core/NumberReplacer",
       "line": "for reading in (text, *(flattened[:1] if flattened else ())):",
       "reason": "The surviving variant is [:2], which also reads the extglob group's own text as a command string. That only adds a reading to a check whose readings each can only add a refusal, so it is stricter, never weaker; the [:0] variant, which drops the flattened reading, is killed."
+    },
+    {
+      "module": "variant_boot_test.py",
+      "operator": "core/NumberReplacer",
+      "line": "BUILD_RETRY_PAUSE_SECONDS = 15",
+      "reason": "How long build() waits before retrying a dropped base pull is a tuning value; 14 or 16 seconds changes no outcome a test can observe, and the tests read the constant rather than restating it."
     }
   ]
 }

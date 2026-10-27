@@ -32,6 +32,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -143,6 +144,9 @@ SETTLE_TIMEOUT_SECONDS = 300
 # The largest base builds in minutes on a hosted runner; this only stops a
 # hung build.
 BUILD_TIMEOUT_SECONDS = 45 * 60
+# Seconds to wait before building again after the registry dropped the base
+# image's download. The retry shares BUILD_TIMEOUT_SECONDS with the first try.
+BUILD_RETRY_PAUSE_SECONDS = 15
 # A slot can boot three times: the generated image twice, then the unmodified
 # base. The job's timeout-minutes has to cover all of it plus the runner setup,
 # or the job is cancelled before it uploads the logs and reports the issue --
@@ -153,6 +157,15 @@ LOG_TAIL_LINES = 50
 # A FROM step in podman's build log, with ARGs already expanded. The rendered
 # BlueBuild Containerfile names its base through one (FROM "${BASE_IMAGE}").
 FROM_STEP_RE = re.compile(r"\bSTEP \d+/\d+: FROM\s+(?:--\S+\s+)*\"?([^\"\s]+)", re.IGNORECASE)
+# What a registry or network drop looks like in podman's output: the download
+# was cut off or the registry answered 502/503/504, as opposed to an answer
+# about the image itself ("manifest unknown", "unauthorized"). Kept short on
+# purpose; a message missing here costs one unretried failure, not a wrong
+# result.
+REGISTRY_TRANSPORT_RE = re.compile(
+    r"unexpected EOF|connection reset by peer|i/o timeout|TLS handshake timeout|unexpected HTTP status: 50[234]",
+    re.IGNORECASE,
+)
 
 # The guest writes one marker per line so the host can read results out of an
 # SSH session that also carries whatever the image prints at login.
@@ -324,6 +337,17 @@ def last_build_step(log: str) -> str:
     return steps[-1] if steps else ""
 
 
+def pulling_base_dropped(output: str) -> bool:
+    """Whether a failed build stopped at a FROM step because the registry dropped the download.
+
+    Only a FROM step qualifies, so a transport message printed by a later RUN
+    step (a package install reaching a flaky mirror) is still a failure of the
+    image, and a failed pull that carries no transport error (manifest
+    unknown, unauthorized) is not retried either.
+    """
+    return bool(FROM_STEP_RE.search(last_build_step(output)) and REGISTRY_TRANSPORT_RE.search(output))
+
+
 def build(slot: Slot, context: Path, log_path: Path) -> None:
     # --no-cache because the generated Containerfile runs build.sh through a
     # bind mount of another stage, and podman's layer cache keys that RUN step
@@ -332,18 +356,36 @@ def build(slot: Slot, context: Path, log_path: Path) -> None:
     # without tonight's packages and services. --pull=always so the base is
     # tonight's, not whatever this machine pulled last.
     command = ["podman", "build", "--pull=always", "--no-cache", "-t", slot.tag, str(context)]
-    try:
-        proc = subprocess.run(command, capture_output=True, text=True, errors="replace", check=False, timeout=BUILD_TIMEOUT_SECONDS)
-        output = proc.stdout + proc.stderr
-        returncode = proc.returncode
-    except subprocess.TimeoutExpired as exc:
-        output = timed_out_output(exc) + f"\npodman build timed out after {BUILD_TIMEOUT_SECONDS}s"
-        returncode = -1
-    log_path.write_text(output)
-    if returncode != 0:
-        step = last_build_step(output)
-        summary = f"podman build failed (exit {returncode})" + (f" at `{step}`" if step else "") + "."
-        raise StageFailure("build", summary, fault_for("build"), tail(output))
+    started = time.monotonic()
+    log = ""
+    for attempt in (1, 2):
+        # The second attempt only happens when the first died pulling the base
+        # (see pulling_base_dropped): it costs the pull and nothing else, and
+        # it gets what is left of BUILD_TIMEOUT_SECONDS so a slot never
+        # outlasts WORST_CASE_SLOT_SECONDS.
+        timeout = BUILD_TIMEOUT_SECONDS if attempt == 1 else BUILD_TIMEOUT_SECONDS - (time.monotonic() - started)
+        try:
+            proc = subprocess.run(command, capture_output=True, text=True, errors="replace", check=False, timeout=timeout)
+            output = proc.stdout + proc.stderr
+            returncode = proc.returncode
+            # Read only when the build failed; a good build returns below.
+            retryable = pulling_base_dropped(output)
+        except subprocess.TimeoutExpired as exc:
+            output = timed_out_output(exc) + f"\npodman build timed out after {BUILD_TIMEOUT_SECONDS}s"
+            returncode = -1
+            retryable = False
+        # Both attempts stay in the log; base_reference reads FROM steps from it.
+        log += (f"\n--- build attempt {attempt} ---\n" if attempt > 1 else "") + output
+        log_path.write_text(log)
+        if returncode == 0:
+            return
+        if attempt == 1 and retryable and BUILD_TIMEOUT_SECONDS - (time.monotonic() - started) > BUILD_RETRY_PAUSE_SECONDS:
+            time.sleep(BUILD_RETRY_PAUSE_SECONDS)
+            continue
+        break
+    step = last_build_step(output)
+    summary = f"podman build failed (exit {returncode})" + (f" at `{step}`" if step else "") + "."
+    raise StageFailure("build", summary, fault_for("build"), tail(output))
 
 
 def base_reference(base: BaseImage, log_path: Path) -> str:
@@ -583,7 +625,8 @@ def run_slot(slot: Slot, work: Path, *, keep_image: bool = False) -> Result:
         for attempt in (1, 2):
             # A second attempt absorbs the nested-VM failures that have nothing
             # to do with the image (a slow runner missing bcvk's SSH deadline).
-            # It is a retry of the boot only; the build is not repeated.
+            # It is a retry of the boot only; the build is not repeated here
+            # (build() itself repeats only a base pull the registry dropped).
             result.attempts = attempt
             retry = boot(slot.tag, work / f"boot-{attempt}", packages=TEST_PACKAGES, services=TEST_SERVICES)
             judged = judge(retry)
