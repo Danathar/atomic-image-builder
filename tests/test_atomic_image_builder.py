@@ -9892,6 +9892,35 @@ class BuilderTests(unittest.TestCase):
             with patch.object(app, "repo_has_state_file", return_value=False):
                 self.assertIsNone(app.scanned_image_is_managed("ghcr.io/owner/repo:latest"))
 
+    def test_scanned_image_is_managed_names_the_users_own_managed_image(self) -> None:
+        # GHCR lowercases the owner, so a login with capitals still matches.
+        app = self.make_app()
+        app.github_user = "Alice"
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch.object(app, "repo_has_state_file", return_value=True) as state_mock:
+                self.assertEqual(app.scanned_image_is_managed("ghcr.io/alice/my-image:latest"), ("alice", "my-image"))
+        state_mock.assert_called_once_with("alice", "my-image")
+
+    def test_scanned_image_is_managed_does_not_claim_someone_elses_managed_image(self) -> None:
+        # bob's image was built with this tool, but alice cannot update it:
+        # select_repo lists only her own repos. Telling her "This Is One Of
+        # Yours ... Use 'Update Existing Image'" sent her to a menu where it
+        # can never appear, so the lookup is not even made.
+        app = self.make_app()
+        app.github_user = "alice"
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch.object(app, "repo_has_state_file", return_value=True) as state_mock:
+                self.assertIsNone(app.scanned_image_is_managed("ghcr.io/bob/bobs-image:latest"))
+        state_mock.assert_not_called()
+
+    def test_scanned_image_is_managed_returns_none_before_sign_in(self) -> None:
+        app = self.make_app()
+        app.github_user = ""
+        with patch("atomic_image_builder.command_exists", return_value=True):
+            with patch.object(app, "repo_has_state_file", return_value=True) as state_mock:
+                self.assertIsNone(app.scanned_image_is_managed("ghcr.io/alice/my-image:latest"))
+        state_mock.assert_not_called()
+
     def run_scan_with_status(self, deployment: dict, *, gum: object | None = None) -> tuple[str, App, "GumStub"]:
         """scan_os() against one synthetic booted deployment."""
         app = self.make_app()
@@ -11090,6 +11119,35 @@ class BuilderTests(unittest.TestCase):
             repo_dir = Path(tmp)
             app.write_project_files(repo_dir, include_workflow=False)
             self.assertTrue((repo_dir / "system_files").is_dir())
+            # git tracks no empty directory, so without a file in it the
+            # pushed commit lacks system_files and the Containerfile's COPY
+            # fails in CI.
+            self.assertTrue((repo_dir / "system_files/.gitkeep").is_file())
+
+    def test_write_project_files_adds_no_gitkeep_beside_an_existing_overlay(self) -> None:
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / "system_files/etc").mkdir(parents=True)
+            (repo_dir / "system_files/etc/motd").write_text("hi\n")
+            app.write_project_files(repo_dir, include_workflow=False)
+            self.assertEqual(sorted(p.name for p in (repo_dir / "system_files").iterdir()), ["etc"])
+
+    def test_write_project_files_commits_system_files_for_a_repo_that_had_none(self) -> None:
+        # A repo created before the snapshot shipped system_files/.gitkeep,
+        # whose Containerfile was then lost: the regenerated one COPYs
+        # system_files, so the commit the update pushes has to carry it.
+        app = self.make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo_dir)], check=True)
+            app.write_project_files(repo_dir, include_workflow=False)
+            self.assertIn("COPY system_files /system_files", (repo_dir / "Containerfile").read_text())
+            subprocess.run(["git", "-C", str(repo_dir), "add", "-A"], check=True)
+            tracked = subprocess.run(
+                ["git", "-C", str(repo_dir), "ls-files", "system_files"], check=True, capture_output=True, text=True
+            ).stdout.split()
+            self.assertEqual(tracked, ["system_files/.gitkeep"])
 
     def test_write_bluebuild_project_files_writes_generated_cosign_pub(self) -> None:
         # The Containerfile-method write path has its own cosign.pub write

@@ -63,6 +63,23 @@ gate = load_hook()
 
 # Commands the hook has to refuse, each with the reach that earns the refusal.
 REFUSED_COMMANDS = (
+    ('echo "$(git diff --no-index /dev/null .env)"', "bash runs the substitution before echo prints anything"),
+    ('echo "x $(git log >cosign.pub) y"', "the substitution's redirection truncates the file"),
+    ('echo "`git diff --no-index /dev/null .env`"', "a backtick substitution inside double quotes runs the same way"),
+    ('printf %s "$(git log >cosign.pub)"', "printf's argument is substituted before printf runs"),
+    ('grep foo "$(git log >cosign.pub)"', "so is grep's"),
+    ('rg x "$(git diff --no-index /dev/null .env)"', "and a text searcher's"),
+    ('gh pr comment 807 --body "$(git diff --no-index /dev/null .env)"', "a prose value's substitution runs before gh starts"),
+    ('gh pr comment 807 -b"$(git log >cosign.pub)"', "attached to the short option too"),
+    ("gh pr create -tx 'git diff --no-index /dev/null .env'", "the title x is attached, so the next word is not the title"),
+    ("gh pr view 807 b 'git diff --no-index /dev/null .env'", "a positional word starting with b is no option, and gives the next word no prose value"),
+    ("./gh pr create --title 'git diff --no-index /dev/null .env'", "a gh spelled as a path is some other file, read like any program"),
+    ("rg --pre 'git diff --no-index /dev/null .env' x docs", "ripgrep runs the --pre program on each file it searches"),
+    ("rg --hostname-bin='git diff --no-index /dev/null .env' x", "ripgrep runs the --hostname-bin program for its hyperlinks"),
+    ("ag --pager='git diff --no-index /dev/null .env' x", "ag starts its pager through the shell"),
+    ("ag --pag='git diff --no-index /dev/null .env' x", "ag takes an unambiguous prefix of --pager"),
+    ("rg -e -- --pre='git diff --no-index /dev/null .env' x", "-e takes the `--` as its pattern, so --pre is still an option"),
+    ("./rg 'git diff --no-index /dev/null .env' docs", "a searcher spelled as a path is some other file"),
     ("git diff --no-index /dev/null ./cosign.key", "reads any file on disk"),
     ("git diff --no-index a b", "reads any file on disk"),
     ("git diff --output=/tmp/out --no-index a b", "writes any file"),
@@ -494,6 +511,32 @@ ALLOWED_COMMANDS = (
     "bash -c 'git diff HEAD~1'",
     "sh -c 'git status'",
     "rg 'git diff' docs",
+    # A searcher without an option that starts a program reads its pattern as
+    # text, as grep does: searching the docs for a refused command is
+    # ordinary work in this repository.
+    "rg -n 'git diff --no-index' docs",
+    "rg -F 'git diff -O' docs",
+    "rg -n 'shellcheck ./.env' docs/",
+    "ag 'git diff --no-index' docs",
+    "rg --hidden -n 'git diff --no-index' docs",
+    "ag --hidden 'git diff --no-index' docs",
+    # ripgrep takes no abbreviated flag: `--p` is rejected and nothing runs.
+    "rg --p 'git diff --no-index' docs",
+    # An argument-only program's words are read only for the substitutions
+    # bash runs in them, and gh's prose options are text it sends to GitHub.
+    "echo 'git diff --no-index /dev/null .env'",
+    'echo "plain $HOME text"',
+    'echo "$(date) ok"',
+    "gh pr comment 807 --body 'Plain `git log` is still allowed.'",
+    "gh pr create --title 'fix(gate): allow `git log -L`' --body x",
+    "gh pr create --title 'fix(gate): refuse git diff -O<file>' --body x",
+    "gh issue create --title 'gate: shellcheck ./.env prints the file' --body x",
+    "gh pr comment 807 --body 'Repro: shellcheck /etc/profile'",
+    "gh pr create -t 'refuse git diff -O<file>' -b 'mentions git log >cosign.pub'",
+    "gh pr create --title=x --body='see git diff --no-index a b'",
+    "gh pr create -t'fix: refuse git diff -O<file>' -bx",
+    "gh pr comment 807 -b 'Repro: shellcheck /etc/profile'",
+    "gh release create v1 --notes 'git diff --no-index is refused now'",
     "grep -rn 'git diff --no-index' docs/",
     "echo git diff --no-index /dev/null .env",
     "grep -rn \"git diff doesn't\" docs",

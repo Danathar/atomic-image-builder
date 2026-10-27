@@ -4773,6 +4773,14 @@ class App:
         if parsed is None or not command_exists("gh"):
             return None
         owner, repo = parsed
+        # Only the signed-in account's repos can be updated: select_repo lists
+        # `gh repo list <github_user>` and takes a typed name under that
+        # account too. Another person's tool-built image is, to this user, a
+        # stranger's custom image, and "Use 'Update Existing Image'" would be
+        # advice they cannot follow. GHCR lowercases the owner, so compare
+        # without case.
+        if not self.github_user or owner.lower() != self.github_user.lower():
+            return None
         try:
             return parsed if self.repo_has_state_file(owner, repo) else None
         except (CommandError, OSError):
@@ -7717,8 +7725,14 @@ class App:
 
         managed_path(base_dir, "build_files").mkdir(parents=True, exist_ok=True)
         # A regenerated Containerfile COPYs system_files into ctx, so the
-        # directory has to exist even when the user has no overlay yet.
+        # directory has to exist even when the user has no overlay yet -- and
+        # exist in the pushed commit, not only on disk: git does not track an
+        # empty directory, so CI's checkout would lack it and the COPY would
+        # fail. The bundled snapshot ships .gitkeep files for the same reason;
+        # a repo created before it did (a7eacc7) has none.
         managed_path(base_dir, "system_files").mkdir(parents=True, exist_ok=True)
+        if not any(managed_path(base_dir, "system_files").iterdir()):
+            managed_path(base_dir, "system_files/.gitkeep").write_text("")
         existing_containerfile = containerfile_path.read_text() if containerfile_path.exists() else None
         containerfile_path.write_text(self.render_containerfile(existing_containerfile))
         build_sh = managed_path(base_dir, "build_files/build.sh")
