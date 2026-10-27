@@ -18,6 +18,7 @@ from variant_boot_test import (
     ALLOWED_FAILED_UNITS,
     BLUEBUILD,
     BOOT_TIMEOUT_SECONDS,
+    BUILD_RETRY_PAUSE_SECONDS,
     BUILD_TIMEOUT_SECONDS,
     CONTAINERFILE,
     GUEST_SCRIPT_MOUNT,
@@ -204,11 +205,16 @@ class BuildTests(unittest.TestCase):
         # subprocess keeps a timed-out command's output as bytes even with
         # text=True; formatting them wrote b'...' with escaped newlines.
         timeout = subprocess.TimeoutExpired(["podman"], 1, output=b"[2/2] STEP 2/4: RUN /ctx/build.sh\nInstalling tmux\n")
-        with tempfile.TemporaryDirectory() as tmp, patch("variant_boot_test.subprocess.run", side_effect=timeout):
+        with tempfile.TemporaryDirectory() as tmp, patch("variant_boot_test.subprocess.run", side_effect=timeout) as run, patch(
+            "variant_boot_test.time.sleep"
+        ) as sleep:
             with self.assertRaises(StageFailure) as caught:
                 build(Slot(base_by_key("bazzite"), CONTAINERFILE), Path(tmp), Path(tmp) / "build.log")
             self.assertTrue((Path(tmp) / "build.log").read_text().startswith("[2/2] STEP 2/4: RUN /ctx/build.sh\nInstalling tmux\n"))
-        self.assertIn("at `[2/2] STEP 2/4: RUN /ctx/build.sh`", caught.exception.summary)
+        # A hung build used its whole budget; there is nothing left to retry with.
+        self.assertEqual(run.call_count, 1)
+        sleep.assert_not_called()
+        self.assertIn("podman build failed (exit -1) at `[2/2] STEP 2/4: RUN /ctx/build.sh`", caught.exception.summary)
         self.assertIn("timed out after", caught.exception.log_tail)
 
     def test_a_timed_out_build_keeps_its_stderr_and_bytes_that_are_not_utf8(self) -> None:
@@ -236,20 +242,37 @@ class BuildTests(unittest.TestCase):
         )
         good = f"[2/2] STEP 1/3: FROM {uri}\n"
         runs = [subprocess.CompletedProcess([], 125, "", dropped), subprocess.CompletedProcess([], 0, good, "")]
+        # The clock reads: the build starts, the first try fails 100 seconds
+        # in, and the retry's timeout is taken at that same moment.
         with tempfile.TemporaryDirectory() as tmp, patch("variant_boot_test.subprocess.run", side_effect=runs) as run, patch(
             "variant_boot_test.time.sleep"
-        ) as sleep:
+        ) as sleep, patch("variant_boot_test.time.monotonic", side_effect=[5000.0, 5100.0, 5100.0]):
             build(Slot(base_by_key("kinoite"), CONTAINERFILE), Path(tmp), Path(tmp) / "build.log")
             log = (Path(tmp) / "build.log").read_text()
             reference = base_reference(base_by_key("kinoite"), Path(tmp) / "build.log")
         self.assertEqual(run.call_count, 2)
-        sleep.assert_called_once()
+        sleep.assert_called_once_with(BUILD_RETRY_PAUSE_SECONDS)
         # The first try gets the whole budget; the retry only what is left of it.
-        self.assertEqual(run.call_args_list[0].kwargs["timeout"], BUILD_TIMEOUT_SECONDS)
-        self.assertLess(run.call_args_list[1].kwargs["timeout"], BUILD_TIMEOUT_SECONDS)
-        self.assertIn("unexpected EOF", log)
-        self.assertTrue(log.endswith(good))
+        self.assertEqual([call.kwargs["timeout"] for call in run.call_args_list], [BUILD_TIMEOUT_SECONDS, BUILD_TIMEOUT_SECONDS - 100])
+        self.assertEqual(log, dropped + "\n--- build attempt 2 ---\n" + good)
         self.assertEqual(reference, uri)
+
+    def test_a_dropped_base_pull_is_not_retried_without_time_for_the_pause(self) -> None:
+        # Exactly the pause left: the retry would start with no time to build in.
+        uri = base_by_key("kinoite").image_uri
+        dropped = f"[2/2] STEP 1/3: FROM {uri}\nunexpected EOF\n"
+        elapsed = BUILD_TIMEOUT_SECONDS - BUILD_RETRY_PAUSE_SECONDS
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "variant_boot_test.subprocess.run", return_value=subprocess.CompletedProcess([], 125, "", dropped)
+        ) as run, patch("variant_boot_test.time.sleep") as sleep, patch(
+            "variant_boot_test.time.monotonic", side_effect=[5000.0, 5000.0 + elapsed]
+        ):
+            with self.assertRaises(StageFailure) as caught:
+                build(Slot(base_by_key("kinoite"), CONTAINERFILE), Path(tmp), Path(tmp) / "build.log")
+            self.assertEqual((Path(tmp) / "build.log").read_text(), dropped)
+        self.assertEqual(run.call_count, 1)
+        sleep.assert_not_called()
+        self.assertIn("unexpected EOF", caught.exception.log_tail)
 
     def test_a_base_pull_dropped_twice_fails_with_the_retrys_output(self) -> None:
         uri = base_by_key("kinoite").image_uri
@@ -337,7 +360,11 @@ class BuildTests(unittest.TestCase):
         self.assertIn("--pull=always", command)
         self.assertIn("--no-cache", command)
         self.assertEqual(command[-3:], ["-t", slot.tag, tmp])
-        self.assertEqual(run.call_args.kwargs["timeout"], BUILD_TIMEOUT_SECONDS)
+        # Text output to read the steps from; a failed build is reported, not raised.
+        self.assertEqual(
+            run.call_args.kwargs,
+            {"capture_output": True, "text": True, "errors": "replace", "check": False, "timeout": BUILD_TIMEOUT_SECONDS},
+        )
 
     def test_a_reference_podman_cannot_inspect_has_no_digest(self) -> None:
         with patch("variant_boot_test.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "sha256:abc\n", "")):

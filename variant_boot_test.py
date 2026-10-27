@@ -368,7 +368,8 @@ def build(slot: Slot, context: Path, log_path: Path) -> None:
             proc = subprocess.run(command, capture_output=True, text=True, errors="replace", check=False, timeout=timeout)
             output = proc.stdout + proc.stderr
             returncode = proc.returncode
-            retryable = returncode != 0 and pulling_base_dropped(output)
+            # Read only when the build failed; a good build returns below.
+            retryable = pulling_base_dropped(output)
         except subprocess.TimeoutExpired as exc:
             output = timed_out_output(exc) + f"\npodman build timed out after {BUILD_TIMEOUT_SECONDS}s"
             returncode = -1
