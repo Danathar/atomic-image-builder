@@ -226,6 +226,71 @@ class BuildTests(unittest.TestCase):
         self.assertTrue(log.startswith("[2/2] STEP 2/4: RUN /ctx/build.sh\nError: \ufffd stalled\n"))
         self.assertIn("Error: \ufffd stalled", caught.exception.log_tail)
 
+    def test_a_base_pull_the_registry_dropped_is_retried_once_and_a_good_retry_passes(self) -> None:
+        uri = base_by_key("kinoite").image_uri
+        dropped = (
+            f"[2/2] STEP 1/3: FROM {uri}\n"
+            f'Error: creating build container: unable to copy from source docker://{uri}: '
+            'copying system image from manifest list: writing blob: happened during read: unexpected EOF '
+            '(while reconnecting: Get "https://cdn01.quay.io/...": EOF)\n'
+        )
+        good = f"[2/2] STEP 1/3: FROM {uri}\n"
+        runs = [subprocess.CompletedProcess([], 125, "", dropped), subprocess.CompletedProcess([], 0, good, "")]
+        with tempfile.TemporaryDirectory() as tmp, patch("variant_boot_test.subprocess.run", side_effect=runs) as run, patch(
+            "variant_boot_test.time.sleep"
+        ) as sleep:
+            build(Slot(base_by_key("kinoite"), CONTAINERFILE), Path(tmp), Path(tmp) / "build.log")
+            log = (Path(tmp) / "build.log").read_text()
+            reference = base_reference(base_by_key("kinoite"), Path(tmp) / "build.log")
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once()
+        self.assertIn("unexpected EOF", log)
+        self.assertTrue(log.endswith(good))
+        self.assertEqual(reference, uri)
+
+    def test_a_base_pull_dropped_twice_fails_with_the_retrys_output(self) -> None:
+        uri = base_by_key("kinoite").image_uri
+        first = f"[2/2] STEP 1/3: FROM {uri}\nunexpected EOF\n"
+        second = f"[2/2] STEP 1/3: FROM {uri}\nread tcp: connection reset by peer\n"
+        runs = [subprocess.CompletedProcess([], 125, "", first), subprocess.CompletedProcess([], 125, "", second)]
+        with tempfile.TemporaryDirectory() as tmp, patch("variant_boot_test.subprocess.run", side_effect=runs) as run, patch(
+            "variant_boot_test.time.sleep"
+        ):
+            with self.assertRaises(StageFailure) as caught:
+                build(Slot(base_by_key("kinoite"), CONTAINERFILE), Path(tmp), Path(tmp) / "build.log")
+            log = (Path(tmp) / "build.log").read_text()
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(caught.exception.stage, "build")
+        self.assertIn("exit 125", caught.exception.summary)
+        self.assertIn("connection reset by peer", caught.exception.log_tail)
+        self.assertNotIn("unexpected EOF", caught.exception.log_tail)
+        self.assertIn("unexpected EOF", log)
+        self.assertIn("connection reset by peer", log)
+
+    def test_a_transport_error_after_the_pull_is_not_retried(self) -> None:
+        # A RUN step that reaches a flaky mirror is a failure of the image.
+        log = "[2/2] STEP 1/3: FROM x\n[2/2] STEP 2/3: RUN /ctx/build.sh\nCurl error: i/o timeout\n"
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "variant_boot_test.subprocess.run", return_value=subprocess.CompletedProcess([], 1, log, "")
+        ) as run, patch("variant_boot_test.time.sleep") as sleep:
+            with self.assertRaises(StageFailure) as caught:
+                build(Slot(base_by_key("kinoite"), CONTAINERFILE), Path(tmp), Path(tmp) / "build.log")
+        self.assertEqual(run.call_count, 1)
+        sleep.assert_not_called()
+        self.assertIn("RUN /ctx/build.sh", caught.exception.summary)
+
+    def test_a_base_pull_refused_by_the_registry_is_not_retried(self) -> None:
+        uri = base_by_key("kinoite").image_uri
+        log = f"[2/2] STEP 1/3: FROM {uri}\nError: manifest unknown\n"
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "variant_boot_test.subprocess.run", return_value=subprocess.CompletedProcess([], 125, "", log)
+        ) as run, patch("variant_boot_test.time.sleep") as sleep:
+            with self.assertRaises(StageFailure) as caught:
+                build(Slot(base_by_key("kinoite"), CONTAINERFILE), Path(tmp), Path(tmp) / "build.log")
+        self.assertEqual(run.call_count, 1)
+        sleep.assert_not_called()
+        self.assertIn("manifest unknown", caught.exception.log_tail)
+
     def test_the_base_digest_is_read_from_the_reference_the_build_pulled(self) -> None:
         # The BlueBuild case is the first lines of budgie-atomic's build log
         # from the first hosted run: the rendered Containerfile says
