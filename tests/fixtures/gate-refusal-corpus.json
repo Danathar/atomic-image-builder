@@ -322,6 +322,36 @@
       "why": "git blame --contents prints every line of the named file"
     },
     {
+      "id": "skopeo-registries-conf",
+      "class": "option that reads a file",
+      "verdict": "refuse",
+      "requires": [
+        "skopeo inspect"
+      ],
+      "command": "skopeo inspect --registries-conf ./.env docker://x",
+      "why": "skopeo parses the file as TOML and its error quotes the first NAME=value line it cannot read, key and value"
+    },
+    {
+      "id": "skopeo-registries-conf-attached",
+      "class": "option that reads a file",
+      "verdict": "refuse",
+      "requires": [
+        "skopeo inspect"
+      ],
+      "command": "skopeo inspect --registries-conf=./.env docker://x",
+      "why": "the attached spelling of the same option"
+    },
+    {
+      "id": "allow-skopeo-inspect",
+      "class": "ordinary use",
+      "verdict": "allow",
+      "requires": [
+        "skopeo inspect"
+      ],
+      "command": "skopeo inspect --no-tags docker://ghcr.io/x:latest",
+      "why": "inspecting an image by name reads no local file"
+    },
+    {
       "id": "gh-jq-env",
       "class": "gh --jq environment",
       "verdict": "refuse",

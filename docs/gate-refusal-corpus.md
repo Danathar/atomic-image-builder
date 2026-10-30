@@ -144,6 +144,15 @@ removes it before it reads a word, so the string runs git. A gate that joins
 continuations only in the top-level command reads `gi` and `t` and finds no
 git. This gate also reads each command string with its pairs joined.
 
+Two `option that reads a file` rows hand `skopeo inspect` the `.env` as its
+registries file, with `--registries-conf ./.env` and with
+`--registries-conf=./.env`. skopeo reads that file as TOML before it contacts a
+registry, and its error names the last key it read and quotes the value it
+could not, so the command prints a `.env` line back. A gate that refuses
+`CONTAINERS_REGISTRIES_CONF=` but not the option lets the same file through
+under the `skopeo inspect` allow row. `allow-skopeo-inspect` keeps a gate from
+refusing an ordinary image lookup.
+
 The `push` rows
 ([#803](https://github.com/Danathar/atomic-image-builder/issues/803),
 approved on
