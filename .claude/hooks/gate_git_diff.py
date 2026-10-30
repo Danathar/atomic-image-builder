@@ -467,6 +467,28 @@ def podman_profile_option(words: list[str]) -> str | None:
     return None
 
 
+# skopeo's option for the registries file, the one CONTAINERS_REGISTRIES_CONF
+# names in REFUSED_ENVIRONMENT. `skopeo inspect` takes it after the subcommand,
+# so `skopeo inspect --registries-conf ./.env docker://x` matches the
+# `skopeo inspect:*` allow row on its prefix, and skopeo parses the file as
+# TOML before it contacts a registry: the error names the last key it read and
+# quotes the bare value it could not, `(last key "API_TOKEN"): expected value
+# but found "sekretvalue" instead`, so a `.env` line comes back key and value.
+# Both the detached and the attached (`--registries-conf=FILE`) spellings are
+# refused; skopeo's flag parser takes no abbreviation of a long option, and
+# nothing in this repository passes the option.
+SKOPEO_CONFIG_OPTIONS = ("--registries-conf",)
+
+
+def skopeo_config_option(words: list[str]) -> str | None:
+    """The first word in a skopeo invocation that names one of
+    SKOPEO_CONFIG_OPTIONS, in either spelling, or None."""
+    for word in words:
+        if word.split("=", 1)[0] in SKOPEO_CONFIG_OPTIONS:
+            return word
+    return None
+
+
 # gh evaluates its --jq (-q) filter with gojq, and gojq's `env` builtin and
 # `$ENV` variable are the whole process environment: `gh label list --json
 # name --jq env` prints GH_TOKEN and every other exported variable under the
@@ -3675,6 +3697,18 @@ def typed_refusal(command: str) -> str | None:
                         "the prefix and nothing prompts -- it is the write this hook "
                         f"refuses for `{' '.join(prefix)} >cosign.pub`, spelled as an "
                         "option. Run the command without the profile option"
+                    )
+            if prefix[0] == "skopeo":
+                option = skopeo_config_option(invocation.words)
+                if option is not None:
+                    return (
+                        f"{option} hands skopeo a registries file of the caller's "
+                        "choosing, which skopeo parses as TOML before it contacts a "
+                        "registry and quotes back on error -- `--registries-conf ./.env` "
+                        "prints the .env's key and value -- and re-points where image "
+                        "names resolve, the reach CONTAINERS_REGISTRIES_CONF= is refused "
+                        f"for; the `{' '.join(prefix)}` allow row matches the prefix, so "
+                        "nothing prompts. Run the command without the option"
                     )
             if prefix[0] == "gh":
                 env_filter = gh_jq_env_filter(invocation.words, invocation.twins)
