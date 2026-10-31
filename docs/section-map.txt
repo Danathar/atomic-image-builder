@@ -251,7 +251,7 @@
 ## From source
   prose: narrative: install steps from a checkout; the issue templates cite the heading, nothing reads the text
 ## Command-line options
-  prose: unchecked: the flag table; nothing compares it to the tool's argument parser
+  joined: tests/test_atomic_image_builder.py
 ## If a container package with that name already exists
   prose: narrative: GitHub's package-permission behaviour and how to clear it
 

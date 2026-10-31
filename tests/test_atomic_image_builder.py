@@ -12754,6 +12754,64 @@ class BuilderTests(unittest.TestCase):
         )
         self.assertIn("bleeding edge", installing)
 
+    def test_installing_docs_option_table_matches_the_tool(self) -> None:
+        # docs/installing.md's "Command-line options" table is the only place a
+        # user is told what the tool accepts, and main() refuses anything else
+        # with exit 2. The table is a hand copy of usage_text(), so an option
+        # added, dropped or respelled on either side leaves a reader typing a
+        # flag the tool rejects. Each documented option must also do what its
+        # row says: print and exit 0 without starting the wizard.
+        installing = (Path(__file__).resolve().parents[1] / "docs/installing.md").read_text()
+        section = re.search(r"^## Command-line options\n(.*?)(?=^## |^---$)", installing, re.M | re.S)
+        self.assertIsNotNone(section)
+        rows = re.findall(r"^\| (`[^|]*`) +\| ([^|]*?) +\|$", section.group(1), re.M)
+        documented = {tuple(re.findall(r"`([^`]+)`", cell)): what for cell, what in rows}
+        usage = atomic_image_builder.usage_text()
+        listed = {
+            tuple(m.group(1).split(", "))
+            for m in re.finditer(r"^  (-\S+(?:, -\S+)*)  ", usage.split("Options:\n", 1)[1], re.M)
+        }
+        self.assertEqual(set(documented), listed)
+        for group, what in documented.items():
+            self.assertTrue(what.endswith(" and exit."), (group, what))
+        expected = {
+            "-h": usage,
+            "--help": usage,
+            "-V": f"{atomic_image_builder.TOOL_COMMAND} {VERSION}",
+            "--version": f"{atomic_image_builder.TOOL_COMMAND} {VERSION}",
+        }
+        for option in (option for group in documented for option in group):
+            buffer = io.StringIO()
+            with self.subTest(option=option):
+                with patch("sys.argv", ["aib-tool", option]):
+                    with patch.object(atomic_image_builder, "App") as app_cls:
+                        with redirect_stdout(buffer):
+                            with self.assertRaises(SystemExit) as raised:
+                                atomic_image_builder.main()
+                self.assertEqual(raised.exception.code, 0)
+                self.assertEqual(buffer.getvalue(), expected[option] + "\n")
+                app_cls.assert_not_called()
+
+    def test_installing_docs_name_the_command_each_install_puts_on_path(self) -> None:
+        # The same section tells a reader what to type after installing. The
+        # names come from three places that do not import each other: the
+        # wrapper file, the Formula's symlink and the container image's link.
+        root = Path(__file__).resolve().parents[1]
+        installing = (root / "docs/installing.md").read_text()
+        section = re.search(r"^## Command-line options\n(.*?)(?=^## |^---$)", installing, re.M | re.S)
+        self.assertIsNotNone(section)
+        prose = " ".join(section.group(1).split())
+        command = atomic_image_builder.TOOL_COMMAND
+        self.assertIn(
+            f"`aib` for the container wrapper, `{command}` for the Homebrew install and inside the container image",
+            prose,
+        )
+        self.assertIn("`./atomic_image_builder.py` from a source checkout", prose)
+        self.assertTrue((root / "contrib/aib").is_file())
+        self.assertIn(f'=> "{command}"', (root / "Formula/atomic-image-builder.rb").read_text())
+        self.assertIn(f"/usr/local/bin/{command}\n", (root / "Containerfile").read_text())
+        self.assertTrue(os.access(root / "atomic_image_builder.py", os.X_OK))
+
     def test_documented_wrapper_install_gates_on_the_checksum(self) -> None:
         # The assertions above check that `sha256sum -c -` is present. Present
         # is not the same as load-bearing: the block is pasted into an
