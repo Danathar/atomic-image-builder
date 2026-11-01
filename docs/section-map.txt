@@ -241,7 +241,7 @@
 ### Plain `podman run`
   joined: tests/test_atomic_image_builder.py
 ### Verifying the image
-  prose: unchecked: the wrapper's refusals when cosign is missing or old, and AIB_SKIP_VERIFY; tests/test_contrib_aib.sh tests the wrapper, not this table
+  joined: tests/test_atomic_image_builder.py
 ### Credentials follow the signature
   joined: tests/test_atomic_image_builder.py
 ### Distrobox
