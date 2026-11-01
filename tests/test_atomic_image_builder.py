@@ -12717,6 +12717,116 @@ class BuilderTests(unittest.TestCase):
         for source in (wrapper, installing):
             self.assertIn("https://token.actions.githubusercontent.com", source)
 
+    def test_installing_docs_verify_table_matches_the_wrapper(self) -> None:
+        # docs/installing.md's "Verifying the image" table is what a user reads
+        # to learn when the wrapper refuses to run and which command gets them
+        # going again. tests/test_contrib_aib.sh tests the wrapper; nothing
+        # read the table, so a row could name a command the wrapper never
+        # prints, or a cosign version it does not refuse, and stay green. This
+        # runs the wrapper once per row, with the row's own command and
+        # version, and checks it does what the row says.
+        root = Path(__file__).resolve().parents[1]
+        installing = (root / "docs/installing.md").read_text()
+        section = installing.split("### Verifying the image\n", 1)[1].split("\n### ", 1)[0]
+        rows = {}
+        for line in section.splitlines():
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if line.startswith("|") and len(cells) == 2 and cells[0] != "Situation" and cells[0].strip("-"):
+                rows[cells[0]] = cells[1]
+        self.assertEqual(
+            set(rows),
+            {
+                "`cosign` not installed",
+                "`cosign` older than 3",
+                "Offline, or you want to opt out",
+                "`AIB_IMAGE` points at your own build",
+            },
+            "a row was added, removed or renamed; give it a scenario below",
+        )
+        # The row set above pins the documented floor; the scenarios below
+        # hold the wrapper to it from both sides.
+        floor = 3
+        digest = "sha256:" + "1" * 64
+
+        def run_wrapper(cosign_version: str | None, extra_env: dict[str, str]) -> tuple[int, str, str, str]:
+            with tempfile.TemporaryDirectory() as tmp:
+                stub_bin = Path(tmp) / "bin"
+                stub_bin.mkdir()
+                for tool in ("bash", "env", "mktemp", "rm"):
+                    (stub_bin / tool).symlink_to(shutil.which(tool))
+                (stub_bin / "podman").write_text(
+                    "#!/usr/bin/env bash\n"
+                    'case "$1" in\n'
+                    "  pull) exit 0 ;;\n"
+                    f"  image) printf %s {digest}; exit 0 ;;\n"
+                    "esac\n"
+                    f'printf "%s " "$@" > {tmp}/run.log\n'
+                )
+                if cosign_version is not None:
+                    (stub_bin / "cosign").write_text(
+                        "#!/usr/bin/env bash\n"
+                        f'printf "%s " "$@" >> {tmp}/cosign.log\n'
+                        f'[ "$1" = version ] && printf \'{{"gitVersion": "%s"}}\' {cosign_version}\n'
+                        "exit 0\n"
+                    )
+                for stub in stub_bin.iterdir():
+                    if not stub.is_symlink():
+                        stub.chmod(0o755)
+                env = {
+                    key: value
+                    for key, value in os.environ.items()
+                    if not key.startswith("AIB_") and key != "GH_TOKEN"
+                }
+                env.update(PATH=str(stub_bin), HOME=tmp, **extra_env)
+                result = subprocess.run(
+                    ["bash", str(root / "contrib/aib")], env=env, capture_output=True, text=True
+                )
+                ran = Path(tmp, "run.log").read_text() if Path(tmp, "run.log").exists() else ""
+                cosign = Path(tmp, "cosign.log").read_text() if Path(tmp, "cosign.log").exists() else ""
+                return result.returncode, result.stderr, ran, cosign
+
+        def check(situation: str, cosign_version: str | None, extra_env: dict[str, str]) -> tuple[str, str, str]:
+            happens = rows[situation]
+            status, stderr, ran, cosign = run_wrapper(cosign_version, extra_env)
+            if "refuses to run" in happens:
+                self.assertNotEqual(status, 0, situation)
+                self.assertEqual(ran, "", f"{situation}: the row says it refuses, but podman run was called")
+            else:
+                self.assertEqual(status, 0, f"{situation}: {stderr}")
+                self.assertNotEqual(ran, "", f"{situation}: the row says it runs, but podman run was not called")
+            # Every command a row names must be one the wrapper prints for the
+            # reader to copy, not merely a word somewhere in its output.
+            for command in re.findall(r"`(brew [^`]+)`", happens):
+                self.assertIn(f"aib:   {command}\n", stderr, situation)
+            return stderr, ran, cosign
+
+        check("`cosign` not installed", None, {})
+
+        stderr, _, _ = check("`cosign` older than 3", f"v{floor - 1}.9.9", {})
+        self.assertIn(f"v{floor - 1}.9.9", stderr)
+        # The floor itself is not "older than" it: that version reaches the
+        # signature check and runs the digest it verified.
+        status, stderr, ran, cosign = run_wrapper(f"v{floor}.0.0", {})
+        self.assertEqual(status, 0, stderr)
+        self.assertIn("verify ", cosign)
+        self.assertIn(f"@{digest} ", ran)
+
+        opt_out = re.search(r"`((AIB_SKIP_VERIFY)=(\S+)) aib`", rows["Offline, or you want to opt out"])
+        self.assertIsNotNone(opt_out, "the opt-out row no longer names its command")
+        stderr, ran, cosign = check(
+            "Offline, or you want to opt out", f"v{floor}.0.0", {opt_out.group(2): opt_out.group(3)}
+        )
+        self.assertIn("warns loudly", rows["Offline, or you want to opt out"])
+        self.assertIn("aib: WARNING - AIB_SKIP_VERIFY is set", stderr)
+        self.assertEqual(cosign, "", "the opt-out row says unverified, but cosign was asked")
+        self.assertNotIn(f"@{digest}", ran)
+
+        own = "localhost/my-aib:latest"
+        stderr, ran, cosign = check("`AIB_IMAGE` points at your own build", f"v{floor}.0.0", {"AIB_IMAGE": own})
+        self.assertIn("Not verified", rows["`AIB_IMAGE` points at your own build"])
+        self.assertEqual(cosign, "", "an own build is not verified, but cosign was asked")
+        self.assertIn(f" {own} ", ran)
+
     def test_release_wrapper_assets_match_what_the_docs_download(self) -> None:
         # publish-wrapper.yml names the files; the docs name the URLs they are
         # fetched from. A rename on either side leaves the documented install
