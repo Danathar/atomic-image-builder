@@ -52,7 +52,21 @@ SIGN_STEP = "Sign the published image"
 COSIGN_STUB = """#!/usr/bin/env bash
 printf '%s\\t' "$@" >> "$STUB_LOG"
 printf '\\n' >> "$STUB_LOG"
+# STUB_COSIGN_FAILS=N fails the first N invocations and then succeeds, which is
+# how a Rekor 409 on a retried upload looks from the outside.
+if [ -n "${STUB_COSIGN_FAILS:-}" ]; then
+    calls=$(wc -l < "$STUB_LOG")
+    if [ "$calls" -le "$STUB_COSIGN_FAILS" ]; then
+        exit 1
+    fi
+    exit 0
+fi
 exit "${STUB_COSIGN_EXIT:-0}"
+"""
+
+# The retry waits between attempts; the case must not.
+SLEEP_STUB = """#!/usr/bin/env bash
+exit 0
 """
 
 
@@ -205,6 +219,7 @@ class SignStepTests(unittest.TestCase):
         image: str = "ghcr.io/danathar/atomic-image-builder",
         digest: str = "sha256:" + "ab" * 32,
         cosign_exit: int = 0,
+        cosign_fails: int | None = None,
     ) -> tuple[subprocess.CompletedProcess, list[list[str]]]:
         script = step_run_body(PUBLISH_WORKFLOW, SIGN_STEP)
         with tempfile.TemporaryDirectory() as tmp:
@@ -214,6 +229,9 @@ class SignStepTests(unittest.TestCase):
             cosign_stub = fake_bin / "cosign"
             cosign_stub.write_text(COSIGN_STUB)
             cosign_stub.chmod(0o755)
+            sleep_stub = fake_bin / "sleep"
+            sleep_stub.write_text(SLEEP_STUB)
+            sleep_stub.chmod(0o755)
             log = tmp_path / "cosign.log"
             log.touch()
 
@@ -223,6 +241,8 @@ class SignStepTests(unittest.TestCase):
             env["DIGEST"] = digest
             env["STUB_LOG"] = str(log)
             env["STUB_COSIGN_EXIT"] = str(cosign_exit)
+            if cosign_fails is not None:
+                env["STUB_COSIGN_FAILS"] = str(cosign_fails)
 
             proc = subprocess.run(
                 ["bash", "-c", script],
@@ -269,6 +289,26 @@ class SignStepTests(unittest.TestCase):
         # signature before it will run the image.
         proc, calls = self.run_sign_step(cosign_exit=1)
         self.assertNotEqual(proc.returncode, 0)
+        # Bounded: three attempts, then the step gives up.
+        self.assertEqual(len(calls), 3)
+
+    def test_a_rejected_upload_is_retried_and_the_retry_signs_the_same_digest(self) -> None:
+        # Rekor answered 409 to a duplicate upload of a log entry whose first
+        # POST had timed out but landed (#839), and the image shipped unsigned.
+        # A second `cosign sign` makes fresh keys and a distinct entry.
+        digest = "sha256:" + "ef" * 32
+        proc, calls = self.run_sign_step(digest=digest, cosign_fails=1)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        reference = f"ghcr.io/danathar/atomic-image-builder@{digest}"
+        self.assertEqual(calls, [["sign", "-y", reference]] * 2)
+
+    def test_a_success_on_the_last_attempt_passes_the_step(self) -> None:
+        proc, calls = self.run_sign_step(cosign_fails=2)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(calls), 3)
+
+    def test_a_first_try_success_is_not_repeated(self) -> None:
+        _, calls = self.run_sign_step()
         self.assertEqual(len(calls), 1)
 
     def test_an_unset_digest_fails_rather_than_signing_the_bare_image(self) -> None:
