@@ -117,10 +117,28 @@ jobs:
       # resolves a tag to anyway. Keyless signing publishes the certificate to
       # the public Rekor transparency log; the entry records the repository,
       # workflow path and commit, all already public here.
+      #
+      # Signing is retried because Rekor can answer 409 to a duplicate upload:
+      # cosign's first POST of the log entry times out client-side but lands,
+      # its own HTTP retry re-sends the same entry, and the signature fails
+      # although the log has it (#839). A new `cosign sign` invocation makes
+      # new ephemeral keys, so its entry is distinct and does not conflict.
+      # Bounded, and still fatal: `contrib/aib` refuses an unsigned image.
       - name: Sign the published image
         env:
           IMAGE: ghcr.io/${{ steps.meta.outputs.owner_lc }}/atomic-image-builder
           DIGEST: ${{ steps.push-to-ghcr.outputs.digest }}
         run: |
           set -euo pipefail
-          cosign sign -y "${IMAGE}@${DIGEST}"
+          reference="${IMAGE}@${DIGEST}"
+          attempts=3
+          for attempt in $(seq 1 "${attempts}"); do
+            if cosign sign -y "${reference}"; then
+              exit 0
+            fi
+            echo "cosign sign failed (attempt ${attempt} of ${attempts})" >&2
+            if [ "${attempt}" -lt "${attempts}" ]; then
+              sleep 10
+            fi
+          done
+          exit 1
