@@ -58,13 +58,14 @@ TARGETS = {
     "maintenance_audit.py": (
         "test_architecture_doc",
         "test_correction_memory",
+        "test_maintainer_snapshot_drift_doc",
         "test_maintenance_audit",
         "test_network_error_contract",
         "test_security_ai_doc",
         "test_snapshot_drift_issue",
     ),
     "mutation_check.py": ("test_mutation_check",),
-    "snapshot_drift_issue.py": ("test_snapshot_drift_issue",),
+    "snapshot_drift_issue.py": ("test_maintainer_snapshot_drift_doc", "test_snapshot_drift_issue"),
     "variant_boot_test.py": ("test_variant_boot_test",),
 }
 
