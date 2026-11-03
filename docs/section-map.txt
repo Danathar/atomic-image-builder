@@ -367,7 +367,7 @@
 ## Reading the weekly audit
   joined: tests/test_prompt_catalog.py
 ### Advisory → failure: the bundled template snapshot trails upstream
-  prose: unchecked: the drift threshold at which the advisory becomes a failure
+  joined: tests/test_maintainer_snapshot_drift_doc.py
 ### Advisory: a pin no longer matches its tag or branch
   prose: unchecked: what maintenance_audit.py reports for a moved pin
 ### Advisory: the formula pin
