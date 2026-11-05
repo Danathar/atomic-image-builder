@@ -243,6 +243,14 @@ command that undoes it — `env -u AIB_IMAGE aib`, or `env -u AIB_SKIP_VERIFY ai
 the variable written in front of it, and there is then nothing left set to
 unset; the command above works either way.
 
+An unverified run also keeps its package metadata apart from a verified one, in
+the `aib-dnf-cache-unverified` volume instead of `aib-dnf-cache`. The tool reads
+that metadata offline and nothing signs it, so an image that could write the
+verified volume could choose what the next verified run reads, with your GitHub
+token in the same container. If you ran an unverified image with a wrapper that
+shared the volume, `podman volume rm aib-dnf-cache` clears it, and the next
+package search offers to download it again.
+
 To forward credentials anyway — iterating on your own build of this image is
 the case that needs it — say so explicitly:
 

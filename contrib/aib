@@ -97,6 +97,11 @@
 #       download on every run. Also a podman-managed named volume, so it
 #       never touches the host's own dnf caches.
 #
+#       An unverified run gets aib-dnf-cache-unverified instead. dnf5 reads
+#       this cache offline and unsigned, in the same container as GH_TOKEN, so
+#       a volume an unverified image can write is input that image chooses
+#       for the next verified run. See the package search block below.
+#
 #   -v <tmp file>:<path>:ro,Z  and  -e AIB_RPM_OSTREE_STATUS_FILE=<path>
 #       When the host has `rpm-ostree`, this script captures
 #       `rpm-ostree status --json` from the host (the container has no way
@@ -441,7 +446,20 @@ fi
 
 # --- Package search metadata ---------------------------------------------
 # The container runs as root, so dnf5 caches metadata under /var/cache/libdnf5.
-podman_args+=(-v "aib-dnf-cache:/var/cache/libdnf5")
+#
+# This follows verification and not forward_auth, because the risk runs the
+# other way from a credential: it is what an unverified image leaves behind,
+# not what it is given. The tool queries this cache with `dnf5 -C`, the
+# repositories set repo_gpgcheck=0, and libsolv treats a .solv file as its own
+# trusted output, so nothing checks what is here. AIB_ALLOW_UNVERIFIED_AUTH is
+# a decision about the login and does not make the image's writes trustworthy.
+# Unverified runs still get a cache of their own, because an offline run has
+# no other way to check package names.
+dnf_cache_volume="aib-dnf-cache"
+if [ "$verify_image" = no ]; then
+    dnf_cache_volume="aib-dnf-cache-unverified"
+fi
+podman_args+=(-v "$dnf_cache_volume:/var/cache/libdnf5")
 
 # --- Nice-to-haves ---------------------------------------------------------
 if [ -e /etc/localtime ]; then
