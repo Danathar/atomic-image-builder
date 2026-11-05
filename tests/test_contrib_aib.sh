@@ -953,10 +953,53 @@ test_always_present_args() {
     setup_stubs
     local args
     args="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_IMAGE=test/image:tag "$aib" foo --bar >/dev/null 2>&1; cat "$podman_log")"
-    assert_contains "$args" "aib-dnf-cache:/var/cache/libdnf5" "always present: dnf cache volume"
+    assert_contains "$args" ":/var/cache/libdnf5" "always present: dnf cache volume"
     assert_contains "$args" "test/image:tag" "always present: custom AIB_IMAGE used"
     assert_contains "$args" "foo" "always present: extra args forwarded"
     assert_contains "$args" "--bar" "always present: extra args forwarded (flag)"
+    cleanup_stubs
+}
+
+# --- dnf cache volume follows verification -----------------------------------
+# dnf5 reads this cache offline and unsigned in the container that holds
+# GH_TOKEN, so an image nobody checked must not be able to write the volume a
+# verified run reads. Each case names the exact mount, because the unverified
+# volume's name starts with the verified one's.
+test_verified_run_uses_the_shared_dnf_cache() {
+    setup_stubs
+    local args
+    args="$(PATH="$stub_dir" HOME="$stub_dir/home" env -u AIB_IMAGE "$aib" >/dev/null 2>&1; cat "$podman_log")"
+    assert_contains "$args" "aib-dnf-cache:/var/cache/libdnf5" "verified run: shared dnf cache"
+    assert_not_contains "$args" "aib-dnf-cache-unverified" "verified run: not the unverified cache"
+    cleanup_stubs
+}
+
+test_custom_image_cannot_write_the_verified_dnf_cache() {
+    setup_stubs
+    local args
+    args="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_IMAGE=test/image:tag "$aib" >/dev/null 2>&1; cat "$podman_log")"
+    assert_contains "$args" "aib-dnf-cache-unverified:/var/cache/libdnf5" "custom image: its own dnf cache"
+    assert_not_contains "$args" "aib-dnf-cache:" "custom image: never the verified dnf cache"
+    cleanup_stubs
+}
+
+test_skip_verify_cannot_write_the_verified_dnf_cache() {
+    setup_stubs
+    local args
+    args="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_SKIP_VERIFY=1 "$aib" >/dev/null 2>&1; cat "$podman_log")"
+    assert_contains "$args" "aib-dnf-cache-unverified:/var/cache/libdnf5" "skip verify: its own dnf cache"
+    assert_not_contains "$args" "aib-dnf-cache:" "skip verify: never the verified dnf cache"
+    cleanup_stubs
+}
+
+# Forwarding the login is a choice about the login. The image is as unchecked
+# as it was, so what it writes stays out of the verified cache.
+test_unverified_auth_opt_in_keeps_the_dnf_caches_apart() {
+    setup_stubs
+    local args
+    args="$(PATH="$stub_dir" HOME="$stub_dir/home" AIB_ALLOW_UNVERIFIED_AUTH=1 AIB_IMAGE=test/image:tag "$aib" >/dev/null 2>&1; cat "$podman_log")"
+    assert_contains "$args" "aib-dnf-cache-unverified:/var/cache/libdnf5" "auth opt-in: its own dnf cache"
+    assert_not_contains "$args" "aib-dnf-cache:" "auth opt-in: never the verified dnf cache"
     cleanup_stubs
 }
 
@@ -1177,6 +1220,10 @@ test_base_podman_flags
 test_localtime_mount
 test_localtime_absent
 test_always_present_args
+test_verified_run_uses_the_shared_dnf_cache
+test_custom_image_cannot_write_the_verified_dnf_cache
+test_skip_verify_cannot_write_the_verified_dnf_cache
+test_unverified_auth_opt_in_keeps_the_dnf_caches_apart
 test_default_image
 test_exit_code_preserved
 test_verified_path_pulls_before_running
