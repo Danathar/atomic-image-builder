@@ -94,6 +94,7 @@ from atomic_image_builder import (
     pin_action_uses_line,
     read_os_release_fields,
     remote_replacement_list,
+    signing_trust_names,
     string_list,
     workflow_job_ranges,
     yaml_scalar,
@@ -4419,6 +4420,53 @@ class BuilderTests(unittest.TestCase):
             any(level == "error" and "cosign keypair" in message for level, message in stub.messages)
         )
         self.assertEqual(stub.prompts, ["Press Enter to return to the update menu..."])
+
+    def test_rotate_signing_key_names_the_readme_key_path_and_machine_impact(self) -> None:
+        # The README tells each machine where to keep cosign.pub; rotation
+        # strands those copies, so its screens must name the same path and say
+        # what happens to machines that are not updated (#843).
+        app = self.make_app()
+        app.config.signing_enabled = True
+        app.config.github_user = "Example"
+        stub = GumStub()
+        prompts: list[tuple[str, bool]] = []
+
+        def confirm(prompt, default=True):
+            prompts.append((prompt, default))
+            return True
+
+        stub.confirm = confirm
+        app.gum = stub
+
+        def fake_run(args, *, cwd=None, env=None, check=True, capture=True, stdin=None):
+            if args[:2] == ["cosign", "generate-key-pair"]:
+                (cwd / "cosign.key").write_text("PRIVATE KEY")
+                (cwd / "cosign.pub").write_text("NEW PUBLIC KEY\n")
+            return subprocess.CompletedProcess(list(args), 0, "git-sha\n", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            self.init_signing_repo(repo_dir)
+            with patch("atomic_image_builder.command_exists", return_value=True):
+                with patch("atomic_image_builder.run", side_effect=fake_run):
+                    app.rotate_signing_key(repo_dir)
+
+        key_path = "/etc/pki/containers/example-test-image.pub"
+        self.assertEqual(signing_trust_names("Example", "test-image"), ("example-test-image", key_path))
+        self.assertEqual(len(prompts), 1)
+        self.assertFalse(prompts[0][1])
+        self.assertIn(
+            "machines already using this image will refuse every new image until the new key is installed on each one",
+            prompts[0][0],
+        )
+        warnings = "\n".join(message for level, message in stub.messages if level == "warn")
+        self.assertIn(f"sudo install -Dm0644 cosign.pub {key_path}", warnings)
+        self.assertIn("On every machine, from a fresh clone of this repository, before its next upgrade", warnings)
+        # The README names the same path and the symptom.
+        readme = app.generate_readme()
+        self.assertIn(key_path, readme)
+        self.assertIn(f"sudo install -Dm0644 cosign.pub {key_path}", readme)
+        self.assertIn("machines already using this image refuse every new image, so their upgrades fail", readme)
 
     def test_rotate_signing_key_warns_when_repo_cannot_be_identified(self) -> None:
         # Without an owner/repo there is nothing safe to rotate against.

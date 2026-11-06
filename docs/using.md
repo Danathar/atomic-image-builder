@@ -58,6 +58,12 @@ pull credentials for root before the switch works. See
   edits you made by hand to other files in your clone (for example under
   `files/system/`) are not part of the local test, while in CI they are.
 - The update menu can rotate the repo's cosign signing key and update `cosign.pub`.
+  Machines already using the image keep their own copy of the old public key,
+  so after a rotation they refuse every new image, and their upgrades fail,
+  until the new `cosign.pub` is installed on each one. Rotation prints the exact
+  `sudo install -Dm0644 cosign.pub /etc/pki/containers/<owner>-<repo>.pub`
+  command for your repository; run it on every machine, from a fresh clone,
+  before its next upgrade.
 - The disk-image workflow (`build-disk.yml`) and the local `just build-qcow2`
   both run `bootc-image-builder` by digest rather than by tag, for the same
   reason the Homebrew layer below is: it produces every qcow2 and installer ISO
