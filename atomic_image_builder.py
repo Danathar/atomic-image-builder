@@ -1187,6 +1187,21 @@ def ghcr_package_page_url(owner: str, repo: str) -> str:
     return f"https://github.com/{owner}/{repo}/pkgs/container/{repo.lower()}"
 
 
+def signing_trust_names(owner: str, repo: str) -> tuple[str, str]:
+    # The README's trust section and the key rotation screens both name the
+    # file a machine keeps its copy of cosign.pub in. They must agree, so both
+    # derive it here. Owner-qualified because /etc/pki/containers is
+    # machine-wide and two repositories with one name must not overwrite each
+    # other's key.
+    trust_basename = f"{owner.lower()}-{repo}"
+    return trust_basename, f"/etc/pki/containers/{trust_basename}.pub"
+
+
+ROTATION_MACHINES_REFUSE_NOTE = (
+    "machines already using this image will refuse every new image until the new key is installed on each one"
+)
+
+
 def open_url_in_browser(url: str) -> bool:
     # Fire and forget, with the browser's output thrown away. A GUI browser is
     # chatty on stderr -- Mesa, EGL and sandbox warnings -- and inheriting this
@@ -5065,7 +5080,8 @@ class App:
             self.gum.enter_to_continue(return_hint)
             return
         if not self.gum.confirm(
-            "Rotate the cosign signing key? Old signatures remain valid in the registry; re-pull or re-verify after rotation.",
+            "Rotate the cosign signing key? Old signatures remain valid in the registry, but "
+            f"{ROTATION_MACHINES_REFUSE_NOTE}.",
             default=False,
         ):
             return
@@ -5123,6 +5139,12 @@ class App:
             return
         self.gum.success(f"Rotated cosign signing key in commit {commit_sha}. GitHub secrets were updated.")
         self.gum.warn("Pre-rotation signatures remain valid in the registry; re-pull or re-verify after rotation.")
+        _trust_basename, key_path = signing_trust_names(owner, repo)
+        self.gum.warn(f"Next step: {ROTATION_MACHINES_REFUSE_NOTE}.")
+        self.gum.warn(
+            "On every machine, from a fresh clone of this repository, before its next upgrade, run: "
+            f"sudo install -Dm0644 cosign.pub {key_path}"
+        )
         self.gum.enter_to_continue(return_hint)
 
     def clone_repo(self, owner: str, repo: str, target: Path) -> None:
@@ -7944,8 +7966,7 @@ class App:
             # different owners would install over each other's key while both
             # policy entries kept pointing at the one path. Owner-qualify the
             # key the same way the discovery file is already qualified.
-            trust_basename = f"{owner.lower()}-{self.config.repo_name}"
-            key_path = f"/etc/pki/containers/{trust_basename}.pub"
+            trust_basename, key_path = signing_trust_names(owner, self.config.repo_name)
             signing_policy_lines = [
                 "## Trusting The Signing Key",
                 "",
@@ -8011,7 +8032,7 @@ class App:
                 "    use-sigstore-attachments: true",
                 "```",
                 "",
-                "Reinstall `cosign.pub` after rotating the repository's signing key.",
+                "Reinstall `cosign.pub` after rotating the repository's signing key. Until you do, machines already using this image refuse every new image, so their upgrades fail.",
                 "",
             ]
         using_image_lines = [
