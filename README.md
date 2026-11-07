@@ -4,7 +4,7 @@
 [![Unit coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDanathar%2Fatomic-image-builder%2Fcoverage-data%2Fcoverage-unit.json)](docs/coverage.md)
 [![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-1f6feb)](https://deepwiki.com/Danathar/atomic-image-builder)
 [![Maintenance assisted by Hivecommons Hive](https://img.shields.io/badge/maintenance%20assisted%20by-Hivecommons%20Hive-1f6feb)](https://github.com/hivecommons/hive)
-[![ACMM L6 Fully Autonomous](https://img.shields.io/badge/ACMM-L6%20Fully%20Autonomous-2da44e)](#maintained-with-hive-acmm-l6)
+[![ACMM L6 Autonomous](https://img.shields.io/badge/ACMM-L6%20Autonomous-2da44e)](#maintained-with-hive-acmm-l6)
 [![AI assisted](https://img.shields.io/badge/AI-assisted-d29922)](#about-this-project)
 [![License: GPLv3](https://img.shields.io/badge/license-GPLv3-blue)](LICENSE)
 
@@ -100,7 +100,7 @@ Found a security vulnerability instead? Please don't open a public issue for it 
 
 ## Maintained with Hive (ACMM L6)
 
-**This repository's Hive runs at ACMM L6 (Fully Autonomous).** Maintenance here is assisted by [Hivecommons Hive](https://github.com/hivecommons/hive).
+**This repository's Hive runs at ACMM L6 (Autonomous).** Maintenance here is assisted by [Hivecommons Hive](https://github.com/hivecommons/hive).
 
 Hive orchestrates a fleet of AI agents that continuously review this codebase and publish what they find to a living [advisory report](https://github.com/Danathar/atomic-image-builder/issues/11).
 
