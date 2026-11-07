@@ -369,11 +369,11 @@
 ### Advisory → failure: the bundled template snapshot trails upstream
   joined: tests/test_maintainer_snapshot_drift_doc.py
 ### Advisory: a pin no longer matches its tag or branch
-  prose: unchecked: what maintenance_audit.py reports for a moved pin
+  joined: tests/test_maintainer_audit_sections_doc.py
 ### Advisory: the formula pin
-  prose: unchecked: what maintenance_audit.py reports for the formula pin
+  joined: tests/test_maintainer_audit_sections_doc.py
 ### Failure: the released wrapper is not `contrib/aib`
-  prose: unchecked: the wrapper release check and how to clear it
+  joined: tests/test_maintainer_audit_sections_doc.py
 ## Refreshing action pins
   joined: tests/test_prompt_catalog.py
 ## Traps

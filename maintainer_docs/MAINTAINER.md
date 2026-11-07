@@ -290,7 +290,8 @@ Read the **direction** before acting. The message states it:
   tag **backwards** onto an older commit. **Do not refresh.** This is real:
   `ublue-os/remove-unwanted-software` is pinned 26 commits ahead of what its
   `v8` tag now points at.
-- *"diverged history"* or *"direction unknown"* — look before touching.
+- *"diverged history"* or *"direction of the difference is unknown"* — look
+  before touching.
 
 ### Advisory: the formula pin
 
@@ -325,8 +326,10 @@ release. Being unable to reach the API stays an advisory, like every other
 network check.
 
 `Release v0.9.6 … carries no aib asset` (or no `aib.sha256`), `The
-aib.sha256 attached to release v0.9.6 records …, but the aib beside it hashes
-to …`, and `The aib.sha256 … also lists contrib/aib` are the other shape: the
+aib.sha256 attached to release v0.9.6 does not record a sha256 for a file
+named aib`, `The aib.sha256 attached to release v0.9.6 records …, but the aib
+beside it hashes to …`, and `The aib.sha256 … also lists contrib/aib` are the
+other shape: the
 release exists but the install cannot complete from it — the URL 404s, or
 `sha256sum -c` rejects the pair, which it does when any one line of the
 checksum names another file or another digest — because `publish-wrapper.yml`
