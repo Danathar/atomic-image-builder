@@ -7751,7 +7751,12 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(all(call[:2] not in (["git", "add"], ["git", "push"]) for call in run_calls))
 
     def _push_update_after_new_signing_secrets(
-        self, confirms: list[bool], *, push_rc: int = 0, generated: bool = True
+        self,
+        confirms: list[bool],
+        *,
+        push_rc: int = 0,
+        generated: bool = True,
+        final_stat: str = " build_files/build.sh | 1 +\n cosign.pub | 1 +\n",
     ) -> tuple[GumStub, list[list[str]]]:
         # ensure_signing_ready() generated and uploaded a keypair (it leaves
         # the public key in generated_cosign_pub), which changes the diff.
@@ -7771,7 +7776,7 @@ class BuilderTests(unittest.TestCase):
                 diff_calls["count"] += 1
                 if diff_calls["count"] == 1:
                     return subprocess.CompletedProcess(list(args), 0, " build_files/build.sh | 1 +\n", "")
-                return subprocess.CompletedProcess(list(args), 0, " build_files/build.sh | 1 +\n cosign.pub | 1 +\n", "")
+                return subprocess.CompletedProcess(list(args), 0, final_stat, "")
             if list(args)[:2] == ["git", "push"] and push_rc:
                 raise CommandError("git push failed: rejected")
             return subprocess.CompletedProcess(list(args), 0, "", "")
@@ -7808,6 +7813,29 @@ class BuilderTests(unittest.TestCase):
 
         self.assertFalse(any("cosign.pub was not pushed" in message for _level, message in stub.messages))
         self.assertEqual(stub.prompts, [])
+
+    def test_push_update_empty_final_diff_after_new_signing_secrets_warns_of_the_split(self) -> None:
+        # The secrets are uploaded before the second write, so an empty final
+        # diff returns with GitHub holding a private key whose public half was
+        # never pushed. That exit must say so, like the decline and failed-push
+        # exits do, rather than only "No changes detected."
+        stub, run_calls = self._push_update_after_new_signing_secrets([False, True], final_stat="")
+
+        self.assertIn(("warn", "No changes detected."), stub.messages)
+        split = [message for level, message in stub.messages if level == "warn" and "cosign.pub was not pushed" in message]
+        self.assertEqual(len(split), 1)
+        self.assertIn("Rotate signing key (cosign)", split[0])
+        self.assertEqual(stub.prompts, ["Press Enter to return to the main menu..."])
+        self.assertTrue(all(call[:2] not in (["git", "add"], ["git", "push"]) for call in run_calls))
+
+    def test_push_update_empty_final_diff_without_new_signing_secrets_stays_quiet(self) -> None:
+        # With an existing key nothing was uploaded, so the empty-diff exit
+        # has no split to report.
+        stub, _run_calls = self._push_update_after_new_signing_secrets([False, True], generated=False, final_stat="")
+
+        self.assertIn(("warn", "No changes detected."), stub.messages)
+        self.assertFalse(any("cosign.pub was not pushed" in message for _level, message in stub.messages))
+        self.assertEqual(stub.prompts, ["Press Enter to return to the main menu..."])
 
     def test_push_update_failed_push_after_new_signing_secrets_reports_the_split(self) -> None:
         # #509: a failed push after the upload must say signing is now split,
