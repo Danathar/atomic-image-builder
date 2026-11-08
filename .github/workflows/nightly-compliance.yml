@@ -140,7 +140,7 @@ jobs:
           for repo in akmods arch-bootc aurora-zfs-simple dns-failover exult goodreads-mcp openaudible-autoupdate sensi tududi zfs-aurora-complex zfs-kinoite-complex; do
             check "Danathar/$repo" "$corpus" "$want_corpus"
           done
-          for repo in dns-failover exult openaudible-autoupdate tududi; do
+          for repo in appbox dns-failover exult openaudible-autoupdate tududi; do
             check "Danathar/$repo" "$reader" "$want_reader"
           done
           exit "$stale"
