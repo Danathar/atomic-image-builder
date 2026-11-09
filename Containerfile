@@ -84,8 +84,8 @@ RUN dnf5 -y install curl && \
 # linter while behaving differently depending on how the image was built. No
 # pipe, no ambiguity, nothing to suppress.
 RUN curl -fsSL --retry 3 -o /tmp/cosign.rpm \
-      https://github.com/sigstore/cosign/releases/download/v3.1.2/cosign-3.1.2-1.x86_64.rpm && \
-    echo "72382d1ef1cc824e1c10acfbe7f76af76fb294a10b0d16f31b978350ec4bc3e9  /tmp/cosign.rpm" > /tmp/cosign.sha256 && \
+      https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign-3.1.4-1.x86_64.rpm && \
+    echo "02fd4fe524932ccba09f7762fce76be35e5570d2023a1093cce776eefc6b62df  /tmp/cosign.rpm" > /tmp/cosign.sha256 && \
     sha256sum -c /tmp/cosign.sha256 && \
     dnf5 -y install /tmp/cosign.rpm && \
     rm -f /tmp/cosign.rpm /tmp/cosign.sha256 && \

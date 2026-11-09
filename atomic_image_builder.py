@@ -343,9 +343,9 @@ ACTION_PINS: dict[str, tuple[str, str]] = {
     "ublue-os/remove-unwanted-software": ("695eb75bc387dbcd9685a8e72d23439d8686cba6", "master"),
     "docker/metadata-action": ("dc802804100637a589fabce1cb79ff13a1411302", "v6.2.0"),
     "redhat-actions/buildah-build": ("719e3c40d8af9790c23eca13f7daa339f2867034", "v3.1.0"),
-    "docker/login-action": ("81c6f93d4bc991e510b342a00b419b3bb4efc5c6", "v4.7.0"),
+    "docker/login-action": ("8aa5831fb8d48d8f76594c7ddde61ae58019f550", "v4.8.0"),
     "redhat-actions/push-to-registry": ("94ade333c38ecc0e60e94785125d9a52ca423b37", "v3.0.0"),
-    "sigstore/cosign-installer": ("6f9f17788090df1f26f669e9d70d6ae9567deba6", "v4.1.2"),
+    "sigstore/cosign-installer": ("756fe2d284c7292c4e9b62c8a28f1e5629c59532", "v4.1.3"),
     "actions/upload-artifact": ("cf430e030ddbb5b0abf93d22962f4752f3646cd9", "v7.0.2"),
     "blue-build/github-action": ("c295af864f2802fc6aea227507af43d35823db81", "v1.13"),
     "extractions/setup-just": ("53165ef7e734c5c07cb06b3c8e7b647c5aa16db3", "v4.0.0"),
@@ -2260,7 +2260,7 @@ def enclosing_workflow_key(lines: Sequence[str], item_index: int) -> str | None:
 # The oldest Cosign release the generated signing step works with. Workflows
 # pinned below it are raised to it; anything at or above it is the owner's
 # choice and stays. The bundled snapshot pins this same version.
-COSIGN_COMPATIBILITY_FLOOR = "v3.1.2"
+COSIGN_COMPATIBILITY_FLOOR = "v3.1.4"
 # A whole line that is the `cosign-release:` input: the key at the start of
 # the line, in any spelling, a value, and nothing after it but an optional
 # comment. Anchoring both ends is what keeps a shell line that merely
