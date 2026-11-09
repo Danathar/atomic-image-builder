@@ -859,7 +859,7 @@ class BuilderTests(unittest.TestCase):
         app = self.make_app()
         snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
         branch_if = "github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
-        uses = "        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2\n"
+        uses = "        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3\n"
         original = f"      - name: Install Cosign\n{uses}        if: {branch_if}\n"
         self.assertIn(original, snapshot)
         reordered = snapshot.replace(original, f"      - if: {branch_if}\n        name: Install Cosign\n{uses}")
@@ -963,7 +963,7 @@ class BuilderTests(unittest.TestCase):
         app = self.make_app()
         snapshot = (CONTAINERFILE_TEMPLATE_DIR / ".github/workflows/build.yml").read_text()
         branch_if = "github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
-        uses = "        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2\n"
+        uses = "        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3\n"
         original = f"      - name: Install Cosign\n{uses}        if: {branch_if}\n"
         self.assertIn(original, snapshot)
         folded = snapshot.replace(
@@ -1524,7 +1524,7 @@ class BuilderTests(unittest.TestCase):
             """
         )
         patched = app.patch_container_workflow(workflow)
-        self.assertIn("cosign-release: 'v3.1.2'", patched)
+        self.assertIn("cosign-release: 'v3.1.4'", patched)
         self.assertIn(
             "cosign sign --new-bundle-format=false --use-signing-config=false -y --key", patched
         )
@@ -1550,7 +1550,7 @@ class BuilderTests(unittest.TestCase):
         return (
             "    steps:\n"
             "      - name: Install Cosign\n"
-            "        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2\n"
+            "        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3\n"
             "        with:\n"
             "          # be careful when upgrading major versions\n"
             f"{release_line}"
@@ -1565,11 +1565,11 @@ class BuilderTests(unittest.TestCase):
                 text = self.cosign_installer_step(f"          cosign-release: '{release}'")
                 self.assertEqual(
                     patch_cosign_compatibility(text),
-                    self.cosign_installer_step("          cosign-release: 'v3.1.2'"),
+                    self.cosign_installer_step("          cosign-release: 'v3.1.4'"),
                 )
 
     def test_patch_cosign_compatibility_leaves_newer_releases_alone(self) -> None:
-        for release in ("v3.1.2", "v3.2.0", "v3.10.1", "v4.0.0"):
+        for release in ("v3.1.4", "v3.2.0", "v3.10.1", "v4.0.0"):
             with self.subTest(release=release):
                 text = self.cosign_installer_step(f"          cosign-release: '{release}'")
                 self.assertEqual(patch_cosign_compatibility(text), text)
@@ -1600,7 +1600,7 @@ class BuilderTests(unittest.TestCase):
         text = self.cosign_installer_step('          cosign-release: "v2.6.3"  # bumped by hand')
         self.assertEqual(
             patch_cosign_compatibility(text),
-            self.cosign_installer_step('          cosign-release: "v3.1.2"  # bumped by hand'),
+            self.cosign_installer_step('          cosign-release: "v3.1.4"  # bumped by hand'),
         )
 
     def test_patch_cosign_compatibility_raises_an_unquoted_release(self) -> None:
@@ -1608,9 +1608,9 @@ class BuilderTests(unittest.TestCase):
         # Missing it left 2.x installed while the signing step still gained
         # flags only 2.6.0 and later accept, so `cosign sign` failed (#525).
         for line, expected in (
-            ("          cosign-release: v2.2.4", "          cosign-release: v3.1.2"),
-            ("          cosign-release: v2.2.4  # pinned", "          cosign-release: v3.1.2  # pinned"),
-            ("          'cosign-release' : \"v2.2.4\"", "          'cosign-release' : \"v3.1.2\""),
+            ("          cosign-release: v2.2.4", "          cosign-release: v3.1.4"),
+            ("          cosign-release: v2.2.4  # pinned", "          cosign-release: v3.1.4  # pinned"),
+            ("          'cosign-release' : \"v2.2.4\"", "          'cosign-release' : \"v3.1.4\""),
         ):
             with self.subTest(line=line):
                 patched = patch_cosign_compatibility(self.cosign_installer_step(line))
@@ -1639,7 +1639,7 @@ class BuilderTests(unittest.TestCase):
             """
         )
         patched = app.patch_container_workflow(workflow)
-        self.assertIn("      cosign-release: v3.1.2\n", patched)
+        self.assertIn("      cosign-release: v3.1.4\n", patched)
         self.assertNotIn("v2.2.4", patched)
         self.assertIn("cosign sign --new-bundle-format=false --use-signing-config=false -y", patched)
         self.assertIn(f'uses: "sigstore/cosign-installer@{ACTION_PINS["sigstore/cosign-installer"][0]}"', patched)
@@ -1674,7 +1674,7 @@ class BuilderTests(unittest.TestCase):
         patched = patch_cosign_compatibility(workflow_text)
         expected = workflow_text.replace(
             "        with:\n          cosign-release: '2.6.3'\n        env:",
-            "        with:\n          cosign-release: 'v3.1.2'\n        env:",
+            "        with:\n          cosign-release: 'v3.1.4'\n        env:",
         )
         self.assertNotEqual(expected, workflow_text, "the fixture must carry the installer's pin")
         self.assertEqual(patched, expected.rstrip("\n"))
@@ -1699,7 +1699,7 @@ class BuilderTests(unittest.TestCase):
         )
         patched = app.patch_container_workflow(workflow)
         self.assertIn("cosign-release: 'v4.0.0'", patched)
-        self.assertNotIn("v3.1.2", patched)
+        self.assertNotIn("v3.1.4", patched)
         self.assertIn("--new-bundle-format=false", patched)
 
     def test_patch_cosign_compatibility_bundled_snapshot_shape(self) -> None:
@@ -1836,7 +1836,7 @@ class BuilderTests(unittest.TestCase):
             """
         )
         patched = app.patch_container_workflow(workflow)
-        self.assertIn("cosign-release: 'v3.1.2'", patched)
+        self.assertIn("cosign-release: 'v3.1.4'", patched)
         self.assertIn("--new-bundle-format=false", patched)
         self.assertNotIn("cosign sign -y \\", patched)
 
