@@ -171,9 +171,11 @@ To re-pin, verify identity before writing anything down.  A new digest is
 never a rubber-stamp update: the digest only says the file changed, and the
 fingerprint is the thing that says it is still the right key.
 
-    curl -fsSL -o /tmp/key https://repo.charm.sh/yum/gpg.key
-    gpg --show-keys --with-fingerprint /tmp/key     # compare to the list above
-    sha256sum /tmp/key                              # the new pin
+    key="$(mktemp)"
+    curl -fsSL -o "$key" https://repo.charm.sh/yum/gpg.key
+    gpg --show-keys --with-fingerprint "$key"       # compare to the list above
+    sha256sum "$key"                                # the new pin
+    rm -f "$key"
 
 If the fingerprint is unchanged, the key was merely re-armored and the new
 sha256 can go straight into Containerfile.  If the fingerprint changed, the

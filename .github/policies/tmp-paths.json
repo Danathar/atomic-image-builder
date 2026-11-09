@@ -1,0 +1,15 @@
+{
+  "$comment": "Fixed-name paths under the shared /tmp that shipped files may contain. tests/test_tmp_path_policy.py scans every tracked text file outside tests/ and .claude/ for /tmp/<name> and fails on any (file, path) pair not listed here, and on any entry here that no longer matches. Any account on a machine can create /tmp/<name> before the intended user does, so prefer PrivateTmp=yes, RuntimeDirectory=/StateDirectory=, mktemp -d, or a root-owned /run/<name>. An entry needs a reason it is safe.",
+  "allowed": [
+    {"file": "Containerfile", "tmp_path": "/tmp/RPM-GPG-KEY-charm", "why": "Build-time RUN step in a throwaway build container with no other account; the file is deleted in the same layer."},
+    {"file": "Containerfile", "tmp_path": "/tmp/RPM-GPG-KEY-gh-cli", "why": "Build-time RUN step in a throwaway build container with no other account; the file is deleted in the same layer."},
+    {"file": "Containerfile", "tmp_path": "/tmp/keys.sha256", "why": "Build-time RUN step in a throwaway build container with no other account; the file is deleted in the same layer."},
+    {"file": "Containerfile", "tmp_path": "/tmp/cosign.rpm", "why": "Build-time RUN step in a throwaway build container with no other account; the file is deleted in the same layer."},
+    {"file": "Containerfile", "tmp_path": "/tmp/cosign.sha256", "why": "Build-time RUN step in a throwaway build container with no other account; the file is deleted in the same layer."},
+    {"file": "atomic_image_builder.py", "tmp_path": "/tmp/homebrew", "why": "Comment quoting the upstream brew-setup.service that the generated 10-private-tmp.conf drop-in contains; it describes the problem and is not a use."},
+    {"file": "docs/using.md", "tmp_path": "/tmp/homebrew", "why": "User documentation explaining the 10-private-tmp.conf drop-in; it describes the problem and is not a use."},
+    {"file": "docs/gate-refusal-corpus.md", "tmp_path": "/tmp/l", "why": "Example command string for the agent git diff gate; an example, not an instruction."},
+    {"file": "template_snapshots/containerfile/.github/workflows/build.yml", "tmp_path": "/tmp/digestfile", "why": "Vendored upstream template workflow that runs on a single-user GitHub-hosted runner; template_snapshots/ changes only for pin refreshes, and a new /tmp name there should fail here and be reviewed."},
+    {"file": "template_snapshots/containerfile/README.md", "tmp_path": "/tmp/akmods-rpms", "why": "Vendored upstream README; bind-mount target inside a container build."}
+  ]
+}
