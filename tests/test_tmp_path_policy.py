@@ -1,8 +1,8 @@
 """Block fixed-name paths under the shared /tmp in shipped files.
 
 Script: tests/test_tmp_path_policy.py
-What: Scans every tracked text file (`git ls-files`) outside `tests/` and
-      `.claude/` for `/tmp/<name>` where `/tmp` starts an absolute path, and
+What: Scans every tracked text file (`git ls-files`) outside `tests/`,
+      `.claude/` and the policy file itself for `/tmp/<name>` where `/tmp` starts an absolute path, and
       compares the hits with .github/policies/tmp-paths.json in both
       directions: an unlisted (file, path) pair fails, and a listed entry that
       matches nothing fails.
@@ -36,6 +36,8 @@ TMP_PATH = re.compile(r"/tmp/[A-Za-z0-9._-]+")
 SEGMENT_BEFORE = re.compile(r"/[A-Za-z0-9._-]+$")
 # Not shipped: tests and agent tooling.
 EXCLUDED_PREFIXES = ("tests/", ".claude/")
+# The allowlist names every allowed path, so scanning it would flag each entry.
+POLICY_FILE = POLICY_PATH.relative_to(ROOT).as_posix()
 ADVICE = (
     "Use PrivateTmp=yes, RuntimeDirectory=/StateDirectory=, `mktemp -d`, or a root-owned /run/<name>; "
     f"or list the (file, path) pair with a reason in {POLICY_PATH.name}."
@@ -67,7 +69,7 @@ def find_hits(root: Path, names: list[str]) -> list[tuple[str, int, str]]:
     """(file, line, /tmp/<name>) for each in-scope match under *root*."""
     hits = []
     for name in names:
-        if name.startswith(EXCLUDED_PREFIXES):
+        if name.startswith(EXCLUDED_PREFIXES) or name == POLICY_FILE:
             continue
         text = read_text(root / name)
         if text is None:
@@ -132,6 +134,9 @@ class MatcherTests(unittest.TestCase):
     def test_the_same_text_under_tests_or_claude_passes(self) -> None:
         text = "curl -o /tmp/payload x\n"
         self.assertEqual(self.scan({"tests/fixtures/a.sh": text, ".claude/hooks/b.py": text}), [])
+
+    def test_the_policy_file_itself_is_not_scanned(self) -> None:
+        self.assertEqual(self.scan({POLICY_FILE: '{"tmp_path": "/tmp/x"}\n'}), [])
 
     def test_var_tmp_is_not_the_shared_tmp(self) -> None:
         self.assertEqual(self.scan({"notes.md": "boot in /var/tmp/x and /usr/local/tmp/y\n"}), [])

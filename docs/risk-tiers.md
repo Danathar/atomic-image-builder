@@ -22,7 +22,8 @@ change, and the other way round.
 `mutation_check.py`; the lint, coverage and mutation configuration — `ruff.toml`,
 `.coveragerc`, `.coveragerc.e2e`, `.coveragerc.maintenance-audit`, `.simplecov`,
 `.coverage-thresholds.json`, `.mutation-survivors.json`,
-`.github/auto-qa-tuning.json`, `.github/actionlint.yaml`; the issue forms in
+`.github/auto-qa-tuning.json`, `.github/actionlint.yaml`,
+`.github/policies/tmp-paths.json`; the issue forms in
 `.github/ISSUE_TEMPLATE/`; and the workflows whose token can only read the
 repository or write to its issue tracker —
 `.github/workflows/nightly-compliance.yml`,
