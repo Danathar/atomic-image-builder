@@ -28,6 +28,7 @@
         ".mutation-survivors.json",
         ".github/auto-qa-tuning.json",
         ".github/actionlint.yaml",
+        ".github/policies/tmp-paths.json",
         ".github/ISSUE_TEMPLATE/",
         ".github/workflows/nightly-compliance.yml",
         ".github/workflows/agent-audit.yml",
