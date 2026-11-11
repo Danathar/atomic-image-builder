@@ -846,6 +846,76 @@
       ],
       "command": "git push origin HEAD:refs/heads/x",
       "why": "a refspec with a source updates one branch and deletes none"
+    },
+    {
+      "id": "local-ref-force-delete",
+      "class": "local ref",
+      "verdict": "refuse",
+      "requires": [
+        "git branch"
+      ],
+      "command": "git branch -D topic",
+      "why": "-D deletes the branch even when its commits are merged nowhere else"
+    },
+    {
+      "id": "local-ref-delete-force-long",
+      "class": "local ref",
+      "verdict": "refuse",
+      "requires": [
+        "git branch"
+      ],
+      "command": "git branch --delete --force topic",
+      "why": "--delete --force is -D written out"
+    },
+    {
+      "id": "local-ref-force-move",
+      "class": "local ref",
+      "verdict": "refuse",
+      "requires": [
+        "git branch"
+      ],
+      "command": "git branch -f main HEAD~3",
+      "why": "-f moves an existing branch back three commits"
+    },
+    {
+      "id": "local-ref-force-rename",
+      "class": "local ref",
+      "verdict": "refuse",
+      "requires": [
+        "git branch"
+      ],
+      "command": "git branch -M topic main",
+      "why": "-M renames topic over main, dropping the branch main was"
+    },
+    {
+      "id": "allow-local-ref-list",
+      "class": "local ref",
+      "verdict": "allow",
+      "requires": [
+        "git branch"
+      ],
+      "command": "git branch --list",
+      "why": "listing branches changes none"
+    },
+    {
+      "id": "allow-local-ref-verbose",
+      "class": "local ref",
+      "verdict": "allow",
+      "requires": [
+        "git branch"
+      ],
+      "command": "git branch -vv",
+      "why": "listing branches with their upstreams changes none"
+    },
+    {
+      "id": "allow-local-ref-show-current",
+      "class": "local ref",
+      "verdict": "allow",
+      "requires": [
+        "git branch"
+      ],
+      "command": "git branch --show-current",
+      "why": "printing the current branch name changes nothing"
     }
   ]
 }
