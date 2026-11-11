@@ -66,8 +66,12 @@ class WorkflowShapeTests(unittest.TestCase):
         self.text = WORKFLOW.read_text(encoding="utf-8")
 
     def test_it_runs_on_pull_request_only_including_an_edited_description(self) -> None:
-        self.assertNotIn("pull_request_target", self.text)
-        on = re.search(r"^on:\n((?:  .*\n)+)", self.text, re.M)
+        # Whole-line comments are skipped: the header names `pull_request_target`
+        # to warn against it. A trailing comment still counts, since its line
+        # carries YAML.
+        code = "\n".join(line for line in self.text.splitlines() if not line.lstrip().startswith("#"))
+        self.assertNotIn("pull_request_target", code)
+        on =re.search(r"^on:\n((?:  .*\n)+)", self.text, re.M)
         self.assertIsNotNone(on, "agent-signature.yml has no `on:` block")
         self.assertEqual(
             on.group(1),
@@ -105,9 +109,15 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertNotIn(JOB_NAME, contexts)
 
 
-@unittest.skipIf(shutil.which("jq") is None, "jq is not installed")
 class SignatureStepTests(unittest.TestCase):
     """Runs the step's shell with each description as PR_BODY."""
+
+    def setUp(self) -> None:
+        # Skipped in setUp, as test_agent_audit_workflow.py does, rather than
+        # with a `skipIf` decorator: those are joined to the tools ci.yml pins
+        # from a release (see test_verify_change_skill.py), which jq is not.
+        if shutil.which("jq") is None:
+            self.skipTest("jq is not installed")
 
     def run_step(self, description: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
