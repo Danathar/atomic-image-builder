@@ -111,7 +111,10 @@ agent pull request leaves is read back every month by
 which fails when a signature line or a Signed-off-by trailer is missing. The
 merge commit that updating a pull request from `main` writes is the one
 exception: it carries no trailer, and what it brings in was audited when it
-reached `main`.
+reached `main`. The signature line is also checked while a Hive pull request
+is still open, by
+[`.github/workflows/agent-signature.yml`](../.github/workflows/agent-signature.yml),
+so a missing one can be added before the merge.
 
 ## What every agent shares
 

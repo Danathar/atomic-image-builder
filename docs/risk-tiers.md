@@ -27,7 +27,8 @@ change, and the other way round.
 `.github/ISSUE_TEMPLATE/`; and the workflows whose token can only read the
 repository or write to its issue tracker —
 `.github/workflows/nightly-compliance.yml`,
-`.github/workflows/agent-audit.yml`, `.github/workflows/triage.yml`,
+`.github/workflows/agent-audit.yml`, `.github/workflows/agent-signature.yml`,
+`.github/workflows/triage.yml`,
 `.github/workflows/ai-fix.yml`, `.github/workflows/maintenance-audit.yml`,
 `.github/workflows/auto-issues.yml`, `.github/workflows/variant-boot-test.yml`
 — with `snapshot_drift_issue.py`, which the audit workflow runs to open its
@@ -57,7 +58,8 @@ The issue-tracker workflows are here by reach too: what `triage.yml`,
 repository's issues and the labels the agents act on, `nightly-compliance.yml`
 holds `contents: read`, and `agent-audit.yml` holds `contents: read` beside the
 `pull-requests: read` it needs to list merged pull requests; it writes nothing
-but its own run summary. `auto-issues.yml` holds `issues: write` and nothing
+but its own run summary. `agent-signature.yml` holds `contents: read` and uses
+none of it: the pull request description it checks arrives in the event. `auto-issues.yml` holds `issues: write` and nothing
 else, not even `contents: read`: it opens, comments on and closes the issue
 that tracks a red scheduled run, and never checks out or runs anything. Their
 permission blocks are pinned by `.github/policies/workflow-permissions.json`,

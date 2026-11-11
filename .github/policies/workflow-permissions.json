@@ -5,6 +5,10 @@
       "workflow": {"contents": "read", "pull-requests": "read"},
       "jobs": {}
     },
+    "agent-signature.yml": {
+      "workflow": {"contents": "read"},
+      "jobs": {}
+    },
     "ai-fix.yml": {
       "workflow": {"contents": "read", "issues": "write"},
       "jobs": {}

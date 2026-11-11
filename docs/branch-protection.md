@@ -90,6 +90,9 @@ does:
   `Build container image` is not required, because it only builds when the
   image's files change.
   `Publish coverage badge and trend` runs on pushes to `main` only.
+  `Check the agent signature line` in `agent-signature.yml` runs only on
+  agent pull requests and is advisory for now; it can be added here once it
+  has run clean for a month.
   `integration_id` 15368 is GitHub Actions. `tests/test_branch_ruleset.py`
   fails if the job is renamed, skipped, or gains a filter. The check is
   strict (`strict_required_status_checks_policy` is `true`): a pull request

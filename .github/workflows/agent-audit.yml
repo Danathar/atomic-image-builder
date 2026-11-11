@@ -132,6 +132,9 @@ jobs:
           done | jq -s 'map({(.number | tostring): .}) | add // {}' > details.json
 
           jq --arg since "$SINCE" --arg total "$total" --slurpfile details details.json '
+            # agent-signature.yml asks an open pull request the same question
+            # with an exact copy of this line, and
+            # tests/test_agent_signature_workflow.py fails when they differ.
             def signature: (.body // "") | split("\n") | map(select(startswith("— hive:"))) | first;
             # The Tier 4 paths in docs/risk-tiers.md: the release workflows,
             # the token policy and ruleset, the agent permission table and its
