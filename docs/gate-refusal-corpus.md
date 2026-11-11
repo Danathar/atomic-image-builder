@@ -167,6 +167,19 @@ work out of scope for the gates. Every repository has
 repository's gate does not read `git push`, so its four refuse rows are
 known gaps here.
 
+The `local ref` rows cover the ways `git branch` throws away a local branch:
+`-D` and `--delete --force` delete one whose commits are merged nowhere
+else, `-f` moves an existing branch back in history, and `-M` renames one
+branch over another. A wildcard rule such as `Bash(git branch:*)`, meant for
+listing branches, lets all four run with no prompt. The fix the owner chose
+is to narrow that rule rather than teach the gate: a repository allows only
+the exact read forms (`Bash(git branch)`, `Bash(git branch -a)`, `-r`, `-v`,
+`-vv`, `--list` and `--show-current`), which cover no prefix, so the rows do
+not run there. A repository that copies the wildcard back fails its corpus
+test until it narrows the rule again. Three `allow-local-ref-*` rows keep a
+gate that does read `git branch` from refusing an ordinary listing. This
+repository names no `git branch` rule, so none of these rows run here.
+
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
 table. The one disagreement found, `git diff --ext-diff`, is refused here and
