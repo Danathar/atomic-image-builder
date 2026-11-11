@@ -34,6 +34,7 @@ RUNBOOK = ROOT / "docs/ai-ops-runbook.md"
 WORKFLOW_DIR = ROOT / ".github/workflows"
 NIGHTLY = WORKFLOW_DIR / "nightly-compliance.yml"
 AGENT_AUDIT = WORKFLOW_DIR / "agent-audit.yml"
+AGENT_SIGNATURE = WORKFLOW_DIR / "agent-signature.yml"
 SNAPSHOT_DRIFT = ROOT / "snapshot_drift_issue.py"
 RULESET = ROOT / ".github/rulesets/main.json"
 
@@ -48,6 +49,7 @@ QUOTED_MESSAGES = {
     "with no `— hive:` signature line": AGENT_AUDIT,
     "no Signed-off-by trailer": AGENT_AUDIT,
     "Tier 4 paths": AGENT_AUDIT,
+    'The description has no line starting "— hive:"': AGENT_SIGNATURE,
     "Could not sync the snapshot drift issue:": SNAPSHOT_DRIFT,
     "Bundled template snapshot trails upstream": SNAPSHOT_DRIFT,
 }
@@ -165,6 +167,20 @@ class RunbookTests(unittest.TestCase):
         body = " ".join(section(self.text, "`main` is red").split())
         self.assertEqual("requires the pull request to be up to date with `main` first" in body, strict)
         self.assertEqual("can no longer merge untested together" in body, strict)
+
+    def test_the_signature_check_is_not_required_as_the_runbook_says(self) -> None:
+        # "It is not a required check": the ruleset must not list the job.
+        body = " ".join(section(self.text, "The agent signature check failed").split())
+        self.assertIn("It is not a required check", body)
+        job = re.search(r"^    name: (.+)$", AGENT_SIGNATURE.read_text(), re.M)
+        self.assertIsNotNone(job, "agent-signature.yml names no job")
+        contexts = [
+            check["context"]
+            for rule in json.loads(RULESET.read_text())["rules"]
+            if rule["type"] == "required_status_checks"
+            for check in rule["parameters"]["required_status_checks"]
+        ]
+        self.assertNotIn(job.group(1), contexts)
 
     def test_links_resolve(self) -> None:
         for target in re.findall(r"\]\(([^)\s]+)\)", self.text):

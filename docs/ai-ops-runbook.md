@@ -186,6 +186,18 @@ leave. The run summary has one row per pull request and a *Findings* list.
 To check only merges after a fix, dispatch with a start date:
 `gh workflow run agent-audit.yml -f since=YYYY-MM-DD`.
 
+## The agent signature check failed
+
+`agent-signature.yml` runs on each pull request the Hive app opens and fails
+when its description has no `— hive:` signature line, the same line the agent
+audit looks for after the merge. The log says
+`The description has no line starting "— hive:"`.
+
+Add the line to the description and save it. Saving runs the check again; no
+new commit is needed. It is not a required check, so a red run does not stop
+a merge, but a pull request merged red here is a finding in the next agent
+audit.
+
 ## An agent pull request looks wrong
 
 At ACMM L6 a non-outreach agent pull request auto-merges when checks pass, and

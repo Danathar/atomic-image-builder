@@ -198,6 +198,8 @@
   prose: unchecked: when a cancelled publish-image.yml run is normal; only the workflow names are checked to exist
 ## The agent audit failed
   joined: tests/test_ai_ops_runbook.py
+## The agent signature check failed
+  joined: tests/test_ai_ops_runbook.py
 ## An agent pull request looks wrong
   prose: narrative: what to do by hand about a pull request
 ## An issue asks for something already done
