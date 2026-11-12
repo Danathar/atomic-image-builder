@@ -1,5 +1,5 @@
 {
-  "description": "Coverage thresholds for this repo. .github/workflows/ci.yml reads gated.unit from here rather than spelling the number itself, and tests/test_atomic_image_builder.py asserts the docs agree with it. See CONTRIBUTING.md's Coverage section for what each measurement means and why only one of them is gated.",
+  "description": "Coverage thresholds for this repo. .github/workflows/ci.yml reads gated.unit from here rather than spelling the number itself, and tests/test_atomic_image_builder.py asserts the docs agree with it. See CONTRIBUTING.md's Coverage section for what each measurement means and why only one of them is gated. ceilings is the most statements the unit run may leave unreached in each module (a measured module not listed has a ceiling of 0); tests/check_coverage_ceilings.py checks it against the unit run's JSON report.",
   "gated": {
     "unit": 90
   },
@@ -8,5 +8,9 @@
     "shell",
     "maintenance-audit",
     "homebrew-release"
-  ]
+  ],
+  "ceilings": {
+    "atomic_image_builder.py": 18,
+    "variant_boot_test.py": 7
+  }
 }

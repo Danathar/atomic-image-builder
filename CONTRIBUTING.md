@@ -87,6 +87,15 @@ python3 -m coverage report
 
 The 90 is not written into `ci.yml`. It lives in `.coverage-thresholds.json`, which the workflow reads at gate time and which a test compares against every `--fail-under=` and every quoted percentage in these docs — so changing the gate is one edit, and a doc left saying the old number fails the suite rather than misleading someone quietly. That file also lists the other four measurements as advisory, which is the part most easily forgotten: they are uploaded, summarized, and deliberately ungated, and the reasons are below.
 
+A total percentage barely moves when a change adds a guard no test reaches, so `.coverage-thresholds.json` also has `ceilings`: for each module, how many statements the unit run may leave unreached. A measured module not listed there has a ceiling of 0. `tests/check_coverage_ceilings.py` compares them with the unit run's JSON report and names every module over its ceiling, with the missed line numbers. To check locally after the run above:
+
+```bash
+python3 -m coverage json -o coverage.json
+python3 tests/check_coverage_ceilings.py coverage.json
+```
+
+Lowering a ceiling is routine: a test now reaches a line nothing reached before. Raising one is a decision; give the reason in the commit.
+
 **End-to-end coverage** measures what a real run of the *built container image* executes. `container/Containerfile.coverage` layers coverage.py onto the built image and swaps the `atomic-image-builder` launcher for a shim that runs the packaged script under it, so `container/entrypoint.sh` and the packaged path stay in the measured run. `.coveragerc.e2e` maps the in-image path (`/opt/atomic-image-builder`) back onto the checkout. To reproduce a CI run locally:
 
 ```bash

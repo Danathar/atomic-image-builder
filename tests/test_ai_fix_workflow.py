@@ -84,6 +84,10 @@ CI_OTHER_STEPS = {
     "Install test tooling": (),
     # Enforces the unit coverage threshold, which the coverage check does.
     "Report coverage": ("coverage",),
+    # Runs tests/check_coverage_ceilings.py, the per-module missed-statement
+    # ceilings. The intake does not replay it yet, so a run over a ceiling is
+    # a CI failure only.
+    "Check missed-statement ceilings": (),
     "Package unit coverage": (),
     "Upload unit coverage": (),
     # bashcov runs each harness, and a failing case fails the step.
