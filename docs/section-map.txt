@@ -80,6 +80,8 @@
   prose: unchecked: says manual dispatch of publish-image.yml publishes to GHCR
 ## Completion and cleanup
   prose: narrative: what to report at the end of a task
+## Owner's standing decisions
+  prose: narrative: a standing ruling on which owner questions agents decide themselves
 
 [ARCHITECTURE.md]
 ## Repository map

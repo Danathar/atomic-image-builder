@@ -375,3 +375,37 @@ Do not perform cleanup merely because the task appears complete. After a merge,
 update local `main`, delete branches, remove handoff files, or delete test
 resources only when the user authorizes each exact action. Preserve anything
 whose ownership or recoverability is uncertain.
+
+## Owner's standing decisions
+
+The owner has already decided the cases below. Do not park them on
+`stage/045-needs-decision` and do not ask the owner again. Decide, write
+`Decision taken by hive: per AGENTS.md "Owner's standing decisions" (<case>)`
+in the issue or PR body, and do the work. Risk tiers, review and merge rules
+still apply to the pull request; this section only removes the question.
+
+- **Adding or widening a check.** A gate proposal, or a gap in an existing
+  check, where the change only adds a check or makes an existing one catch
+  more (a policy pattern, a test, a lint rule, a read-only CI step). It must
+  need no new permission, secret or token scope. Take your own
+  recommendation. Between options, pick the stricter one that still passes
+  the current tree, and fix any existing hits in the same PR.
+- **Repeating an earlier decision.** A change the owner already approved in
+  another `Danathar/*` repository: the same check, the same workflow fix, the
+  same signature or record-line rollout. It is approved here too. Link the
+  earlier issue or PR.
+- **Routine updates.** Patch and minor updates of GitHub Actions and
+  dependencies, digest and SHA pin updates included, with green CI.
+- **Fixing a red scheduled run.** When a scheduled or nightly run fails and
+  the cause is in this repository (a script, a test, a pin, a timeout), fix
+  it. File for the owner only when the fix needs something in the list below.
+
+Always ask the owner first for:
+
+- signing keys, and anything that reads, moves or rotates a secret;
+- a new permission, token scope, secret or repository setting;
+- turning a check off, loosening it, or adding an exception or allow-list
+  entry to one;
+- upstream syncs or updates that are a major release or marked breaking
+  (`!`);
+- publishing a release, and anything about licensing.
