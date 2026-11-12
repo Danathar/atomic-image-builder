@@ -12,7 +12,8 @@ statements the unit run is allowed to leave unreached. A module measured by
 the run but absent from `ceilings` has a ceiling of 0. A ceiling is a count of
 statements, never a percentage. Lowering one is routine: a test now reaches
 a line that nothing reached before. Raising one is a decision a person makes
-in the diff, with the reason in the commit.
+in the diff, with the reason in the commit. A module under its ceiling is
+reported as `could lower <module>: ceiling N, missing M`; that never fails.
 
 A ceiling naming a module the run did not measure also fails, so a rename
 cannot leave a stale entry quietly allowing nothing.
@@ -74,16 +75,33 @@ def evaluate(missing: dict[str, list[int]], ceilings: dict[str, int]) -> list[st
     return failures
 
 
+def lowerable_ceilings(missing: dict[str, list[int]], ceilings: dict[str, int]) -> list[str]:
+    """Return one line per measured module whose missed count is under its ceiling.
+
+    Report-only: it never fails the check. Without it, room left by a new test
+    stays open for the next untested guard to use.
+    """
+    return [
+        f"could lower {module}: ceiling {ceilings.get(module, 0)}, missing {len(lines)}"
+        for module, lines in sorted(missing.items())
+        if len(lines) < ceilings.get(module, 0)
+    ]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("report", type=Path, help="coverage JSON report (python3 -m coverage json)")
     parser.add_argument("--thresholds", type=Path, default=THRESHOLDS, help="thresholds file (default: %(default)s)")
     args = parser.parse_args(argv)
     try:
-        failures = evaluate(load_missing_lines(args.report), load_ceilings(args.thresholds))
+        missing = load_missing_lines(args.report)
+        loaded_ceilings = load_ceilings(args.thresholds)
+        failures = evaluate(missing, loaded_ceilings)
     except CeilingError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    for line in lowerable_ceilings(missing, loaded_ceilings):
+        print(line)
     for failure in failures:
         print(failure, file=sys.stderr)
     if failures:

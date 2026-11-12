@@ -141,6 +141,16 @@ class MainTests(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
         self.assertIn("at or under", out)
 
+    def test_under_a_ceiling_reports_it_could_lower_and_still_passes(self) -> None:
+        code, out, err = self.run_main({"a.py": [1]}, {"a.py": 3})
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("could lower a.py: ceiling 3, missing 1", out)
+
+    def test_at_a_ceiling_reports_nothing_to_lower(self) -> None:
+        code, out, err = self.run_main({"a.py": [1]}, {"a.py": 1})
+        self.assertEqual((code, err), (0, ""))
+        self.assertNotIn("could lower", out)
+
     def test_fails_naming_the_module_and_how_to_fix_it(self) -> None:
         code, out, err = self.run_main({"a.py": [1, 2]}, {"a.py": 1})
         self.assertEqual((code, out), (1, ""))

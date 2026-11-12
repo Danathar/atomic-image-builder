@@ -94,7 +94,7 @@ python3 -m coverage json -o coverage.json
 python3 tests/check_coverage_ceilings.py coverage.json
 ```
 
-Lowering a ceiling is routine: a test now reaches a line nothing reached before. Raising one is a decision; give the reason in the commit.
+Lowering a ceiling is routine: a test now reaches a line nothing reached before, and the check prints `could lower <module>: ceiling N, missing M` (without failing) for any module under its ceiling so the spare room is not silently reused. Raising one is a decision; give the reason in the commit.
 
 **End-to-end coverage** measures what a real run of the *built container image* executes. `container/Containerfile.coverage` layers coverage.py onto the built image and swaps the `atomic-image-builder` launcher for a shim that runs the packaged script under it, so `container/entrypoint.sh` and the packaged path stay in the measured run. `.coveragerc.e2e` maps the in-image path (`/opt/atomic-image-builder`) back onto the checkout. To reproduce a CI run locally:
 
