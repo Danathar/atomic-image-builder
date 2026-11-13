@@ -72,6 +72,13 @@ also classifies it in [docs/section-map.txt](docs/section-map.txt): `joined:`
 with the test that reads the section, or `prose:` with a reason no test does.
 `tests/test_docs_section_map.py` fails until it is.
 
+A change that makes a script read a new environment variable also names that
+variable in a document: the page a user or maintainer would look in for that
+setting. `tests/test_env_vars_documented.py` fails until some Markdown file
+mentions it, or until it goes on that test's `ALLOWED` list with the reason no
+document needs it (a name the CI runner or the terminal sets, not one anyone
+is meant to change).
+
 ## Coverage
 
 [docs/quality.md](docs/quality.md) is the index of every quality signal in this project and what each one is worth; start there if you want the overview rather than the mechanics.
