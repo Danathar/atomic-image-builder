@@ -1,4 +1,9 @@
 {
+  "env": {
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": "safe.bareRepository",
+    "GIT_CONFIG_VALUE_0": "explicit"
+  },
   "permissions": {
     "allow": [
       "Bash(python3 -m unittest discover -s tests)",
