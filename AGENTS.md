@@ -402,6 +402,10 @@ still apply to the pull request; this section only removes the question.
   earlier issue or PR.
 - **Routine updates.** Patch and minor updates of GitHub Actions and
   dependencies, digest and SHA pin updates included, with green CI.
+  A major update counts too when another `Danathar/*` repository already
+  runs the same version (the same release, or the same pinned SHA) on its
+  default branch with green CI and this repository's CI is green on it.
+  Name that repository and file in the pull request.
 - **Fixing a red scheduled run.** When a scheduled or nightly run fails and
   the cause is in this repository (a script, a test, a pin, a timeout), fix
   it. File for the owner only when the fix needs something in the list below.
@@ -413,5 +417,6 @@ Always ask the owner first for:
 - turning a check off, loosening it, or adding an exception or allow-list
   entry to one;
 - upstream syncs or updates that are a major release or marked breaking
-  (`!`);
+  (`!`), except a major update another repository already runs (see
+  "Routine updates");
 - publishing a release, and anything about licensing.
