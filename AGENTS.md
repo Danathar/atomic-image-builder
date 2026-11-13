@@ -390,6 +390,12 @@ still apply to the pull request; this section only removes the question.
   need no new permission, secret or token scope. Take your own
   recommendation. Between options, pick the stricter one that still passes
   the current tree, and fix any existing hits in the same PR.
+  This holds even when the narrower behavior is written down or pinned by a
+  test (a README sentence, a code comment, a "passes by design" test row, a
+  note such as "a human edits this file"): turning a documented pass into a
+  hit is widening, not overturning an owner decision. Only adding an
+  allow-list entry or exception, removing a rule, or narrowing a match is
+  loosening.
 - **Repeating an earlier decision.** A change the owner already approved in
   another `Danathar/*` repository: the same check, the same workflow fix, the
   same signature or record-line rollout. It is approved here too. Link the
