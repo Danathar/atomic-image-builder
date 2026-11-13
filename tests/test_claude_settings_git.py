@@ -19,12 +19,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SETTINGS = ROOT / ".claude/settings.json"
+HOOK = ROOT / ".claude/hooks/gate_git_diff.py"
 
 EXPECTED_ENV = {
     "GIT_CONFIG_COUNT": "1",
@@ -100,6 +102,22 @@ class ClaudeSettingsGitTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("safe.bareRepository", result.stderr)
                 self.assertFalse(self.marker.exists(), f"git {' '.join(args)} ran the planted program")
+
+    def test_bare_flag_runs_the_planted_program_despite_the_settings_env(self) -> None:
+        """`git --bare` names the working directory as the repository, the explicit
+        form `safe.bareRepository=explicit` permits, so the guard hook has to refuse it."""
+        agent_env = {**self.base_env(), **settings_env()}
+        self.git(self.victim / "evil", agent_env, "--bare", "log", "-p", "-1")
+        self.assertTrue(self.marker.exists(), "git --bare should reach the planted program; if not, revisit the hook rule")
+        hook = subprocess.run(
+            [sys.executable, str(HOOK)],
+            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "git --bare log -p -1"}}),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(hook.returncode, 2, hook.stderr)
+        self.assertIn("--bare", hook.stderr)
 
     def test_checkout_own_repository_still_works_with_the_settings_env(self) -> None:
         agent_env = {**self.base_env(), **settings_env()}

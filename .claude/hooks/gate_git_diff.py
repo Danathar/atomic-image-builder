@@ -257,9 +257,14 @@ VALUED_SHORT = frozenset("BCGILMOSUXln")
 # options of `fetch`, `clone` and `push`, none of which any allow rule covers
 # -- so they are listed against a git that starts accepting them there rather
 # than for a hole that is open now (#428).
+# `--bare` is `--git-dir=.`: it names the working directory as the
+# repository, which is the "explicit" form `safe.bareRepository=explicit`
+# (the `.claude/settings.json` env) still permits, so a bare repository a
+# branch commits runs its own config's programs under `git --bare log -p`.
 REFUSED_GLOBAL = (
     "-c",
     "-C",
+    "--bare",
     "--config-env",
     "--exec-path",
     "--git-dir",
