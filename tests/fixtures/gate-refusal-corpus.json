@@ -916,6 +916,46 @@
       ],
       "command": "git branch --show-current",
       "why": "printing the current branch name changes nothing"
+    },
+    {
+      "id": "named-repo-git-dir",
+      "class": "named repository",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git --git-dir=evil log -p",
+      "why": "safe.bareRepository=explicit allows a bare repository that is named, so git loads the config of a bare folder a branch planted and runs its diff textconv program for each changed file"
+    },
+    {
+      "id": "named-repo-git-dir-separate",
+      "class": "named repository",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git --git-dir evil log -p",
+      "why": "the same named bare repository, with the folder as a separate word"
+    },
+    {
+      "id": "named-repo-bare",
+      "class": "named repository",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git --bare log -p",
+      "why": "--bare names the current directory as the repository, so run inside a planted bare folder git loads its config and runs its diff textconv program"
+    },
+    {
+      "id": "named-repo-work-tree",
+      "class": "named repository",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "git --work-tree=.. diff HEAD",
+      "why": "--work-tree moves the files git reads outside the checkout, so git diff HEAD prints the file at each tracked path under that folder, as -C does"
     }
   ]
 }

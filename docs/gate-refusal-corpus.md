@@ -180,6 +180,28 @@ test until it narrows the rule again. Three `allow-local-ref-*` rows keep a
 gate that does read `git branch` from refusing an ordinary listing. This
 repository names no `git branch` rule, so none of these rows run here.
 
+The `named repository` rows
+([#874](https://github.com/Danathar/atomic-image-builder/issues/874)) put a
+git option that names the repository or its files in front of the
+subcommand: `--git-dir=evil` and `--git-dir evil`, `--bare`, and
+`--work-tree=..`. `safe.bareRepository=explicit`, which every repository
+sets in `.claude/settings.json` since
+[#866](https://github.com/Danathar/atomic-image-builder/pull/866), stops git
+from using a bare folder it finds, but a bare folder named this way is
+explicit, so git loads the config a branch planted there and runs its diff
+textconv program during `git log -p`. `--work-tree` points git at files
+outside the checkout instead. The class was fixed one repository at a time
+(here in [#870](https://github.com/Danathar/atomic-image-builder/pull/870),
+then Danathar/zfs-aurora-complex#321, Danathar/arch-bootc#692 and
+Danathar/zfs-kinoite-complex#589) before it had rows, which is the drift
+the corpus exists to stop. A runner reads these rows as needing `git log`
+or `git diff` because git reads its own options before the subcommand, so
+`names()` in the test here steps over git's global options, and their
+values, between `git` and the rest of a `git ...` prefix. `git -C <dir>`
+has no row yet: git itself refuses `-C` into a planted bare folder under
+`safe.bareRepository=explicit`, and whether a gate should refuse reading
+another checkout that way is a separate decision.
+
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
 table. The one disagreement found, `git diff --ext-diff`, is refused here and
@@ -204,7 +226,11 @@ fetching it:
   the way the shell does: quotes and backslashes removed, `$'...'` decoded,
   `$"..."` read as `"..."`, unquoted brace groups expanded, an unquoted
   extglob group read as `*`, and an unquoted wildcard, in a path or not,
-  matched against the name by its last part, as the `name-*` rows need. A wrapped row's words are read that way a second
+  matched against the name by its last part, as the `name-*` rows need.
+  Between `git` and the rest of a `git ...` prefix it steps over git's
+  global options (`--bare`, `--git-dir=...`, and `-C`, `-c`, `--git-dir`,
+  `--work-tree`, `--namespace` or `--config-env` with their value as the
+  next word), as the `named-repo-*` rows need. A wrapped row's words are read that way a second
   time, as `unlisted-script-split-quote` needs. `inner_words()` in
   [`tests/test_gate_refusal_corpus.py`](../tests/test_gate_refusal_corpus.py)
   is the reference. A gate that lets a row through lists
