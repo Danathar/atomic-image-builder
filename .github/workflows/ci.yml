@@ -93,6 +93,18 @@ jobs:
           python3 -m coverage report --fail-under="$threshold"
           echo "percent=$(python3 -m coverage report --format=total)" >> "$GITHUB_OUTPUT"
 
+      # A total percentage barely moves when a change adds a guard no test
+      # reaches, so each module also has a ceiling on how many statements the
+      # run may leave unreached. The ceilings live in .coverage-thresholds.json;
+      # see tests/check_coverage_ceilings.py and CONTRIBUTING.md's Coverage
+      # section. A separate step, so a failure here still leaves the percentage
+      # output above set.
+      - name: Check missed-statement ceilings
+        run: |
+          set -euo pipefail
+          python3 -m coverage json -o coverage.json -q
+          python3 tests/check_coverage_ceilings.py coverage.json
+
       # Uploaded even when the gate above fails: a run that dropped below the
       # threshold is exactly when someone wants the line-level data. The raw
       # data file ships alongside the XML so it can be combined with the
