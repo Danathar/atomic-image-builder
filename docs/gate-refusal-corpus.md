@@ -202,6 +202,20 @@ has no row yet: git itself refuses `-C` into a planted bare folder under
 `safe.bareRepository=explicit`, and whether a gate should refuse reading
 another checkout that way is a separate decision.
 
+The `configuration override` rows
+([#879](https://github.com/Danathar/atomic-image-builder/issues/879)) undo
+that same `safe.bareRepository=explicit` setting for one command. Git reads
+`-c` and `--config-env` at the same level as the `GIT_CONFIG_*` variables in
+`.claude/settings.json`, and the later value wins, so
+`git -c safe.bareRepository=all log -p` lets git use a bare folder it finds
+again and run the textconv program a branch planted there. `--config-env`
+takes the value from an environment variable instead, and the upper-case row
+is there because git reads section and key names in any case. A gate that
+vets `-c` keys against a list of dangerous ones refuses these only if the
+list names `safe.`; this repository's gate refuses every `-c` and
+`--config-env`. Git rejects the attached `-csafe...` and abbreviated
+`--conf=...` spellings itself, so they have no rows.
+
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
 table. The one disagreement found, `git diff --ext-diff`, is refused here and
