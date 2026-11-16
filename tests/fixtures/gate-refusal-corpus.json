@@ -956,6 +956,36 @@
       ],
       "command": "git --work-tree=.. diff HEAD",
       "why": "--work-tree moves the files git reads outside the checkout, so git diff HEAD prints the file at each tracked path under that folder, as -C does"
+    },
+    {
+      "id": "config-override-safe-c",
+      "class": "configuration override",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git -c safe.bareRepository=all log -p",
+      "why": "-c sets configuration at the same level as the settings environment and the later value wins, so it turns safe.bareRepository back to all and git uses a bare folder it finds, loads the config a branch planted there and runs its diff textconv program"
+    },
+    {
+      "id": "config-override-safe-config-env",
+      "class": "configuration override",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git --config-env=safe.bareRepository=V log -p",
+      "why": "--config-env sets the same key from the environment variable V, so with V=all it is the same override"
+    },
+    {
+      "id": "config-override-safe-any-case",
+      "class": "configuration override",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git -c SAFE.bareRepository=all log -p",
+      "why": "git reads configuration section and key names in any case, so a check that matches only a lowercase safe. misses this spelling of the same override"
     }
   ]
 }
