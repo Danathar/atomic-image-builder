@@ -194,7 +194,13 @@ outside the checkout instead. The class was fixed one repository at a time
 (here in [#870](https://github.com/Danathar/atomic-image-builder/pull/870),
 then Danathar/zfs-aurora-complex#321, Danathar/arch-bootc#692 and
 Danathar/zfs-kinoite-complex#589) before it had rows, which is the drift
-the corpus exists to stop. A runner reads these rows as needing `git log`
+the corpus exists to stop. `named-repo-after-attr-source` and
+`config-override-safe-after-attr-source`
+([#889](https://github.com/Danathar/atomic-image-builder/issues/889)) put
+`--attr-source HEAD` first: git takes `HEAD` as that option's value, so a
+gate that reads it as the subcommand stops there and never sees the
+`--git-dir` or `-c` after it. `allow-attr-source-separated` keeps a gate
+from passing by refusing every `--attr-source`. A runner reads these rows as needing `git log`
 or `git diff` because git reads its own options before the subcommand, so
 `names()` in the test here steps over git's global options, and their
 values, between `git` and the rest of a `git ...` prefix. `git -C <dir>`
@@ -259,8 +265,8 @@ fetching it:
   matched against the name by its last part, as the `name-*` rows need.
   Between `git` and the rest of a `git ...` prefix it steps over git's
   global options (`--bare`, `--git-dir=...`, and `-C`, `-c`, `--git-dir`,
-  `--work-tree`, `--namespace` or `--config-env` with their value as the
-  next word), as the `named-repo-*` rows need. A wrapped row's words are read that way a second
+  `--work-tree`, `--namespace`, `--config-env` or `--attr-source` with their
+  value as the next word), as the `named-repo-*` rows need. A wrapped row's words are read that way a second
   time, as `unlisted-script-split-quote` needs. `inner_words()` in
   [`tests/test_gate_refusal_corpus.py`](../tests/test_gate_refusal_corpus.py)
   is the reference. A gate that lets a row through lists
