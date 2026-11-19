@@ -274,6 +274,26 @@ REFUSED_GLOBAL = (
     "--receive-pack",
 )
 
+# git's global options that may take their value as the next word
+# (`--attr-source HEAD`, `--git-dir evil`) rather than after `=`. The words
+# ahead of the subcommand are read one at a time, so without this the value
+# would be read as the subcommand and every option after it would go unread:
+# `git --attr-source HEAD --git-dir=evil log -p` stopped at `HEAD` and ran
+# `--git-dir` unchecked (#889). The refused ones are listed too, so the walk
+# is right on its own and not only because they stop it first.
+GLOBAL_VALUE_NEXT = frozenset(
+    {
+        "-c",
+        "-C",
+        "--attr-source",
+        "--config-env",
+        "--git-dir",
+        "--namespace",
+        "--super-prefix",
+        "--work-tree",
+    }
+)
+
 # Environment variables with the same reach, and what each one reaches. A
 # variable is one row: the name, as an fnmatch pattern so a numbered family
 # (`GIT_CONFIG_KEY_0`) is one entry, and the clause the refusal is built from.
@@ -3251,14 +3271,35 @@ def global_refusal(arguments: list[str]) -> str | None:
     """The refused option, if one appears before the subcommand.
 
     Only the options ahead of the subcommand are read here: `-c` and `-C`
-    after it are diff options with no such reach.
+    after it are diff options with no such reach. A global option that takes
+    its value as the next word (GLOBAL_VALUE_NEXT) steps over that word, so
+    `git --attr-source HEAD --git-dir=evil log` reads on past `HEAD`.
     """
-    for token in arguments:
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
         if not token.startswith("-"):
             return None
         if token.split("=", 1)[0] in REFUSED_GLOBAL:
             return token
+        index += 2 if token in GLOBAL_VALUE_NEXT else 1
     return None
+
+
+def git_subcommand(arguments: list[str]) -> str:
+    """The subcommand word of git's `arguments`, or "" when there is none.
+
+    The first word that is not a global option or the separate value of one
+    (GLOBAL_VALUE_NEXT): in `git --attr-source HEAD difftool` it is
+    `difftool`, not `HEAD`.
+    """
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if not token.startswith("-"):
+            return token
+        index += 2 if token in GLOBAL_VALUE_NEXT else 1
+    return ""
 
 
 # The first word of each gated command: what a command name has to become in
@@ -4048,7 +4089,7 @@ def typed_refusal(command: str) -> str | None:
                 f"{option} rewrites git's configuration or its repository before the "
                 "subcommand runs, which reaches past what the allow list describes"
             )
-        subcommand = next((word for word in arguments if not word.startswith("-")), "")
+        subcommand = git_subcommand(arguments)
         for token in arguments:
             if subcommand.startswith("difftool") and difftool_runs_command(token):
                 return (

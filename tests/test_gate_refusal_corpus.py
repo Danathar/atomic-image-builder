@@ -113,7 +113,15 @@ GLOB_CHARS = re.compile(r"[*?[]")
 EXTGLOB_GROUP = re.compile(r"[@?*+!]\([^()]*\)")
 MAX_BRACE_WORDS = 32
 # git global options whose value can be the next word (`git -C dir log`).
-GIT_OPTIONS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
+GIT_OPTIONS_WITH_VALUE = {
+    "-C",
+    "-c",
+    "--attr-source",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--config-env",
+}
 
 
 def ansi_c(text: str, start: int) -> tuple[str, int]:

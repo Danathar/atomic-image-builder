@@ -948,6 +948,26 @@
       "why": "--bare names the current directory as the repository, so run inside a planted bare folder git loads its config and runs its diff textconv program"
     },
     {
+      "id": "named-repo-after-attr-source",
+      "class": "named repository",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git --attr-source HEAD --git-dir=evil log -p",
+      "why": "--attr-source takes its value as the next word; a gate that reads HEAD as the subcommand never sees --git-dir, which names a bare folder a branch planted, loads its config and runs its diff textconv program"
+    },
+    {
+      "id": "allow-attr-source-separated",
+      "class": "named repository",
+      "verdict": "allow",
+      "requires": [
+        "git log"
+      ],
+      "command": "git --attr-source HEAD log -p",
+      "why": "--attr-source on its own names no repository; a gate must not refuse it"
+    },
+    {
       "id": "named-repo-work-tree",
       "class": "named repository",
       "verdict": "refuse",
@@ -986,6 +1006,16 @@
       ],
       "command": "git -c SAFE.bareRepository=all log -p",
       "why": "git reads configuration section and key names in any case, so a check that matches only a lowercase safe. misses this spelling of the same override"
+    },
+    {
+      "id": "config-override-safe-after-attr-source",
+      "class": "configuration override",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git --attr-source HEAD -c safe.bareRepository=all log -p",
+      "why": "--attr-source takes its value as the next word; a gate that reads HEAD as the subcommand never sees -c safe.bareRepository=all, which undoes the settings env so a planted bare folder runs its diff textconv program"
     },
     {
       "id": "config-removal-unset",

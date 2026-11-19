@@ -863,6 +863,11 @@ REACH_CORPUS = (
     ("options", "git --git-dir=/tmp/other/.git log", REFUSED, "re-points the repository"),
     ("options", "git --bare log -p", REFUSED, "is --git-dir=., the explicit form safe.bareRepository=explicit still permits"),
     ("options", "git -P --bare diff HEAD", REFUSED, "behind an unrefused global option"),
+    ("options", "git --attr-source HEAD --git-dir=evil log -p", REFUSED, "--attr-source takes HEAD as its value, so the walk reads on to --git-dir (#889)"),
+    ("options", "git --attr-source HEAD -c safe.bareRepository=all log -p", REFUSED, "the -c behind a separated --attr-source value (#889)"),
+    ("options", "git --attr-source HEAD --bare log -p", REFUSED, "the --bare behind a separated --attr-source value (#889)"),
+    ("options", "git --attr-source HEAD difftool -y -x cat HEAD~1", REFUSED, "difftool is the subcommand, not the HEAD --attr-source takes (#889)"),
+    ("options", "git --attr-source HEAD log -p", ALLOWED, "--attr-source alone names no repository"),
     ("options", "git init --bare x", ALLOWED, "--bare after the subcommand is init's own option"),
     ("options", "git --upload-pack=/tmp/evil log", REFUSED, "listed against a git that starts taking it before a subcommand"),
     ("options", "git diff --output=/tmp/out", REFUSED, "writes any file"),
@@ -3059,6 +3064,18 @@ class RefusalTests(unittest.TestCase):
         self.assertEqual(gate.global_refusal(["-c", "diff.external=x", "diff"]), "-c")
         self.assertIsNone(gate.global_refusal(["log", "-c", "-p"]))
         self.assertIsNone(gate.global_refusal(["diff", "-C"]))
+
+    def test_a_global_option_value_given_as_the_next_word_is_stepped_over(self) -> None:
+        # `--attr-source HEAD` takes HEAD as its value; reading HEAD as the
+        # subcommand stopped the walk before the --git-dir after it (#889).
+        self.assertEqual(
+            gate.global_refusal(["--attr-source", "HEAD", "--git-dir=evil", "log"]),
+            "--git-dir=evil",
+        )
+        self.assertIsNone(gate.global_refusal(["--attr-source", "HEAD", "log", "-c"]))
+        self.assertEqual(gate.git_subcommand(["--attr-source", "HEAD", "difftool"]), "difftool")
+        self.assertEqual(gate.git_subcommand(["--attr-source=HEAD", "log"]), "log")
+        self.assertEqual(gate.git_subcommand(["--attr-source", "HEAD"]), "")
 
     def test_a_shellcheck_glob_is_judged_by_the_files_it_names(self) -> None:
         # The one expansion the scan performs instead of refusing, because
