@@ -1073,6 +1073,17 @@
       "why": "bash's exec -c runs the command with an empty environment, as env -i does"
     },
     {
+      "id": "config-removal-exec-a-name-c",
+      "class": "configuration removal",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "wraps": "exec",
+      "command": "exec -a name -c git log -p",
+      "why": "bash keeps reading exec's options after -a NAME, so -c there still empties the environment"
+    },
+    {
       "id": "config-removal-allow-other-unset",
       "class": "configuration removal",
       "verdict": "allow",
@@ -1092,6 +1103,17 @@
       "wraps": "env",
       "command": "env -u FOO git log -1",
       "why": "env -u of another variable reaches nothing either"
+    },
+    {
+      "id": "config-removal-allow-exec-a-name",
+      "class": "configuration removal",
+      "verdict": "allow",
+      "requires": [
+        "git log"
+      ],
+      "wraps": "exec",
+      "command": "exec -a name git log -1",
+      "why": "exec -a only sets the name the command sees; without -c the environment is kept"
     }
   ]
 }
