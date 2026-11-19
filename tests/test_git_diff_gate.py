@@ -131,7 +131,7 @@ REFUSED_COMMANDS = (
     ("git diff HEAD --outp*", "builds --output from a glob over a file named for it"),
     ("git diff .env*", "builds two untracked-file operands from a glob"),
     ("git diff -- *", "globs every file in the working directory into an operand"),
-    ("env -i git log -1 *", "globs behind a wrapper"),
+    ("env -v git log -1 *", "globs behind a wrapper"),
     ("git log --format=%h?", "carries an unquoted ? bash would expand"),
     ("git diff HEAD -- a[b]", "carries an unquoted [ bash would expand"),
     ("G=/dev/null; git diff $G ./cosign.key", "builds a --no-index operand from a variable"),
@@ -191,7 +191,7 @@ REFUSED_COMMANDS = (
     ("shellcheck <(printf x) >cosign.pub", "carries the redirection across a process substitution"),
     (">`printf cosign.pub` shellcheck contrib/aib", "hid the linter behind a backtick target"),
     ("command -p shellcheck contrib/aib >cosign.pub", "hid the linter behind a wrapper's option"),
-    ("env -i podman images >cosign.pub", "hid podman behind a wrapper's option"),
+    ("env -v podman images >cosign.pub", "hid podman behind a wrapper's option"),
     ("shellcheck contrib/aib >cosign.pub # ok", "writes before a comment"),
     ("shellcheck contrib/aib '#' >cosign.pub", "writes past a quoted hash"),
     ("podman images >(cat >cosign.pub)", "writes from inside a process substitution argument"),
@@ -245,7 +245,7 @@ REFUSED_COMMANDS = (
     ("git log --stdin 3< .env <&3", "opens the file on another descriptor and duplicates it"),
     ("SHELLCHECK_OPTS=./.env shellcheck contrib/aib", "hands the linter a denied operand through its environment"),
     ("env SHELLCHECK_OPTS=./.env shellcheck contrib/aib", "hides that assignment behind a wrapper"),
-    ("env -i SHELLCHECK_OPTS=./.env shellcheck contrib/aib", "hides it behind a wrapper's own option"),
+    ("env -v SHELLCHECK_OPTS=./.env shellcheck contrib/aib", "hides it behind a wrapper's own option"),
     ("env 'SHELLCHECK_OPTS'=./.env shellcheck contrib/aib", "quotes the name bash would not read as an assignment and env does"),
     ("env -S 'SHELLCHECK_OPTS=./.env shellcheck contrib/aib'", "splits the assignment and the command out of one word"),
     ("export SHELLCHECK_OPTS=./.env; shellcheck contrib/aib", "exports it from a segment with no gated command in it"),
@@ -261,7 +261,7 @@ REFUSED_COMMANDS = (
     ("env --chdir=/tmp/other git diff", "relocates git through the attached spelling of the same option"),
     ("env -S'FOO=x\\_GIT_EXTERNAL_DIFF=./evil\\_git diff'", "merges past word.split() so only the decoy name in front of it is read"),
     ("export GIT_EXTERNAL_DIFF$'=./evil'; git diff HEAD", "concatenates an ANSI-C quote onto the name so the literal scan misses it"),
-    ("env -i {,git} diff --no-index /dev/null ./cosign.key", "hides a brace-expanded name behind a wrapper's own option"),
+    ("env -v {,git} diff --no-index /dev/null ./cosign.key", "hides a brace-expanded name behind a wrapper's own option"),
     (
         "export 'GIT_EXTERNAL_DIFF'$'=./evil'; git diff HEAD",
         "quotes the identifier ahead of the ANSI-C escape, which used to shift an index-based scan out of alignment with its "
@@ -586,7 +586,7 @@ REACH_CORPUS = (
     ("environment", "GIT_EXTERNAL_DIFF=/tmp/evil git diff HEAD", REFUSED, "names a program git runs on every file it diffs"),
     ("environment", "GIT_EXTERNAL_DIFF+=/tmp/evil git diff HEAD", REFUSED, "appending to an unset variable creates it"),
     ("environment", "env GIT_EXTERNAL_DIFF=/tmp/evil git diff HEAD", REFUSED, "the same assignment behind a wrapper"),
-    ("environment", "env -i GIT_EXTERNAL_DIFF=/tmp/evil git diff HEAD", REFUSED, "behind the wrapper's own option"),
+    ("environment", "env -v GIT_EXTERNAL_DIFF=/tmp/evil git diff HEAD", REFUSED, "behind the wrapper's own option"),
     ("environment", "GIT_COMMON_DIR=/tmp/other/.git git diff", REFUSED, "git reads $GIT_COMMON_DIR/config in place of the checkout's, so a diff.external there runs"),
     ("environment", "export GIT_COMMON_DIR=/tmp/other/.git", REFUSED, "exported ahead of the git a later command runs"),
     ("environment", "GIT_TRACE=/var/tmp/x/cosign.pub git status", REFUSED, "an absolute-path value makes git append its trace to that file"),
@@ -629,6 +629,57 @@ REACH_CORPUS = (
     ("environment", "x=1; podman images", ALLOWED, "a variable in another command of the string reaches nothing the allow list covers"),
     ("environment", "FOO=1 echo x; podman images", ALLOWED, "an assignment on a command no rule covers"),
     ("environment", "grep -rn SHELLCHECK_OPTS docs/SECURITY-AI.md", ALLOWED, "the name without the = is not an assignment"),
+    ("environment", "unset GIT_CONFIG_COUNT; git log -p", REFUSED, "without the count git reads no settings configuration and falls back to safe.bareRepository=all (#885)"),
+    ("environment", "cd evil && unset GIT_CONFIG_COUNT && git log -p", REFUSED, "the same, inside the planted folder"),
+    ("environment", "unset GIT_CONFIG_COUNT", REFUSED, "alone: the Bash tool's shell outlives one call"),
+    ("environment", "git log -1; unset GIT_CONFIG_COUNT", REFUSED, "after the git: it still reaches the next call's"),
+    ("environment", "command unset GIT_CONFIG_COUNT; git log -p", REFUSED, "behind a wrapper bash steps over"),
+    ("environment", "unset -v FOO GIT_CONFIG_COUNT", REFUSED, "the name need not be the first operand"),
+    ("environment", "export -n GIT_CONFIG_COUNT; git log -p", REFUSED, "export -n stops exporting the variable"),
+    ("environment", "export -pn GIT_CONFIG_COUNT; git log -p", REFUSED, "-n clustered with another option"),
+    ("environment", "declare +x GIT_CONFIG_COUNT; git log -p", REFUSED, "declare +x stops exporting it the same way"),
+    ("environment", "typeset +x GIT_CONFIG_KEY_0; git log -p", REFUSED, "typeset is declare's other name, and any GIT_CONFIG name counts"),
+    ("environment", "declare +ix GIT_CONFIG_COUNT; git log -p", REFUSED, "+x clustered with another attribute"),
+    ("environment", "env -u GIT_CONFIG_COUNT git log -p", REFUSED, "env removes it for the command it runs"),
+    ("environment", "env -uGIT_CONFIG_COUNT git log -p", REFUSED, "-u with its name attached"),
+    ("environment", "env -0u GIT_CONFIG_COUNT git log -p", REFUSED, "-u clustered behind another option"),
+    ("environment", "env -u FOO -u GIT_CONFIG_COUNT git log -p", REFUSED, "the second of two -u options"),
+    ("environment", "env --unset=GIT_CONFIG_COUNT git log -p", REFUSED, "the long spelling"),
+    ("environment", "env --unset GIT_CONFIG_COUNT git log -p", REFUSED, "the long spelling with the name a separate word"),
+    ("environment", "env --uns=GIT_CONFIG_COUNT git log -p", REFUSED, "an abbreviation env accepts"),
+    ("environment", "env -i git log -p", REFUSED, "env -i runs the command with an empty environment"),
+    ("environment", "env -vi git log -p", REFUSED, "-i clustered behind another option"),
+    ("environment", "env - git log -p", REFUSED, "a bare - is env's old spelling of -i"),
+    ("environment", "env --ignore-environment git log -p", REFUSED, "the long spelling of -i"),
+    ("environment", "env --ignore-e git log -p", REFUSED, "an abbreviation of it"),
+    ("environment", "env -i bash -c \"git log -p\"", REFUSED, "the emptied environment reaches a command string this scan reads apart"),
+    ("environment", "timeout 5 env -i git log -p", REFUSED, "env behind another wrapper's value"),
+    ("environment", "timeout 5 env -i bash -c \"git log -p\"", REFUSED, "behind a duration and a wrapper, running a command string"),
+    ("environment", "nice env -u GIT_CONFIG_COUNT git log -p", REFUSED, "env behind another wrapper"),
+    ("environment", "exec -c git log -p", REFUSED, "bash's exec -c runs the command with an empty environment"),
+    ("environment", "exec -lc git log -p", REFUSED, "-c clustered with exec's -l"),
+    ("environment", "unset FOO; git log -1", ALLOWED, "unsetting any other variable reaches nothing"),
+    ("environment", "echo unset GIT_CONFIG_COUNT; git log -1", ALLOWED, "the words of another command"),
+    ("environment", "export -n FOO; git log -1", ALLOWED, "export -n of another variable"),
+    ("environment", "export GIT_CONFIG_COUNT; git log -1", ALLOWED, "exporting it again without a value changes nothing"),
+    ("environment", "export -f GIT_CONFIG_COUNT; git log -1", ALLOWED, "an export option other than -n"),
+    ("environment", "declare -x GIT_CONFIG_COUNT; git log -1", ALLOWED, "-x exports, it does not unexport"),
+    ("environment", "declare +i GIT_CONFIG_COUNT; git log -1", ALLOWED, "a + attribute other than x"),
+    ("environment", "env -u FOO git log -1", ALLOWED, "env -u of another variable, the way contrib/aib's own remedy text uses it"),
+    ("environment", "env -uFOO git log -1", ALLOWED, "the same with the name attached"),
+    ("environment", "env --unset=FOO git log -1", ALLOWED, "the long spelling"),
+    ("environment", "env -u FOO --unset GH_TOKEN git log -1", ALLOWED, "two -u options naming neither"),
+    ("environment", "env -- git log -1", ALLOWED, "-- ends env's options and empties nothing"),
+    ("environment", "env LANG=C git log -1", ALLOWED, "an ordinary assignment"),
+    ("environment", "exec git log -1", ALLOWED, "exec without -c keeps the environment"),
+    ("environment", "exec -a -c git log -1", ALLOWED, "-a takes the next word as the name, even one that looks like -c"),
+    ("environment", "git grep env -i", ALLOWED, "git's own operands are not env's"),
+    ("environment", "nice grep env -i README.md", ALLOWED, "nor are another program's behind a wrapper"),
+    ("environment", "git grep -n GIT_CONFIG_COUNT", ALLOWED, "searching for the name removes nothing"),
+    ("environment", "git log -S unset", ALLOWED, "the word unset as an operand"),
+    ("environment", "timeout 5 git log -1", ALLOWED, "a wrapper with a duration"),
+    ("environment", "env -u", ALLOWED, "-u with no name after it removes nothing"),
+    ("environment", "env --unset", ALLOWED, "nor does the long spelling"),
     (
         "environment",
         "export 'GIT_EXTERNAL_DIFF'$'=./evil'; git diff HEAD",
@@ -826,12 +877,12 @@ REACH_CORPUS = (
     ("options", "git diff -S 'a\\b' HEAD", ALLOWED, "the same pickaxe option on git diff, detached the way env's -S is when it belongs to env"),
     ("options", "shellcheck -e SC2034 -x tests/e2e/lib.sh", ALLOWED, "-x is load-bearing in this repository's own lint command"),
     ("options", "env -C/tmp/other git diff", REFUSED, "-C's argument attached with no separator, which env accepts and the exact-match test missed"),
-    ("options", "env -iC/etc git diff HEAD", REFUSED, "-C clustered behind env's own -i, its value the rest of the same word"),
-    ("options", "env -iC /etc git diff HEAD", REFUSED, "the same cluster with the value a separate word"),
+    ("options", "env -vC/etc git diff HEAD", REFUSED, "-C clustered behind env's own -v, its value the rest of the same word (behind -i the cluster is refused for emptying the environment first, #885)"),
+    ("options", "env -vC /etc git diff HEAD", REFUSED, "the same cluster with the value a separate word"),
     ("options", "env --chd=/tmp/other git diff", REFUSED, "an unambiguous abbreviation of --chdir"),
     ("options", "env --split='FOO=x GIT_EXTERNAL_DIFF=./evil git diff HEAD'", REFUSED, "an unambiguous abbreviation of --split-string, carrying the same re-splitting"),
-    ("options", "env -iS'FOO=x GIT_EXTERNAL_DIFF=./evil git diff HEAD'", REFUSED, "-S clustered behind env's own -i, attached to the rest of the word"),
-    ("options", "env -i git diff HEAD", ALLOWED, "env's own -i carries neither letter wrapper_relocates() or env_split_string_value() reads"),
+    ("options", "env -vS'FOO=x GIT_EXTERNAL_DIFF=./evil git diff HEAD'", REFUSED, "-S clustered behind env's own -v, attached to the rest of the word"),
+    ("options", "env -v git diff HEAD", ALLOWED, "env's own -v carries neither letter wrapper_relocates() or env_split_string_value() reads; -i is refused since #885, for emptying the settings environment"),
     ("options", "podman images --cpu-profile cosign.pub", REFUSED, "podman opens the path and dumps a CPU profile over it"),
     ("options", "podman images --cpu-profile=cosign.pub", REFUSED, "the attached spelling of the same option"),
     ("options", "podman ps --memory-profile .claude/settings.json", REFUSED, "the memory profile writes the same way"),
@@ -1542,6 +1593,52 @@ class ReachCorpusTests(unittest.TestCase):
                     self.assertIsNotNone(
                         gate.refusal(command.replace("PROBE", "GIT_EXTERNAL_DIFF").replace("./show.sh", "git diff")),
                         f"{spelling} is not refused for a variable that reaches git",
+                    )
+
+    def test_every_removing_spelling_takes_the_variable_away(self) -> None:
+        # The other direction (#885): each spelling removed_settings_environment()
+        # refuses takes an exported variable out of a later command's
+        # environment, checked against bash and env rather than their manual
+        # pages, and the gate refuses it for the settings env's own name.
+        removals = {
+            "unset": "unset PROBE; ./show.sh",
+            "export -n": "export -n PROBE; ./show.sh",
+            "declare +x": "declare +x PROBE; ./show.sh",
+            "typeset +x": "typeset +x PROBE; ./show.sh",
+            "env -u": "env -u PROBE ./show.sh",
+            "env -uNAME": "env -uPROBE ./show.sh",
+            "env --unset=": "env --unset=PROBE ./show.sh",
+            "env --uns": "env --uns PROBE ./show.sh",
+            "env -i": "env -i ./show.sh",
+            "env -": "env - ./show.sh",
+            "env --ignore-e": "env --ignore-e ./show.sh",
+            "exec -c": "exec -c ./show.sh",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            show = Path(tmp, "show.sh")
+            show.write_text('#!/bin/bash\necho "PROBE=${PROBE:-unset}"\n')
+            show.chmod(0o755)
+            environment = {"PATH": os.environ["PATH"], "PROBE": "hit"}
+            kept = subprocess.run(
+                ["bash", "--norc", "--noprofile", "-c", "./show.sh"],
+                cwd=tmp, env=environment, capture_output=True, text=True, check=False,
+            )
+            self.assertIn("PROBE=hit", kept.stdout, "the probe has to start out exported")
+            for spelling, command in removals.items():
+                with self.subTest(spelling=spelling):
+                    result = subprocess.run(
+                        ["bash", "--norc", "--noprofile", "-c", command],
+                        cwd=tmp, env=environment, capture_output=True, text=True, check=False,
+                    )
+                    self.assertIn(
+                        "PROBE=unset",
+                        result.stdout,
+                        f"{command!r} no longer takes the variable away; re-derive "
+                        "which spellings removed_settings_environment() has to read",
+                    )
+                    self.assertIsNotNone(
+                        gate.refusal(command.replace("PROBE", "GIT_CONFIG_COUNT").replace("./show.sh", "git log -p")),
+                        f"{spelling} is not refused for the settings env",
                     )
 
     def test_git_runs_the_program_an_earlier_command_exported(self) -> None:

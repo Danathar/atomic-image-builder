@@ -119,6 +119,39 @@ class ClaudeSettingsGitTests(unittest.TestCase):
         self.assertEqual(hook.returncode, 2, hook.stderr)
         self.assertIn("--bare", hook.stderr)
 
+    def test_removing_the_settings_env_runs_the_planted_program_and_the_hook_refuses_it(self) -> None:
+        """Taking GIT_CONFIG_COUNT away undoes the setting as completely as `-c`
+        does: git reads no environment configuration without the count. So the
+        guard hook has to refuse each command that removes it (#885)."""
+        agent_env = {**self.base_env(), **settings_env()}
+        cleared = subprocess.run(
+            ["bash", "--norc", "--noprofile", "-c", "unset GIT_CONFIG_COUNT; git log -p -1"],
+            cwd=self.victim / "evil",
+            env=agent_env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(cleared.returncode, 0, cleared.stderr)
+        self.assertTrue(self.marker.exists(), "unset GIT_CONFIG_COUNT should reach the planted program; if not, revisit the hook rule")
+        for command in (
+            "unset GIT_CONFIG_COUNT; git log -p -1",
+            "export -n GIT_CONFIG_COUNT; git log -p -1",
+            "env -u GIT_CONFIG_COUNT git log -p -1",
+            "env -i git log -p -1",
+            "exec -c git log -p -1",
+        ):
+            with self.subTest(command=command):
+                hook = subprocess.run(
+                    [sys.executable, str(HOOK)],
+                    input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(hook.returncode, 2, hook.stderr)
+                self.assertIn("safe.bareRepository", hook.stderr)
+
     def test_checkout_own_repository_still_works_with_the_settings_env(self) -> None:
         agent_env = {**self.base_env(), **settings_env()}
         self.assertEqual(self.git(self.victim, agent_env, "log", "-1", "--format=%s").stdout.strip(), "planted-tree")
