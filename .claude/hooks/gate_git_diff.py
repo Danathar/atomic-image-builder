@@ -2825,14 +2825,40 @@ def removed_settings_environment(invocation: Invocation) -> str | None:
             if found is not None:
                 return f"env {found}"
         elif program == "exec":
-            for word in chain[index + 1 :]:
-                option = bare(word)
-                if not option.startswith("-"):
-                    break
-                if "c" in option[1:]:
-                    return f"exec {option}"
-                if option.endswith("a"):
-                    break  # -a NAME takes the next word; nothing after it is exec's
+            # The chain is cut at the first word that is not an option, which
+            # for `exec -a name -c bash -c '...'` is the name, so exec is read
+            # from the whole invocation: the chain is a prefix of it.
+            whole = [token for token, _ in invocation.wrappers] + invocation.words
+            found = exec_empties_environment(whole[index + 1 :])
+            if found is not None:
+                return f"exec {found}"
+    return None
+
+
+def exec_empties_environment(words: list[str]) -> str | None:
+    """The option word among `exec`'s options that carries -c, or None.
+
+    bash reads exec's options with getopt (`cla:`), so -a NAME does not end
+    them: `exec -a name -c git log -p` still empties the environment (#887).
+    -a takes the rest of its word as the name when there is any (`-aname`,
+    `-laname`), and the next word otherwise (`-a name`, `-la name`), and the
+    scan goes on after either, up to the first word that is not an option.
+    A word carrying a `c` anywhere is refused, even one where the c is part
+    of an attached name (`-acat`): that is stricter than bash, never weaker.
+    `--` holds no c and no a, so the scan reading on past it can only add a
+    refusal.
+    """
+    position = 0
+    while position < len(words):
+        option = bare(words[position])
+        if not option.startswith("-"):
+            return None
+        if "c" in option[1:]:
+            return option
+        name_at = option.find("a", 1)
+        if name_at == len(option) - 1:
+            position += 1  # -a NAME: the next word is the name, not an option
+        position += 1
     return None
 
 

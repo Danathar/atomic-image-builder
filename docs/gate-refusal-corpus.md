@@ -224,8 +224,11 @@ reads no environment configuration at all, so `unset GIT_CONFIG_COUNT`,
 `export -n`, `declare +x`, `env -u` and `env --unset=` in front of
 `git log -p` reach the planted textconv program as surely as `-c` does, and
 so do `env -i`, `env -` and bash's `exec -c`, which run the command with an
-empty environment. Two allow rows keep ordinary work open: unsetting any
-other variable, and `env -u` of one. This repository's gate refuses the
+empty environment. bash keeps reading `exec`'s options after `-a NAME`, so
+`exec -a name -c` is a refuse row too
+([#887](https://github.com/Danathar/atomic-image-builder/issues/887)). Three
+allow rows keep ordinary work open: unsetting any other variable, `env -u`
+of one, and `exec -a name` without `-c`. This repository's gate refuses the
 removal wherever it is written, as it does an assignment, since the Bash
 tool's shell outlives one call.
 
