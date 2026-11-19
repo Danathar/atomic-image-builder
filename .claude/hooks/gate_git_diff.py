@@ -926,6 +926,23 @@ SHELLCHECK_CHECK_SOURCED = "--check-sourced"
 ENV_VALUED_SHORT = frozenset("CSu")
 WRAPPER_RELOCATION_LONG = "--chdir"
 WRAPPER_SPLIT_STRING_LONG = "--split-string"
+WRAPPER_UNSET_LONG = "--unset"
+WRAPPER_IGNORE_ENVIRONMENT_LONG = "--ignore-environment"
+
+# The variables `.claude/settings.json` puts in every Bash call to make git
+# refuse a planted bare repository (safe.bareRepository=explicit, #866), as
+# an fnmatch pattern. Assigning one is refused with REFUSED_ENVIRONMENT's
+# GIT_CONFIG* row; *removing* one undoes the setting just as completely --
+# without GIT_CONFIG_COUNT git reads no environment configuration at all
+# and falls back to safe.bareRepository=all -- so the commands that take
+# them out of a child's environment are refused too (#885). See
+# removed_settings_environment().
+SETTINGS_ENVIRONMENT = "GIT_CONFIG*"
+
+# The builtins that take a variable out of the environment of every later
+# command: `unset NAME`, `export -n NAME`, and `declare +x NAME` /
+# `typeset +x NAME`, which keep the variable but stop exporting it.
+UNEXPORT_FAMILY = frozenset({"declare", "typeset"})
 
 
 # Both of bash's assignment operators, longest first. `+=` appends, and
@@ -2674,6 +2691,151 @@ def assigned_name(piece: str) -> str | None:
     return None
 
 
+def names_settings_environment(word: str) -> bool:
+    """Is this word (a `NAME` or a `NAME=value`) one of the settings env's
+    variables, in the case bash and env read it in?"""
+    return fnmatch.fnmatchcase(bare(word).split("=", 1)[0], SETTINGS_ENVIRONMENT)
+
+
+def env_empties_or_unsets(words: list[str]) -> str | None:
+    """The env option among `words` -- env's own arguments, from the first
+    word after its name -- that empties the child's environment or removes a
+    SETTINGS_ENVIRONMENT variable from it, or None.
+
+    Every spelling env accepts is read: `-i`, a bare `-`, and
+    `--ignore-environment` or an unambiguous abbreviation of it; `-u NAME`,
+    `-uNAME`, `-iuNAME` clustered, and `--unset=NAME` / `--unset NAME` or
+    an abbreviation. `-C` and `-S` take a value the same way `-u` does, so
+    a cluster's scan stops there. The walk ends at the first word that is
+    not one of env's options -- an assignment or the command it runs. `--`
+    is read as an option word too: `env -- -i` runs a program named `-i`,
+    which nothing does, so refusing it costs nothing.
+    """
+    index = 0
+    while index < len(words):
+        word = bare(words[index])
+        if word == "-":
+            return word
+        if not word.startswith("-"):
+            return None
+        name = long_option_name(word)
+        if name is not None:
+            if long_option_abbreviates(name, WRAPPER_IGNORE_ENVIRONMENT_LONG):
+                return word
+            if long_option_abbreviates(name, WRAPPER_UNSET_LONG):
+                if "=" in word:
+                    value = word.split("=", 1)[1]
+                else:
+                    index += 1
+                    value = words[index] if index < len(words) else ""
+                if names_settings_environment(value):
+                    return word
+            elif "=" not in word and (
+                long_option_abbreviates(name, WRAPPER_RELOCATION_LONG)
+                or long_option_abbreviates(name, WRAPPER_SPLIT_STRING_LONG)
+            ):
+                index += 1
+            index += 1
+            continue
+        for position, char in enumerate(word[1:], start=1):
+            if char == "i":
+                return word
+            if char in ENV_VALUED_SHORT:
+                value = word[position + 1 :]
+                if not value:
+                    index += 1
+                    value = bare(words[index]) if index < len(words) else ""
+                if char == "u" and names_settings_environment(value):
+                    return word
+                break
+        index += 1
+    return None
+
+
+def wrapper_chain(invocation: Invocation) -> list[str]:
+    """The wrapper words of an invocation and the option words that follow
+    them, up to the command they run.
+
+    command_words() steps over the leading wrappers, so `env -i git log`
+    has `env` in `wrappers` and its `-i` as the first of `words`; a wrapper
+    behind another wrapper's value (`timeout 5 env -i git log`) stays among
+    `words`. The words are cut where the gated command's name stands, or,
+    when none does, at the first word that is neither an option, a wrapper
+    name nor a bare duration -- so `git grep env -i` and `nice grep env -i`
+    keep their own `env` and `-i` as the operands they are.
+    """
+    if not invocation.wrapped:
+        return []
+    words = invocation.words
+    limit = command_start(invocation)
+    if limit is None:
+        limit = 0
+        while limit < len(words) and (
+            bare(words[limit]).startswith("-")
+            or wrapper_basename(words[limit]) in COMMAND_WRAPPERS
+            or re.fullmatch(r"[0-9.]+[smhd]?", bare(words[limit]))
+        ):
+            limit += 1
+    return [token for token, _ in invocation.wrappers] + words[:limit]
+
+
+def removed_settings_environment(invocation: Invocation) -> str | None:
+    """The words in this segment that take a SETTINGS_ENVIRONMENT variable
+    out of a command's environment, or None.
+
+    Five spellings do it, all of them plain builtin names or the plain
+    `env` wrapper: `unset GIT_CONFIG_COUNT`, `export -n GIT_CONFIG_COUNT`,
+    `declare +x` / `typeset +x GIT_CONFIG_COUNT`, `env -u GIT_CONFIG_COUNT`
+    (or `--unset=`), and the two that empty the whole environment, `env -i`
+    (or `-`, `--ignore-environment`) and bash's `exec -c`. Each was shown
+    to run a planted bare repository's textconv program from `git log -p`
+    with the settings env set (git 2.47.3, Danathar/sensi#705).
+
+    Refused wherever it stands, like an assignment (assigned_environment()):
+    an `unset` in an earlier command of the string reaches the later git,
+    and the Bash tool's shell outlives one call, so one in a string that
+    runs nothing gated reaches the next call's. The empty-environment
+    spellings are refused whatever they run, since `env -i bash -c '...'`
+    hands the emptied environment to a command this scan reads separately.
+    Every wrapper position is read (wrapper_chain()), so `timeout 5 env -i
+    git log -p` is read as surely as `env -i git log -p`.
+    """
+    words = invocation.words
+    if words and words[0] == "unset":
+        for word in words[1:]:
+            if names_settings_environment(word):
+                return f"unset {word}"
+    if words and words[0] == "export":
+        options = [bare(word) for word in words[1:] if bare(word).startswith("-")]
+        if any(option != "--" and "n" in option[1:] for option in options):
+            for word in words[1:]:
+                if names_settings_environment(word):
+                    return f"export -n {bare(word)}"
+    if words and words[0] in UNEXPORT_FAMILY:
+        options = [bare(word) for word in words[1:] if bare(word).startswith("+")]
+        if any("x" in option[1:] for option in options):
+            for word in words[1:]:
+                if names_settings_environment(word):
+                    return f"{words[0]} +x {bare(word)}"
+    chain = wrapper_chain(invocation)
+    for index, token in enumerate(chain):
+        program = wrapper_basename(token)
+        if program == "env":
+            found = env_empties_or_unsets(chain[index + 1 :])
+            if found is not None:
+                return f"env {found}"
+        elif program == "exec":
+            for word in chain[index + 1 :]:
+                option = bare(word)
+                if not option.startswith("-"):
+                    break
+                if "c" in option[1:]:
+                    return f"exec {option}"
+                if option.endswith("a"):
+                    break  # -a NAME takes the next word; nothing after it is exec's
+    return None
+
+
 def env_split_escape(token: str) -> str | None:
     """The backslash escape in an `env -S`/`--split-string` argument this
     scan does not parse, or None.
@@ -3535,6 +3697,19 @@ def typed_refusal(command: str) -> str | None:
                             "words instead of inside a split string with an escape in it"
                         )
         invocation = command_words(segment, twins, [raws[index] for index in positions])
+        removed = removed_settings_environment(invocation)
+        if removed is not None:
+            return (
+                f"`{removed}` takes git's settings environment ({SETTINGS_ENVIRONMENT}) "
+                "out of the command's environment. `.claude/settings.json` sets "
+                "safe.bareRepository=explicit through those variables so git refuses a "
+                "bare repository a branch commits; without them git falls back to "
+                "safe.bareRepository=all and `git log -p` runs a diff textconv program "
+                "the planted folder's config names. Removing them is refused wherever "
+                "it is written -- unset, export -n, declare or typeset +x, env -u, and "
+                "env -i or exec -c, which empty the whole environment -- since the Bash "
+                "tool's shell outlives one call; run the command without clearing them"
+            )
         if invocation.words and invocation.words[0] in EXPORT_FAMILY:
             # Every word after the name is a candidate assignment
             # assigned_environment() already tests by content; this is

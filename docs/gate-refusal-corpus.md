@@ -216,6 +216,19 @@ list names `safe.`; this repository's gate refuses every `-c` and
 `--config-env`. Git rejects the attached `-csafe...` and abbreviated
 `--conf=...` spellings itself, so they have no rows.
 
+The `configuration removal` rows
+([#885](https://github.com/Danathar/atomic-image-builder/issues/885)) undo
+the same setting from the other side: they take the `GIT_CONFIG_*`
+variables away instead of overriding them. Without `GIT_CONFIG_COUNT` git
+reads no environment configuration at all, so `unset GIT_CONFIG_COUNT`,
+`export -n`, `declare +x`, `env -u` and `env --unset=` in front of
+`git log -p` reach the planted textconv program as surely as `-c` does, and
+so do `env -i`, `env -` and bash's `exec -c`, which run the command with an
+empty environment. Two allow rows keep ordinary work open: unsetting any
+other variable, and `env -u` of one. This repository's gate refuses the
+removal wherever it is written, as it does an assignment, since the Bash
+tool's shell outlives one call.
+
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
 table. The one disagreement found, `git diff --ext-diff`, is refused here and

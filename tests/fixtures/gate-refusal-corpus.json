@@ -986,6 +986,112 @@
       ],
       "command": "git -c SAFE.bareRepository=all log -p",
       "why": "git reads configuration section and key names in any case, so a check that matches only a lowercase safe. misses this spelling of the same override"
+    },
+    {
+      "id": "config-removal-unset",
+      "class": "configuration removal",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "unset GIT_CONFIG_COUNT; git log -p",
+      "why": "unset in an earlier command of the string: removing GIT_CONFIG_COUNT takes away the safe.bareRepository=explicit setting .claude/settings.json puts in the environment, so git uses a bare folder it finds again, loads the config a branch planted there and runs its diff textconv program"
+    },
+    {
+      "id": "config-removal-export-n",
+      "class": "configuration removal",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "export -n GIT_CONFIG_COUNT; git log -p",
+      "why": "export -n keeps the variable but stops exporting it, so git never sees it"
+    },
+    {
+      "id": "config-removal-declare-unexport",
+      "class": "configuration removal",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "declare +x GIT_CONFIG_COUNT; git log -p",
+      "why": "declare +x stops exporting it the same way, and typeset is the same builtin"
+    },
+    {
+      "id": "config-removal-env-u",
+      "class": "configuration removal",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "wraps": "env",
+      "command": "env -u GIT_CONFIG_COUNT git log -p",
+      "why": "env -u removes the variable from the environment of the command env runs"
+    },
+    {
+      "id": "config-removal-env-unset-long",
+      "class": "configuration removal",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "wraps": "env",
+      "command": "env --unset=GIT_CONFIG_COUNT git log -p",
+      "why": "the long spelling of env -u"
+    },
+    {
+      "id": "config-removal-env-i",
+      "class": "configuration removal",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "wraps": "env",
+      "command": "env -i git log -p",
+      "why": "env -i runs the command with an empty environment, which removes every settings variable at once"
+    },
+    {
+      "id": "config-removal-env-dash",
+      "class": "configuration removal",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "wraps": "env",
+      "command": "env - git log -p",
+      "why": "a bare - is env's older spelling of -i"
+    },
+    {
+      "id": "config-removal-exec-c",
+      "class": "configuration removal",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "wraps": "exec",
+      "command": "exec -c git log -p",
+      "why": "bash's exec -c runs the command with an empty environment, as env -i does"
+    },
+    {
+      "id": "config-removal-allow-other-unset",
+      "class": "configuration removal",
+      "verdict": "allow",
+      "requires": [
+        "git log"
+      ],
+      "command": "unset FOO; git log -1",
+      "why": "unsetting a variable the settings environment does not set reaches nothing"
+    },
+    {
+      "id": "config-removal-allow-other-env-u",
+      "class": "configuration removal",
+      "verdict": "allow",
+      "requires": [
+        "git log"
+      ],
+      "wraps": "env",
+      "command": "env -u FOO git log -1",
+      "why": "env -u of another variable reaches nothing either"
     }
   ]
 }
