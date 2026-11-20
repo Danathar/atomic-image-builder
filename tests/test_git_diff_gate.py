@@ -3107,6 +3107,26 @@ class RefusalTests(unittest.TestCase):
             self.assertIn("PROBE_LINE=hit", result.stderr)
             self.assertEqual(gate.global_refusal(["--shallow-file", "probe", "log"]), "--shallow-file")
 
+    def test_env_reads_a_split_string_value_ahead_of_its_later_words(self) -> None:
+        # The corpus rows for env -S (#891) are also refused by other rules,
+        # so they pass even when env_empties_or_unsets() misreads the split
+        # value. These read it directly: the value is env's next arguments,
+        # the words after it follow, and the option is named as typed.
+        read = gate.env_empties_or_unsets
+        self.assertEqual(read(["--split-string=-i"]), "--split-string=-i")
+        self.assertEqual(read(["--split-string", "-i"]), "--split-string -i")
+        # The value is everything after the first "=", later ones included.
+        self.assertEqual(read(["--split-string=-i FOO=x"]), "--split-string=-i FOO=x")
+        # The words after the value are read once, starting right after it.
+        self.assertEqual(read(["--split-string=-v", "-i", "-v"]), "--split-string=-v")
+        self.assertEqual(read(["--split-string", "-u", "GIT_CONFIG_COUNT"]), "--split-string -u")
+        self.assertIsNone(read(["--split-string", "-u", "FOO"]))
+        # A trailing --split-string has no value to read.
+        self.assertIsNone(read(["--split-string"]))
+        # Only --chdir takes the next word; any other long option does not.
+        self.assertEqual(read(["--debug", "-i"]), "-i")
+        self.assertIsNone(read(["--chdir", "-i"]))
+
     def test_a_shellcheck_glob_is_judged_by_the_files_it_names(self) -> None:
         # The one expansion the scan performs instead of refusing, because
         # this repository's own lint command ends in a glob. So the test is
