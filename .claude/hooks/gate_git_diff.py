@@ -261,6 +261,9 @@ VALUED_SHORT = frozenset("BCGILMOSUXln")
 # repository, which is the "explicit" form `safe.bareRepository=explicit`
 # (the `.claude/settings.json` env) still permits, so a bare repository a
 # branch commits runs its own config's programs under `git --bare log -p`.
+# `--shallow-file PATH` reads PATH as the shallow list and quotes the first
+# line it cannot parse (`fatal: bad shallow line: <line of .env>`), a file
+# the index does not hold; it is an internal option nothing ordinary types.
 REFUSED_GLOBAL = (
     "-c",
     "-C",
@@ -270,6 +273,7 @@ REFUSED_GLOBAL = (
     "--git-dir",
     "--work-tree",
     "--namespace",
+    "--shallow-file",
     "--upload-pack",
     "--receive-pack",
 )
@@ -289,6 +293,7 @@ GLOBAL_VALUE_NEXT = frozenset(
         "--config-env",
         "--git-dir",
         "--namespace",
+        "--shallow-file",
         "--super-prefix",
         "--work-tree",
     }
@@ -2726,7 +2731,8 @@ def env_empties_or_unsets(words: list[str]) -> str | None:
     `--ignore-environment` or an unambiguous abbreviation of it; `-u NAME`,
     `-uNAME`, `-iuNAME` clustered, and `--unset=NAME` / `--unset NAME` or
     an abbreviation. `-C` and `-S` take a value the same way `-u` does, so
-    a cluster's scan stops there. The walk ends at the first word that is
+    a cluster's scan stops there; the `-S` value is read as more of env's
+    own words (env_split_empties_or_unsets()). The walk ends at the first word that is
     not one of env's options -- an assignment or the command it runs. `--`
     is read as an option word too: `env -- -i` runs a program named `-i`,
     which nothing does, so refusing it costs nothing.
@@ -2750,10 +2756,14 @@ def env_empties_or_unsets(words: list[str]) -> str | None:
                     value = words[index] if index < len(words) else ""
                 if names_settings_environment(value):
                     return word
-            elif "=" not in word and (
-                long_option_abbreviates(name, WRAPPER_RELOCATION_LONG)
-                or long_option_abbreviates(name, WRAPPER_SPLIT_STRING_LONG)
-            ):
+            elif long_option_abbreviates(name, WRAPPER_SPLIT_STRING_LONG):
+                if "=" in word:
+                    value = word.split("=", 1)[1]
+                else:
+                    index += 1
+                    value = bare(words[index]) if index < len(words) else ""
+                return env_split_empties_or_unsets(word, value, words[index + 1 :])
+            elif "=" not in word and long_option_abbreviates(name, WRAPPER_RELOCATION_LONG):
                 index += 1
             index += 1
             continue
@@ -2767,9 +2777,28 @@ def env_empties_or_unsets(words: list[str]) -> str | None:
                     value = bare(words[index]) if index < len(words) else ""
                 if char == "u" and names_settings_environment(value):
                     return word
+                if char == "S":
+                    return env_split_empties_or_unsets(word, value, words[index + 1 :])
                 break
         index += 1
     return None
+
+
+def env_split_empties_or_unsets(option: str, value: str, rest: list[str]) -> str | None:
+    """env_empties_or_unsets() for the words after an `-S`/`--split-string`.
+
+    env splits the value into words and reads them as more of its own
+    arguments, ahead of the words that follow it, so `env -S -i git log -p`
+    is `env -i git log -p` and `env -S-u GIT_CONFIG_COUNT git log -p` is
+    `env -u GIT_CONFIG_COUNT git log -p`. Reading the value as words in
+    that position finds the same options the plain spellings are refused
+    for. A value holding the command itself (`env -S 'git log -p'`) is
+    refused on its own by the wrapper rule; this only adds what the split
+    puts in front of env's later words.
+    """
+    if env_empties_or_unsets(value.split() + rest) is None:
+        return None
+    return option if option.endswith(value) else f"{option} {value}"
 
 
 def wrapper_chain(invocation: Invocation) -> list[str]:

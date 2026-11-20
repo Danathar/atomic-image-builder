@@ -868,6 +868,9 @@ REACH_CORPUS = (
     ("options", "git --attr-source HEAD --bare log -p", REFUSED, "the --bare behind a separated --attr-source value (#889)"),
     ("options", "git --attr-source HEAD difftool -y -x cat HEAD~1", REFUSED, "difftool is the subcommand, not the HEAD --attr-source takes (#889)"),
     ("options", "git --attr-source HEAD log -p", ALLOWED, "--attr-source alone names no repository"),
+    ("options", "git --shallow-file HEAD --git-dir=evil log -p", REFUSED, "--shallow-file takes HEAD as its value too, so the walk must not stop there"),
+    ("options", "git --shallow-file x -c safe.bareRepository=all log -p", REFUSED, "the -c behind a separated --shallow-file value"),
+    ("options", "git --shallow-file .env log -1", REFUSED, "git quotes the first line of the shallow file it cannot parse"),
     ("options", "git init --bare x", ALLOWED, "--bare after the subcommand is init's own option"),
     ("options", "git --upload-pack=/tmp/evil log", REFUSED, "listed against a git that starts taking it before a subcommand"),
     ("options", "git diff --output=/tmp/out", REFUSED, "writes any file"),
@@ -1625,6 +1628,12 @@ class ReachCorpusTests(unittest.TestCase):
             "env -i": "env -i ./show.sh",
             "env -": "env - ./show.sh",
             "env --ignore-e": "env --ignore-e ./show.sh",
+            "env -S -i": "env -S -i ./show.sh",
+            "env -S-i": "env -S-i ./show.sh",
+            "env --split-string=-i": "env --split-string=-i ./show.sh",
+            "env --spl -i": "env --spl -i ./show.sh",
+            "env -S-u NAME": "env -S-u PROBE ./show.sh",
+            "env -S'-u NAME'": "env -S'-u PROBE' ./show.sh",
             "exec -c": "exec -c ./show.sh",
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -3076,6 +3085,27 @@ class RefusalTests(unittest.TestCase):
         self.assertEqual(gate.git_subcommand(["--attr-source", "HEAD", "difftool"]), "difftool")
         self.assertEqual(gate.git_subcommand(["--attr-source=HEAD", "log"]), "log")
         self.assertEqual(gate.git_subcommand(["--attr-source", "HEAD"]), "")
+        self.assertEqual(gate.git_subcommand(["--shallow-file", "HEAD", "log"]), "log")
+
+    def test_git_reads_the_shallow_file_option_the_way_the_gate_does(self) -> None:
+        # --shallow-file takes its value as the next word and quotes the
+        # first line it cannot parse, which is why it is refused before a
+        # subcommand and why the walk steps over its value.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@x",
+                 "commit", "-q", "--allow-empty", "-m", "x"],
+                check=True,
+            )
+            (repo / "probe").write_text("PROBE_LINE=hit\n")
+            result = subprocess.run(
+                ["git", "-C", str(repo), "--shallow-file", "probe", "log", "-1"],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertIn("PROBE_LINE=hit", result.stderr)
+            self.assertEqual(gate.global_refusal(["--shallow-file", "probe", "log"]), "--shallow-file")
 
     def test_a_shellcheck_glob_is_judged_by_the_files_it_names(self) -> None:
         # The one expansion the scan performs instead of refusing, because

@@ -1018,6 +1018,26 @@
       "why": "--attr-source takes its value as the next word; a gate that reads HEAD as the subcommand never sees -c safe.bareRepository=all, which undoes the settings env so a planted bare folder runs its diff textconv program"
     },
     {
+      "id": "named-repo-after-shallow-file",
+      "class": "named repository",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git --shallow-file HEAD --git-dir=evil log -p",
+      "why": "--shallow-file takes its value as the next word too; a gate that reads HEAD as the subcommand never sees --git-dir, which names a bare folder a branch planted, loads its config and runs its diff textconv program"
+    },
+    {
+      "id": "shallow-file-reads-env",
+      "class": "option that reads a file",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git --shallow-file .env log -1",
+      "why": "git reads the file as its shallow list and its error quotes the first line it cannot parse, NAME=value and all"
+    },
+    {
       "id": "config-removal-unset",
       "class": "configuration removal",
       "verdict": "refuse",
@@ -1114,6 +1134,50 @@
       "why": "bash keeps reading exec's options after -a NAME, so -c there still empties the environment"
     },
     {
+      "id": "config-removal-env-split-i",
+      "class": "configuration removal",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "wraps": "env",
+      "command": "env -S -i git log -p",
+      "why": "env re-splits the -S value into more of its own options, so -S -i is env -i"
+    },
+    {
+      "id": "config-removal-env-split-attached-i",
+      "class": "configuration removal",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "wraps": "env",
+      "command": "env -S-i git log -p",
+      "why": "the same with the value attached to -S"
+    },
+    {
+      "id": "config-removal-env-split-long-i",
+      "class": "configuration removal",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "wraps": "env",
+      "command": "env --split-string=-i git log -p",
+      "why": "the long spelling of env -S -i"
+    },
+    {
+      "id": "config-removal-env-split-u",
+      "class": "configuration removal",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "wraps": "env",
+      "command": "env -S-u GIT_CONFIG_COUNT git log -p",
+      "why": "the split value is -u and its name is the next word, which is env -u GIT_CONFIG_COUNT"
+    },
+    {
       "id": "config-removal-allow-other-unset",
       "class": "configuration removal",
       "verdict": "allow",
@@ -1133,6 +1197,17 @@
       "wraps": "env",
       "command": "env -u FOO git log -1",
       "why": "env -u of another variable reaches nothing either"
+    },
+    {
+      "id": "config-removal-allow-env-split-other-u",
+      "class": "configuration removal",
+      "verdict": "allow",
+      "requires": [
+        "git log"
+      ],
+      "wraps": "env",
+      "command": "env -S -u FOO git log -1",
+      "why": "a split value that unsets another variable reaches nothing; a gate must not refuse every -S"
     },
     {
       "id": "config-removal-allow-exec-a-name",

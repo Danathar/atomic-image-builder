@@ -117,6 +117,7 @@ GIT_OPTIONS_WITH_VALUE = {
     "-C",
     "-c",
     "--attr-source",
+    "--shallow-file",
     "--git-dir",
     "--work-tree",
     "--namespace",
