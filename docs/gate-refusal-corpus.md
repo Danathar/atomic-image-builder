@@ -151,7 +151,10 @@ registry, and its error names the last key it read and quotes the value it
 could not, so the command prints a `.env` line back. A gate that refuses
 `CONTAINERS_REGISTRIES_CONF=` but not the option lets the same file through
 under the `skopeo inspect` allow row. `allow-skopeo-inspect` keeps a gate from
-refusing an ordinary image lookup.
+refusing an ordinary image lookup. `shallow-file-reads-env`
+([#891](https://github.com/Danathar/atomic-image-builder/issues/891)) does the
+same through git's own global option: `git --shallow-file .env log -1` reads the
+file as its shallow list and fails with `bad shallow line:` and the first line.
 
 The `push` rows
 ([#803](https://github.com/Danathar/atomic-image-builder/issues/803),
@@ -200,7 +203,11 @@ the corpus exists to stop. `named-repo-after-attr-source` and
 `--attr-source HEAD` first: git takes `HEAD` as that option's value, so a
 gate that reads it as the subcommand stops there and never sees the
 `--git-dir` or `-c` after it. `allow-attr-source-separated` keeps a gate
-from passing by refusing every `--attr-source`. A runner reads these rows as needing `git log`
+from passing by refusing every `--attr-source`.
+`named-repo-after-shallow-file`
+([#891](https://github.com/Danathar/atomic-image-builder/issues/891)) is the
+same shape with `--shallow-file`, the other global option whose value is the
+next word. A runner reads these rows as needing `git log`
 or `git diff` because git reads its own options before the subcommand, so
 `names()` in the test here steps over git's global options, and their
 values, between `git` and the rest of a `git ...` prefix. `git -C <dir>`
@@ -232,9 +239,13 @@ reads no environment configuration at all, so `unset GIT_CONFIG_COUNT`,
 so do `env -i`, `env -` and bash's `exec -c`, which run the command with an
 empty environment. bash keeps reading `exec`'s options after `-a NAME`, so
 `exec -a name -c` is a refuse row too
-([#887](https://github.com/Danathar/atomic-image-builder/issues/887)). Three
+([#887](https://github.com/Danathar/atomic-image-builder/issues/887)). env
+reads the value of `-S`/`--split-string` as more of its own options, so
+`env -S -i`, `env -S-i`, `env --split-string=-i` and `env -S-u
+GIT_CONFIG_COUNT` are the same removals
+([#891](https://github.com/Danathar/atomic-image-builder/issues/891)). Four
 allow rows keep ordinary work open: unsetting any other variable, `env -u`
-of one, and `exec -a name` without `-c`. This repository's gate refuses the
+of one, the same through `env -S -u`, and `exec -a name` without `-c`. This repository's gate refuses the
 removal wherever it is written, as it does an assignment, since the Bash
 tool's shell outlives one call.
 
@@ -265,7 +276,8 @@ fetching it:
   matched against the name by its last part, as the `name-*` rows need.
   Between `git` and the rest of a `git ...` prefix it steps over git's
   global options (`--bare`, `--git-dir=...`, and `-C`, `-c`, `--git-dir`,
-  `--work-tree`, `--namespace`, `--config-env` or `--attr-source` with their
+  `--work-tree`, `--namespace`, `--config-env`, `--attr-source` or
+  `--shallow-file` with their
   value as the next word), as the `named-repo-*` rows need. A wrapped row's words are read that way a second
   time, as `unlisted-script-split-quote` needs. `inner_words()` in
   [`tests/test_gate_refusal_corpus.py`](../tests/test_gate_refusal_corpus.py)
