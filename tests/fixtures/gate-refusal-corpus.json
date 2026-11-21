@@ -1219,6 +1219,106 @@
       "wraps": "exec",
       "command": "exec -a name git log -1",
       "why": "exec -a only sets the name the command sees; without -c the environment is kept"
+    },
+    {
+      "id": "config-standalone-count",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "GIT_CONFIG_COUNT=0; git log -p",
+      "why": "the settings env is exported, so assigning the count in a command of its own reaches git and drops safe.bareRepository=explicit"
+    },
+    {
+      "id": "config-standalone-value",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "GIT_CONFIG_VALUE_0=all; git log -p",
+      "why": "the same assignment to the value turns safe.bareRepository back to all for the git after it"
+    },
+    {
+      "id": "config-standalone-inject",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "GIT_CONFIG_KEY_0=diff.external; GIT_CONFIG_VALUE_0=/tmp/evil; git diff HEAD~1 HEAD",
+      "why": "re-pointing the exported key and value sets diff.external, and git diff runs that program"
+    },
+    {
+      "id": "home-prefix",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "HOME=planted git diff HEAD~1 HEAD",
+      "why": "git reads planted/.gitconfig as its global configuration, so a diff.external a branch commits there runs"
+    },
+    {
+      "id": "home-standalone",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "HOME=planted; git diff HEAD~1 HEAD",
+      "why": "HOME is already exported, so assigning it in a command of its own reaches the git after it"
+    },
+    {
+      "id": "home-standalone-log",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "HOME=planted; git log -p",
+      "why": "a diff.*.textconv in planted/.gitconfig, matched by a .gitattributes the branch commits, runs while git log -p renders the diff"
+    },
+    {
+      "id": "home-export",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "export HOME=planted; git diff HEAD~1 HEAD",
+      "why": "the export spelling of the same"
+    },
+    {
+      "id": "xdg-config-home-prefix",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "XDG_CONFIG_HOME=planted git diff HEAD~1 HEAD",
+      "why": "git reads planted/git/config as global configuration the same way"
+    },
+    {
+      "id": "config-reach-allow-other-standalone",
+      "class": "configuration reach",
+      "verdict": "allow",
+      "requires": [
+        "git log"
+      ],
+      "command": "TZ=UTC; git log -1",
+      "why": "a stand-alone assignment to a name git takes no configuration from reaches nothing"
+    },
+    {
+      "id": "config-reach-allow-read-home",
+      "class": "configuration reach",
+      "verdict": "allow",
+      "requires": [
+        "git status"
+      ],
+      "command": "cd \"$HOME\" && git status",
+      "why": "reading HOME is not assigning it"
     }
   ]
 }
