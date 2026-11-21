@@ -344,8 +344,9 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
 - The record an agent leaves is read back after the fact.
   [`.github/workflows/agent-audit.yml`](../.github/workflows/agent-audit.yml)
   runs monthly and on demand, lists every pull request merged in the window
-  that an agent wrote -- opened by the Hive app, or carrying the `— hive:`
-  signature line that names the backend and model -- and fails when a
+  that an agent wrote -- opened by the Hive app, or carrying the `-- hive:`
+  signature line (`— hive:` before 2026-11-18) that names the backend and
+  model -- and fails when a
   Hive-app pull request has no signature line or a commit has no
   Signed-off-by trailer. A merge of `main` into the branch, which "Update
   branch" writes with no trailer, is exempt: what it brings in was audited

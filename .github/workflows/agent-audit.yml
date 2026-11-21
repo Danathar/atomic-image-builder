@@ -4,8 +4,9 @@ name: Agent audit trail
 # Reads back the record every agent-authored pull request is supposed to
 # leave, and fails when one did not leave it.
 #
-# The record is GitHub itself: an agent pull request carries a `— hive:`
-# signature line naming the backend and model that wrote it, and every
+# The record is GitHub itself: an agent pull request carries a `-- hive:`
+# signature line naming the backend and model that wrote it (the hive wrote
+# `— hive:`, with an em dash, until 2026-11-18; both count), and every
 # commit carries a Signed-off-by trailer. Nothing checked either after the
 # merge. The DCO app is not a required status check in the `main` ruleset,
 # and an omp-backed run pushes under the maintainer's own identity, so the
@@ -94,7 +95,7 @@ jobs:
           # carry neither the signature line nor a Signed-off-by trailer, so
           # `is_bot` would turn every merged dependency bump into two findings.
           hive_app="app/danathar-atomic-hive"
-          jq -c --arg hive "$hive_app" '[.[] | select(.author.login == $hive or ((.body // "") | test("(^|\n)— hive:")))]' \
+          jq -c --arg hive "$hive_app" '[.[] | select(.author.login == $hive or ((.body // "") | test("(^|\n)(--|—) hive:")))]' \
             merged.json > agents.json
 
           # Commits and files are fetched one pull request at a time: asking
@@ -135,7 +136,7 @@ jobs:
             # agent-signature.yml asks an open pull request the same question
             # with an exact copy of this line, and
             # tests/test_agent_signature_workflow.py fails when they differ.
-            def signature: (.body // "") | split("\n") | map(select(startswith("— hive:"))) | first;
+            def signature: (.body // "") | split("\n") | map(select(startswith("-- hive:") or startswith("— hive:"))) | first;
             # The Tier 4 paths in docs/risk-tiers.md: the release workflows,
             # the token policy and ruleset, the agent permission table and its
             # hooks, the Renovate config, and what the release path runs.
@@ -174,7 +175,7 @@ jobs:
                   merged: $pr.mergedAt[:10],
                   author: $pr.author.login,
                   merged_by: ($pr.mergedBy.login // "unknown"),
-                  signature: (signature | if . == null then null else ltrimstr("— hive: ") end),
+                  signature: (signature | if . == null then null else sub("^(--|—) hive: "; "") end),
                   commits: ($d.commits | length),
                   authored: ([$d.commits[] | select(is_merge($own; $d.baseRefName) | not)] | length),
                   unsigned: [$d.commits[] | select(is_merge($own; $d.baseRefName) | not) | select(.message | test("(^|\n)Signed-off-by: ") | not) | .oid[:7]],
@@ -182,7 +183,7 @@ jobs:
                 };
             def findings:
               [ .[]
-                | (if .signature == null then "#\(.number): opened by the Hive app with no `— hive:` signature line, so the backend and model that wrote it are unrecorded" else empty end),
+                | (if .signature == null then "#\(.number): opened by the Hive app with no `-- hive:` signature line (the older `— hive:` also counts), so the backend and model that wrote it are unrecorded" else empty end),
                   (if (.unsigned | length) > 0 then "#\(.number): commit\(if (.unsigned | length) > 1 then "s" else "" end) \(.unsigned | join(", ")) carr\(if (.unsigned | length) > 1 then "y" else "ies" end) no Signed-off-by trailer" else empty end)
               ];
             def cell: tostring | gsub("\\|"; "\\|");

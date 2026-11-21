@@ -16,7 +16,8 @@ agents share the repository while they work is in
 ## The three marks
 
 **The pull request signature.** An agent-written pull request body ends with
-a line beginning `— hive:` that names the backend and the model, and for every
+a line beginning `-- hive:` (`— hive:`, with an em dash, on pull requests from
+before 2026-11-18) that names the backend and the model, and for every
 role except the contributor the role too, as `agent=<role>`. The contributor's
 signature has no `agent=` field (see the roster in
 [`docs/multi-agent.md`](../multi-agent.md#who-works-here)), so for its pull
@@ -27,7 +28,7 @@ account alone undercounts agent work by about a third (see the first ledger
 below).
 
 ```bash
-gh pr view <n> --repo Danathar/atomic-image-builder --json body --jq '.body | capture("— hive: (?<sig>.*)").sig'
+gh pr view <n> --repo Danathar/atomic-image-builder --json body --jq '.body | capture("(--|—) hive: (?<sig>.*)").sig'
 ```
 
 **The branch prefix.** An agent's branch is named `<prefix>/<slug>`, where the

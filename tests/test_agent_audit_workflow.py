@@ -1,7 +1,8 @@
 """Execute the `run:` body of .github/workflows/agent-audit.yml.
 
 The audit reads back the record every agent pull request is supposed to leave
--- the `— hive:` signature line naming its backend and model, and a
+-- the `-- hive:` signature line (`— hive:` before 2026-11-18) naming its
+backend and model, and a
 Signed-off-by trailer on every commit -- and fails the run when one did not
 leave it. Nothing else notices either gap after the merge: the DCO check is
 not a required status check in the ruleset, and an omp-backed run pushes under
@@ -93,6 +94,8 @@ esac
 """
 
 SIGNATURE = "— hive: backend=claude model=claude-opus-5-5 effort=medium"
+# The spelling the hive writes since 2026-11-18 (hive v5.322.0).
+CURRENT_SIGNATURE = "-- hive: agent=scanner backend=claude model=claude-sonnet-5-5 effort=high claude=2.1.327"
 SIGNED = "Hive-Run: Danathar/atomic-image-builder#1\n\nSigned-off-by: Dan <dan@example.com>"
 
 # Parents a case can give a commit. BEFORE is main as it stood just before
@@ -293,7 +296,7 @@ class AuditStepTests(unittest.TestCase):
         summary = self.run_.summary.read_text()
         self.assertIn("| **missing** | 1 | all | none |", summary)
         self.assertIn("#### Findings", summary)
-        self.assertIn("- #20: opened by the Hive app with no `— hive:` signature line", summary)
+        self.assertIn("- #20: opened by the Hive app with no `-- hive:` signature line (the older `— hive:` also counts)", summary)
         self.assertNotIn("- #21:", summary)
         self.assertIn("::error::1 agent pull request(s) merged since 2026-09-01 left an incomplete record", result.stdout)
 
@@ -658,6 +661,35 @@ class AuditNearMissTests(unittest.TestCase):
         result = self.run_.run()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(self.row(54).endswith("| 1 | all | none |"), self.row(54))
+
+    def test_the_current_two_hyphen_signature_counts_like_the_em_dash_one(self) -> None:
+        hive = merged(60, bot=True, signed_body=False)
+        hive["body"] += f"\n{CURRENT_SIGNATURE}\n"
+        maintainer = merged(61, bot=False, signed_body=False)
+        maintainer["body"] += f"\r\n{CURRENT_SIGNATURE}\r\n"
+        self.run_.stage([hive, maintainer], [details(60, [SIGNED], ["README.md"]), details(61, [SIGNED], ["README.md"])])
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        summary = self.run_.summary.read_text()
+        self.assertIn("2 of the 2 pull requests merged in the window were written by an agent.", summary)
+        self.assertIn("| agent=scanner backend=claude model=claude-sonnet-5-5 effort=high claude=2.1.327 | 1 | all | none |", self.row(60))
+        self.assertNotIn("Findings", summary)
+
+    def test_near_misses_of_the_current_signature_do_not_count(self) -> None:
+        quoting = merged(62, bot=False, signed_body=False, title="docs: describe the signature")
+        quoting["body"] = "Every agent pull request ends with a `-- hive:` line naming its model.\n"
+        prose = merged(63, bot=True, signed_body=False)
+        prose["body"] += f"\nThe line looks like {CURRENT_SIGNATURE}\n"
+        three = merged(64, bot=True, signed_body=False)
+        three["body"] += "\n--- hive: backend=claude model=m\n"
+        self.run_.stage([quoting, prose, three], [details(63, [SIGNED], ["README.md"]), details(64, [SIGNED], ["README.md"])])
+        result = self.run_.run()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        summary = self.run_.summary.read_text()
+        self.assertIn("2 of the 3 pull requests merged in the window were written by an agent.", summary)
+        self.assertNotIn("#62", summary)
+        self.assertIn("- #63: opened by the Hive app with no `-- hive:` signature line", summary)
+        self.assertIn("- #64: opened by the Hive app with no `-- hive:` signature line", summary)
 
     def test_a_pipe_in_the_signature_does_not_split_the_row(self) -> None:
         pr = merged(55, bot=True, signed_body=False)

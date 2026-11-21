@@ -46,10 +46,10 @@ NIGHTLY_SETUP_STEPS = {"Checkout", "Set up Python", "Install test tooling", "Sum
 
 # Text the runbook quotes as what a run prints, and the file that prints it.
 QUOTED_MESSAGES = {
-    "with no `— hive:` signature line": AGENT_AUDIT,
+    "with no `-- hive:` signature line": AGENT_AUDIT,
     "no Signed-off-by trailer": AGENT_AUDIT,
     "Tier 4 paths": AGENT_AUDIT,
-    'The description has no line starting "— hive:"': AGENT_SIGNATURE,
+    'The description has no line starting "-- hive:"': AGENT_SIGNATURE,
     "Could not sync the snapshot drift issue:": SNAPSHOT_DRIFT,
     "Bundled template snapshot trails upstream": SNAPSHOT_DRIFT,
 }
