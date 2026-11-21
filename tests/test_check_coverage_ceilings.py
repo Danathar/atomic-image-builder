@@ -14,12 +14,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from importlib.util import find_spec
 from pathlib import Path
 
 import check_coverage_ceilings as ceilings_check
 
 ROOT = Path(__file__).resolve().parent.parent
 THRESHOLDS = ROOT / ".coverage-thresholds.json"
+HAS_COVERAGE = find_spec("coverage") is not None
 
 
 def write_json(path: Path, value: object) -> Path:
@@ -101,6 +103,7 @@ class LoadCeilingsTests(unittest.TestCase):
 
 
 class LoadMissingLinesTests(unittest.TestCase):
+    @unittest.skipUnless(HAS_COVERAGE, "the test runs `python3 -m coverage`")
     def test_reads_a_report_written_by_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
