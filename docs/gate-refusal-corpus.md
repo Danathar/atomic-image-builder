@@ -243,7 +243,11 @@ empty environment. bash keeps reading `exec`'s options after `-a NAME`, so
 reads the value of `-S`/`--split-string` as more of its own options, so
 `env -S -i`, `env -S-i`, `env --split-string=-i` and `env -S-u
 GIT_CONFIG_COUNT` are the same removals
-([#891](https://github.com/Danathar/atomic-image-builder/issues/891)). Four
+([#891](https://github.com/Danathar/atomic-image-builder/issues/891)). env
+also keeps reading its options after `-a NAME` / `--argv0 NAME`, so `env -a
+name -i`, `env --argv0 name -i` and `env -a name -u GIT_CONFIG_COUNT` are
+refuse rows too
+([#899](https://github.com/Danathar/atomic-image-builder/issues/899)). Four
 allow rows keep ordinary work open: unsetting any other variable, `env -u`
 of one, the same through `env -S -u`, and `exec -a name` without `-c`. This repository's gate refuses the
 removal wherever it is written, as it does an assignment, since the Bash

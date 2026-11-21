@@ -965,6 +965,10 @@ ENV_VALUED_SHORT = frozenset("CSu")
 WRAPPER_RELOCATION_LONG = "--chdir"
 WRAPPER_SPLIT_STRING_LONG = "--split-string"
 WRAPPER_UNSET_LONG = "--unset"
+# `-a, --argv0=NAME` takes a value too: the name env starts its command
+# under. env keeps reading its own options after it, so `env -a name -i`
+# still empties the environment. See env_empties_or_unsets().
+WRAPPER_ARGV0_LONG = "--argv0"
 WRAPPER_IGNORE_ENVIRONMENT_LONG = "--ignore-environment"
 
 # The variables `.claude/settings.json` puts in every Bash call to make git
@@ -2744,7 +2748,7 @@ def env_empties_or_unsets(words: list[str]) -> str | None:
     `--ignore-environment` or an unambiguous abbreviation of it; `-u NAME`,
     `-uNAME`, `-iuNAME` clustered, and `--unset=NAME` / `--unset NAME` or
     an abbreviation. `-C` and `-S` take a value the same way `-u` does, so
-    a cluster's scan stops there; the `-S` value is read as more of env's
+    a cluster's scan stops there; `-a NAME` / `--argv0 NAME` is stepped over; the `-S` value is read as more of env's
     own words (env_split_empties_or_unsets()). The walk ends at the first word that is
     not one of env's options -- an assignment or the command it runs. `--`
     is read as an option word too: `env -- -i` runs a program named `-i`,
@@ -2778,6 +2782,8 @@ def env_empties_or_unsets(words: list[str]) -> str | None:
                 return env_split_empties_or_unsets(word, value, words[index + 1 :])
             elif "=" not in word and long_option_abbreviates(name, WRAPPER_RELOCATION_LONG):
                 index += 1
+            elif "=" not in word and long_option_abbreviates(name, WRAPPER_ARGV0_LONG):
+                index += argv0_value_words(words, index)
             index += 1
             continue
         for position, char in enumerate(word[1:], start=1):
@@ -2793,8 +2799,21 @@ def env_empties_or_unsets(words: list[str]) -> str | None:
                 if char == "S":
                     return env_split_empties_or_unsets(word, value, words[index + 1 :])
                 break
+            if char == "a" and position == len(word) - 1:
+                index += argv0_value_words(words, index)
         index += 1
     return None
+
+
+def argv0_value_words(words: list[str], index: int) -> int:
+    """How many words after `words[index]` -- an env `-a` ending its
+    cluster, or a `--argv0` with no `=` -- are its NAME and not env's
+    command: one, unless that next word looks like an option, which is then
+    read as one. Reading it as an option can only find more to refuse, so
+    `env -a -i git log -p` stays refused, as it was before -a was read.
+    """
+    following = bare(words[index + 1]) if index + 1 < len(words) else "-"
+    return 0 if following.startswith("-") else 1
 
 
 def env_split_empties_or_unsets(option: str, value: str, rest: list[str]) -> str | None:
