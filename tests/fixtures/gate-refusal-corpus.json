@@ -1178,6 +1178,39 @@
       "why": "the split value is -u and its name is the next word, which is env -u GIT_CONFIG_COUNT"
     },
     {
+      "id": "config-removal-env-argv0-i",
+      "class": "configuration removal",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "wraps": "env",
+      "command": "env -a name -i git log -p",
+      "why": "env -a takes the next word as the name its command runs under and keeps reading its own options after it, so -i there still empties the environment"
+    },
+    {
+      "id": "config-removal-env-argv0-long-i",
+      "class": "configuration removal",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "wraps": "env",
+      "command": "env --argv0 name -i git log -p",
+      "why": "the long spelling of env -a, with its name a separate word"
+    },
+    {
+      "id": "config-removal-env-argv0-u",
+      "class": "configuration removal",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "wraps": "env",
+      "command": "env -a name -u GIT_CONFIG_COUNT git log -p",
+      "why": "a -u after -a NAME still removes the variable it names"
+    },
+    {
       "id": "config-removal-allow-other-unset",
       "class": "configuration removal",
       "verdict": "allow",
