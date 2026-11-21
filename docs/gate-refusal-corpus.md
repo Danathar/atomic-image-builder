@@ -249,6 +249,25 @@ of one, the same through `env -S -u`, and `exec -a name` without `-c`. This repo
 removal wherever it is written, as it does an assignment, since the Bash
 tool's shell outlives one call.
 
+The `configuration reach` rows cover two more ways to change the
+configuration git reads. A gate that refuses `NAME=value` only in front of
+git, and reads a stand-alone `NAME=value;` as a shell variable no later
+command sees, is wrong for a name already exported: the `GIT_CONFIG_*`
+variables `.claude/settings.json` sets are exported into every Bash call, so
+`GIT_CONFIG_VALUE_0=all; git log -p` turns the setting back off and
+`GIT_CONFIG_KEY_0=diff.external; GIT_CONFIG_VALUE_0=prog; git diff`
+names a program for git to run. `HOME` is exported too, and git reads
+`$HOME/.gitconfig` (and `$XDG_CONFIG_HOME/git/config`) as its global
+configuration, which the settings env does not replace. A branch can commit
+a folder with a `.gitconfig` that sets `diff.external`, so `HOME=planted git
+diff HEAD~1 HEAD`, the stand-alone `HOME=planted;` and `export HOME=planted;`
+each run that program, and a `diff.*.textconv` there runs under
+`HOME=planted; git log -p` the same way. Two allow rows keep ordinary
+work open: a stand-alone assignment to a name git takes nothing from
+(`TZ=UTC;`), and reading `$HOME`.
+This repository's gate refuses `HOME` and `XDG_CONFIG_HOME` the way it
+refuses the `GIT_CONFIG_*` family, wherever the assignment is written.
+
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
 table. The one disagreement found, `git diff --ext-diff`, is refused here and

@@ -360,6 +360,19 @@ REFUSED_ENVIRONMENT = (
         "adds an object store the command reads",
     ),
     (
+        "HOME",
+        "re-points the folder git reads its global configuration from, "
+        "`$HOME/.gitconfig` -- a branch can commit one that sets "
+        "diff.external, and git diff then runs that program. HOME is "
+        "already exported, so `HOME=dir; git diff` reaches git as surely "
+        "as `HOME=dir git diff` does",
+    ),
+    (
+        "XDG_CONFIG_HOME",
+        "re-points the folder git reads `git/config` from, the same global "
+        "configuration `$HOME/.gitconfig` is",
+    ),
+    (
         "SHELLCHECK_OPTS",
         "is not a list of options despite the name -- shellcheck splits it and "
         "prepends it to its own argument list, operands included, so "

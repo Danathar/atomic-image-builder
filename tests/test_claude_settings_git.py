@@ -152,6 +152,50 @@ class ClaudeSettingsGitTests(unittest.TestCase):
                 self.assertEqual(hook.returncode, 2, hook.stderr)
                 self.assertIn("safe.bareRepository", hook.stderr)
 
+    def test_a_planted_home_runs_its_program_and_the_hook_refuses_it(self) -> None:
+        """Git reads `$HOME/.gitconfig` as its global configuration, and the
+        settings env does not stop that. A branch can commit a folder with a
+        `.gitconfig` that sets diff.external, so pointing HOME at it runs the
+        program on the next `git diff`. HOME is already exported, so the
+        stand-alone assignment reaches git as well as the leading one does."""
+        repo = self.dir / "repo"
+        repo.mkdir()
+        self.must(repo, "init", "-q")
+        (repo / "f.txt").write_text("a\n", encoding="utf-8")
+        planted = repo / "planted"
+        planted.mkdir()
+        self.must(repo, "config", "-f", str(planted / ".gitconfig"), "diff.external", f"touch '{self.marker}'; :")
+        self.must(repo, "add", ".")
+        self.must(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "one")
+        (repo / "f.txt").write_text("b\n", encoding="utf-8")
+        self.must(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "two")
+        agent_env = {"PATH": os.environ["PATH"], "HOME": str(self.dir), "GIT_CONFIG_NOSYSTEM": "1", **settings_env()}
+        ran = subprocess.run(
+            ["bash", "--norc", "--noprofile", "-c", "HOME=planted; git diff HEAD~1 HEAD"],
+            cwd=repo,
+            env=agent_env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertTrue(self.marker.exists(), "HOME=planted should reach the planted diff.external; if not, revisit the hook rule")
+        for command in (
+            "HOME=planted git diff HEAD~1 HEAD",
+            "HOME=planted; git diff HEAD~1 HEAD",
+            "XDG_CONFIG_HOME=planted git diff HEAD~1 HEAD",
+        ):
+            with self.subTest(command=command):
+                hook = subprocess.run(
+                    [sys.executable, str(HOOK)],
+                    input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(hook.returncode, 2, hook.stderr)
+                self.assertIn("HOME", hook.stderr)
+
     def test_checkout_own_repository_still_works_with_the_settings_env(self) -> None:
         agent_env = {**self.base_env(), **settings_env()}
         self.assertEqual(self.git(self.victim, agent_env, "log", "-1", "--format=%s").stdout.strip(), "planted-tree")
