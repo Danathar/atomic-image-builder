@@ -225,13 +225,13 @@ class AgentBoundariesDocTests(unittest.TestCase):
     def test_the_audit_is_monthly_and_reads_the_signature(self) -> None:
         row = row_for(self.rows, ".github/workflows/agent-audit.yml")
         self.assertIn("It runs monthly", row["What it stops"])
-        self.assertIn("`— hive:` line", row["What it stops"])
+        self.assertIn("`-- hive:` line", row["What it stops"])
         workflow = AGENT_AUDIT.read_text()
         crons = re.findall(r"cron:\s*'([^']+)'", workflow)
         self.assertEqual(len(crons), 1, "agent-audit.yml has one schedule")
         minute, hour, day, month, weekday = crons[0].split()
         self.assertTrue(day.isdigit() and month == "*" and weekday == "*", crons[0])
-        self.assertIn('test("(^|\\n)— hive:")', workflow)
+        self.assertIn('test("(^|\\n)(--|—) hive:")', workflow)
 
     def test_the_consent_gate_count_is_agents_mds(self) -> None:
         match = re.search(r"lists (\w+), each its own gate", flat(self.text))

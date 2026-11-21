@@ -40,6 +40,9 @@ AUDIT_STEP = "Audit merged agent pull requests"
 JOB_NAME = "Check the agent signature line"
 
 SIGNATURE = "— hive: agent=scanner backend=claude model=claude-opus-5-5"
+# The spelling the hive writes since 2026-11-18 (hive v5.322.0): two ASCII
+# hyphens instead of the em dash above, which older pull requests carry.
+CURRENT_SIGNATURE = "-- hive: agent=scanner backend=claude model=claude-sonnet-5-5 effort=high claude=2.1.327"
 
 
 def signature_definitions(body: str) -> list[str]:
@@ -58,7 +61,7 @@ class SameTestAsTheAuditTests(unittest.TestCase):
     def test_the_definition_still_looks_for_the_signature_line(self) -> None:
         # Guards the comparison above against both copies losing the test together.
         (line,) = signature_definitions(step_run_body(WORKFLOW, STEP))
-        self.assertIn('"— hive:"', line)
+        self.assertIn('startswith("-- hive:") or startswith("— hive:")', line)
 
 
 class WorkflowShapeTests(unittest.TestCase):
@@ -127,15 +130,16 @@ class SignatureStepTests(unittest.TestCase):
             text=True,
         )
 
-    def assertSigned(self, description: str) -> None:
+    def assertSigned(self, description: str, signature: str = SIGNATURE) -> None:
         result = self.run_step(description)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn(f"Signed: {SIGNATURE}", result.stdout)
+        self.assertIn(f"Signed: {signature}", result.stdout)
 
     def assertUnsigned(self, description: str) -> None:
         result = self.run_step(description)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("::error::The description has no line starting", result.stdout)
+        self.assertIn('"-- hive:" (the older "— hive:" is still accepted)', result.stdout)
 
     def test_a_signed_description_passes(self) -> None:
         self.assertSigned(f"## What changed\n\nThe thing.\n\n{SIGNATURE}\n")
@@ -156,6 +160,23 @@ class SignatureStepTests(unittest.TestCase):
 
     def test_a_signature_that_does_not_start_its_line_fails(self) -> None:
         self.assertUnsigned(f"The line looks like {SIGNATURE}\n")
+
+    def test_the_current_two_hyphen_signature_passes(self) -> None:
+        self.assertSigned(f"## What changed\n\nThe thing.\n\n{CURRENT_SIGNATURE}\n", CURRENT_SIGNATURE)
+
+    def test_the_current_signature_written_in_the_browser_passes(self) -> None:
+        self.assertSigned(f"## What changed\r\n\r\n{CURRENT_SIGNATURE}\r\n", CURRENT_SIGNATURE)
+
+    def test_the_current_signature_that_does_not_start_its_line_fails(self) -> None:
+        self.assertUnsigned(f"The line looks like {CURRENT_SIGNATURE}\n")
+
+    def test_an_indented_current_signature_fails(self) -> None:
+        self.assertUnsigned(f"## What changed\n\n  {CURRENT_SIGNATURE}\n")
+
+    def test_other_dashes_are_not_the_signature(self) -> None:
+        for prefix in ("- hive:", "--- hive:", "--hive:", "\u2013 hive:"):
+            with self.subTest(prefix=prefix):
+                self.assertUnsigned(f"## What changed\n\n{prefix} agent=scanner backend=claude\n")
 
     def test_shell_syntax_in_the_description_is_text(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

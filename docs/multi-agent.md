@@ -16,8 +16,8 @@ command under [What is in flight right now](#what-is-in-flight-right-now).
 
 ## Who works here
 
-Each agent signs the pull requests it writes with a `— hive:` line that names
-its role, and names its branches `<role>/<slug>`.
+Each agent signs the pull requests it writes with a `-- hive:` line (`— hive:`
+on pull requests from before 2026-11-18) that names its role, and names its branches `<role>/<slug>`.
 [`docs/agent-tasks/`](agent-tasks/README.md) explains both marks and how to
 read them back.
 

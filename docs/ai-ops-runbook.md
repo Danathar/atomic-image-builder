@@ -178,7 +178,7 @@ leave. The run summary has one row per pull request and a *Findings* list.
 
 | The run says                               | What to do                                                                                                                                                                                                                                                                                                        |
 | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `` with no `— hive:` signature line ``     | The backend and model that wrote it are unrecorded. Recover what the branch prefix and `Hive-Run:` trailer show ([docs/agent-tasks/](agent-tasks/README.md)) and leave it as a comment on the pull request. Do not write a signature into the body afterwards: a reconstructed line reads the same as a real one. |
+| `` with no `-- hive:` signature line ``    | The backend and model that wrote it are unrecorded. Recover what the branch prefix and `Hive-Run:` trailer show ([docs/agent-tasks/](agent-tasks/README.md)) and leave it as a comment on the pull request. Do not write a signature into the body afterwards: a reconstructed line reads the same as a real one. |
 | `no Signed-off-by trailer`                 | The ruleset blocks rewriting `main`, so the commit stays. Comment on the pull request. Its signature line names the backend that committed without `-s`; that is where the fix belongs. The finding repeats in every window that covers the merge.                                                                |
 | `reached the 500 cap`                      | Too many merges for one window. Dispatch again with a later `since`.                                                                                                                                                                                                                                              |
 | A **Tier 4 paths** cell that is not `none` | Not a failure. It is the pull request to read first.                                                                                                                                                                                                                                                              |
@@ -189,9 +189,10 @@ To check only merges after a fix, dispatch with a start date:
 ## The agent signature check failed
 
 `agent-signature.yml` runs on each pull request the Hive app opens and fails
-when its description has no `— hive:` signature line, the same line the agent
-audit looks for after the merge. The log says
-`The description has no line starting "— hive:"`.
+when its description has no `-- hive:` signature line, the same line the agent
+audit looks for after the merge. A line starting with the older `— hive:`,
+which pull requests from before 2026-11-18 carry, still counts. The log says
+`The description has no line starting "-- hive:"`.
 
 Add the line to the description and save it. Saving runs the check again; no
 new commit is needed. It is not a required check, so a red run does not stop
