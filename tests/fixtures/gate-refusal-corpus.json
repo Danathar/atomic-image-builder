@@ -1334,6 +1334,36 @@
       "why": "git reads planted/git/config as global configuration the same way"
     },
     {
+      "id": "path-prefix",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "PATH=planted:$PATH git log -1",
+      "why": "bash looks git up in planted/ first, so a file named git that a branch commits there runs instead of git"
+    },
+    {
+      "id": "path-standalone",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "PATH=planted:$PATH; git log -1",
+      "why": "PATH is already exported, so assigning it in a command of its own reaches the git after it"
+    },
+    {
+      "id": "path-export",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "export PATH=planted:$PATH; git diff HEAD~1 HEAD",
+      "why": "the export spelling of the same"
+    },
+    {
       "id": "config-reach-allow-other-standalone",
       "class": "configuration reach",
       "verdict": "allow",
