@@ -196,6 +196,44 @@ class ClaudeSettingsGitTests(unittest.TestCase):
                 self.assertEqual(hook.returncode, 2, hook.stderr)
                 self.assertIn("HOME", hook.stderr)
 
+    def test_a_planted_path_runs_its_git_and_the_hook_refuses_it(self) -> None:
+        """Bash finds `git` by PATH. A branch can commit an executable named
+        git in a folder, so putting that folder first runs it in place of git
+        on the next history command. PATH is already exported, so the
+        stand-alone assignment reaches it as well as the leading one does."""
+        repo = self.dir / "repo"
+        planted = repo / "planted"
+        planted.mkdir(parents=True)
+        fake = planted / "git"
+        fake.write_text(f"#!/bin/sh\ntouch '{self.marker}'\n", encoding="utf-8")
+        fake.chmod(0o755)
+        agent_env = {"PATH": os.environ["PATH"], "HOME": str(self.dir), **settings_env()}
+        ran = subprocess.run(
+            ["bash", "--norc", "--noprofile", "-c", "PATH=planted:$PATH; git log -1"],
+            cwd=repo,
+            env=agent_env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertTrue(self.marker.exists(), "PATH=planted should run the planted git; if not, revisit the hook rule")
+        for command in (
+            "PATH=planted:$PATH git log -1",
+            "PATH=planted:$PATH; git log -1",
+            "export PATH=planted:$PATH; git log -1",
+        ):
+            with self.subTest(command=command):
+                hook = subprocess.run(
+                    [sys.executable, str(HOOK)],
+                    input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(hook.returncode, 2, hook.stderr)
+                self.assertIn("PATH", hook.stderr)
+
     def test_checkout_own_repository_still_works_with_the_settings_env(self) -> None:
         agent_env = {**self.base_env(), **settings_env()}
         self.assertEqual(self.git(self.victim, agent_env, "log", "-1", "--format=%s").stdout.strip(), "planted-tree")

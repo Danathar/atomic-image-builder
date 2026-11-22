@@ -373,6 +373,15 @@ REFUSED_ENVIRONMENT = (
         "configuration `$HOME/.gitconfig` is",
     ),
     (
+        "PATH",
+        "re-points where bash looks up every command name after it, so "
+        "`PATH=planted:$PATH git log -1` runs a file named git that a branch "
+        "committed in planted/ instead of git. PATH is already exported, so "
+        "`PATH=dir; git log` reaches it as surely as the leading spelling, and "
+        "the value is not read because a prefix, a replacement and an append "
+        "are one word apart",
+    ),
+    (
         "SHELLCHECK_OPTS",
         "is not a list of options despite the name -- shellcheck splits it and "
         "prepends it to its own argument list, operands included, so "

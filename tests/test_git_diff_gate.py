@@ -616,6 +616,11 @@ REACH_CORPUS = (
     ("environment", "HOME=planted; git log -p", REFUSED, "a diff.*.textconv in planted/.gitconfig runs while git log -p renders the diff"),
     ("environment", "export HOME=planted; git diff HEAD~1 HEAD", REFUSED, "the export spelling of the same"),
     ("environment", "XDG_CONFIG_HOME=planted git diff HEAD~1 HEAD", REFUSED, "git reads planted/git/config as global configuration the same way"),
+    ("environment", "PATH=planted:$PATH git log -1", REFUSED, "bash looks git up in planted/ first, so a file named git a branch commits there runs instead"),
+    ("environment", "PATH=planted:$PATH; git log -1", REFUSED, "PATH is already exported, so a stand-alone assignment reaches the git after it"),
+    ("environment", "export PATH=planted:$PATH; git diff HEAD~1 HEAD", REFUSED, "the export spelling of the same"),
+    ("environment", 'echo "$PATH"; git status', ALLOWED, "reading PATH is not assigning it"),
+    ("environment", "MYPATH=x; git log -1", ALLOWED, "a name that only ends in PATH is not PATH"),
     ("environment", "GIT_CONFIG_VALUE_0=all; git log -p", REFUSED, "the settings env is exported, so a stand-alone assignment changes the value git reads"),
     ("environment", 'cd "$HOME" && git status', ALLOWED, "reading HOME is not assigning it"),
     ("environment", "LD_PRELOAD=/tmp/evil.so git diff HEAD", REFUSED, "loads code into any of these commands, git included"),
@@ -737,8 +742,8 @@ REACH_CORPUS = (
     (
         "environment",
         'export PATH="$PATH:/x"; git diff HEAD',
-        ALLOWED,
-        "the live $ sits at index 5 of an export-family word, not index 0, so opaque_assignment_prefix() does not fire; content-based scoping reads the plain identifier PATH ahead of it and PATH is not a REFUSED_ENVIRONMENT name",
+        REFUSED,
+        "the live $ sits at index 5 of an export-family word, not index 0, so opaque_assignment_prefix() does not fire; content-based scoping reads the plain identifier PATH ahead of it, and PATH is a REFUSED_ENVIRONMENT name: a prepend in the same spelling runs a planted git",
     ),
     (
         "environment",

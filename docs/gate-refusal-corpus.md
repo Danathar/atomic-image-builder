@@ -269,8 +269,13 @@ each run that program, and a `diff.*.textconv` there runs under
 `HOME=planted; git log -p` the same way. Two allow rows keep ordinary
 work open: a stand-alone assignment to a name git takes nothing from
 (`TZ=UTC;`), and reading `$HOME`.
-This repository's gate refuses `HOME` and `XDG_CONFIG_HOME` the way it
-refuses the `GIT_CONFIG_*` family, wherever the assignment is written.
+`PATH` is exported as well, and bash finds `git` itself through it: a branch
+can commit an executable named `git` in a folder, and `PATH=planted:$PATH
+git log -1`, the stand-alone `PATH=planted:$PATH;` and `export
+PATH=planted:$PATH;` each run that file in place of git.
+This repository's gate refuses `HOME`, `XDG_CONFIG_HOME` and `PATH` the way
+it refuses the `GIT_CONFIG_*` family, wherever the assignment is written, an
+append to `PATH` included, since a prepend is the same word.
 
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
