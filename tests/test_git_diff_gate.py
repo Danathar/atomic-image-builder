@@ -3148,6 +3148,30 @@ class RefusalTests(unittest.TestCase):
         self.assertEqual(read(["--debug", "-i"]), "-i")
         self.assertIsNone(read(["--chdir", "-i"]))
 
+    def test_env_steps_over_an_argv0_name_and_nothing_else(self) -> None:
+        # The corpus rows for env -a / --argv0 (#900) name one ordinary
+        # NAME followed by -i or -u, so they pass when the step-over is
+        # read from the wrong word or reaches past the end of the words.
+        # These read env_empties_or_unsets() directly.
+        read = gate.env_empties_or_unsets
+        # A trailing -a or --argv0 has no name to read. Reaching past the
+        # end raises, and a hook that raises lets the whole command run.
+        self.assertIsNone(read(["-a"]))
+        self.assertIsNone(read(["--argv0"]))
+        self.assertIsNone(read(["-va"]))
+        # The name is the word right after the option, not the one after it.
+        self.assertEqual(read(["-a", "name", "-i"]), "-i")
+        self.assertEqual(read(["--argv0", "name", "-i"]), "-i")
+        # A word after -a that looks like an option is read as one.
+        self.assertEqual(read(["-a", "-i", "git"]), "-i")
+        self.assertEqual(read(["--argv0", "-i", "git"]), "-i")
+        # Only -a ending its cluster and a detached --argv0 take the next
+        # word: another short or long option leaves it as env's command.
+        self.assertIsNone(read(["-v", "name", "-i"]))
+        self.assertIsNone(read(["-av", "name", "-i"]))
+        self.assertIsNone(read(["--debug", "name", "-i"]))
+        self.assertIsNone(read(["--argv0=name", "git", "-i"]))
+
     def test_a_shellcheck_glob_is_judged_by_the_files_it_names(self) -> None:
         # The one expansion the scan performs instead of refusing, because
         # this repository's own lint command ends in a glob. So the test is
