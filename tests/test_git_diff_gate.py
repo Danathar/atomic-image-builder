@@ -3189,6 +3189,34 @@ class RefusalTests(unittest.TestCase):
         self.assertIsNone(read(["--debug", "name", "-i"]))
         self.assertIsNone(read(["--argv0=name", "git", "-i"]))
 
+    def test_operand_assigning_builtins_read_exactly_their_name_word(self) -> None:
+        # The corpus rows for read, printf -v, getopts and readarray (#905)
+        # are refused by more than one pass, so they still pass when
+        # builtin_assigned_environment() reads the wrong word or reaches
+        # past the last one. These read it directly.
+        def name(words: list[str]) -> str | None:
+            found = gate.builtin_assigned_environment(words)
+            return None if found is None else found[1]
+
+        # printf takes its name from the -v word or the word right after
+        # it, with nothing further needed.
+        self.assertEqual(name(["printf", "-vPATH", "%s", "x"]), "PATH")
+        self.assertEqual(name(["printf", "-v", "HOME", "%s", "x"]), "HOME")
+        self.assertEqual(name(["printf", "-v", "HOME"]), "HOME")
+        # A trailing -v or getopts with one operand has no name to read.
+        # Reaching past the end raises, and a hook that raises lets the
+        # whole command run.
+        self.assertIsNone(name(["printf", "-v"]))
+        self.assertIsNone(name(["getopts", "x"]))
+        self.assertEqual(name(["getopts", "x", "HOME"]), "HOME")
+        # printf without -v assigns nothing, and -v means nothing to
+        # another program.
+        self.assertIsNone(name(["printf"]))
+        self.assertIsNone(name(["printf", "%s", "HOME"]))
+        self.assertIsNone(name(["echo", "-vHOME"]))
+        # A subscript assigns the variable itself.
+        self.assertEqual(name(["readarray", "PATH[0]"]), "PATH")
+
     def test_a_shellcheck_glob_is_judged_by_the_files_it_names(self) -> None:
         # The one expansion the scan performs instead of refusing, because
         # this repository's own lint command ends in a glob. So the test is

@@ -24,6 +24,18 @@
       "operator": "core/NumberReplacer",
       "line": "BUILD_RETRY_PAUSE_SECONDS = 15",
       "reason": "How long build() waits before retrying a dropped base pull is a tuning value; 14 or 16 seconds changes no outcome a test can observe, and the tests read the constant rather than restating it."
+    },
+    {
+      "module": ".claude/hooks/gate_git_diff.py",
+      "operator": "core/NumberReplacer",
+      "line": "candidates.extend(word[start:] for start in range(1, len(word)))",
+      "reason": "In builtin_assigned_environment() the surviving variants are range(0, ...) and range(2, ...). range(0, ...) also reads the whole option word, dash included, and no REFUSED_ENVIRONMENT pattern starts with a dash, so it can never match. range(2, ...) drops only the tail that starts at the first option letter, and that tail names a variable only when the option letter is part of the name, as in `read -HOME`; read, mapfile and readarray reject such a word as an invalid option and assign nothing. Every tail that starts after a real option letter (`read -aHOME`, `read -raHOME`) is still read."
+    },
+    {
+      "module": ".claude/hooks/gate_git_diff.py",
+      "operator": "core/NumberReplacer",
+      "line": "name = candidate.split(\"[\", 1)[0]",
+      "reason": "The surviving variant is split(\"[\", 2)[0]. Splitting further changes only the parts after the first [, and [0] is the text before it either way; the split(\"[\", 0) variant, which keeps the subscript, is killed."
     }
   ]
 }
