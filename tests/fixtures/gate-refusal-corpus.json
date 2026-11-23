@@ -1364,6 +1364,66 @@
       "why": "the export spelling of the same"
     },
     {
+      "id": "home-read",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "read -r HOME <<< planted; git diff HEAD~1 HEAD",
+      "why": "read assigns the exported HOME as surely as HOME=planted; does, so git reads planted/.gitconfig"
+    },
+    {
+      "id": "home-printf-v",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "printf -v HOME %s planted; git diff HEAD~1 HEAD",
+      "why": "printf -v assigns HOME the same way"
+    },
+    {
+      "id": "home-for-loop",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "for HOME in planted; do git diff HEAD~1 HEAD; done",
+      "why": "a for loop assigns its name before the body runs, so the git inside it reads planted/.gitconfig"
+    },
+    {
+      "id": "path-mapfile",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "mapfile -t PATH < list; git log -1",
+      "why": "mapfile assigns PATH, so bash looks git up in the first line of list"
+    },
+    {
+      "id": "settings-env-read",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "read GIT_CONFIG_VALUE_0 <<< all; git log -p",
+      "why": "the settings env is exported, so read turns safe.bareRepository back to all"
+    },
+    {
+      "id": "config-reach-allow-read-line",
+      "class": "configuration reach",
+      "verdict": "allow",
+      "requires": [
+        "git log"
+      ],
+      "command": "read -r line < README.md; git log -1",
+      "why": "read into a name git takes nothing from"
+    },
+    {
       "id": "config-reach-allow-other-standalone",
       "class": "configuration reach",
       "verdict": "allow",

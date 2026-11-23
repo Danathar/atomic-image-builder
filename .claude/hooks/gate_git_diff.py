@@ -995,6 +995,18 @@ SETTINGS_ENVIRONMENT = "GIT_CONFIG*"
 # `typeset +x NAME`, which keep the variable but stop exporting it.
 UNEXPORT_FAMILY = frozenset({"declare", "typeset"})
 
+# The builtins that assign a variable named as an operand rather than as a
+# NAME=value word: `read NAME`, `mapfile`/`readarray NAME`, `printf -v NAME`,
+# the name of a `for`/`select` loop, and `getopts OPTSTRING NAME`. When the
+# name is one bash already exports (HOME, PATH, the GIT_CONFIG_* settings
+# env), the new value reaches every later command, git included, exactly as
+# `HOME=planted;` does. See builtin_assigned_environment().
+OPERAND_ASSIGNERS = frozenset({"read", "mapfile", "readarray"})
+LOOP_ASSIGNERS = frozenset({"for", "select"})
+# The reserved words bash reads before a command in the same segment, so
+# `while read -r HOME` and `if printf -v PATH x` are read as the builtin.
+LEADING_RESERVED_WORDS = frozenset({"!", "if", "elif", "then", "else", "while", "until", "do", "{"})
+
 
 # Both of bash's assignment operators, longest first. `+=` appends, and
 # appending to a variable that is not set creates it, so `SHELLCHECK_OPTS+=x`
@@ -2952,6 +2964,53 @@ def exec_empties_environment(words: list[str]) -> str | None:
     return None
 
 
+def builtin_assigned_environment(words: list[str]) -> tuple[str, str, str] | None:
+    """The REFUSED_ENVIRONMENT name a builtin in this segment assigns as an
+    operand, as (builtin, name, reach), or None.
+
+    assigned_environment() reads the NAME=value word, and these builtins
+    write no such word: `read -r HOME <<< planted`, `mapfile -t PATH < f`,
+    `printf -v HOME %s planted`, `for HOME in planted; do git diff; done`
+    and `getopts x HOME` each set the variable all the same, and HOME, PATH
+    and the settings env are already exported, so the next git reads the
+    new value.
+
+    `read`, `mapfile` and `readarray` have every operand read, and every
+    tail of an option word too, so `read -aHOME` and `read -raHOME` are
+    found without a table of which option takes a value; an option value
+    that happens to be a refused name (`read -p PATH line`) is refused as
+    well, which only over-refuses. `printf` is read for `-v NAME` and
+    `-vNAME`, the one place bash reads -v; a loop for its name; `getopts`
+    for its second operand. A subscript (`PATH[0]`) assigns the variable
+    itself and is read without it.
+    """
+    words = [bare(word) for word in words]
+    while words and words[0] in LEADING_RESERVED_WORDS:
+        words = words[1:]
+    if not words:
+        return None
+    program, rest = words[0], words[1:]
+    candidates: list[str] = []
+    if program in OPERAND_ASSIGNERS:
+        for word in rest:
+            if word.startswith("-") and word != "--":
+                candidates.extend(word[start:] for start in range(1, len(word)))
+            else:
+                candidates.append(word)
+    elif program == "printf" and rest and rest[0].startswith("-v"):
+        candidates.append(rest[0][2:] or (rest[1] if len(rest) > 1 else ""))
+    elif program in LOOP_ASSIGNERS and rest:
+        candidates.append(rest[0])
+    elif program == "getopts" and len(rest) > 1:
+        candidates.append(rest[1])
+    for candidate in candidates:
+        name = candidate.split("[", 1)[0]
+        for pattern, reach in REFUSED_ENVIRONMENT:
+            if fnmatch.fnmatchcase(name, pattern):
+                return program, name, reach
+    return None
+
+
 def env_split_escape(token: str) -> str | None:
     """The backslash escape in an `env -S`/`--split-string` argument this
     scan does not parse, or None.
@@ -3846,6 +3905,18 @@ def typed_refusal(command: str) -> str | None:
                 "it is written -- unset, export -n, declare or typeset +x, env -u, and "
                 "env -i or exec -c, which empty the whole environment -- since the Bash "
                 "tool's shell outlives one call; run the command without clearing them"
+            )
+        builtin_assigned = builtin_assigned_environment(invocation.words)
+        if builtin_assigned is not None:
+            program, name, reach = builtin_assigned
+            return (
+                f"`{program}` assigns {name}, which {reach}. The builtin names the "
+                "variable as an operand rather than as a NAME=value word, and the new "
+                "value reaches every later command the same way -- HOME, PATH and the "
+                "GIT_CONFIG_* settings env are already exported -- so read, mapfile, "
+                "readarray, printf -v, a for or select loop's name and getopts are "
+                "refused on these names wherever they are written; use another "
+                "variable name"
             )
         if invocation.words and invocation.words[0] in EXPORT_FAMILY:
             # Every word after the name is a candidate assignment
