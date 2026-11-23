@@ -196,6 +196,50 @@ class ClaudeSettingsGitTests(unittest.TestCase):
                 self.assertEqual(hook.returncode, 2, hook.stderr)
                 self.assertIn("HOME", hook.stderr)
 
+    def test_a_builtin_assigning_home_runs_its_program_and_the_hook_refuses_it(self) -> None:
+        """`read`, `mapfile`, `printf -v`, a `for` or `select` loop and
+        `getopts` set a variable named as an operand, with no NAME=value word
+        for the assignment rule to read. HOME is already exported, so a loop
+        that names it runs the planted diff.external on the git inside it."""
+        repo = self.dir / "repo"
+        repo.mkdir()
+        self.must(repo, "init", "-q")
+        (repo / "f.txt").write_text("a\n", encoding="utf-8")
+        planted = repo / "planted"
+        planted.mkdir()
+        self.must(repo, "config", "-f", str(planted / ".gitconfig"), "diff.external", f"touch '{self.marker}'; :")
+        self.must(repo, "add", ".")
+        self.must(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "one")
+        (repo / "f.txt").write_text("b\n", encoding="utf-8")
+        self.must(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "two")
+        agent_env = {"PATH": os.environ["PATH"], "HOME": str(self.dir), "GIT_CONFIG_NOSYSTEM": "1", **settings_env()}
+        ran = subprocess.run(
+            ["bash", "--norc", "--noprofile", "-c", "for HOME in planted; do git diff HEAD~1 HEAD; done"],
+            cwd=repo,
+            env=agent_env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertTrue(self.marker.exists(), "for HOME in planted should reach the planted diff.external; if not, revisit the hook rule")
+        for command in (
+            "for HOME in planted; do git diff HEAD~1 HEAD; done",
+            "read -r HOME <<< planted; git diff HEAD~1 HEAD",
+            "printf -v HOME %s planted; git diff HEAD~1 HEAD",
+            "mapfile -t PATH < list; git log -1",
+        ):
+            with self.subTest(command=command):
+                hook = subprocess.run(
+                    [sys.executable, str(HOOK)],
+                    input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(hook.returncode, 2, hook.stderr)
+                self.assertIn("assigns", hook.stderr)
+
     def test_a_planted_path_runs_its_git_and_the_hook_refuses_it(self) -> None:
         """Bash finds `git` by PATH. A branch can commit an executable named
         git in a folder, so putting that folder first runs it in place of git

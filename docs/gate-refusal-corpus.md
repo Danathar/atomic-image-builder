@@ -276,6 +276,14 @@ PATH=planted:$PATH;` each run that file in place of git.
 This repository's gate refuses `HOME`, `XDG_CONFIG_HOME` and `PATH` the way
 it refuses the `GIT_CONFIG_*` family, wherever the assignment is written, an
 append to `PATH` included, since a prepend is the same word.
+Bash builtins also assign a variable named as an operand, with no
+`NAME=value` word in the command: `read -r HOME <<< planted;`, `printf -v
+HOME %s planted;`, `for HOME in planted; do git diff HEAD~1 HEAD; done`,
+`mapfile -t PATH < list;` and `read GIT_CONFIG_VALUE_0 <<< all;` each change
+an exported variable the next git reads. This repository's gate refuses
+`read`, `mapfile`, `readarray`, `printf -v`, a `for` or `select` loop's name
+and `getopts` on any name it refuses as an assignment; one allow row keeps
+`read` into an ordinary name open.
 
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
