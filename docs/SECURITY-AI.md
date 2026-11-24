@@ -299,6 +299,22 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   loaded an untracked `yaml/CSafeLoader.py` this way on a host without
   PyYAML, CI among them. Same finding as
   [#594](https://github.com/Danathar/atomic-image-builder/issues/594).
+  The same move reaches git and the other gated commands. Every operand
+  check above resolves a path against the checkout, so `cd /some/dir && git
+  diff -- a.env b` passed as two in-tree operands, then git ran outside any
+  repository, fell back to `--no-index` on its own and printed both files.
+  It is the shell's spelling of `git -C DIR` and `env -C DIR`, which were
+  already refused. Once an earlier command of the string runs `cd`, `pushd`
+  or `popd` (also behind `builtin` or `command`) to anywhere that may be
+  outside the checkout, a later git or gated command is refused. A change
+  stays allowed only when its target is the project root (a literal path to
+  it, or `$CLAUDE_PROJECT_DIR`) or a literal relative path with no `..`
+  whose real path is inside the checkout, so `cd tests && git log` still
+  runs and a committed symlink that points out does not. A bare `cd`, `cd
+  -`, a `~`, `$`, backtick or glob target, an option, every `popd`, and a
+  relative name while CDPATH is set or assigned in the string all count as
+  leaving. Same finding as
+  [#911](https://github.com/Danathar/atomic-image-builder/issues/911).
 - The gate is one of six separate copies across the fleet's repositories, so
   a bypass fixed here is not fixed anywhere else.
   [`tests/fixtures/gate-refusal-corpus.json`](../tests/fixtures/gate-refusal-corpus.json)

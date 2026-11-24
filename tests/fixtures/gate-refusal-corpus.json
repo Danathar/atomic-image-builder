@@ -1550,8 +1550,68 @@
       "requires": [
         "git status"
       ],
-      "command": "cd \"$HOME\" && git status",
+      "command": "echo \"$HOME\" && git status",
       "why": "reading HOME is not assigning it"
+    },
+    {
+      "id": "dir-change-cd-plain-file",
+      "class": "directory change",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "cd /tmp && git diff -- x .env",
+      "why": "git runs outside any repository, falls back to --no-index with no flag and prints /tmp/.env, while both operands look like in-tree paths"
+    },
+    {
+      "id": "dir-change-cd-semicolon",
+      "class": "directory change",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "cd /tmp; git diff -- x .env",
+      "why": "the same move ended by ; rather than &&"
+    },
+    {
+      "id": "dir-change-subshell",
+      "class": "directory change",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "(cd /tmp && git diff -- x .env)",
+      "why": "the same move inside a subshell"
+    },
+    {
+      "id": "dir-change-pushd",
+      "class": "directory change",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "pushd /tmp && git diff -- x .env",
+      "why": "pushd moves the shell as cd does"
+    },
+    {
+      "id": "dir-change-bare-cd",
+      "class": "directory change",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "cd && git diff -- .netrc .env",
+      "why": "a cd with no operand goes to HOME and prints two files there"
+    },
+    {
+      "id": "dir-change-allow-inside",
+      "class": "directory change",
+      "verdict": "allow",
+      "requires": [
+        "git log"
+      ],
+      "command": "cd tests && git log -1",
+      "why": "a literal relative directory with no .. stays inside the checkout"
     }
   ]
 }

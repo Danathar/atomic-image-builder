@@ -2669,6 +2669,63 @@ def wrapper_chdir(invocation: Invocation) -> str | None:
     return None
 
 
+# The words that name the project root to a `cd` without spelling its path.
+PROJECT_DIRECTORY_WORDS = frozenset({"$CLAUDE_PROJECT_DIR", "${CLAUDE_PROJECT_DIR}"})
+
+
+def checkout_root() -> str:
+    """The real path of the checkout this hook guards: Claude Code's project
+    directory, or the directory the hook was started in."""
+    return os.path.realpath(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
+
+
+def directory_change_leaves(invocation: Invocation, cdpath: bool) -> str | None:
+    """The directory change this invocation makes, as typed, when it may move
+    the shell out of the checkout; None when it is no directory change or
+    one that stays inside.
+
+    It is the shell's spelling of `git -C DIR` and `env -C DIR`, and every
+    operand check here resolves paths against the checkout, so `cd /some/dir
+    && git diff -- a.env b` passed as two in-tree operands while git ran
+    outside any repository and printed both files (#911). A change stays
+    inside only when its one operand is the project root (a literal path to
+    it, or `$CLAUDE_PROJECT_DIR`) or a literal relative path with no `..`
+    component whose real path is inside the checkout, symlinks resolved.
+    Anything this cannot read as a literal path leaves: no operand (HOME),
+    `-` (OLDPWD), an option, a `~`, a `$`, a backtick or a glob, and every
+    `popd`, which returns to a directory this string does not name. With
+    CDPATH set, bash searches it for a relative name that does not start
+    with `./`, so `cdpath` makes those leave too.
+    """
+    words, twins = invocation.words, invocation.twins
+    if words[:1] == ["builtin"]:
+        words, twins = words[1:], twins[1:]
+    if not words or words[0] not in DIRECTORY_CHANGERS:
+        return None
+    shown = " ".join(words)
+    if words[0] == "popd" or len(words) != 2:
+        return shown
+    target, twin = words[1], twins[1]
+    if target in PROJECT_DIRECTORY_WORDS and "$" in twin:
+        return None
+    if (
+        not target
+        or target.startswith(("-", "+"))
+        or twin.startswith("~")
+        or any(char in EXPANSION or char in GLOB for char in twin)
+    ):
+        return shown
+    root = checkout_root()
+    if target.startswith("/"):
+        return None if os.path.realpath(target) == root else shown
+    if ".." in target.split("/") or (cdpath and not target.startswith("./")):
+        return shown
+    resolved = os.path.realpath(os.path.join(root, target))
+    if resolved == root or resolved.startswith(root + os.sep):
+        return None
+    return shown
+
+
 def env_split_string_value(token: str) -> str | None:
     """The value attached to this word if it is any spelling of env's own
     `-S`/`--split-string` carrying it in the same word -- clustered or
@@ -3918,6 +3975,8 @@ def typed_refusal(command: str) -> str | None:
             "arithmetic naming these is refused wherever it is written; use another "
             "variable name"
         )
+    cdpath = "CDPATH" in command or "CDPATH" in os.environ
+    left: str | None = None
     for positions in segment_positions(tokens, masked):
         segment = [tokens[index] for index in positions]
         twins = [masked[index] for index in positions]
@@ -3953,6 +4012,27 @@ def typed_refusal(command: str) -> str | None:
                             "words instead of inside a split string with an escape in it"
                         )
         invocation = command_words(segment, twins, [raws[index] for index in positions])
+        if left is not None:
+            prefix = gated_prefix(invocation)
+            gated = "git" if git_position(invocation) is not None else None
+            if prefix is not None:
+                gated = " ".join(prefix)
+            if gated is not None:
+                return (
+                    f"`{left}` may move the shell out of this checkout before `{gated}` "
+                    "runs, and every operand check here resolves paths against the "
+                    "checkout: `cd /some/dir && git diff -- a.env b` passed as two "
+                    "in-tree operands, then git ran outside any repository, fell back to "
+                    "--no-index on its own and printed both files. It is the shell's "
+                    "spelling of `git -C DIR` and `env -C DIR`, which are refused for the "
+                    "same reason. A cd to the project root (`cd \"$CLAUDE_PROJECT_DIR\"`) "
+                    "or into a literal relative path inside the checkout (`cd tests`) is "
+                    "not refused; otherwise run the command from the checkout and name "
+                    "the paths"
+                )
+        moved = directory_change_leaves(invocation, cdpath)
+        if left is None and moved is not None:
+            left = moved
         removed = removed_settings_environment(invocation)
         if removed is not None:
             return (

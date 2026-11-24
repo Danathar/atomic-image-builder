@@ -353,11 +353,32 @@ REFUSED_COMMANDS = (
     ("shopt -s extglob\ngit log -p @(--output=.env) -1", "spells a refused option as an extglob group beside a file of that name"),
     ("@(git) diff /dev/null ./.env", "starts the command with a group, once an earlier call in the same shell turned extglob on"),
     ("script -qc 'shopt -s extglob\n/usr/bin/g@(i)t diff /dev/null ./.env' /dev/null", "names git with an extglob group in a string a program no gate lists hands to a shell"),
+    # A directory change earlier in the string moves git out of the checkout
+    # that every operand check resolves against: the shell's `git -C` (#911).
+    ("cd /tmp && git diff -- x .env", "moves git outside any repository, where two in-tree-looking operands are a plain-file read"),
+    ("cd /tmp; git diff -- x .env", "the same after a ;"),
+    ("(cd /tmp && git diff -- x .env)", "the same inside a subshell"),
+    ("pushd /tmp && git diff -- x .env", "pushd moves the shell as cd does"),
+    ("builtin cd /tmp && git diff -- x .env", "cd behind builtin"),
+    ("command cd /tmp && git diff -- x .env", "cd behind command"),
+    ("cd && git diff -- .netrc .env", "a bare cd goes to HOME"),
+    ("cd ~/.ssh && git diff -- id_ed25519 id_ed25519.pub", "a ~ target is HOME"),
+    ("cd - && git log -1", "cd - returns to a directory this string does not name"),
+    ("cd .. && git status", "a .. target leaves the checkout"),
+    ("cd \"$HOME\" && git status", "a $ target is read only at runtime"),
+    ("popd && git log -1", "popd returns to a directory this string does not name"),
+    ("CDPATH=/tmp; cd sub && git diff -- x .env", "CDPATH turns a relative name into a path outside"),
+    ("cd /tmp && shellcheck .env", "the move reaches the gated prefixes too"),
 )
 
 # Commands it has to leave alone. Everything an ordinary session runs.
 ALLOWED_COMMANDS = (
     "git diff",
+    "cd tests && git log -1",
+    "cd ./tests && git diff HEAD",
+    'cd "$CLAUDE_PROJECT_DIR" && git status',
+    "git diff HEAD; cd /tmp",
+    'cd /tmp && echo "$PWD"',
     "git diff --stat",
     "git diff -- docs/quality.md",
     "git diff --quiet -- tests/",
@@ -648,7 +669,7 @@ REACH_CORPUS = (
     ("environment", "( echo PATH ); git log -1", ALLOWED, "a single paren is a subshell, and printing the word PATH assigns nothing"),
     ("environment", "echo $(( 1 + 2 )); git log -1", ALLOWED, "an expansion that names no variable"),
     ("environment", "GIT_CONFIG_VALUE_0=all; git log -p", REFUSED, "the settings env is exported, so a stand-alone assignment changes the value git reads"),
-    ("environment", 'cd "$HOME" && git status', ALLOWED, "reading HOME is not assigning it"),
+    ("environment", 'echo "$HOME" && git status', ALLOWED, "reading HOME is not assigning it"),
     ("environment", "LD_PRELOAD=/tmp/evil.so git diff HEAD", REFUSED, "loads code into any of these commands, git included"),
     ("environment", "export LD_AUDIT=/tmp/evil.so; shellcheck contrib/aib", REFUSED, "the dynamic linker's own hook for the same"),
     ("environment", "export PYTHONHOME=/tmp; python3 maintenance_audit.py --skip-upstream", REFUSED, "re-points the standard library the audit imports from"),
@@ -2164,6 +2185,49 @@ def reaches_a_group(pattern: str) -> bool:
         # the `*` can finish the word: `Bash(i*)` matches `if ...`
         return any(opener.startswith(words[0]) for opener in GROUP_OPENERS)
     return words[0] in GROUP_OPENERS
+
+
+class DirectoryChangeTests(unittest.TestCase):
+    """A directory change before git in the same string (#911)."""
+
+    def test_git_after_cd_prints_a_file_outside_the_checkout(self) -> None:
+        # The reach, run rather than reasoned about: outside any repository
+        # git diff falls back to --no-index with no flag and prints both files.
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "a.env").write_text("SECRET=1\n")
+            Path(tmp, "b").write_text("x\n")
+            command = f"cd {tmp} && git diff -- a.env b"
+            shown = subprocess.run(
+                ["bash", "-c", command],
+                cwd=ROOT,
+                env={**os.environ, "GIT_CEILING_DIRECTORIES": str(Path(tmp).parent)},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertIn("-SECRET=1", shown.stdout)
+            self.assertIsNotNone(gate.refusal(command))
+
+    def test_only_a_change_that_stays_inside_is_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside:
+            Path(root, "inside").mkdir()
+            Path(root, "escape").symlink_to(outside)
+            saved = os.environ.get("CLAUDE_PROJECT_DIR")
+            os.environ["CLAUDE_PROJECT_DIR"] = root
+            try:
+                self.assertIsNone(gate.refusal("cd inside && git log -1"))
+                self.assertIsNone(gate.refusal(f"cd {root} && git status"))
+                self.assertIsNone(gate.refusal('cd "$CLAUDE_PROJECT_DIR" && git status'))
+                # A symlink a branch can commit resolves out of the checkout
+                # although its name is a tidy relative path.
+                self.assertIsNotNone(gate.refusal("cd escape && git log -1"))
+                self.assertIsNotNone(gate.refusal(f"cd {outside} && git status"))
+                self.assertIsNotNone(gate.refusal(f"cd {root}/escape && git status"))
+            finally:
+                if saved is None:
+                    os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                else:
+                    os.environ["CLAUDE_PROJECT_DIR"] = saved
 
 
 class RefusalTests(unittest.TestCase):
