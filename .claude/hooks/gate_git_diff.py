@@ -1007,6 +1007,14 @@ LOOP_ASSIGNERS = frozenset({"for", "select"})
 # `while read -r HOME` and `if printf -v PATH x` are read as the builtin.
 LEADING_RESERVED_WORDS = frozenset({"!", "if", "elif", "then", "else", "while", "until", "do", "{"})
 
+# A variable name as bash's arithmetic reads one: `(( PATH = 1 ))` and
+# `$(( HOME = 1 ))` assign the name with no NAME=value word when the
+# operator stands apart from it. See arithmetic_named_environment().
+ARITHMETIC_NAME = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*")
+# An arithmetic expansion inside one word, as it is left when a double
+# quote keeps the word whole (`: "$(( PATH = 1 ))"`).
+WORD_ARITHMETIC = re.compile(r"\$\(\((.*)\)\)", re.DOTALL)
+
 
 # Both of bash's assignment operators, longest first. `+=` appends, and
 # appending to a variable that is not set creates it, so `SHELLCHECK_OPTS+=x`
@@ -3011,6 +3019,47 @@ def builtin_assigned_environment(words: list[str]) -> tuple[str, str, str] | Non
     return None
 
 
+def arithmetic_named_environment(tokens: list[str], masked: list[str]) -> tuple[str, str] | None:
+    """The REFUSED_ENVIRONMENT name an arithmetic command `(( ... ))` or an
+    arithmetic expansion `$(( ... ))` names, as (name, reach), or None.
+
+    assigned_environment() reads the NAME=value word, and arithmetic with
+    spaces round its operator writes none: `(( PATH = 1 ))` and `:
+    $(( HOME = 1 ))` set the variable all the same, and HOME, PATH and the
+    settings env are already exported, so the next git is looked up in a
+    folder named 1 or reads a planted `.gitconfig`. The expression is read
+    from its two opening parens to the parens that close them, and every
+    whole name in it is tested, so a name that is only read (`(( PATH ))`)
+    is refused as well, which only over-refuses. A single paren is a
+    subshell, not arithmetic, and is not read here. A double-quoted
+    expansion stays one word to the lexer and is read from the word.
+    """
+    names: list[str] = []
+    index = 0
+    while index < len(tokens):
+        if masked[index] == "(" and index + 1 < len(tokens) and masked[index + 1] == "(":
+            depth = 2
+            index += 2
+            while index < len(tokens) and depth:
+                if masked[index] == "(":
+                    depth += 1
+                elif masked[index] == ")":
+                    depth -= 1
+                else:
+                    names.extend(ARITHMETIC_NAME.findall(tokens[index]))
+                index += 1
+            continue
+        if "$" in masked[index]:
+            for body in WORD_ARITHMETIC.findall(tokens[index]):
+                names.extend(ARITHMETIC_NAME.findall(body))
+        index += 1
+    for name in names:
+        for pattern, reach in REFUSED_ENVIRONMENT:
+            if fnmatch.fnmatchcase(name, pattern):
+                return name, reach
+    return None
+
+
 def env_split_escape(token: str) -> str | None:
     """The backslash escape in an `env -S`/`--split-string` argument this
     scan does not parse, or None.
@@ -3858,6 +3907,17 @@ def typed_refusal(command: str) -> str | None:
                 "would be in the environment of the next call's command; pass what the "
                 "command needs after its name instead"
             )
+    arithmetic = arithmetic_named_environment(tokens, masked)
+    if arithmetic is not None:
+        name, reach = arithmetic
+        return (
+            f"an arithmetic command or expansion names {name}, which {reach}. "
+            f"`(( {name} = 1 ))` and `$(( {name} = 1 ))` assign it with no NAME=value "
+            "word, and the new value reaches every later command the same way -- "
+            "HOME, PATH and the GIT_CONFIG_* settings env are already exported -- so "
+            "arithmetic naming these is refused wherever it is written; use another "
+            "variable name"
+        )
     for positions in segment_positions(tokens, masked):
         segment = [tokens[index] for index in positions]
         twins = [masked[index] for index in positions]
