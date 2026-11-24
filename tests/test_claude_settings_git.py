@@ -278,6 +278,45 @@ class ClaudeSettingsGitTests(unittest.TestCase):
                 self.assertEqual(hook.returncode, 2, hook.stderr)
                 self.assertIn("PATH", hook.stderr)
 
+    def test_an_arithmetic_path_runs_its_git_and_the_hook_refuses_it(self) -> None:
+        """`(( PATH = 1 ))` assigns PATH with no NAME=value word, so bash
+        looks the next git up in a folder named 1, which a branch can
+        commit (#909)."""
+        repo = self.dir / "repo"
+        planted = repo / "1"
+        planted.mkdir(parents=True)
+        fake = planted / "git"
+        # PATH is 1 inside the fake as well, so it writes the marker with a
+        # shell redirection rather than a program it would have to look up.
+        fake.write_text(f"#!/bin/sh\n: > '{self.marker}'\n", encoding="utf-8")
+        fake.chmod(0o755)
+        agent_env = {"PATH": os.environ["PATH"], "HOME": str(self.dir), **settings_env()}
+        ran = subprocess.run(
+            ["bash", "--norc", "--noprofile", "-c", "(( PATH = 1 )); git log -1"],
+            cwd=repo,
+            env=agent_env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertTrue(self.marker.exists(), "(( PATH = 1 )) should run the planted git; if not, revisit the hook rule")
+        for command in (
+            "(( PATH = 1 )); git log -1",
+            ": $(( PATH = 1 )); git log -1",
+            "if (( PATH = 1 )); then git log -1; fi",
+        ):
+            with self.subTest(command=command):
+                hook = subprocess.run(
+                    [sys.executable, str(HOOK)],
+                    input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(hook.returncode, 2, hook.stderr)
+                self.assertIn("PATH", hook.stderr)
+
     def test_checkout_own_repository_still_works_with_the_settings_env(self) -> None:
         agent_env = {**self.base_env(), **settings_env()}
         self.assertEqual(self.git(self.victim, agent_env, "log", "-1", "--format=%s").stdout.strip(), "planted-tree")

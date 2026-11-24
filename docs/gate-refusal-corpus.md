@@ -290,6 +290,15 @@ name on the left of its expression and keeps its export: `let PATH=1;` makes
 bash look git up in a folder named `1`, and `let GIT_CONFIG_COUNT=0;` drops
 `safe.bareRepository=explicit`. One allow row keeps `let` on an ordinary name
 open.
+Arithmetic assigns the same way with no `NAME=value` word once the operator
+has spaces round it: `(( PATH = 1 ));`, `(( HOME = 1 ));` and `: $((
+XDG_CONFIG_HOME = 1 ));` each change an exported variable the next git reads.
+This repository's gate refuses an arithmetic command or expansion whose
+expression names `HOME`, `XDG_CONFIG_HOME`, `PATH` or another name it refuses
+as an assignment, wherever it is written. Two allow rows keep arithmetic on an
+ordinary name (`(( i = 1 ));`) and a subshell that only prints the word `PATH`
+(`( echo PATH );`) open, so a gate that refuses every arithmetic command or
+every subshell naming `PATH` fails too.
 
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the

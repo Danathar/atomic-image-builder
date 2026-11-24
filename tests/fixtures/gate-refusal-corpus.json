@@ -1474,6 +1474,56 @@
       "why": "let into a name git takes nothing from"
     },
     {
+      "id": "path-arithmetic",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "(( PATH = 1 )); git log -1",
+      "why": "an arithmetic command assigns PATH with no NAME=value word, so bash looks git up in a folder named 1 a branch can commit"
+    },
+    {
+      "id": "home-arithmetic",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "(( HOME = 1 )); git diff HEAD~1 HEAD",
+      "why": "the same assignment to the exported HOME, so git reads 1/.gitconfig and runs the diff.external it names"
+    },
+    {
+      "id": "xdg-config-home-arithmetic-expansion",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": ": $(( XDG_CONFIG_HOME = 1 )); git log -p -1",
+      "why": "an arithmetic expansion assigns as the command does, so git reads 1/git/config and runs the textconv it names"
+    },
+    {
+      "id": "config-reach-allow-arithmetic-counter",
+      "class": "configuration reach",
+      "verdict": "allow",
+      "requires": [
+        "git log"
+      ],
+      "command": "(( i = 1 )); git log -1",
+      "why": "arithmetic on a name git takes nothing from"
+    },
+    {
+      "id": "config-reach-allow-subshell-path-word",
+      "class": "configuration reach",
+      "verdict": "allow",
+      "requires": [
+        "git log"
+      ],
+      "command": "( echo PATH ); git log -1",
+      "why": "a subshell that prints the word PATH assigns nothing"
+    },
+    {
       "id": "config-reach-allow-read-line",
       "class": "configuration reach",
       "verdict": "allow",
