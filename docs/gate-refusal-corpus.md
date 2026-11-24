@@ -284,6 +284,12 @@ an exported variable the next git reads. This repository's gate refuses
 `read`, `mapfile`, `readarray`, `printf -v`, a `for` or `select` loop's name
 and `getopts` on any name it refuses as an assignment; one allow row keeps
 `read` into an ordinary name open.
+The same goes for a `declare`, `typeset`, `local` or `readonly` operand that
+names `PATH` (`declare PATH=planted:$PATH;`), and for `let`, which assigns the
+name on the left of its expression and keeps its export: `let PATH=1;` makes
+bash look git up in a folder named `1`, and `let GIT_CONFIG_COUNT=0;` drops
+`safe.bareRepository=explicit`. One allow row keeps `let` on an ordinary name
+open.
 
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
