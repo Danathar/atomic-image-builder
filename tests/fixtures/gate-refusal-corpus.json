@@ -1414,6 +1414,66 @@
       "why": "the settings env is exported, so read turns safe.bareRepository back to all"
     },
     {
+      "id": "path-declare",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "declare PATH=planted:$PATH; git log -1",
+      "why": "PATH is already exported and declare keeps the export, so bash looks git up in planted/ first"
+    },
+    {
+      "id": "path-readonly",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "readonly PATH=planted:$PATH; git log -1",
+      "why": "readonly assigns its operand the same way declare does"
+    },
+    {
+      "id": "path-typeset-option",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "typeset -g PATH=planted:$PATH; git log -1",
+      "why": "an option before the operand does not change what typeset assigns"
+    },
+    {
+      "id": "path-let",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "let PATH=1; git log -1",
+      "why": "let assigns the name on the left of its expression, so bash looks git up in a folder named 1 a branch can commit"
+    },
+    {
+      "id": "settings-env-let",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "let GIT_CONFIG_COUNT=0; git log -p",
+      "why": "let sets the exported count to 0, so git drops safe.bareRepository=explicit and trusts a planted bare repository again"
+    },
+    {
+      "id": "config-reach-allow-let-counter",
+      "class": "configuration reach",
+      "verdict": "allow",
+      "requires": [
+        "git log"
+      ],
+      "command": "let i=1; git log -1",
+      "why": "let into a name git takes nothing from"
+    },
+    {
       "id": "config-reach-allow-read-line",
       "class": "configuration reach",
       "verdict": "allow",
