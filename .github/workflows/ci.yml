@@ -259,7 +259,7 @@ jobs:
           pip install cosmic-ray==8.7.0
           status=0
           python3 mutation_check.py --base "origin/$BASE_REF" > mutation-report.md || status=$?
-          cat mutation-report.md >> "$GITHUB_STEP_SUMMARY"
+          tee -a "$GITHUB_STEP_SUMMARY" < mutation-report.md
           exit "$status"
 
   publish-coverage:
