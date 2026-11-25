@@ -1004,7 +1004,8 @@ UNEXPORT_FAMILY = frozenset({"declare", "typeset"})
 OPERAND_ASSIGNERS = frozenset({"read", "mapfile", "readarray"})
 LOOP_ASSIGNERS = frozenset({"for", "select"})
 # The reserved words bash reads before a command in the same segment, so
-# `while read -r HOME` and `if printf -v PATH x` are read as the builtin.
+# `if cd /tmp`, `then unset GIT_CONFIG_COUNT` and `while read -r HOME` are
+# read as the command after the word. command_words() steps over them.
 LEADING_RESERVED_WORDS = frozenset({"!", "if", "elif", "then", "else", "while", "until", "do", "{"})
 
 # A variable name as bash's arithmetic reads one: `(( PATH = 1 ))` and
@@ -2067,7 +2068,10 @@ def command_words(
     as the name left the whole segment unchecked. A target that opens a
     backtick substitution runs to the token that closes it, since shlex
     splits the substitution's words apart: `` >`printf x` git diff `` still
-    finds its name at git. A leading assignment and a leading wrapper word
+    finds its name at git. A reserved word in front of the command (`if`,
+    `then`, `do`, `!`) is the shell's as well: read as the name it hid the
+    `cd` of `if cd /tmp; then git diff -- x .env; fi` and the `unset` of
+    `then unset GIT_CONFIG_COUNT`. A leading assignment and a leading wrapper word
     (`time`, `command`, `env`, recognised by wrapper_word(), so
     `/usr/bin/env` too) are stepped over too, since neither is part of the
     prefix an allow rule matches; the assignment is kept, because a variable
@@ -2113,6 +2117,11 @@ def command_words(
             index += 1  # the substitution's opening; its body is a segment of its own
             continue
         if not words:
+            # A reserved word bash reads in front of a command, typed with no
+            # quote or backslash: `then cd /tmp` runs cd.
+            if raws[index] in LEADING_RESERVED_WORDS:
+                index += 1
+                continue
             assigned = assignment(token)
             if assigned is not None:
                 assignments.append(assigned)
@@ -3124,8 +3133,6 @@ def builtin_assigned_environment(words: list[str]) -> tuple[str, str, str] | Non
     itself and is read without it.
     """
     words = [bare(word) for word in words]
-    while words and words[0] in LEADING_RESERVED_WORDS:
-        words = words[1:]
     if not words:
         return None
     program, rest = words[0], words[1:]

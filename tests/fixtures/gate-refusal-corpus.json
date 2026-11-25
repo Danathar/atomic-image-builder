@@ -1712,6 +1712,66 @@
       ],
       "command": "git log -1 <<'EOF'\nit's\nEOF\ngit log --output=x -1\ncat <<'EOF'\nit's\nEOF",
       "why": "the apostrophes of two such bodies pair with nothing, so the line between them runs; a gate that only refuses an unclosed quote reads them as one word"
+    },
+    {
+      "id": "compound-if-cd",
+      "class": "compound command",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "if cd /tmp; then git diff -- x .env; fi",
+      "why": "if is the shell's word, not the command's: the condition moves the shell and git then runs outside any repository, where two in-tree-looking operands are a plain-file read"
+    },
+    {
+      "id": "compound-do-cd",
+      "class": "compound command",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "for d in /tmp; do cd \"$d\"; git diff -- x .env; done",
+      "why": "the same move as the first command of a loop body, after do"
+    },
+    {
+      "id": "compound-not-cd",
+      "class": "compound command",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "! cd /tmp || git diff -- x .env",
+      "why": "the same move after !"
+    },
+    {
+      "id": "compound-then-unset",
+      "class": "compound command",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "if true; then unset GIT_CONFIG_COUNT; git log -p; fi",
+      "why": "unset after then removes the safe.bareRepository setting as a plain unset does"
+    },
+    {
+      "id": "compound-allow-if-diff",
+      "class": "compound command",
+      "verdict": "allow",
+      "requires": [
+        "git diff"
+      ],
+      "command": "if git diff --quiet; then echo same; fi",
+      "why": "an ordinary condition stays allowed"
+    },
+    {
+      "id": "compound-allow-if-cd-inside",
+      "class": "compound command",
+      "verdict": "allow",
+      "requires": [
+        "git log"
+      ],
+      "command": "if cd tests; then git log -1; fi",
+      "why": "a literal directory inside the checkout stays allowed after if too"
     }
   ]
 }
