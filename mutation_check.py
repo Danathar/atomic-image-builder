@@ -184,10 +184,31 @@ def config_text(target: str, tests: tuple[str, ...]) -> str:
     )
 
 
-def load_ledger(path: Path) -> set[tuple[str, str, str]]:
-    """The (module, operator, stripped source line) keys a maintainer accepted."""
+def load_ledger(path: Path) -> set[tuple[str, str, str, str | None]]:
+    """The (module, operator, stripped source line, function) keys a maintainer
+    accepted. The function is None for an entry that does not name one."""
     data = json.loads(path.read_text(encoding="utf-8"))
-    return {(entry["module"], entry["operator"], entry["line"]) for entry in data["accepted"]}
+    return {
+        (entry["module"], entry["operator"], entry["line"], entry.get("function")) for entry in data["accepted"]
+    }
+
+
+def is_accepted(survivor: dict, accepted) -> bool:
+    """Whether a ledger key covers `survivor`: one that names its function, or
+    one that names no function at all."""
+    site = (survivor["module"], survivor["operator"], survivor["line"])
+    return (*site, None) in accepted or (*site, survivor["function"]) in accepted
+
+
+def enclosing_function(tree: ast.AST, line_number: int) -> str | None:
+    """The name of the innermost function holding a line, or None outside one."""
+    holding = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.lineno <= line_number <= node.end_lineno
+    ]
+    return max(holding, key=lambda node: node.lineno).name if holding else None
 
 
 def survivors(dump: str, root: Path) -> list[dict]:
@@ -201,14 +222,17 @@ def survivors(dump: str, root: Path) -> list[dict]:
         for mutation in item["mutations"]:
             module = mutation["module_path"]
             if module not in sources:
-                sources[module] = (root / module).read_text(encoding="utf-8").splitlines()
+                source = (root / module).read_text(encoding="utf-8")
+                sources[module] = (source.splitlines(), ast.parse(source))
+            lines, tree = sources[module]
             line_number = mutation["start_pos"][0]
             found.append(
                 {
                     "module": module,
                     "line_number": line_number,
                     "operator": mutation["operator_name"],
-                    "line": sources[module][line_number - 1].strip(),
+                    "line": lines[line_number - 1].strip(),
+                    "function": enclosing_function(tree, line_number),
                 }
             )
     return found
@@ -239,7 +263,7 @@ def report(results: dict[str, tuple[dict[str, int], list[dict]]], accepted) -> t
     for target, (counts, found) in results.items():
         summary = ", ".join(f"{counts[k]} {k}" for k in sorted(counts) if k != "skipped")
         out.append(f"- `{target}`: {summary or 'no mutant on a changed line'}")
-        new.extend(s for s in found if (s["module"], s["operator"], s["line"]) not in accepted)
+        new.extend(s for s in found if not is_accepted(s, accepted))
     out.append("")
     if not new:
         out.append("No surviving mutant outside the ledger.")
