@@ -211,9 +211,9 @@ next word. A runner reads these rows as needing `git log`
 or `git diff` because git reads its own options before the subcommand, so
 `names()` in the test here steps over git's global options, and their
 values, between `git` and the rest of a `git ...` prefix. `git -C <dir>`
-has no row yet: git itself refuses `-C` into a planted bare folder under
-`safe.bareRepository=explicit`, and whether a gate should refuse reading
-another checkout that way is a separate decision.
+is a `directory change` row instead: git itself refuses `-C` into a planted
+bare folder under `safe.bareRepository=explicit`, but `-C` outside any
+repository makes `git diff` print two plain files, as `cd` does.
 
 The `configuration override` rows
 ([#879](https://github.com/Danathar/atomic-image-builder/issues/879)) undo
