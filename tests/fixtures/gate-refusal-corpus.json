@@ -1644,6 +1644,38 @@
       "why": "a cd with no operand goes to HOME and prints two files there"
     },
     {
+      "id": "dir-change-env-c",
+      "class": "directory change",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "wraps": "env",
+      "command": "env -C /tmp git diff -- x .env",
+      "why": "env starts git in /tmp, so it runs outside any repository, falls back to --no-index and prints /tmp/.env, as after cd /tmp"
+    },
+    {
+      "id": "dir-change-env-chdir",
+      "class": "directory change",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "wraps": "env",
+      "command": "env --chdir=/tmp git diff -- x .env",
+      "why": "the long spelling of env -C, with its value attached"
+    },
+    {
+      "id": "dir-change-git-c",
+      "class": "directory change",
+      "verdict": "refuse",
+      "requires": [
+        "git diff"
+      ],
+      "command": "git -C /tmp diff -- x .env",
+      "why": "git's own spelling of the same move, written before the subcommand"
+    },
+    {
       "id": "dir-change-allow-inside",
       "class": "directory change",
       "verdict": "allow",
