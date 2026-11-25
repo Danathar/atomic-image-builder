@@ -1,5 +1,5 @@
 {
-  "description": "Surviving mutants a maintainer has looked at and accepted: equivalent ones (no input can tell them apart from the original) and ones that only make a check stricter. mutation_check.py leaves these out of its report. An entry matches by module, cosmic-ray operator and the stripped text of the source line, so it follows the line when code above it moves and stops matching when the line itself changes. tests/test_mutation_check.py fails when an entry's line no longer exists. Say in reason why the mutant cannot matter.",
+  "description": "Surviving mutants a maintainer has looked at and accepted: equivalent ones (no input can tell them apart from the original) and ones that only make a check stricter. mutation_check.py leaves these out of its report. An entry matches by module, cosmic-ray operator and the stripped text of the source line, so it follows the line when code above it moves and stops matching when the line itself changes. An entry whose line text occurs more than once in its module also names the function it is about in function, and then matches only inside that function. tests/test_mutation_check.py fails when an entry does not match exactly one line. Say in reason why the mutant cannot matter.",
   "accepted": [
     {
       "module": "mutation_check.py",
@@ -11,6 +11,7 @@
       "module": ".claude/hooks/gate_git_diff.py",
       "operator": "core/ReplaceContinueWithBreak",
       "line": "continue",
+      "function": "spells_a_gated_name",
       "reason": "In spells_a_gated_name() the flattened reading differs from the text only where an unquoted extglob group became *, so a string raw_words() rejects as typed (its stand-in character anywhere, or a quoted character the lexer drops) is rejected flattened too, unless that character sits inside the group. Stopping at the first rejection then skips only a command-string prefilter on a string the gate cannot split; no test input reaches that case, and the outer command is still read flattened by refusal()."
     },
     {

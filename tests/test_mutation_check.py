@@ -30,6 +30,7 @@ from mutation_check import (
     annotation_spans,
     changed_lines,
     config_text,
+    enclosing_function,
     kept_operator,
     load_ledger,
     outcomes,
@@ -224,41 +225,81 @@ class ConfigTextTests(unittest.TestCase):
         self.assertLess(text.index("[cosmic-ray.distributor]"), text.index('name = "local"'))
 
 
+def matching_lines(source: str, entry: dict) -> list[int]:
+    """The numbers of the lines in `source` a ledger entry accepts a survivor on."""
+    tree = ast.parse(source)
+    return [
+        number
+        for number, line in enumerate(source.splitlines(), 1)
+        if line.strip() == entry["line"]
+        and entry.get("function") in (None, enclosing_function(tree, number))
+    ]
+
+
 class LedgerTests(unittest.TestCase):
     def test_reads_each_accepted_entry_as_a_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ledger.json"
             entry = {"module": "m.py", "operator": "core/AddNot", "line": "if x:", "reason": "equivalent"}
             path.write_text(json.dumps({"accepted": [entry]}))
-            self.assertEqual(load_ledger(path), {("m.py", "core/AddNot", "if x:")})
+            self.assertEqual(load_ledger(path), {("m.py", "core/AddNot", "if x:", None)})
+            path.write_text(json.dumps({"accepted": [dict(entry, function="f")]}))
+            self.assertEqual(load_ledger(path), {("m.py", "core/AddNot", "if x:", "f")})
 
     def test_the_committed_ledger_names_real_live_mutation_sites(self) -> None:
         # An entry whose line has since been edited would quietly accept
         # nothing, and one naming a skipped swap could never match; both
-        # are rot a reader would trust.
+        # are rot a reader would trust. One that matches several lines
+        # accepts survivors its reason never looked at.
         data = json.loads(mutation_check.LEDGER.read_text(encoding="utf-8"))
         self.assertTrue(data["description"])
-        keys = [(entry["module"], entry["operator"], entry["line"]) for entry in data["accepted"]]
+        keys = [(entry["module"], entry["operator"], entry["line"], entry.get("function")) for entry in data["accepted"]]
         self.assertEqual(len(keys), len(set(keys)), "a ledger entry is listed twice")
         self.assertEqual(load_ledger(mutation_check.LEDGER), set(keys))
         for entry in data["accepted"]:
             with self.subTest(entry=entry):
-                self.assertEqual(set(entry), {"module", "operator", "line", "reason"})
+                self.assertEqual(set(entry) - {"function"}, {"module", "operator", "line", "reason"})
                 self.assertIn(entry["module"], TARGETS)
                 self.assertTrue(kept_operator(entry["operator"]))
                 self.assertTrue(entry["reason"].strip())
-                lines = [line.strip() for line in (ROOT / entry["module"]).read_text(encoding="utf-8").splitlines()]
-                self.assertIn(entry["line"], lines)
+                source = (ROOT / entry["module"]).read_text(encoding="utf-8")
+                self.assertEqual(len(matching_lines(source, entry)), 1, "name the function the entry is about")
+
+    def test_an_entry_matching_several_lines_needs_its_function(self) -> None:
+        source = "def f():\n    continue\n\n\ndef g():\n    continue\n"
+        self.assertEqual(matching_lines(source, {"line": "continue"}), [2, 6])
+        self.assertEqual(matching_lines(source, {"line": "continue", "function": "g"}), [6])
+        self.assertEqual(matching_lines(source, {"line": "continue", "function": "h"}), [])
+
+    def test_the_committed_continue_entry_accepts_only_its_own_function(self) -> None:
+        accepted = load_ledger(mutation_check.LEDGER)
+        survivor = {
+            "module": ".claude/hooks/gate_git_diff.py",
+            "line_number": 1,
+            "operator": "core/ReplaceContinueWithBreak",
+            "line": "continue",
+        }
+        for function, new in (("spells_a_gated_name", 0), ("arithmetic_named_environment", 1), (None, 1)):
+            with self.subTest(function=function):
+                found = [dict(survivor, function=function)]
+                self.assertEqual(report({"hook": ({"survived": 1}, found)}, accepted)[1], new)
+
+    def test_enclosing_function_is_the_innermost_one(self) -> None:
+        tree = ast.parse(
+            "x = 1\n\n\nasync def outer():\n    def inner():\n        return 1\n\n    return inner\n\n\ny = 2\n"
+        )
+        names = [enclosing_function(tree, number) for number in range(1, 12)]
+        self.assertEqual(names, [None] * 3 + ["outer"] + ["inner"] * 2 + ["outer"] * 2 + [None] * 3)
 
 
 class DumpTests(unittest.TestCase):
     def test_keys_each_survivor_by_its_source_line(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "m.py").write_text("a = 1\n    if a == 1:\n")
+            (Path(tmp) / "m.py").write_text("a = 1\ndef f():\n    if a == 1:\n        pass\n")
             dump = "\n".join(
                 [
                     dump_row("core/NumberReplacer", 1, "killed"),
-                    dump_row("core/ReplaceComparisonOperator_Eq_NotEq", 2, "survived"),
+                    dump_row("core/ReplaceComparisonOperator_Eq_NotEq", 3, "survived"),
                     dump_row("core/NumberReplacer", 1, "survived"),
                     dump_row("core/AddNot", 2, None),
                     dump_row("core/AddNot", 2, None, worker="skipped"),
@@ -267,8 +308,8 @@ class DumpTests(unittest.TestCase):
             self.assertEqual(
                 survivors(dump, Path(tmp)),
                 [
-                    {"module": "m.py", "line_number": 2, "operator": "core/ReplaceComparisonOperator_Eq_NotEq", "line": "if a == 1:"},
-                    {"module": "m.py", "line_number": 1, "operator": "core/NumberReplacer", "line": "a = 1"},
+                    {"module": "m.py", "line_number": 3, "operator": "core/ReplaceComparisonOperator_Eq_NotEq", "line": "if a == 1:", "function": "f"},
+                    {"module": "m.py", "line_number": 1, "operator": "core/NumberReplacer", "line": "a = 1", "function": None},
                 ],
             )
 
@@ -289,7 +330,7 @@ class DumpTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
-    SURVIVOR = {"module": "m.py", "line_number": 4, "operator": "core/AddNot", "line": "x = a | b"}
+    SURVIVOR = {"module": "m.py", "line_number": 4, "operator": "core/AddNot", "line": "x = a | b", "function": "f"}
 
     def test_says_so_when_no_target_changed(self) -> None:
         self.assertEqual(report({}, set()), ("## Mutation check\n\nNo module in the mutation table changed.\n", 0))
@@ -303,14 +344,14 @@ class ReportTests(unittest.TestCase):
         self.assertTrue(text.endswith("No surviving mutant outside the ledger.\n"))
 
     def test_an_accepted_survivor_is_not_reported(self) -> None:
-        text, new = report({"m.py": ({"survived": 1}, [self.SURVIVOR])}, {("m.py", "core/AddNot", "x = a | b")})
+        text, new = report({"m.py": ({"survived": 1}, [self.SURVIVOR])}, {("m.py", "core/AddNot", "x = a | b", None)})
         self.assertEqual(new, 0)
         self.assertIn("No surviving mutant outside the ledger.", text)
 
     def test_tables_each_new_survivor_and_escapes_its_pipes(self) -> None:
         other = dict(self.SURVIVOR, operator="core/NumberReplacer")
         text, new = report(
-            {"m.py": ({"killed": 1, "survived": 2}, [self.SURVIVOR, other])}, {("m.py", "core/NumberReplacer", "x = a | b")}
+            {"m.py": ({"killed": 1, "survived": 2}, [self.SURVIVOR, other])}, {("m.py", "core/NumberReplacer", "x = a | b", "f")}
         )
         self.assertEqual(new, 1)
         self.assertIn("- `m.py`: 1 killed, 2 survived\n", text)
@@ -418,8 +459,8 @@ class MainTests(unittest.TestCase):
 
     def test_checks_each_changed_target_in_order_and_fails_on_a_new_survivor(self) -> None:
         found = {
-            "coverage_badge.py": [{"module": "coverage_badge.py", "line_number": 1, "operator": "core/AddNot", "line": "ok"}],
-            "atomic_image_builder.py": [{"module": "atomic_image_builder.py", "line_number": 9, "operator": "core/AddNot", "line": "new"}],
+            "coverage_badge.py": [{"module": "coverage_badge.py", "line_number": 1, "operator": "core/AddNot", "line": "ok", "function": None}],
+            "atomic_image_builder.py": [{"module": "atomic_image_builder.py", "line_number": 9, "operator": "core/AddNot", "line": "new", "function": None}],
         }
         check = mock.Mock(side_effect=lambda target, base, workdir: ({"survived": 1}, found[target]))
         code, out, _, _, check, _ = self.run_main(
@@ -431,7 +472,7 @@ class MainTests(unittest.TestCase):
         self.assertNotIn("`coverage_badge.py:1`", out)
 
     def test_passes_when_every_survivor_is_accepted(self) -> None:
-        found = [{"module": "coverage_badge.py", "line_number": 1, "operator": "core/AddNot", "line": "ok"}]
+        found = [{"module": "coverage_badge.py", "line_number": 1, "operator": "core/AddNot", "line": "ok", "function": None}]
         code, out, _, _, _, _ = self.run_main(
             ["--base", "b"], changed="coverage_badge.py\n", check=mock.Mock(return_value=({"survived": 1}, found))
         )
