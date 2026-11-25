@@ -315,6 +315,12 @@ body as more shell hides the command either way. Two rows do the same with a
 quoted delimiter, the form an agent writes most: one body, where the quote never
 closes, and two, where it closes in the second.
 
+The `compound-*` rows put a reserved word (`if`, `do`, `then`, `!`) in front of
+a command on the same line: `if cd /tmp; then git diff -- x .env; fi` moves the
+shell and `then unset GIT_CONFIG_COUNT;` drops a setting exactly as the plain
+command does. A gate that takes the first word as the command's name reads `if`
+and checks nothing after it. Two allow rows keep an ordinary condition open.
+
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
 table. The one disagreement found, `git diff --ext-diff`, is refused here and

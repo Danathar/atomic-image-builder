@@ -369,12 +369,26 @@ REFUSED_COMMANDS = (
     ("popd && git log -1", "popd returns to a directory this string does not name"),
     ("CDPATH=/tmp; cd sub && git diff -- x .env", "CDPATH turns a relative name into a path outside"),
     ("cd /tmp && shellcheck .env", "the move reaches the gated prefixes too"),
+    # A reserved word in front of a command is the shell's, so the command
+    # after it is checked as though it stood first.
+    ("if cd /tmp; then git diff -- x .env; fi", "moves git out of the checkout in a condition"),
+    ("if ! cd /tmp; then exit 1; fi; git diff -- x .env", "the same after two reserved words"),
+    ("if false; then :; elif cd /tmp; then git diff -- x .env; fi", "the same after elif"),
+    ("if false; then :; else cd /tmp; fi; git diff -- x .env", "the same after else"),
+    ("for d in /tmp; do cd \"$d\"; git diff -- x .env; done", "the same after do"),
+    ("until cd /tmp; do :; done; git diff -- x .env", "the same after until"),
+    ("while cd /tmp; do git diff -- x .env; done", "the same after while"),
+    ("if unset GIT_CONFIG_COUNT; then git log -p; fi", "removes the settings environment in a condition"),
+    ("if true; then env -i git log -p; fi", "empties the environment after then"),
+    ("if true; then hadolint Containerfile >cosign.pub; fi", "truncates a file from a gated command after then"),
 )
 
 # Commands it has to leave alone. Everything an ordinary session runs.
 ALLOWED_COMMANDS = (
     "git diff",
     "cd tests && git log -1",
+    "if cd tests; then git log -1; fi",
+    "if ! git diff --quiet; then git status; fi",
     "cd ./tests && git diff HEAD",
     'cd "$CLAUDE_PROJECT_DIR" && git status',
     "git diff HEAD; cd /tmp",
@@ -2636,6 +2650,24 @@ class RefusalTests(unittest.TestCase):
         self.assertEqual(gate.command_words(["FOO=bar", "git", "diff"]).assignments, ["FOO"])
         self.assertEqual(gate.command_words(["FOO+=bar", "git", "diff"]).assignments, ["FOO"])
         self.assertEqual(gate.command_words(["git", "diff"]).assignments, [])
+
+    def test_a_reserved_word_is_not_the_name_of_the_command(self) -> None:
+        # Read as the name, `if` hid the cd, unset or env -i after it.
+        for segment, words in (
+            (["if", "cd", "/tmp"], ["cd", "/tmp"]),
+            (["if", "!", "cd", "/tmp"], ["cd", "/tmp"]),
+            (["do", "FOO=bar", "time", "git", "diff"], ["git", "diff"]),
+            # Only in front of the name: an operand is kept.
+            (["echo", "if", "cd"], ["echo", "if", "cd"]),
+            # A `for` names its variable, so it stays the name.
+            (["for", "HOME", "in", "x"], ["for", "HOME", "in", "x"]),
+            (["if"], []),
+        ):
+            with self.subTest(segment=segment):
+                self.assertEqual(gate.command_words(segment).words, words)
+        # A quoted reserved word is an ordinary name to bash.
+        segment = ["if", "cd", "/tmp"]
+        self.assertEqual(gate.command_words(segment, segment, ["'if'", "cd", "/tmp"]).words, segment)
 
     def test_a_quoted_separator_is_a_word_of_its_command(self) -> None:
         # shlex hands back the same `;` for `';'` and `;`, and bash treats
