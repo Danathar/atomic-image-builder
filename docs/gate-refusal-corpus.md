@@ -300,6 +300,13 @@ ordinary name (`(( i = 1 ));`) and a subshell that only prints the word `PATH`
 (`( echo PATH );`) open, so a gate that refuses every arithmetic command or
 every subshell naming `PATH` fails too.
 
+The `comment` rows put an apostrophe, a double quote or a trailing backslash in
+a `#` comment and a refused command on the next line. Bash drops a comment
+without reading it, so none of those opens a quote or joins a line and the next
+line runs. A gate that looks for quotes before it drops comments hides every
+later line, or every later command substitution. One allow row keeps an
+apostrophe in the comment of an ordinary command open.
+
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
 table. The one disagreement found, `git diff --ext-diff`, is refused here and

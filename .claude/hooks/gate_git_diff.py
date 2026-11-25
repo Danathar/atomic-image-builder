@@ -1429,7 +1429,7 @@ def mask_quotes_stripped(command: str) -> str:
     lines up character for character with tokenize(command)'s own tokens.
 
     mask_quotes() keeps every quoted region the same *length* as the
-    original command -- that is what strip_comments() needs, to index the
+    original command -- that is what extglob_flattened() needs, to index the
     masked and the real copy together -- and gets it by masking the quote
     mark to a `Q` rather than dropping it the way shlex's own quote removal
     does. A membership test never notices the difference (expands_at_runtime()
@@ -1651,23 +1651,47 @@ def strip_comments(command: str) -> str:
     A `#` that begins a word after whitespace (or the start of the string)
     starts a comment bash drops through the end of the line, so `shellcheck
     contrib/aib # output > file` opens nothing and must not be refused for
-    the `>` in the comment (#420). The spans are found on the quote-masked
-    copy, where a quoted `#` is a `Q`, and cut from the command itself;
-    tokenize() is then handed a string with no comment in it, and its
-    `commenters = ""` still holds for the `#` this leaves in place: one
-    inside a word (`HEAD^#x`), which is a character of the word, and one
-    straight after an operator (`;#`), which is kept as a word and can only
-    over-refuse.
+    the `>` in the comment (#420). tokenize() is then handed a string with no
+    comment in it, and its `commenters = ""` still holds for the `#` this
+    leaves in place: one inside a word (`HEAD^#x`), which is a character of
+    the word, and one straight after an operator (`;#`), which is kept as a
+    word and can only over-refuse.
+
+    The text of a comment is never read as shell. An apostrophe in `# don't`
+    opens no quote and a backslash at its end joins no line, so the quotes
+    are walked here, outside the comments only. Spans found on a copy whose
+    quotes were masked first ran the quote an apostrophe opened to the end of
+    the string, the newline that ends the comment with it, and every later
+    line was dropped as comment. For the same reason this runs before
+    join_continuations(): the backslash-newline pair it removes later is
+    stepped over here, and is no character of its own when asking whether a
+    `#` begins a word.
     """
-    masked = mask_quotes(command)
     kept: list[str] = []
+    quote = ""
+    previous = ""
     index = 0
     while index < len(command):
-        if masked[index] == "#" and (index == 0 or masked[index - 1] in " \t\n"):
-            end = masked.find("\n", index)
+        char = command[index]
+        if not quote and char == "#" and previous in ("", " ", "\t", "\n"):
+            end = command.find("\n", index)
             index = len(command) if end == -1 else end
             continue
-        kept.append(command[index])
+        if char == "\\" and quote != "'" and index + 1 < len(command):
+            kept.append(command[index : index + 2])
+            if command[index + 1] != "\n":
+                previous = "\\"
+            index += 2
+            continue
+        if quote:
+            if char == quote[-1]:
+                quote = ""
+        elif char in "'\"":
+            # `$'...'` ends at the first `'` no backslash stands before; the
+            # `$` of `$$'...'` is the shell's pid and the quote is a plain one.
+            quote = "$'" if char == "'" and previous == "$" else char
+        kept.append(char)
+        previous = "$$" if char == previous == "$" else char
         index += 1
     return "".join(kept)
 
@@ -2589,7 +2613,7 @@ def unlisted_program_command(invocation: Invocation) -> tuple[str, str, str] | N
             inner.append(" ".join(invocation.raws[index:]))
         for text in itertools.chain(inner, gated_command_strings(words[index])):
             try:
-                tokenize(text)
+                tokenize(strip_comments(text))
             except ValueError:
                 continue
             reason = refusal(text)
@@ -3885,7 +3909,7 @@ def spelled_refusal(command: str) -> str | None:
     """The reading refusal() makes the way bash expands and decodes the
     command's words (spelled_name_refusal()), or None."""
     try:
-        command = strip_comments(join_continuations(drop_quoted_heredoc_bodies(command)))
+        command = join_continuations(strip_comments(drop_quoted_heredoc_bodies(command)))
         tokens = tokenize(command)
         raws = raw_words(command)
     except ValueError:
@@ -3905,7 +3929,7 @@ def spelled_refusal(command: str) -> str | None:
 def typed_refusal(command: str) -> str | None:
     """Why this command is blocked as its words are typed, or None."""
     try:
-        command = strip_comments(join_continuations(drop_quoted_heredoc_bodies(command)))
+        command = join_continuations(strip_comments(drop_quoted_heredoc_bodies(command)))
         tokens = tokenize(command)
         masked = tokenize(mask_quotes_stripped(command))
         raws = raw_words(command)
@@ -4522,7 +4546,7 @@ def untracked_import_refusal(command: str, cwd: Path) -> str | None:
     since the directory read here would not be the one Python starts in.
     """
     try:
-        command = strip_comments(join_continuations(drop_quoted_heredoc_bodies(command)))
+        command = join_continuations(strip_comments(drop_quoted_heredoc_bodies(command)))
         tokens = tokenize(command)
         masked = tokenize(mask_quotes_stripped(command))
         raws = raw_words(command)

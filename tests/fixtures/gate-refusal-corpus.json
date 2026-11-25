@@ -1612,6 +1612,56 @@
       ],
       "command": "cd tests && git log -1",
       "why": "a literal relative directory with no .. stays inside the checkout"
+    },
+    {
+      "id": "comment-apostrophe",
+      "class": "comment",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git log -1 # it's the last one\ngit log --output=x -1",
+      "why": "the apostrophe is comment text to bash, so the second line runs; a gate that opens a quote there reads it as data"
+    },
+    {
+      "id": "comment-double-quote",
+      "class": "comment",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git log -1 # 5\" wide\ngit log --output=x -1",
+      "why": "a double quote in a comment opens no quote either"
+    },
+    {
+      "id": "comment-backslash",
+      "class": "comment",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git log -1 # one \\\ngit log --output=x -1",
+      "why": "a backslash at the end of a comment joins no line, so the second line is a command of its own"
+    },
+    {
+      "id": "comment-apostrophe-substitution",
+      "class": "comment",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git log -1 # it's the last one\necho $(git log --output=x -1)",
+      "why": "the second line runs a command substitution the apostrophe must not hide"
+    },
+    {
+      "id": "comment-allow-apostrophe",
+      "class": "comment",
+      "verdict": "allow",
+      "requires": [
+        "git log"
+      ],
+      "command": "git log -1 # it's the last one",
+      "why": "an apostrophe in a comment is ordinary prose"
     }
   ]
 }
