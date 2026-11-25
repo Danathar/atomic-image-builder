@@ -2509,9 +2509,40 @@ class RefusalTests(unittest.TestCase):
             ("echo x;#c >o", "echo x;#c >o"),
             ("shellcheck '#' >o", "shellcheck '#' >o"),
             ('echo "a # b"', 'echo "a # b"'),
+            # The text of a comment opens no quote and joins no line.
+            ("# don't\ngit log -1", "\ngit log -1"),
+            ('git log # a "b\ngit diff', "git log \ngit diff"),
+            ("# x \\\ngit diff", "\ngit diff"),
+            # A continuation outside a comment is no character of its own:
+            # the `#` after it begins a word only if one ended before it.
+            ("echo \\\n# don't\ngit diff", "echo \\\n\ngit diff"),
+            ("echo x\\\n#y", "echo x\\\n#y"),
+            ("echo \\ #x", "echo \\ #x"),
+            # Quotes are walked as bash walks them, so a `#` in one is kept.
+            ('echo "a \\" # b"', 'echo "a \\" # b"'),
+            ("echo 'a\\' # b", "echo 'a\\' "),
+            ("echo $'a\\' # b'", "echo $'a\\' # b'"),
+            ("echo $$'a\\' # b", "echo $$'a\\' "),
+            ("echo $$$'a\\' # b'", "echo $$$'a\\' # b'"),
+            ("echo \\$'a\\' # b", "echo \\$'a\\' "),
         ):
             with self.subTest(command=command):
                 self.assertEqual(gate.strip_comments(command), stripped)
+        for command in (
+            "# don't\ngit diff --output=x",
+            '# a "b\ngit diff --output=x',
+            "git status # it's\ngit diff --output=x",
+            "# x \\\ngit diff --output=x",
+            "git status # x \\\ngit diff --output=x",
+            "# don't\n(( PATH = 1 ))\ngit log -1",
+            "echo $$'a\\' 'b # c'; git diff --output=x",
+            'bash -c "# don\'t\ngit diff --output=x"',
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(gate.refusal(command))
+        for command in ("# don't\ngit log -1", "git log -1 # it's fine"):
+            with self.subTest(command=command):
+                self.assertIsNone(gate.refusal(command))
         self.assertIsNotNone(gate.refusal("shellcheck x #c\nhadolint y >o"))
         self.assertIsNotNone(gate.refusal("git diff --stat#x /etc/passwd /dev/null"))
 
