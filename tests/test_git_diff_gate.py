@@ -2243,6 +2243,21 @@ class DirectoryChangeTests(unittest.TestCase):
                 else:
                     os.environ["CLAUDE_PROJECT_DIR"] = saved
 
+    def test_a_change_behind_builtin_is_read_from_its_own_words(self) -> None:
+        # command_words() steps over `builtin`, so the corpus row for it
+        # never reaches this branch. These read it directly.
+        def left(words: list[str]) -> str | None:
+            invocation = gate.command_words([])._replace(words=words, twins=words)
+            return gate.directory_change_leaves(invocation, False, {gate.checkout_root()})
+
+        self.assertEqual(left(["builtin", "cd", "/tmp"]), "cd /tmp")
+        self.assertIsNone(left(["builtin", "cd", "tests"]))
+        self.assertEqual(left(["builtin", "cd", "$X"]), "cd $X")
+        self.assertEqual(left(["popd", "tests"]), "popd tests")
+
+    def test_the_refusal_names_the_first_change_that_leaves(self) -> None:
+        self.assertIn("`cd /tmp` may move", gate.refusal("cd /tmp && cd /var && git status"))
+
     def test_a_second_change_is_resolved_from_where_the_first_left_the_shell(self) -> None:
         # Each hop read from the root stays inside, but bash resolves the
         # second against the first and `sub/data` points out (#916).
@@ -2575,6 +2590,9 @@ class RefusalTests(unittest.TestCase):
             ("echo $$'a\\' # b", "echo $$'a\\' "),
             ("echo $$$'a\\' # b'", "echo $$$'a\\' # b'"),
             ("echo \\$'a\\' # b", "echo \\$'a\\' "),
+            ("echo $'a' # b", "echo $'a' "),
+            # A backslash at the very end has no character after it to read.
+            ("echo \\", "echo \\"),
         ):
             with self.subTest(command=command):
                 self.assertEqual(gate.strip_comments(command), stripped)
@@ -3389,6 +3407,30 @@ class RefusalTests(unittest.TestCase):
         # A subscript assigns the variable itself.
         self.assertEqual(name(["readarray", "PATH[0]"]), "PATH")
 
+    def test_arithmetic_is_read_to_the_parens_that_close_it(self) -> None:
+        def name(text: str) -> str | None:
+            tokens = text.split()
+            found = gate.arithmetic_named_environment(tokens, tokens)
+            return None if found is None else found[0]
+
+        self.assertEqual(name("( ( PATH = 1 ) )"), "PATH")
+        # A nested group does not close the expression, at any depth.
+        self.assertEqual(name("( ( ( 1 ) + PATH ) )"), "PATH")
+        self.assertEqual(name("( ( ( ( 1 ) ) + PATH ) )"), "PATH")
+        self.assertEqual(name("( ( 1 ) + PATH )"), "PATH")
+        # Words after the closing parens are not arithmetic.
+        self.assertIsNone(name("( ( 1 ) ) PATH"))
+        self.assertIsNone(name("( ( ( 1 ) ) ) PATH"))
+        # A second expression straight after the first is read too.
+        self.assertEqual(name("( ( 1 ) ) ( ( PATH ) )"), "PATH")
+        # One paren is a subshell, whatever opens later.
+        self.assertIsNone(name("( PATH )"))
+        self.assertIsNone(name("( x ( PATH ) )"))
+        # Running out of tokens must not raise: a hook that raises lets the
+        # whole command run.
+        self.assertIsNone(name("("))
+        self.assertIsNone(name("( ( 1"))
+
     def test_a_shellcheck_glob_is_judged_by_the_files_it_names(self) -> None:
         # The one expansion the scan performs instead of refusing, because
         # this repository's own lint command ends in a glob. So the test is
@@ -3666,6 +3708,11 @@ class QuotedHeredocTests(unittest.TestCase):
                 self.assertIn("here-document", gate.refusal(command))
         self.assertEqual(gate.heredoc_body_quote("cat <<EOF\nok\nEOF\nit's"), None)
         self.assertEqual(gate.heredoc_body_quote("cat <<EOFx\nEOF\nit's\nEOFx"), "it's")
+        # Only `<<-` ends at a terminator with tabs in front of it.
+        self.assertIsNone(gate.heredoc_body_quote("cat <<-EOF\nok\n\tEOF\nit's"))
+        self.assertEqual(gate.heredoc_body_quote("cat <<EOF\nok\n\tEOF\nit's\nEOF"), "it's")
+        # A quote on the operator's own line is not in the body.
+        self.assertIsNone(gate.heredoc_body_quote('echo "x"; cat <<EOF\nok\nEOF'))
         for command in (
             "cat <<EOF\nplain text\nEOF",
             "cat <<'EOF'\nit's\nEOF",
