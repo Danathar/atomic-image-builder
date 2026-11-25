@@ -1601,6 +1601,45 @@ def drop_quoted_heredoc_bodies(command: str) -> str:
     return "\n".join(kept)
 
 
+# An unquoted here-document operator and its delimiter word: `<<` or `<<-`
+# that is not a here-string's `<<<`, then a word with no quote mark or
+# backslash in it, which is the line that ends the body. The word ends where
+# bash ends it, at a blank, an operator character or the end of the line.
+_UNQUOTED_HEREDOC_OPERATOR = re.compile(
+    r"(?<!<)<<(?P<strip_tabs>-?)(?!<)[ \t]*(?P<word>[\w.@%+,:=/~-]+)(?=[ \t;&|<>()]|$)"
+)
+
+
+def heredoc_body_quote(command: str) -> str | None:
+    """A line of an unquoted here-document body this scan would misread, or
+    None.
+
+    Bash reads a here-document's body as text: a quote mark there opens no
+    quote and a `#` starts no comment, while with an unquoted delimiter the
+    body's `$(...)` still runs. drop_quoted_heredoc_bodies() cuts no
+    unquoted body, so each reaches the lexer as more shell. Two apostrophes
+    in two bodies (`cat <<EOF`, `it's`, `EOF`, a refused command, then a
+    second such here-document) became one quoted word that hid the command
+    between them, and a `# $(git diff --output=x)` body line was dropped as
+    a comment while bash ran the substitution (#914). A body that holds a
+    `'`, `"` or `#` is reported here so the command is refused rather than
+    guessed at. Run it on what
+    drop_quoted_heredoc_bodies() returns. A `<<` this does not read as a
+    here-document only adds a refusal, and a body with no terminator line
+    runs to the end of the command, as it does in bash.
+    """
+    lines = command.split("\n")
+    for number, line in enumerate(lines):
+        for match in _UNQUOTED_HEREDOC_OPERATOR.finditer(line):
+            delimiter = match.group("word")
+            for body in lines[number + 1 :]:
+                if (body.lstrip("\t") if match.group("strip_tabs") else body) == delimiter:
+                    break
+                if any(char in body for char in "'\"#"):
+                    return body
+    return None
+
+
 def join_continuations(command: str) -> str:
     """The command with every backslash-newline removed the way bash removes
     it, before any word is read.
@@ -2703,7 +2742,7 @@ def checkout_root() -> str:
     return os.path.realpath(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
 
 
-def directory_change_leaves(invocation: Invocation, cdpath: bool) -> str | None:
+def directory_change_leaves(invocation: Invocation, cdpath: bool, reached: set[str]) -> str | None:
     """The directory change this invocation makes, as typed, when it may move
     the shell out of the checkout; None when it is no directory change or
     one that stays inside.
@@ -2715,6 +2754,16 @@ def directory_change_leaves(invocation: Invocation, cdpath: bool) -> str | None:
     inside only when its one operand is the project root (a literal path to
     it, or `$CLAUDE_PROJECT_DIR`) or a literal relative path with no `..`
     component whose real path is inside the checkout, symlinks resolved.
+
+    A relative operand is resolved against every directory in `reached`, the
+    set of directories the shell may already be in, and not against the
+    checkout alone: bash resolves the second `cd` of `cd sub && cd data`
+    against the first, so with `sub/data` a committed symlink out of the
+    tree the pair left while each hop, read from the root, stayed inside
+    (#916). It is a set rather than one current directory because a
+    subshell's `cd` does not carry over: `(cd sub && x); (cd sub && x)`
+    must not be read as `sub/sub` alone. A change that stays inside from
+    every one of them adds what it reaches to `reached`.
     Anything this cannot read as a literal path leaves: no operand (HOME),
     `-` (OLDPWD), an option, a `~`, a `$`, a backtick or a glob, and every
     `popd`, which returns to a directory this string does not name. With
@@ -2744,10 +2793,11 @@ def directory_change_leaves(invocation: Invocation, cdpath: bool) -> str | None:
         return None if os.path.realpath(target) == root else shown
     if ".." in target.split("/") or (cdpath and not target.startswith("./")):
         return shown
-    resolved = os.path.realpath(os.path.join(root, target))
-    if resolved == root or resolved.startswith(root + os.sep):
-        return None
-    return shown
+    resolved = {os.path.realpath(os.path.join(start, target)) for start in reached}
+    if not all(path == root or path.startswith(root + os.sep) for path in resolved):
+        return shown
+    reached |= resolved
+    return None
 
 
 def env_split_string_value(token: str) -> str | None:
@@ -3928,8 +3978,18 @@ def spelled_refusal(command: str) -> str | None:
 
 def typed_refusal(command: str) -> str | None:
     """Why this command is blocked as its words are typed, or None."""
+    command = drop_quoted_heredoc_bodies(command)
+    body = heredoc_body_quote(command)
+    if body is not None:
+        return (
+            f"the here-document body line {body!r} holds a quote mark or `#`, which bash "
+            "reads there as plain text but this scan would read as shell, so a quote "
+            "could hide the commands after the body and a `#` could hide a `$(...)` "
+            "bash still runs; write the delimiter quoted on a plain line of its own "
+            "(`cat <<'EOF'`), or put the text in a file"
+        )
     try:
-        command = join_continuations(strip_comments(drop_quoted_heredoc_bodies(command)))
+        command = join_continuations(strip_comments(command))
         tokens = tokenize(command)
         masked = tokenize(mask_quotes_stripped(command))
         raws = raw_words(command)
@@ -4001,6 +4061,14 @@ def typed_refusal(command: str) -> str | None:
         )
     cdpath = "CDPATH" in command or "CDPATH" in os.environ
     left: str | None = None
+    # The directories the shell may be in, for directory_change_leaves(): the
+    # root, and the directory the hook starts in when that is inside it, since
+    # the session's directory carries over from an earlier call.
+    root = checkout_root()
+    reached = {root}
+    cwd = os.path.realpath(os.getcwd())
+    if cwd.startswith(root + os.sep):
+        reached.add(cwd)
     for positions in segment_positions(tokens, masked):
         segment = [tokens[index] for index in positions]
         twins = [masked[index] for index in positions]
@@ -4054,7 +4122,7 @@ def typed_refusal(command: str) -> str | None:
                     "not refused; otherwise run the command from the checkout and name "
                     "the paths"
                 )
-        moved = directory_change_leaves(invocation, cdpath)
+        moved = directory_change_leaves(invocation, cdpath, reached)
         if left is None and moved is not None:
             left = moved
         removed = removed_settings_environment(invocation)

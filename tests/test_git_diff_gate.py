@@ -2229,6 +2229,42 @@ class DirectoryChangeTests(unittest.TestCase):
                 else:
                     os.environ["CLAUDE_PROJECT_DIR"] = saved
 
+    def test_a_second_change_is_resolved_from_where_the_first_left_the_shell(self) -> None:
+        # Each hop read from the root stays inside, but bash resolves the
+        # second against the first and `sub/data` points out (#916).
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside:
+            Path(root, "sub").mkdir()
+            Path(root, "sub", "data").symlink_to(outside)
+            Path(root, "sub", "sub").mkdir()
+            saved = os.environ.get("CLAUDE_PROJECT_DIR")
+            saved_cwd = os.getcwd()
+            os.environ["CLAUDE_PROJECT_DIR"] = root
+            try:
+                for command in (
+                    "cd sub/data && git diff -- x .env",
+                    "cd sub && cd data && git diff -- x .env",
+                    "cd sub; cd data; git diff -- x .env",
+                    "cd sub && pushd data && git diff -- x .env",
+                ):
+                    with self.subTest(command=command):
+                        self.assertIsNotNone(gate.refusal(command))
+                # A subshell's cd does not carry over, so two of them are not
+                # read as sub/sub alone; sub and sub/sub both stay inside.
+                self.assertIsNone(gate.refusal("(cd sub && git log -1); (cd sub && git log -1)"))
+                self.assertIsNone(gate.refusal("cd sub && git log -1"))
+                self.assertIsNone(gate.refusal('cd "$CLAUDE_PROJECT_DIR" && git status'))
+                # The session's folder carries over from an earlier call, so
+                # a hook started in `sub` resolves `data` from there too.
+                os.chdir(Path(root, "sub"))
+                self.assertIsNotNone(gate.refusal("cd data && git diff -- x .env"))
+                self.assertIsNone(gate.refusal("cd sub && git log -1"))
+            finally:
+                os.chdir(saved_cwd)
+                if saved is None:
+                    os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                else:
+                    os.environ["CLAUDE_PROJECT_DIR"] = saved
+
 
 class RefusalTests(unittest.TestCase):
     def test_each_reaching_command_is_refused(self) -> None:
@@ -3580,6 +3616,31 @@ class QuotedHeredocTests(unittest.TestCase):
         # the apostrophe sits inside the double quotes.)
         command = "echo \"$(cat <<'EOF'\ndon't\nEOF\n)\""
         self.assertEqual(gate.drop_quoted_heredoc_bodies(command), command)
+
+    def test_a_quote_or_hash_in_an_unquoted_body_is_refused(self) -> None:
+        # Bash reads the body as text, so its quotes pair with nothing and
+        # its `#` hides nothing, while the lexer read two apostrophes in two
+        # bodies as one quoted word over the command between them, and
+        # dropped a `# $(...)` line bash still expands (#914).
+        for command in (
+            "cat <<EOF\nit's\nEOF\ngit diff --output=x\ncat <<EOF\nit's\nEOF",
+            'cat <<EOF\na "b\nEOF\ngit diff --output=x\ncat <<EOF\na "b\nEOF',
+            "cat <<-EOF\n\tit's\n\tEOF\ngit diff --output=x\ncat <<-EOF\n\tit's\n\tEOF",
+            "cat <<EOF\n# $(git diff --output=x)\nEOF",
+            "cat <<EOF >out\n# $(git diff --output=x)\nEOF",
+            "cat <<EOF\n# $(git diff --output=x)",
+        ):
+            with self.subTest(command=command):
+                self.assertIn("here-document", gate.refusal(command))
+        self.assertEqual(gate.heredoc_body_quote("cat <<EOF\nok\nEOF\nit's"), None)
+        self.assertEqual(gate.heredoc_body_quote("cat <<EOFx\nEOF\nit's\nEOFx"), "it's")
+        for command in (
+            "cat <<EOF\nplain text\nEOF",
+            "cat <<'EOF'\nit's\nEOF",
+            "git log --stdin <<< HEAD~3",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(gate.refusal(command))
 
     def test_a_delimiter_word_that_runs_on_past_its_quote_is_not_cut(self) -> None:
         # Bash's delimiter is the whole word, so `<<'EOF'x` ends at the line

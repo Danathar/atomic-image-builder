@@ -307,6 +307,12 @@ line runs. A gate that looks for quotes before it drops comments hides every
 later line, or every later command substitution. One allow row keeps an
 apostrophe in the comment of an ordinary command open.
 
+The `here-document` rows put an apostrophe or a `#` in the body of a
+here-document whose delimiter is unquoted. Bash reads that body as text, so
+the apostrophes in two bodies pair with nothing and the line between them
+runs, and a `#` hides no `$(...)` bash expands there. A gate that lexes the
+body as more shell hides the command either way.
+
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the
 table. The one disagreement found, `git diff --ext-diff`, is refused here and

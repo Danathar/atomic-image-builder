@@ -310,7 +310,13 @@ Some of the above is mechanical rather than advisory, and that is deliberate:
   stays allowed only when its target is the project root (a literal path to
   it, or `$CLAUDE_PROJECT_DIR`) or a literal relative path with no `..`
   whose real path is inside the checkout, so `cd tests && git log` still
-  runs and a committed symlink that points out does not. A bare `cd`, `cd
+  runs and a committed symlink that points out does not. A relative target
+  is resolved against every directory an earlier change in the string (or
+  the session's own starting folder) may have left the shell in, not
+  against the root alone, so `cd sub && cd data` is refused when
+  `sub/data` points out even though `data` read from the root would not
+  ([#916](https://github.com/Danathar/atomic-image-builder/issues/916)).
+  A bare `cd`, `cd
   -`, a `~`, `$`, backtick or glob target, an option, every `popd`, and a
   relative name while CDPATH is set or assigned in the string all count as
   leaving. Same finding as

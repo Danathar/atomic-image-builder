@@ -1662,6 +1662,26 @@
       ],
       "command": "git log -1 # it's the last one",
       "why": "an apostrophe in a comment is ordinary prose"
+    },
+    {
+      "id": "heredoc-unquoted-apostrophe",
+      "class": "here-document",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git log -1 <<EOF\nit's\nEOF\ngit log --output=x -1\ncat <<EOF\nit's\nEOF",
+      "why": "an apostrophe in a here-document body is text to bash, so the line between the two bodies runs; a gate that pairs the two apostrophes reads it as one quoted word"
+    },
+    {
+      "id": "heredoc-unquoted-hash-substitution",
+      "class": "here-document",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git log -1 <<EOF\n# $(git log --output=x -1)\nEOF",
+      "why": "a # in an unquoted here-document body starts no comment, and bash runs the command substitution after it"
     }
   ]
 }
