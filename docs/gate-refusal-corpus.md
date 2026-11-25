@@ -279,8 +279,8 @@ append to `PATH` included, since a prepend is the same word.
 Bash builtins also assign a variable named as an operand, with no
 `NAME=value` word in the command: `read -r HOME <<< planted;`, `printf -v
 HOME %s planted;`, `for HOME in planted; do git diff HEAD~1 HEAD; done`,
-`mapfile -t PATH < list;` and `read GIT_CONFIG_VALUE_0 <<< all;` each change
-an exported variable the next git reads. This repository's gate refuses
+`mapfile -t PATH < list;`, `getopts ab PATH;` and `read GIT_CONFIG_VALUE_0 <<<
+all;` each change an exported variable the next git reads. This repository's gate refuses
 `read`, `mapfile`, `readarray`, `printf -v`, a `for` or `select` loop's name
 and `getopts` on any name it refuses as an assignment; one allow row keeps
 `read` into an ordinary name open.
@@ -311,7 +311,9 @@ The `here-document` rows put an apostrophe or a `#` in the body of a
 here-document whose delimiter is unquoted. Bash reads that body as text, so
 the apostrophes in two bodies pair with nothing and the line between them
 runs, and a `#` hides no `$(...)` bash expands there. A gate that lexes the
-body as more shell hides the command either way.
+body as more shell hides the command either way. Two rows do the same with a
+quoted delimiter, the form an agent writes most: one body, where the quote never
+closes, and two, where it closes in the second.
 
 Before the corpus was first added, each row was checked against all six gates
 at their `main` heads on 2026-09-30, and all six reached the verdict in the

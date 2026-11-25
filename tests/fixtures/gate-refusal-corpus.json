@@ -1404,6 +1404,16 @@
       "why": "mapfile assigns PATH, so bash looks git up in the first line of list"
     },
     {
+      "id": "path-getopts",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "getopts ab PATH; git log -1",
+      "why": "getopts stores into the name it is given, ? once no option is left, so bash looks git up in a folder named ? a branch can commit"
+    },
+    {
       "id": "settings-env-read",
       "class": "configuration reach",
       "verdict": "refuse",
@@ -1682,6 +1692,26 @@
       ],
       "command": "git log -1 <<EOF\n# $(git log --output=x -1)\nEOF",
       "why": "a # in an unquoted here-document body starts no comment, and bash runs the command substitution after it"
+    },
+    {
+      "id": "heredoc-quoted-apostrophe",
+      "class": "here-document",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git log -1 <<'EOF'\nit's\nEOF\ngit log --output=x -1",
+      "why": "the apostrophe in a body with a quoted delimiter is text too; a gate that opens a quote there reads every command after the body as data"
+    },
+    {
+      "id": "heredoc-quoted-apostrophe-pair",
+      "class": "here-document",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git log -1 <<'EOF'\nit's\nEOF\ngit log --output=x -1\ncat <<'EOF'\nit's\nEOF",
+      "why": "the apostrophes of two such bodies pair with nothing, so the line between them runs; a gate that only refuses an unclosed quote reads them as one word"
     }
   ]
 }
