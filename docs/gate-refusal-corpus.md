@@ -300,6 +300,12 @@ ordinary name (`(( i = 1 ));`) and a subshell that only prints the word `PATH`
 (`( echo PATH );`) open, so a gate that refuses every arithmetic command or
 every subshell naming `PATH` fails too.
 
+The `*-arithmetic-after-*` rows write the assignment on a line after a comment
+with an apostrophe, an unquoted here-document body with one, or a here-string.
+Bash carries no open quote and no pending body out of any of them. A gate that
+finds arithmetic with its own scan of the command line, apart from the reading
+the `comment` and `heredoc` rows pin, can treat that line as quoted text.
+
 The `comment` rows put an apostrophe, a double quote or a trailing backslash in
 a `#` comment and a refused command on the next line. Bash drops a comment
 without reading it, so none of those opens a quote or joins a line and the next

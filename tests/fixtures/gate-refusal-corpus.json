@@ -1514,6 +1514,36 @@
       "why": "an arithmetic expansion assigns as the command does, so git reads 1/git/config and runs the textconv it names"
     },
     {
+      "id": "path-arithmetic-after-comment-apostrophe",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git log -1 # it's the last one\n(( PATH = 1 ))\ngit log -1",
+      "why": "a comment is not shell text, so its apostrophe opens no quote that would hide the assignment on the next line"
+    },
+    {
+      "id": "home-arithmetic-after-heredoc-apostrophe",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git log -1 <<EOF\nit's\nEOF\n(( HOME = 1 ))\ngit log -p -1",
+      "why": "a quote mark in a here-document body is data, so the assignment after the body still runs"
+    },
+    {
+      "id": "path-arithmetic-after-here-string",
+      "class": "configuration reach",
+      "verdict": "refuse",
+      "requires": [
+        "git log"
+      ],
+      "command": "git log -1 <<< 'x'\n(( PATH = 1 ))\ngit log -1",
+      "why": "a here-string has no body, so the next line is a command and not here-document text"
+    },
+    {
       "id": "config-reach-allow-arithmetic-counter",
       "class": "configuration reach",
       "verdict": "allow",
