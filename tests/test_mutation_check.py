@@ -508,7 +508,12 @@ class TargetTableTests(unittest.TestCase):
     def test_targets_every_unit_measured_module_and_every_tracked_hook(self) -> None:
         config = (ROOT / ".coveragerc").read_text()
         source = re.split(r"^\S", config.split("source =", 1)[1], maxsplit=1, flags=re.MULTILINE)[0]
-        measured = {f"{name}.py" for name in re.findall(r"^\s+(\S+)$", source, flags=re.MULTILINE)}
+        # A directory entry (.claude/hooks) measures the hooks listed below.
+        measured = {
+            f"{name}.py"
+            for name in re.findall(r"^\s+(\S+)$", source, flags=re.MULTILINE)
+            if not (ROOT / name).is_dir()
+        }
         hooks = {name for name in tracked(".claude/hooks/") if name.endswith(".py")}
         self.assertIn("atomic_image_builder.py", measured)
         self.assertIn(".claude/hooks/gate_git_diff.py", hooks)

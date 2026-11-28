@@ -10,6 +10,7 @@
     "homebrew-release"
   ],
   "ceilings": {
+    ".claude/hooks/gate_git_diff.py": 28,
     "atomic_image_builder.py": 18,
     "variant_boot_test.py": 7
   }

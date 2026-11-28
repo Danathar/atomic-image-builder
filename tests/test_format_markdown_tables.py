@@ -641,6 +641,37 @@ class CoverageConfigTests(unittest.TestCase):
             "unit gate does not measure them",
         )
 
+    def test_every_tracked_python_file_outside_tests_is_measured_by_the_unit_gate(self) -> None:
+        # The check above reads only the repository root, so the Bash command
+        # gate in .claude/hooks/ -- a Python file the tests load by path --
+        # stayed outside the unit gate and its per-module ceilings. A file
+        # below the root is measured when its directory is a source entry.
+        files = [
+            Path(name)
+            for name in subprocess.run(
+                ["git", "-C", str(ROOT), "ls-files", "-z", "*.py"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.split("\0")
+            if "/" in name and not name.startswith("tests/")
+        ]
+        config = (ROOT / ".coveragerc").read_text()
+        listed = set(
+            re.findall(
+                r"^\s+(\S+)$",
+                re.split(r"^\[|^\w+ =", config.split("source =", 1)[1], maxsplit=1)[0],
+                flags=re.MULTILINE,
+            )
+        )
+        self.assertTrue(files, "expected at least the .claude/hooks gate below the root")
+        self.assertEqual(
+            sorted(str(name) for name in files if not any(str(parent) in listed for parent in name.parents)),
+            [],
+            "these Python files sit in a directory .coveragerc's source list does "
+            "not name, so the unit gate does not measure them",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
