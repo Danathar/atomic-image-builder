@@ -98,8 +98,10 @@ class LoadCeilingsTests(unittest.TestCase):
         source = (ROOT / ".coveragerc").read_text(encoding="utf-8")
         for module in loaded:
             # A ceiling for a module the unit gate does not measure would fail
-            # the stale-entry check in CI; catch the rename here instead.
-            self.assertIn(f"    {module.removesuffix('.py')}\n", source, module)
+            # the stale-entry check in CI; catch the rename here instead. A
+            # module below the root is measured through its directory's entry.
+            entries = [module.removesuffix(".py"), *map(str, Path(module).parents)]
+            self.assertTrue(any(f"    {entry}\n" in source for entry in entries), module)
 
 
 class LoadMissingLinesTests(unittest.TestCase):

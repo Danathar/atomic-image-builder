@@ -8,13 +8,15 @@
 # job, and so is variant_boot_test, run only by the nightly boot job, and
 # mutation_check, run only by the mutation job);
 # format_markdown_tables is a contributor-facing helper with the same
-# shape, run from a checkout and never from the image. Tests are deliberately
+# shape, run from a checkout and never from the image. .claude/hooks holds
+# the Bash command gate Claude Code runs before each command; the tests load
+# it by path, so it is listed as a directory. Tests are deliberately
 # excluded from measurement — covering the test file tells us nothing.
 #
 # A module missing from this list lowers no percentage, so the gap is silent.
 # test_every_top_level_module_is_measured_by_the_unit_gate in
 # tests/test_format_markdown_tables.py compares this list against the tracked
-# root modules so a new one cannot go unmeasured unnoticed.
+# Python files outside tests/ so a new one cannot go unmeasured unnoticed.
 
 [run]
 source =
@@ -26,6 +28,7 @@ source =
     format_markdown_tables
     variant_boot_test
     mutation_check
+    .claude/hooks
 # Store paths relative to the checkout instead of absolute. Without this the
 # data file records the runner's workspace path, which makes the coverage
 # artifact useless anywhere but that runner -- see .coveragerc.e2e.
